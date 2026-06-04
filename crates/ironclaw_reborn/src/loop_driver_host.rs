@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    error::Error,
     fmt,
     sync::{Arc, Mutex},
     time::Duration,
@@ -19,18 +18,31 @@ use ironclaw_hooks::middleware::{
 use ironclaw_host_api::ExtensionId;
 use ironclaw_loop_support::{
     CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
-    HostQueueLoopInputPort, HostSkillContextSource, LoopCapabilityInputResolver,
+    EmptyLoopCapabilityPort, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
     RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
-    TurnStateRunCancellationFactory,
+    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
+    ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
+    default_host_managed_loop_compaction_port,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
 use crate::hook_gate_refs::HookGateInvocationScopePort;
 use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
+use crate::planned_driver_factory::is_subagent_planned_run_profile;
 use crate::text_loop_driver::{TEXT_ONLY_DRIVER_ID, TEXT_ONLY_DRIVER_VERSION};
+
+mod config;
+mod model_gateway;
+mod port_adapters;
+
+pub use config::{RebornLoopDriverHostError, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig};
+use model_gateway::ThreadResolvingLoopModelGateway;
+use port_adapters::{
+    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
+};
 
 // Legacy text-only driver key used by `is_text_only_driver_key`'s fail-closed
 // allowlist. Kept alongside `TEXT_ONLY_DRIVER_ID` so legacy registry entries
@@ -42,10 +54,9 @@ const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID: &str = "interactive_checkpoint_v1";
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
 
 use ironclaw_turns::{
-    CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest,
-    LoopCheckpointStateRef, LoopCheckpointStore, PutCheckpointStateRequest,
-    PutLoopCheckpointRequest, RunProfileId, TurnCheckpointId, TurnError, TurnRunWake,
-    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStateStore, TurnStatus,
+    CheckpointStateStore, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
+    TurnCheckpointId, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
+    TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
@@ -54,74 +65,24 @@ use ironclaw_turns::{
         InstructionBundleMaterializedMessage, InstructionMaterializationStore,
         InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
         LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPolicyGuard, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopCheckpointRequest, LoopCompactionError, LoopCompactionPort, LoopCompactionRequest,
+        LoopCompactionResponse, LoopContextBundle, LoopContextPort, LoopContextRequest,
+        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
+        LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
         LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RunScopedHookMilestoneSink,
-        StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopRunInfoPort, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
+        ProviderToolCall, ProviderToolDefinition, RunScopedHookMilestoneSink,
+        StageCheckpointPayloadRequest, SystemInferencePort, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
 use tokio::task::JoinHandle;
 
-#[async_trait]
-pub trait LoopCapabilityPortFactory: Send + Sync {
-    async fn create_capability_port(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError>;
-}
-
 struct ProfiledCapabilityHostRuntime {
     capability_factory: Arc<dyn LoopCapabilityPortFactory>,
     surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TextOnlyLoopHostConfig {
-    pub max_messages: usize,
-    pub require_model_route_snapshot: bool,
-}
-
-impl Default for TextOnlyLoopHostConfig {
-    fn default() -> Self {
-        Self {
-            max_messages: 16,
-            require_model_route_snapshot: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RebornLoopDriverHostError {
-    ScopeMismatch { reason: String },
-    InvalidRequest { reason: String },
-}
-
-impl fmt::Display for RebornLoopDriverHostError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ScopeMismatch { reason } => {
-                write!(formatter, "loop driver host scope mismatch: {reason}")
-            }
-            Self::InvalidRequest { reason } => {
-                write!(formatter, "invalid loop driver host request: {reason}")
-            }
-        }
-    }
-}
-
-impl Error for RebornLoopDriverHostError {}
-
-#[derive(Debug, Clone)]
-pub struct RebornLoopDriverHostRequest {
-    pub claimed_run: ClaimedTurnRun,
-    pub loop_run_context: LoopRunContext,
 }
 
 /// Provider resolver that consults the current visible-capability surface
@@ -172,7 +133,7 @@ impl HookPromptMaterializationSink for InstructionStoreBackedHookSink {
             vec![InstructionBundleMaterializedMessage {
                 role: role.to_string(),
                 content_ref: content_ref.clone(),
-                safe_content,
+                model_content: safe_content,
             }],
         )
     }
@@ -757,6 +718,7 @@ async fn emit_subscription_terminated_note(
     };
     let milestone = ironclaw_turns::run_profile::LoopHostMilestone {
         scope: run_context.scope.clone(),
+        actor: run_context.actor.clone(),
         turn_id: run_context.turn_id,
         run_id: run_context.run_id,
         loop_driver_id: run_context.loop_driver_id.clone(),
@@ -834,10 +796,11 @@ where
     /// Optional durable runtime-event subscription for event-triggered hooks.
     /// The subscription starts only when a hook dispatcher is also installed.
     event_subscription: Option<EventTriggeredHookSubscription>,
-    safety_context: Option<InstructionSafetyContext>,
+    safety_context: InstructionSafetyContext,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
+    subagent_prompt_composer: Option<SubagentPromptComposer>,
     driver_requirements: HashMap<LoopDriverRegistryKey, DriverRequirements>,
 }
 
@@ -860,6 +823,7 @@ where
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
+    // arch-exempt: too_many_args, needs LoopHostDependencies aggregation, plan #4088
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         thread_service: Arc<S>,
@@ -870,6 +834,7 @@ where
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         config: TextOnlyLoopHostConfig,
+        safety_context: InstructionSafetyContext,
     ) -> Self {
         let cancellation_factory: Arc<dyn RunCancellationFactory> = Arc::new(
             TurnStateRunCancellationFactory::new(Arc::clone(&turn_state_store)),
@@ -893,10 +858,11 @@ where
             hook_gate_ref_factory: None,
             hook_gate_ref_factory_builder: None,
             event_subscription: None,
-            safety_context: None,
+            safety_context,
             identity_context_source: None,
             input_queue: None,
             profiled_capabilities: None,
+            subagent_prompt_composer: None,
             driver_requirements: HashMap::new(),
         }
     }
@@ -908,6 +874,45 @@ where
 
     pub fn cancellation_observation_kind(&self) -> RunCancellationObservationKind {
         self.cancellation_factory.observation_kind()
+    }
+
+    /// Per-run thread scope: the factory's installation scope
+    /// (tenant/agent/project) with `owner_user_id` re-pointed at the
+    /// run's authenticated actor. This is what makes the WebChat v2
+    /// surface multi-user — each caller's thread reads and writes land
+    /// in their own `owners/<user>` subtree (via
+    /// [`ThreadScope::to_resource_scope`]), matching the owner the
+    /// product facade already creates threads under
+    /// (`reborn_services::create_thread` scopes to `caller.user_id`).
+    ///
+    /// The re-scoping applies only when the factory is owner-scoped (it
+    /// declares an owner, as the serve path does by pinning the runtime
+    /// owner). An owner-less factory keeps its shared/system slot, so
+    /// owner-agnostic flows and runs without an actor (background tasks,
+    /// triggers) are unaffected.
+    fn effective_thread_scope(&self, run_context: &LoopRunContext) -> ThreadScope {
+        crate::thread_scope::ThreadScopeResolver::resolve(&self.thread_scope, run_context.actor())
+    }
+
+    fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
+        let direct_system_inference: Arc<dyn SystemInferencePort> =
+            Arc::new(ModelGatewayBackedSystemInferencePort::new(
+                Arc::clone(&self.model_gateway),
+                run_context.clone(),
+            ));
+        let system_inference: Arc<dyn SystemInferencePort> =
+            Arc::new(GuardedSystemInferencePort::new(
+                direct_system_inference,
+                run_context.clone(),
+                Arc::clone(&self.model_accountant),
+                Arc::clone(&self.model_policy_guard),
+            ));
+        default_host_managed_loop_compaction_port(
+            system_inference,
+            Arc::clone(&self.thread_service),
+            self.effective_thread_scope(run_context),
+            include_str!("../../ironclaw_loop_support/prompts/compaction_summarizer_fresh.md"),
+        )
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
@@ -1085,11 +1090,6 @@ where
         self.with_hook_dispatcher(builder.build_arc())
     }
 
-    pub fn with_safety_context(mut self, safety_context: InstructionSafetyContext) -> Self {
-        self.safety_context = Some(safety_context);
-        self
-    }
-
     // Queue ownership follows the same factory used for capability/context
     // ports. PlannedDriver delegates fully to the host for input port
     // construction.
@@ -1115,6 +1115,11 @@ where
             capability_factory,
             surface_resolver,
         });
+        self
+    }
+
+    pub fn with_subagent_prompt_composer(mut self, composer: SubagentPromptComposer) -> Self {
+        self.subagent_prompt_composer = Some(composer);
         self
     }
 
@@ -1159,7 +1164,10 @@ where
         surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
     ) -> Result<RebornLoopDriverHost, RebornLoopDriverHostError> {
         validate_claimed_run_context(&request.claimed_run, &request.loop_run_context)?;
-        validate_thread_scope(&self.thread_scope, &request.loop_run_context)?;
+        validate_thread_scope(
+            &self.effective_thread_scope(&request.loop_run_context),
+            &request.loop_run_context,
+        )?;
         let allow_set = Arc::new(
             surface_resolver
                 .resolve(&request.loop_run_context)
@@ -1178,13 +1186,17 @@ where
         capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<RebornLoopDriverHost, RebornLoopDriverHostError> {
         validate_claimed_run_context(&request.claimed_run, &request.loop_run_context)?;
-        validate_thread_scope(&self.thread_scope, &request.loop_run_context)?;
+        // Resolve the per-caller thread scope once; every thread read/write
+        // port below uses it so a logged-in user's turn touches only their
+        // own `owners/<user>` subtree.
+        let effective_scope = self.effective_thread_scope(&request.loop_run_context);
+        validate_thread_scope(&effective_scope, &request.loop_run_context)?;
 
         let max_messages = self.config.max_messages.max(1);
         let run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
         let mut context_adapter = ThreadBackedLoopContextPort::new(
             Arc::clone(&self.thread_service),
-            self.thread_scope.clone(),
+            effective_scope.clone(),
             run_context.clone(),
             max_messages,
         );
@@ -1235,7 +1247,7 @@ where
                 // would silently dispatch B's hook events into A's
                 // dispatcher with A's context tenant.
                 subscription
-                    .validate_against_run_scope(&run_context.scope, &self.thread_scope)
+                    .validate_against_run_scope(&run_context.scope, &effective_scope)
                     .map_err(|reason| RebornLoopDriverHostError::ScopeMismatch { reason })?;
                 Some(subscription.clone_for_independent_spawn().spawn(
                     Arc::clone(dispatcher),
@@ -1305,7 +1317,7 @@ where
             })?;
         let prompt_authority = LoopPromptBundleAuthority::shared();
         let surface_state_for_prompt = Arc::clone(&surface_state);
-        let mut prompt_port = HostManagedLoopPromptPort::new(
+        let prompt_port = HostManagedLoopPromptPort::new(
             run_context.clone(),
             Arc::clone(&context),
             Arc::clone(&self.milestone_sink),
@@ -1313,10 +1325,8 @@ where
         .with_prompt_bundle_authority(prompt_authority.clone())
         .with_default_message_limit(max_messages)
         .with_current_surface_lookup(move || surface_state_for_prompt.current())
-        .with_instruction_materialization_store(Arc::clone(&instruction_materialization_store));
-        if let Some(safety_context) = self.safety_context.clone() {
-            prompt_port = prompt_port.with_safety_context(safety_context);
-        }
+        .with_instruction_materialization_store(Arc::clone(&instruction_materialization_store))
+        .with_safety_context(self.safety_context.clone());
         let mut prompt: Arc<dyn LoopPromptPort> = Arc::new(prompt_port);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {
             // Pass a sink backed by the host's instruction materialization
@@ -1339,6 +1349,19 @@ where
                 .with_bundle_authority(prompt_authority.clone(), run_context.clone()),
             );
         }
+        if is_subagent_planned_run_profile(&run_context) {
+            let Some(composer) = self.subagent_prompt_composer.clone() else {
+                return Err(RebornLoopDriverHostError::InvalidRequest {
+                    reason: "subagent prompt composer is required for subagent run profile"
+                        .to_string(),
+                });
+            };
+            prompt = Arc::new(SubagentLoopPromptPort::new(
+                prompt,
+                run_context.clone(),
+                composer,
+            ));
+        }
         let input: Arc<dyn LoopInputPort> = match self.input_queue.as_ref() {
             Some(queue) => Arc::new(HostQueueLoopInputPort::new(
                 queue.clone(),
@@ -1346,21 +1369,17 @@ where
             )),
             None => Arc::new(NoExtraLoopInputPort::new(run_context.clone())),
         };
-        let model_gateway = Arc::new(ThreadResolvingLoopModelGateway::new(
-            ThreadResolvingLoopModelGatewayConfig {
-                thread_service: Arc::clone(&self.thread_service),
-                thread_scope: self.thread_scope.clone(),
-                host_gateway: Arc::clone(&self.model_gateway),
-                max_messages,
-                skill_context_source: self.skill_context_source.clone(),
-                identity_context_source: self.identity_context_source.clone(),
-                instruction_materialization_store: Some(Arc::clone(
-                    &instruction_materialization_store,
-                )),
-                capabilities: Some(Arc::clone(&capabilities)),
-                prompt_authority,
-            },
-        ));
+        let model_gateway = Arc::new(ThreadResolvingLoopModelGateway {
+            thread_service: Arc::clone(&self.thread_service),
+            thread_scope: effective_scope.clone(),
+            host_gateway: Arc::clone(&self.model_gateway),
+            max_messages,
+            skill_context_source: self.skill_context_source.clone(),
+            identity_context_source: self.identity_context_source.clone(),
+            instruction_materialization_store: Some(Arc::clone(&instruction_materialization_store)),
+            capabilities: Some(Arc::clone(&capabilities)),
+            prompt_authority,
+        });
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
             model_gateway,
@@ -1378,7 +1397,7 @@ where
         let mut transcript: Arc<dyn LoopTranscriptPort> =
             Arc::new(ThreadBackedLoopTranscriptPort::with_milestone_sink(
                 Arc::clone(&self.thread_service),
-                self.thread_scope.clone(),
+                effective_scope.clone(),
                 run_context.clone(),
                 Arc::clone(&self.milestone_sink),
             ));
@@ -1403,6 +1422,7 @@ where
             run_context.clone(),
             Arc::clone(&self.milestone_sink),
         ));
+        let compaction = self.build_compaction_ports(&run_context);
         let cancellation_handle = self
             .cancellation_factory
             .handle_for_run(&run_context.scope, run_context.run_id)
@@ -1423,6 +1443,7 @@ where
             capabilities,
             transcript,
             progress,
+            compaction,
             cancellation,
             _event_subscription: event_subscription,
         })
@@ -1479,111 +1500,6 @@ where
     }
 }
 
-struct ThreadResolvingLoopModelGateway<S, G>
-where
-    S: SessionThreadService + ?Sized,
-    G: HostManagedModelGateway + ?Sized,
-{
-    thread_service: Arc<S>,
-    thread_scope: ThreadScope,
-    host_gateway: Arc<G>,
-    max_messages: usize,
-    skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
-    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
-    instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
-    capabilities: Option<Arc<dyn LoopCapabilityPort>>,
-    prompt_authority: LoopPromptBundleAuthority,
-}
-
-struct ThreadResolvingLoopModelGatewayConfig<S, G>
-where
-    S: SessionThreadService + ?Sized,
-    G: HostManagedModelGateway + ?Sized,
-{
-    thread_service: Arc<S>,
-    thread_scope: ThreadScope,
-    host_gateway: Arc<G>,
-    max_messages: usize,
-    skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
-    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
-    instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
-    capabilities: Option<Arc<dyn LoopCapabilityPort>>,
-    prompt_authority: LoopPromptBundleAuthority,
-}
-
-impl<S, G> ThreadResolvingLoopModelGateway<S, G>
-where
-    S: SessionThreadService + ?Sized,
-    G: HostManagedModelGateway + ?Sized,
-{
-    fn new(config: ThreadResolvingLoopModelGatewayConfig<S, G>) -> Self {
-        Self {
-            thread_service: config.thread_service,
-            thread_scope: config.thread_scope,
-            host_gateway: config.host_gateway,
-            max_messages: config.max_messages,
-            skill_context_source: config.skill_context_source,
-            identity_context_source: config.identity_context_source,
-            instruction_materialization_store: config.instruction_materialization_store,
-            capabilities: config.capabilities,
-            prompt_authority: config.prompt_authority,
-        }
-    }
-}
-
-#[async_trait]
-impl<S, G> LoopModelGateway for ThreadResolvingLoopModelGateway<S, G>
-where
-    S: SessionThreadService + ?Sized + Send + Sync,
-    G: HostManagedModelGateway + ?Sized + Send + Sync,
-{
-    async fn stream_model(
-        &self,
-        request: LoopModelGatewayRequest,
-    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
-        let mut model_port = ThreadBackedLoopModelPort::new(
-            Arc::clone(&self.thread_service),
-            self.thread_scope.clone(),
-            request.context,
-            Arc::clone(&self.host_gateway),
-            self.max_messages,
-        )
-        .with_prompt_bundle_authority(self.prompt_authority.clone());
-        if let Some(source) = self.skill_context_source.as_ref() {
-            model_port = model_port.with_skill_context_source(source.clone());
-        }
-        if let Some(source) = self.identity_context_source.as_ref() {
-            model_port = model_port.with_identity_context_source(source.clone());
-        }
-        if let Some(store) = self.instruction_materialization_store.as_ref() {
-            model_port = model_port.with_instruction_materialization_store(Arc::clone(store));
-        }
-        if let Some(capabilities) = self.capabilities.as_ref() {
-            model_port = model_port.with_capability_port(Arc::clone(capabilities));
-        }
-        model_port
-            .stream_model(request.request)
-            .await
-            .map_err(host_error_to_model_gateway_error)
-    }
-}
-
-fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
-    let diagnostic_ref = error.diagnostic_ref;
-    let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
-        Ok(error) => error,
-        Err(_) => LoopModelGatewayError {
-            kind: error.kind,
-            safe_summary: LoopSafeSummary::model_gateway_failed(),
-            diagnostic_ref: None,
-        },
-    };
-    if let Some(diagnostic_ref) = diagnostic_ref {
-        converted = converted.with_diagnostic_ref(diagnostic_ref);
-    }
-    converted
-}
-
 pub struct RebornLoopDriverHost {
     run_context: LoopRunContext,
     context: Arc<dyn LoopContextPort>,
@@ -1594,6 +1510,7 @@ pub struct RebornLoopDriverHost {
     capabilities: Arc<dyn LoopCapabilityPort>,
     transcript: Arc<dyn LoopTranscriptPort>,
     progress: Arc<dyn LoopProgressPort>,
+    compaction: Arc<dyn LoopCompactionPort>,
     cancellation: Arc<dyn LoopCancellationPort>,
     _event_subscription: Option<EventTriggeredHookSubscriptionHandle>,
 }
@@ -1616,9 +1533,14 @@ impl LoopRunInfoPort for RebornLoopDriverHost {
     }
 }
 
+#[async_trait]
 impl LoopCancellationPort for RebornLoopDriverHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         self.cancellation.observe_cancellation()
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        self.cancellation.cancellation_requested().await
     }
 }
 
@@ -1773,348 +1695,13 @@ impl LoopProgressPort for RebornLoopDriverHost {
     }
 }
 
-#[derive(Clone)]
-pub struct NoExtraLoopInputPort {
-    run_context: LoopRunContext,
-}
-
-impl NoExtraLoopInputPort {
-    pub fn new(run_context: LoopRunContext) -> Self {
-        Self { run_context }
-    }
-
-    fn validate_cursor(&self, cursor: &LoopInputCursor) -> Result<(), AgentLoopHostError> {
-        if cursor.is_for_run(&self.run_context) {
-            Ok(())
-        } else {
-            Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::ScopeMismatch,
-                "input cursor is not scoped to this loop run",
-            ))
-        }
-    }
-}
-
-impl LoopRunInfoPort for NoExtraLoopInputPort {
-    fn run_context(&self) -> &LoopRunContext {
-        &self.run_context
-    }
-}
-
 #[async_trait]
-impl LoopInputPort for NoExtraLoopInputPort {
-    async fn poll_inputs(
+impl LoopCompactionPort for RebornLoopDriverHost {
+    async fn compact_loop_context(
         &self,
-        after: LoopInputCursor,
-        _limit: usize,
-    ) -> Result<LoopInputBatch, AgentLoopHostError> {
-        self.validate_cursor(&after)?;
-        Ok(LoopInputBatch {
-            inputs: Vec::new(),
-            input_acks: Vec::new(),
-            next_cursor: after,
-        })
-    }
-
-    async fn ack_inputs(&self, tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopHostError> {
-        if tokens.is_empty() {
-            Ok(())
-        } else {
-            Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "input ack token was not issued by this host",
-            ))
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct HostManagedLoopCheckpointPort {
-    run_context: LoopRunContext,
-    checkpoint_state_store: Arc<dyn CheckpointStateStore>,
-    loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
-    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-}
-
-impl HostManagedLoopCheckpointPort {
-    pub fn new(
-        run_context: LoopRunContext,
-        checkpoint_state_store: Arc<dyn CheckpointStateStore>,
-        loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
-        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-    ) -> Self {
-        Self {
-            run_context,
-            checkpoint_state_store,
-            loop_checkpoint_store,
-            milestone_sink,
-        }
-    }
-}
-
-impl LoopRunInfoPort for HostManagedLoopCheckpointPort {
-    fn run_context(&self) -> &LoopRunContext {
-        &self.run_context
-    }
-}
-
-#[async_trait]
-impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
-    async fn checkpoint(
-        &self,
-        request: LoopCheckpointRequest,
-    ) -> Result<TurnCheckpointId, AgentLoopHostError> {
-        // `stage_checkpoint_payload` returns a run-scoped ref of the form
-        // `checkpoint:{run_id}:{token}`. The underlying store indexed the payload
-        // under the original `checkpoint:{token}` key (which `new_state_ref()`
-        // generated). Unwrap to the store key so the look-up succeeds, then pass
-        // the caller-supplied (run-scoped) ref through to the loop-checkpoint
-        // record so `is_for_run` validators see the correct form.
-        let store_ref = checkpoint_state_store_ref(&self.run_context, &request.state_ref)?;
-
-        let loaded = self
-            .checkpoint_state_store
-            .get_checkpoint_state(GetCheckpointStateRequest {
-                scope: self.run_context.scope.clone(),
-                turn_id: self.run_context.turn_id,
-                run_id: self.run_context.run_id,
-                state_ref: store_ref,
-                schema_id: self.run_context.checkpoint_schema_id.clone(),
-                schema_version: self.run_context.checkpoint_schema_version,
-                kind: request.kind,
-            })
-            .await
-            .map_err(turn_error_to_host_error)?;
-        if loaded.is_none() {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::CheckpointRejected,
-                "checkpoint state ref is unavailable for this loop run",
-            ));
-        }
-
-        let checkpoint = self
-            .loop_checkpoint_store
-            .put_loop_checkpoint(PutLoopCheckpointRequest {
-                scope: self.run_context.scope.clone(),
-                turn_id: self.run_context.turn_id,
-                run_id: self.run_context.run_id,
-                state_ref: request.state_ref,
-                schema_id: self.run_context.checkpoint_schema_id.clone(),
-                schema_version: self.run_context.checkpoint_schema_version,
-                kind: request.kind,
-            })
-            .await
-            .map_err(turn_error_to_host_error)?;
-        LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(&self.milestone_sink))
-            .checkpoint_created(checkpoint.checkpoint_id, request.kind)
-            .await?;
-        Ok(checkpoint.checkpoint_id)
-    }
-
-    async fn stage_checkpoint_payload(
-        &self,
-        request: StageCheckpointPayloadRequest,
-    ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
-        // Reject staged payloads whose schema_id disagrees with the run
-        // profile's resolved checkpoint schema — the read-side
-        // `get_checkpoint_state` checks `(state_ref, schema_id, kind)` as a
-        // unit, so mismatches here would lead to phantom resume rejections.
-        if request.schema_id != self.run_context.checkpoint_schema_id.as_str() {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::CheckpointRejected,
-                "staged checkpoint payload schema_id does not match the run profile's checkpoint schema",
-            ));
-        }
-
-        let record = self
-            .checkpoint_state_store
-            .put_checkpoint_state(PutCheckpointStateRequest::new(
-                self.run_context.scope.clone(),
-                self.run_context.turn_id,
-                self.run_context.run_id,
-                self.run_context.checkpoint_schema_id.clone(),
-                self.run_context.checkpoint_schema_version,
-                request.kind,
-                request.payload,
-            ))
-            .await
-            .map_err(turn_error_to_host_error)?;
-
-        // The store produces `checkpoint:{uuid}` refs. Wrap into the run-scoped
-        // form `checkpoint:{run_id}:{token}` so that `LoopCheckpointStateRef::
-        // is_for_run` validators accept the returned ref without treating it as
-        // a cross-run ref. The token is the opaque UUID the store already minted.
-        let raw = record.state_ref.as_str();
-        let token = raw.strip_prefix("checkpoint:").ok_or_else(|| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Internal,
-                "checkpoint state store returned ref without expected `checkpoint:` prefix",
-            )
-        })?;
-        LoopCheckpointStateRef::for_run(&self.run_context, token).map_err(|reason| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Internal,
-                format!("could not build run-scoped checkpoint state ref: {reason}"),
-            )
-        })
-    }
-
-    async fn load_checkpoint_payload(
-        &self,
-        request: LoadCheckpointPayloadRequest,
-    ) -> Result<LoadedCheckpointPayload, AgentLoopHostError> {
-        let metadata = self
-            .loop_checkpoint_store
-            .get_loop_checkpoint(GetLoopCheckpointRequest {
-                scope: self.run_context.scope.clone(),
-                turn_id: self.run_context.turn_id,
-                run_id: self.run_context.run_id,
-                checkpoint_id: request.checkpoint_id,
-            })
-            .await
-            .map_err(turn_error_to_host_error)?
-            .ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "checkpoint metadata was not found for this loop run",
-                )
-            })?;
-
-        if metadata.schema_id != request.expected_schema_id
-            || metadata.schema_version != request.expected_schema_version
-        {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Invalid,
-                "checkpoint schema id/version does not match the resume request",
-            ));
-        }
-
-        let state_ref = checkpoint_state_store_ref(&self.run_context, &metadata.state_ref)?;
-        let state_record = self
-            .checkpoint_state_store
-            .get_checkpoint_state(GetCheckpointStateRequest {
-                scope: self.run_context.scope.clone(),
-                turn_id: self.run_context.turn_id,
-                run_id: self.run_context.run_id,
-                state_ref,
-                schema_id: metadata.schema_id.clone(),
-                schema_version: metadata.schema_version,
-                kind: metadata.kind,
-            })
-            .await
-            .map_err(turn_error_to_host_error)?
-            .ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "checkpoint payload was not found for this loop run",
-                )
-            })?;
-
-        Ok(LoadedCheckpointPayload {
-            kind: state_record.kind,
-            schema_id: state_record.schema_id,
-            schema_version: state_record.schema_version,
-            payload: state_record.payload,
-        })
-    }
-}
-
-fn checkpoint_state_store_ref(
-    run_context: &LoopRunContext,
-    state_ref: &LoopCheckpointStateRef,
-) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
-    let run_scoped_prefix = format!("checkpoint:{}:", run_context.run_id);
-    if let Some(token) = state_ref.as_str().strip_prefix(&run_scoped_prefix) {
-        return LoopCheckpointStateRef::new(format!("checkpoint:{token}")).map_err(|reason| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Internal,
-                format!("could not rebuild store key from run-scoped checkpoint ref: {reason}"),
-            )
-        });
-    }
-    Ok(state_ref.clone())
-}
-
-#[derive(Clone)]
-pub struct HostManagedLoopProgressPort {
-    run_context: LoopRunContext,
-    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-}
-
-impl HostManagedLoopProgressPort {
-    pub fn new(
-        run_context: LoopRunContext,
-        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-    ) -> Self {
-        Self {
-            run_context,
-            milestone_sink,
-        }
-    }
-}
-
-impl LoopRunInfoPort for HostManagedLoopProgressPort {
-    fn run_context(&self) -> &LoopRunContext {
-        &self.run_context
-    }
-}
-
-#[async_trait]
-impl LoopProgressPort for HostManagedLoopProgressPort {
-    async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
-        let emitter = LoopHostMilestoneEmitter::new(
-            self.run_context.clone(),
-            Arc::clone(&self.milestone_sink),
-        );
-        match event {
-            LoopProgressEvent::DriverNote { kind, safe_summary } => {
-                emitter.driver_note(kind, safe_summary).await
-            }
-            LoopProgressEvent::IterationStarted { iteration } => {
-                emitter.iteration_started(iteration).await
-            }
-            // Prompt construction already emits the canonical
-            // `PromptBundleBuilt` milestone from `HostManagedLoopPromptPort`,
-            // including the bundle ref and redacted skill-context metadata.
-            // Treat the executor progress echo as advisory to avoid duplicate
-            // prompt milestones for the same bundle.
-            LoopProgressEvent::PromptBundleBuilt { .. } => Ok(()),
-            LoopProgressEvent::CapabilityBatchStarted {
-                iteration,
-                call_count,
-                policy,
-            } => {
-                emitter
-                    .capability_batch_started(iteration, call_count, policy)
-                    .await
-            }
-            LoopProgressEvent::CapabilityBatchCompleted {
-                iteration,
-                result_count,
-                denied_count,
-                gated_count,
-                failed_count,
-            } => {
-                emitter
-                    .capability_batch_completed(
-                        iteration,
-                        result_count,
-                        denied_count,
-                        gated_count,
-                        failed_count,
-                    )
-                    .await
-            }
-            LoopProgressEvent::GateBlocked {
-                iteration,
-                gate_kind,
-            } => emitter.gate_blocked(iteration, gate_kind).await,
-            // `HostManagedLoopCheckpointPort::checkpoint` publishes the
-            // canonical checkpoint milestone with the durable checkpoint id.
-            // `CheckpointWritten` carries only the checkpoint kind/iteration,
-            // so emitting it here would either duplicate or weaken that record.
-            LoopProgressEvent::CheckpointWritten { .. } => Ok(()),
-        }
+        request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        self.compaction.compact_loop_context(request).await
     }
 }
 
@@ -2329,6 +1916,13 @@ fn is_legacy_text_only_driver_key(key: &LoopDriverRegistryKey) -> bool {
 }
 
 fn model_route_error_to_host_error(error: ModelRouteError) -> RebornLoopDriverHostError {
+    tracing::warn!(
+        component = "model_route",
+        operation = "resolve_route",
+        error = %error,
+        error_debug = ?error,
+        "model route error mapped to safe host error"
+    );
     RebornLoopDriverHostError::InvalidRequest {
         reason: format!("model route resolution failed: {}", error.kind().as_str()),
     }
@@ -2337,6 +1931,13 @@ fn model_route_error_to_host_error(error: ModelRouteError) -> RebornLoopDriverHo
 fn capability_resolve_error_to_host_error(
     error: CapabilityResolveError,
 ) -> RebornLoopDriverHostError {
+    tracing::warn!(
+        component = "capability_surface_profile",
+        operation = "resolve_profile",
+        error = %error,
+        error_debug = ?error,
+        "capability surface resolution error mapped to safe host error"
+    );
     let reason = match error {
         CapabilityResolveError::Unavailable { .. } => "capability surface profile is unavailable",
         CapabilityResolveError::Internal { .. } => {
@@ -2387,43 +1988,90 @@ fn validate_thread_scope(
             reason: "thread scope does not match loop run scope".to_string(),
         });
     }
+    // The thread store keys threads by `owner_user_id` (via the MountView in
+    // `ThreadScope::to_resource_scope`), but that axis is not part of the
+    // on-disk thread path, so a wrong owner silently reads an empty subtree
+    // and surfaces as `UnknownThread` deep in the Prompt stage. When the run
+    // carries an authenticated actor and the thread scope declares an owner,
+    // require them to agree so the divergence fails loud here instead.
+    if let (Some(thread_owner), Some(actor)) =
+        (thread_scope.owner_user_id.as_ref(), run_context.actor())
+        && thread_owner != &actor.user_id
+    {
+        return Err(RebornLoopDriverHostError::ScopeMismatch {
+            reason: "thread scope owner does not match the loop run actor".to_string(),
+        });
+    }
     Ok(())
 }
 
 fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
-    match error {
-        TurnError::Unauthorized => AgentLoopHostError::new(
+    match &error {
+        TurnError::Unauthorized => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "access",
             AgentLoopHostErrorKind::Unauthorized,
             "checkpoint state access was unauthorized",
+            &error,
         ),
-        TurnError::InvalidRequest { .. } => AgentLoopHostError::new(
+        TurnError::InvalidRequest { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "request",
             AgentLoopHostErrorKind::InvalidInvocation,
             "checkpoint state request is invalid",
+            &error,
         ),
-        TurnError::Unavailable { .. } => AgentLoopHostError::new(
+        TurnError::Unavailable { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "store",
             AgentLoopHostErrorKind::Unavailable,
             "checkpoint state store is unavailable",
+            &error,
         ),
-        TurnError::ScopeNotFound => AgentLoopHostError::new(
+        TurnError::ScopeNotFound => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "scope_lookup",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state scope was not found for this loop run",
+            &error,
         ),
-        TurnError::Conflict { .. } => AgentLoopHostError::new(
+        TurnError::Conflict { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state write conflicted with current turn state",
+            &error,
         ),
-        TurnError::InvalidTransition { .. } => AgentLoopHostError::new(
+        TurnError::CapacityExceeded { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
+            AgentLoopHostErrorKind::Unavailable,
+            "checkpoint state store capacity was exceeded",
+            &error,
+        ),
+        TurnError::InvalidTransition { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state write was invalid for current turn state",
+            &error,
         ),
-        TurnError::LeaseMismatch => AgentLoopHostError::new(
+        TurnError::LeaseMismatch => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state write lease no longer matches current run",
+            &error,
         ),
-        TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_) => AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Unavailable,
-            "checkpoint state store returned unsupported turn admission status",
-        ),
+        TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_) => {
+            ironclaw_loop_support::raw_agent_loop_host_error(
+                "checkpoint_state",
+                "admission",
+                AgentLoopHostErrorKind::Unavailable,
+                "checkpoint state store returned unsupported turn admission status",
+                &error,
+            )
+        }
     }
 }
 
@@ -2573,13 +2221,18 @@ mod hook_resolver_adapter_tests {
 }
 
 #[cfg(test)]
+#[path = "loop_driver_host/tests.rs"]
+mod port_adapter_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::{
         InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-        RunProfileResolver, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+        PutLoopCheckpointRequest, RunProfileResolver, TurnActor, TurnCheckpointId, TurnId,
+        TurnRunId, TurnScope,
         run_profile::{
             AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
             LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest,
@@ -2598,6 +2251,57 @@ mod tests {
             .await
             .unwrap();
         LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
+    }
+
+    #[tokio::test]
+    async fn owner_scoped_thread_scope_isolates_each_caller() {
+        let base = ThreadScope {
+            tenant_id: TenantId::new("tenant-scope-test").unwrap(),
+            agent_id: AgentId::new("agent-scope-test").unwrap(),
+            project_id: None,
+            owner_user_id: Some(UserId::new("operator").unwrap()),
+            mission_id: None,
+        };
+
+        // This drives the resolution exactly as the host does — through
+        // `run_context.actor()` — so it locks the host's call pattern, not
+        // just the resolver rule (which has its own tests in
+        // `crate::thread_scope`).
+        use crate::thread_scope::ThreadScopeResolver;
+
+        // No actor → the factory's owner is kept (background / system runs).
+        let ctx = test_run_context().await;
+        assert_eq!(
+            ThreadScopeResolver::resolve(&base, ctx.actor()).owner_user_id,
+            Some(UserId::new("operator").unwrap()),
+        );
+
+        // Distinct actors → distinct owners: this is the per-caller thread
+        // isolation. user-a's run can only ever touch owners/user-a.
+        let ctx_a = test_run_context()
+            .await
+            .with_actor(TurnActor::new(UserId::new("user-a").unwrap()));
+        let ctx_b = test_run_context()
+            .await
+            .with_actor(TurnActor::new(UserId::new("user-b").unwrap()));
+        assert_eq!(
+            ThreadScopeResolver::resolve(&base, ctx_a.actor()).owner_user_id,
+            Some(UserId::new("user-a").unwrap()),
+        );
+        assert_eq!(
+            ThreadScopeResolver::resolve(&base, ctx_b.actor()).owner_user_id,
+            Some(UserId::new("user-b").unwrap()),
+        );
+
+        // Owner-less base → unchanged even with an actor (shared/system slot).
+        let ownerless = ThreadScope {
+            owner_user_id: None,
+            ..base.clone()
+        };
+        assert_eq!(
+            ThreadScopeResolver::resolve(&ownerless, ctx_a.actor()).owner_user_id,
+            None,
+        );
     }
 
     fn test_checkpoint_port(
@@ -2639,6 +2343,7 @@ mod tests {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeSideEffect,
                 state_ref,
+                gate_ref: None,
             })
             .await
             .expect("write checkpoint metadata");
@@ -2676,6 +2381,7 @@ mod tests {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeModel,
                 state_ref,
+                gate_ref: None,
             })
             .await
             .expect("write checkpoint metadata");
@@ -2711,6 +2417,7 @@ mod tests {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeModel,
                 state_ref,
+                gate_ref: None,
             })
             .await
             .expect("write checkpoint metadata");
@@ -2767,6 +2474,7 @@ mod tests {
                 schema_id: expected_schema_id.clone(),
                 schema_version: expected_schema_version,
                 kind: LoopCheckpointKind::BeforeBlock,
+                gate_ref: None,
             })
             .await
             .expect("write checkpoint metadata");
@@ -2827,5 +2535,44 @@ mod tests {
         let cap = Duration::from_millis(50);
         assert_eq!(adaptive_poll_interval(base, cap, 0), cap);
         assert_eq!(adaptive_poll_interval(base, cap, 10), cap);
+    }
+}
+
+#[cfg(test)]
+mod turn_error_to_host_error_tests {
+    use super::*;
+    use ironclaw_turns::{TurnCapacityResource, TurnError};
+
+    #[test]
+    fn capacity_exceeded_maps_to_unavailable() {
+        let error = turn_error_to_host_error(TurnError::capacity_exceeded(
+            TurnCapacityResource::SpawnTreeDescendants,
+            3,
+        ));
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    }
+
+    #[test]
+    fn conflict_maps_to_checkpoint_rejected() {
+        let error = turn_error_to_host_error(TurnError::Conflict {
+            reason: "checkpoint conflict".to_string(),
+        });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+
+    #[test]
+    fn scope_not_found_maps_to_checkpoint_rejected() {
+        let error = turn_error_to_host_error(TurnError::ScopeNotFound);
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+
+    #[test]
+    fn invalid_transition_maps_to_checkpoint_rejected() {
+        use ironclaw_turns::TurnStatus;
+        let error = turn_error_to_host_error(TurnError::InvalidTransition {
+            from: TurnStatus::Running,
+            to: TurnStatus::Completed,
+        });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
     }
 }

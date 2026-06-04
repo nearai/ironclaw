@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub create_issue input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository owner or organization."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository name."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "description": "Issue title."
+    },
+    "body": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Issue body."
+    },
+    "labels": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      }
+    }
+  },
+  "required": [
+    "owner",
+    "repo",
+    "title"
+  ]
+}

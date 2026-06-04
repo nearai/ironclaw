@@ -18,19 +18,21 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetupExtensionResponse, RebornSetupExtensionStatus, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    LifecyclePackageRef, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
-    RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
+    PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
+    webui_v2_app,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
@@ -55,12 +57,196 @@ impl WebuiAuthenticator for OnlyValidToken {
             None
         }
     }
+
+    fn allows_operator_llm_config(&self) -> bool {
+        true
+    }
+}
+
+struct MultiUserToken;
+
+#[async_trait]
+impl WebuiAuthenticator for MultiUserToken {
+    async fn authenticate(&self, token: &str) -> Option<UserId> {
+        if token == VALID_TOKEN {
+            Some(UserId::new(USER).expect("user id"))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_personal_binding_pairing_mount_tests {
+    use super::*;
+    use ironclaw_product_adapters::AdapterInstallationId;
+    use ironclaw_reborn_composition::slack_serve::SlackUserId;
+    use ironclaw_reborn_composition::{
+        IssuedSlackPersonalBindingPairingChallenge, RebornUserIdentityBinding,
+        RebornUserIdentityBindingError, RebornUserIdentityBindingStore, SlackInstallationSelector,
+        SlackPersonalBindingInstallation, SlackPersonalBindingPairingChallenge,
+        SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
+        SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
+        SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingRouteConfig,
+        SlackPersonalBindingPairingService, SlackPersonalUserBindingService,
+        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
+    };
+
+    #[tokio::test]
+    async fn pairing_route_mounted_when_config_provided() {
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let pairing = SlackPersonalBindingPairingService::new(
+            SlackPersonalUserBindingService::new(
+                [SlackPersonalBindingInstallation {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    installation_id: installation("install-a"),
+                    selector: SlackInstallationSelector::app_team("A-app", "T-team"),
+                }],
+                binding_store.clone(),
+            ),
+            Arc::new(StaticChallengeStore),
+            Arc::new(NoopNotifier),
+        );
+        let bundle = RebornWebuiBundle {
+            api: Arc::new(StubServices::default()),
+            product_auth: None,
+            readiness: RebornReadiness::disabled(),
+        };
+        let config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            Arc::new(OnlyValidToken),
+            vec![HeaderValue::from_static("http://localhost:1234")],
+        )
+        .with_slack_personal_binding_pairing(SlackPersonalBindingPairingRouteConfig::new(pairing));
+        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"channel":"slack","code":"abc12345"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
+                    .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"channel":"slack","code":"abc12345"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(authenticated.status(), StatusCode::OK);
+        assert_eq!(binding_store.bound_user_ids(), vec![USER.to_string()]);
+    }
+
+    fn installation(value: &str) -> AdapterInstallationId {
+        AdapterInstallationId::new(value).expect("installation")
+    }
+
+    #[derive(Default)]
+    struct RecordingBindingStore {
+        bindings: Mutex<Vec<RebornUserIdentityBinding>>,
+    }
+
+    impl RecordingBindingStore {
+        fn bound_user_ids(&self) -> Vec<String> {
+            self.bindings
+                .lock()
+                .expect("bindings lock should not be poisoned")
+                .iter()
+                .map(|binding| binding.user_id.to_string())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl RebornUserIdentityBindingStore for RecordingBindingStore {
+        async fn bind_user_identity(
+            &self,
+            binding: RebornUserIdentityBinding,
+        ) -> Result<(), RebornUserIdentityBindingError> {
+            self.bindings
+                .lock()
+                .expect("bindings lock should not be poisoned")
+                .push(binding);
+            Ok(())
+        }
+    }
+
+    struct StaticChallengeStore;
+
+    #[async_trait]
+    impl SlackPersonalBindingPairingChallengeStore for StaticChallengeStore {
+        async fn issue_challenge(
+            &self,
+            challenge: SlackPersonalBindingPairingChallenge,
+        ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            Ok(IssuedSlackPersonalBindingPairingChallenge {
+                code: SlackPersonalBindingPairingCode::new("ABC12345").expect("code"),
+                challenge,
+            })
+        }
+
+        async fn get_challenge(
+            &self,
+            code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            if code.as_str() != "ABC12345" {
+                return Err(SlackPersonalBindingPairingError::ChallengeNotFound);
+            }
+            Ok(SlackPersonalBindingPairingChallenge {
+                installation_id: installation("install-a"),
+                slack_user_id: SlackUserId::new("U123"),
+            })
+        }
+
+        async fn consume_challenge(
+            &self,
+            code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            self.get_challenge(code).await
+        }
+    }
+
+    struct NoopNotifier;
+
+    #[async_trait]
+    impl SlackPersonalBindingPairingNotifier for NoopNotifier {
+        async fn send_pairing_challenge(
+            &self,
+            _notification: SlackPersonalBindingPairingNotification,
+        ) -> Result<(), SlackPersonalBindingPairingError> {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Default)]
 struct StubServices {
     create_thread_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
     stream_events_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    // Records the `gate_ref` value the facade observed on each
+    // `resolve_gate` call. Used by the JS-client contract tests to
+    // assert axum's path extractor actually percent-decodes the gate
+    // segment (e.g. `gate%3Aapproval` → `gate:approval`). The handler
+    // overwrites `body.gate_ref` from the matched path param before
+    // calling the facade, so this captures whatever the path
+    // extractor delivered.
+    resolve_gate_refs: Mutex<Vec<Option<String>>>,
 }
 
 #[async_trait]
@@ -84,6 +270,7 @@ impl RebornServicesApi for StubServices {
                 created_by_actor_id: USER.to_string(),
                 title: None,
                 metadata_json: None,
+                goal: None,
             },
         })
     }
@@ -124,6 +311,7 @@ impl RebornServicesApi for StubServices {
                 created_by_actor_id: USER.to_string(),
                 title: None,
                 metadata_json: None,
+                goal: None,
             },
             messages: Vec::new(),
             summary_artifacts: Vec::new(),
@@ -171,8 +359,12 @@ impl RebornServicesApi for StubServices {
     async fn resolve_gate(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: WebUiResolveGateRequest,
+        request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        self.resolve_gate_refs
+            .lock()
+            .expect("lock")
+            .push(request.gate_ref.clone());
         Err(RebornServicesError {
             code: RebornServicesErrorCode::Internal,
             kind: RebornServicesErrorKind::Internal,
@@ -194,17 +386,84 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn list_automations(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+        Ok(RebornListAutomationsResponse {
+            automations: Vec::new(),
+        })
+    }
+
+    async fn list_extensions(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        Ok(RebornExtensionListResponse {
+            extensions: Vec::new(),
+        })
+    }
+
+    async fn list_extension_registry(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
+        Ok(RebornExtensionRegistryResponse {
+            entries: Vec::new(),
+        })
+    }
+
+    async fn install_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn activate_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn remove_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        extension_name: ExtensionName,
+        package_ref: LifecyclePackageRef,
         _request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
-            extension_name,
-            status: RebornSetupExtensionStatus::NotImplemented,
+            package_ref,
+            phase: LifecyclePhase::UnsupportedOrLegacy,
+            blockers: Vec::new(),
             payload: None,
+            secrets: Vec::new(),
+            fields: Vec::new(),
+            onboarding: None,
         })
+    }
+}
+
+fn unused_services_error() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Internal,
+        kind: RebornServicesErrorKind::Internal,
+        status_code: 500,
+        retryable: false,
+        field: None,
+        validation_code: None,
     }
 }
 
@@ -217,6 +476,7 @@ fn build_app() -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
         api: services.clone(),
+        product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
     // Match the host-installation pattern the CLI's `serve` command
@@ -226,6 +486,26 @@ fn build_app() -> (axum::Router, Arc<StubServices>) {
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    (app, services)
+}
+
+fn build_app_with_authenticator(
+    authenticator: Arc<dyn WebuiAuthenticator>,
+) -> (axum::Router, Arc<StubServices>) {
+    let services = Arc::new(StubServices::default());
+    let bundle = RebornWebuiBundle {
+        api: services.clone(),
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        authenticator,
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
@@ -521,6 +801,7 @@ async fn malformed_user_id_from_authenticator_rejects_with_401() {
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
         api: services.clone(),
+        product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
@@ -793,6 +1074,7 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
         api: services.clone(),
+        product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
@@ -911,7 +1193,7 @@ async fn list_threads_returns_facade_response_with_empty_default() {
 }
 
 #[tokio::test]
-async fn setup_extension_returns_not_implemented_status_via_facade() {
+async fn setup_extension_returns_lifecycle_projection_via_facade() {
     let (app, _services) = build_app();
     let response = app
         .oneshot(
@@ -928,12 +1210,16 @@ async fn setup_extension_returns_not_implemented_status_via_facade() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
     assert!(
-        body.contains("\"status\":\"not_implemented\""),
-        "setup_extension must surface the skeleton status, got: {body}",
+        body.contains("\"phase\":\"unsupported_or_legacy\""),
+        "setup_extension must surface lifecycle phase, got: {body}",
     );
     assert!(
-        body.contains("\"extension_name\":\"telegram\""),
-        "setup_extension must echo the path-bound extension name, got: {body}",
+        !body.contains("\"status\""),
+        "setup_extension must not surface legacy status aliases, got: {body}",
+    );
+    assert!(
+        body.contains("\"package_ref\":{\"kind\":\"extension\",\"id\":\"telegram\"}"),
+        "setup_extension must echo the path-bound package ref, got: {body}",
     );
 }
 
@@ -958,6 +1244,7 @@ async fn rate_limit_is_independent_per_caller() {
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
         api: services.clone(),
+        product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
@@ -1005,4 +1292,681 @@ async fn rate_limit_is_independent_per_caller() {
         StatusCode::OK,
         "bob's per-caller budget must be independent of alice's",
     );
+}
+
+/// Every descriptor returned by `webui_v2_routes()` must be reachable on
+/// the composed `webui_v2_app` Router. Sends a request with a bogus
+/// bearer token to each route and asserts the response is anything *but*
+/// 404. A 404 means the descriptor exists but host composition forgot to
+/// mount the matching handler — exactly the regression Lane 7 step 1
+/// ("Mount WebUI v2 routes in production composition") guards against.
+///
+/// 401 is the expected status for a mounted route receiving a wrong
+/// token; some routes may also legitimately surface 400/405/413/426 (WS
+/// upgrade without proper headers) — anything but 404 proves the mount.
+#[tokio::test]
+async fn every_webui_v2_descriptor_is_mounted_on_composed_app() {
+    let (app, _services) = build_app();
+
+    for descriptor in ironclaw_webui_v2::webui_v2_routes() {
+        let method = match descriptor.method() {
+            NetworkMethod::Get => Method::GET,
+            NetworkMethod::Post => Method::POST,
+            NetworkMethod::Put => Method::PUT,
+            NetworkMethod::Patch => Method::PATCH,
+            NetworkMethod::Delete => Method::DELETE,
+            NetworkMethod::Head => Method::HEAD,
+        };
+        let uri = expand_route_pattern(descriptor.route_pattern().as_str());
+
+        let mut builder = Request::builder()
+            .method(method.clone())
+            .uri(&uri)
+            .header(header::AUTHORIZATION, "Bearer not-the-valid-token");
+        // POST routes with non-NoBody policies expect a JSON content
+        // type; body is empty so it's within every per-route cap.
+        if method == Method::POST {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        let request = builder.body(Body::empty()).expect("request");
+
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("oneshot must complete");
+
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "descriptor `{route_id}` ({method} {uri}) returned 404 — host composition did not mount the handler",
+            route_id = descriptor.route_id().as_str(),
+            method = method,
+            uri = uri,
+        );
+    }
+}
+
+#[tokio::test]
+async fn llm_config_routes_are_not_mounted_for_multi_user_authenticator() {
+    let (app, _services) = build_app_with_authenticator(Arc::new(MultiUserToken));
+
+    for (method, uri) in [
+        (Method::GET, "/api/webchat/v2/llm/providers"),
+        (Method::POST, "/api/webchat/v2/llm/providers"),
+        (Method::POST, "/api/webchat/v2/llm/providers/openai/delete"),
+        (Method::POST, "/api/webchat/v2/llm/active"),
+        (Method::POST, "/api/webchat/v2/llm/test-connection"),
+        (Method::POST, "/api/webchat/v2/llm/list-models"),
+    ] {
+        let mut builder = Request::builder()
+            .method(method.clone())
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"));
+        if method == Method::POST {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::empty()).expect("request"))
+            .await
+            .expect("oneshot must complete");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{method} {uri} must not be mounted for non-operator auth"
+        );
+    }
+}
+
+fn expand_route_pattern(pattern: &str) -> String {
+    // Stand-in values for the four path params the v2 descriptors use.
+    // All must satisfy each handler's path-segment validation.
+    pattern
+        .replace("{thread_id}", "thread.fake")
+        .replace("{run_id}", "11111111-1111-1111-1111-111111111111")
+        .replace("{gate_ref}", "gate.fake")
+        .replace("{package_id}", "ext-fake")
+}
+
+// ─── static SPA mount (`ironclaw_webui_v2_static`) ────────────────────
+//
+// The composition mounts the embedded SPA bundle under `/v2`. These
+// tests drive that mount through the same composed router production
+// uses, so a regression that drops the `.nest("/v2", ...)` call (or
+// that accidentally routes the SPA through the bearer-auth middleware)
+// fails here. Per `.claude/rules/testing.md` ("Test Through the
+// Caller") — the standalone router test in `ironclaw_webui_v2_static`
+// does not exercise the composition seam, so this layer needs its
+// own coverage.
+
+#[tokio::test]
+async fn static_root_serves_index_with_substituted_csp_nonce() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap().to_string()),
+        Some("text/html; charset=utf-8".to_string()),
+    );
+    let body = read_body_string(response).await;
+    assert!(
+        body.contains("v2-root"),
+        "SPA shell must contain the React mount point",
+    );
+    assert!(
+        !body.contains("__IRONCLAW_CSP_NONCE__"),
+        "every CSP-nonce placeholder must be substituted",
+    );
+}
+
+#[tokio::test]
+async fn static_root_does_not_require_bearer_auth() {
+    let (app, _) = build_app();
+    // No Authorization header at all — anonymous fetch of the SPA shell
+    // must succeed. The bearer-auth middleware is only attached to the
+    // v2 JSON routes via `route_layer`, so the static `.nest("/v2", …)`
+    // mount escapes it by design.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn static_js_asset_returns_javascript_content_type() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/main.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let ct = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    assert!(ct.starts_with("text/javascript"), "got content-type `{ct}`");
+}
+
+#[tokio::test]
+async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/chat/components/auth-oauth-card.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("new URL(gate.authorizationUrl).protocol === \"https:\""),
+        "OAuth auth card must reject non-HTTPS authorization URLs before opening"
+    );
+    assert!(
+        body.contains("className=\"auth-oauth\""),
+        "OAuth auth card must keep the UI-test selector on the authorization control"
+    );
+    assert!(
+        body.contains("href=${hasHttpsAuthorizationUrl ? gate.authorizationUrl : undefined}"),
+        "OAuth auth card must expose the HTTPS authorization URL as a link href"
+    );
+    assert!(
+        body.contains("noopener,noreferrer"),
+        "OAuth authorization popup must keep opener isolation"
+    );
+}
+
+#[tokio::test]
+async fn static_chat_hook_listens_for_oauth_callback_completion() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/chat/hooks/useChat.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("ironclaw:product-auth:oauth-complete"),
+        "chat hook must listen for the OAuth callback completion signal"
+    );
+    assert!(
+        body.contains("new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL)"),
+        "chat hook must consume same-origin OAuth callback broadcasts"
+    );
+    assert!(
+        body.contains("window.addEventListener(\"storage\", onStorage)"),
+        "chat hook must keep a localStorage fallback for browsers without BroadcastChannel"
+    );
+    assert!(
+        body.contains("window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY)"),
+        "chat hook must poll localStorage in case the callback write happened before the storage event listener observed it"
+    );
+    assert!(
+        body.contains("oauthCompletionMatchesGate(payload, pendingGate, listeningSince)"),
+        "chat hook must match callback completion to the visible OAuth gate when continuation metadata is present"
+    );
+    assert!(
+        body.contains(
+            "setPendingGate((current) => (isPendingOAuthGate(current) ? null : current))"
+        ),
+        "OAuth callback completion must clear only a pending OAuth auth gate"
+    );
+}
+
+#[tokio::test]
+async fn static_chat_events_clear_gate_when_run_resumes() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/chat/lib/useChatEvents.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("const PROMPT_RUN_STATUSES = new Set"),
+        "chat event handler must distinguish active prompts from resumed runs"
+    );
+    assert!(
+        body.contains("clearPendingGateForRun(setPendingGate, runId, promptRunIdRef)"),
+        "non-blocked run_status updates must clear stale gates for the resumed run"
+    );
+    assert!(
+        !body.contains(
+            "clearPendingGateForRun(\n              setPendingGate,\n              progress.turn_run_id,"
+        ),
+        "typed running/progress events must not clear blocked auth gates"
+    );
+    assert!(
+        body.contains("clearPendingNonAuthGateForRun(\n              setPendingGate,\n              progress.turn_run_id,\n              promptRunIdRef,"),
+        "typed running/progress events should still clear stale non-auth gates"
+    );
+    assert!(
+        body.contains("promptRunIdRef?.current === activeRunId"),
+        "projection gates must not be restored after the run has resumed"
+    );
+    assert!(
+        !body.contains("clearPendingAuthGateForForwardProgress"),
+        "tool/reasoning/text progress must not hide a still-blocked auth gate"
+    );
+}
+
+#[tokio::test]
+async fn static_css_asset_returns_text_css_content_type() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/styles/app.css")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let ct = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    assert!(ct.starts_with("text/css"), "got content-type `{ct}`");
+}
+
+#[tokio::test]
+async fn static_unknown_extension_path_returns_404() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/missing-asset.bin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn static_client_side_route_falls_back_to_spa_shell() {
+    // Any `/v2/<no-dot-segment>` path that does not match an asset
+    // returns the SPA shell so react-router can render the right
+    // view. Without this, a hard refresh on `/v2/chat/<id>` would
+    // 404 instead of resuming the chat view.
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/chat/some-thread-id")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    assert!(body.contains("v2-root"));
+}
+
+#[tokio::test]
+async fn static_root_emits_a_fresh_nonce_per_request() {
+    fn nonce_attribute(body: &str) -> String {
+        let marker = "nonce=\"";
+        let start = body.find(marker).expect("nonce attribute present");
+        let after = &body[start + marker.len()..];
+        let end = after.find('"').expect("nonce attribute closed");
+        after[..end].to_string()
+    }
+
+    let (app, _) = build_app();
+    let body_a = read_body_string(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v2/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot"),
+    )
+    .await;
+    let body_b = read_body_string(
+        app.oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot"),
+    )
+    .await;
+
+    let nonce_a = nonce_attribute(&body_a);
+    let nonce_b = nonce_attribute(&body_b);
+    assert_ne!(
+        nonce_a, nonce_b,
+        "CSP nonce must be regenerated for every request",
+    );
+}
+
+// ─── Route-shape contract: URLs the SPA's lib/api.js builds ────────────
+//
+// These tests lock the URL + body shapes the composed router accepts —
+// they hand-build requests against the same shapes `static/js/lib/api.js`
+// constructs in the browser, so a routing-level regression (path
+// segments, body field names) surfaces here rather than as a runtime
+// browser failure. They do NOT execute the JS client itself: there is
+// no JS test harness in this workspace, so a regression purely inside
+// `api.js` (e.g. forgetting `encodeURIComponent` on a gate_ref) would
+// pass these tests and only break in the browser. A full JS-level
+// caller test belongs in a separate JS test scaffold the workspace
+// doesn't currently own.
+
+#[tokio::test]
+async fn js_client_send_message_path_shape_reaches_facade() {
+    // api.js → `sendMessage({threadId, content, clientActionId})`
+    // builds `POST /api/webchat/v2/threads/{thread_id}/messages` with
+    // body `{client_action_id, content}` (no thread_id in body —
+    // it lives in the path).
+    let (app, _) = build_app();
+    let body = json!({
+        "client_action_id": "act-from-js",
+        "content": "hello from the SPA",
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread.fake/messages")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn js_client_cancel_run_path_shape_reaches_facade() {
+    // api.js → `cancelRun({threadId, runId, reason, clientActionId})`
+    // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel`
+    // with body `{client_action_id, reason}`.
+    let (app, _) = build_app();
+    let run_id = uuid::Uuid::new_v4();
+    let body = json!({
+        "client_action_id": "act-from-js",
+        "reason": "user_requested",
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/webchat/v2/threads/thread.fake/runs/{run_id}/cancel",
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn js_client_resolve_gate_path_shape_dispatches_to_facade() {
+    // api.js → `resolveGate({threadId, runId, gateRef, resolution, always, clientActionId})`
+    // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve`
+    // with body `{client_action_id, resolution, always}`.
+    //
+    // The stub's `resolve_gate` returns 500 by design; we only care
+    // that the path-params parsing succeeded and the facade was
+    // reached. A routing-level regression (missing path segment,
+    // wrong encoding) would surface as 404, not 500.
+    let (app, services) = build_app();
+    let run_id = uuid::Uuid::new_v4();
+    let gate_ref = "gate-abc";
+    let body = json!({
+        "client_action_id": "act-from-js",
+        "resolution": "approved",
+        "always": false,
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/webchat/v2/threads/thread.fake/runs/{run_id}/gates/{gate_ref}/resolve",
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    // 500 = facade reached and returned (stub returns Internal); 404
+    // would mean the path did not route. Anything else means contract
+    // drift.
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "resolve_gate path must reach the stubbed facade (which returns 500)",
+    );
+    assert_eq!(
+        services.resolve_gate_refs.lock().expect("lock").as_slice(),
+        &[Some("gate-abc".to_string())],
+        "literal gate_ref must reach the facade unchanged",
+    );
+}
+
+#[tokio::test]
+async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
+    // Real gate refs can carry characters that require percent-encoding
+    // in a URL segment (`:` in `gate:approval`, `/` in compound refs).
+    // axum's path extractor must decode the segment before the handler
+    // assigns it to `body.gate_ref`, so the facade sees the literal
+    // ref the JS client built — dropping `encodeURIComponent` in
+    // `api.js` would otherwise either 404 (slash-bearing refs) or
+    // silently mismatch (`%3A` left undecoded).
+    let (app, services) = build_app();
+    let run_id = uuid::Uuid::new_v4();
+    // `gate:approval` percent-encoded = `gate%3Aapproval`.
+    let encoded_gate_ref = "gate%3Aapproval";
+    let body = json!({
+        "client_action_id": "act-from-js",
+        "resolution": "approved",
+        "always": false,
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/webchat/v2/threads/thread.fake/runs/{run_id}/gates/{encoded_gate_ref}/resolve",
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "path-decoded resolve_gate must reach the stubbed facade",
+    );
+    assert_eq!(
+        services.resolve_gate_refs.lock().expect("lock").as_slice(),
+        &[Some("gate:approval".to_string())],
+        "facade must observe the decoded gate_ref, not the URL-encoded form",
+    );
+}
+
+/// Locks the [`WebuiServeConfig::with_public_router`] seam: a
+/// host-supplied router (today wired by
+/// `ironclaw_reborn_webui_ingress::webui_v2_auth_router`) must
+/// reach its handler WITHOUT going through the bearer-auth
+/// middleware, and must still pick up the outer security headers
+/// applied to every other response. Regression guard for issue
+/// #4116: without the merge in `webui_v2_app`, the SPA's
+/// unauthenticated `GET /auth/providers` would 401 before the
+/// host's OAuth router ever ran.
+#[tokio::test]
+async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_policy() {
+    use axum::extract::ConnectInfo;
+    use ironclaw_host_api::ingress::{
+        AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
+        IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
+        ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+    };
+    use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
+    use std::net::SocketAddr;
+    use std::num::NonZeroU32;
+
+    let services = Arc::new(StubServices::default());
+    let bundle = RebornWebuiBundle {
+        api: services,
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let public = axum::Router::new().route(
+        "/auth/providers",
+        axum::routing::get(|| async { axum::Json(serde_json::json!({ "providers": [] })) }),
+    );
+    let descriptor = IngressRouteDescriptor::new(
+        "webui.sso.providers.test".to_string(),
+        NetworkMethod::Get,
+        "/auth/providers".to_string(),
+        IngressPolicy::new(IngressPolicyParts {
+            listener_class: ListenerClass::LocalGateway,
+            auth: IngressAuthPolicy::Public {
+                justification: IngressJustification::new("test public", "regression test")
+                    .expect("justification"),
+            },
+            scope_source: IngressScopeSource::PublicRoute,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit: RateLimitPolicy::Limited {
+                scope: RateLimitScope::PerIp,
+                max_requests: NonZeroU32::new(120).expect("120 != 0"),
+                window_seconds: NonZeroU32::new(60).expect("60 != 0"),
+            },
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::PublicCallback,
+            effect_path: AllowedEffectPath::NoEffect,
+        })
+        .expect("policy"),
+    )
+    .expect("descriptor");
+
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_public_route_mount(PublicRouteMount::new(public, vec![descriptor]));
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    // No Authorization header — `with_public_route_mount` MUST
+    // merge outside the bearer-auth layer.
+    // ConnectInfo is required because the descriptor's PerIp rate
+    // limit middleware reads the peer address; the production
+    // listener injects this via `into_make_service_with_connect_info`,
+    // so the oneshot harness simulates it.
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/auth/providers")
+        .body(Body::empty())
+        .expect("request");
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
+
+    let response = app.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff"),
+        "outer security headers must still wrap the public route mount",
+    );
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"providers\""), "got body {body}");
+
+    // The bearer-protected v2 surface must still 401 without a
+    // token, defense in depth that the public merge did not widen
+    // auth bypass beyond its mounted paths.
+    let protected = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
 }

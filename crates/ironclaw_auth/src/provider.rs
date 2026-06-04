@@ -5,8 +5,8 @@ use ironclaw_host_api::SecretHandle;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
-    AuthProductError, AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel,
-    PkceVerifierHash, ProviderScope, ids::AuthProviderId,
+    AuthFlowId, AuthProductError, AuthProductScope, AuthorizationCodeHash, CredentialAccountId,
+    CredentialAccountLabel, PkceVerifierHash, ProviderScope, ids::AuthProviderId,
 };
 
 macro_rules! one_shot_secret {
@@ -37,7 +37,7 @@ macro_rules! one_shot_secret {
                 Ok(Self(value))
             }
 
-            pub(crate) fn expose_secret(&self) -> &str {
+            pub fn expose_secret(&self) -> &str {
                 self.0.expose_secret()
             }
         }
@@ -80,6 +80,14 @@ impl fmt::Debug for OAuthProviderCallbackRequest {
     }
 }
 
+/// Provider-exchange context claimed by the product-auth flow before raw
+/// provider material is exchanged or stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthProviderExchangeContext {
+    pub scope: AuthProductScope,
+    pub flow_id: AuthFlowId,
+}
+
 /// Provider-exchange result safe to store in auth-flow/account records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthProviderExchange {
@@ -93,15 +101,63 @@ pub struct OAuthProviderExchange {
     pub account_id: Option<CredentialAccountId>,
 }
 
+/// One-shot provider refresh input. This type intentionally does not implement
+/// serde traits because refresh authority must stay behind host-mediated
+/// credential/egress boundaries.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthProviderRefreshRequest {
+    pub provider: AuthProviderId,
+    pub scope: AuthProductScope,
+    pub account_id: CredentialAccountId,
+    pub refresh_secret: SecretHandle,
+    pub scopes: Vec<ProviderScope>,
+}
+
+impl fmt::Debug for OAuthProviderRefreshRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthProviderRefreshRequest")
+            .field("provider", &self.provider)
+            .field("scope", &self.scope)
+            .field("account_id", &self.account_id)
+            .field("refresh_secret", &"[REDACTED]")
+            .field("scopes", &self.scopes)
+            .finish()
+    }
+}
+
+/// Provider refresh result safe to store back into credential-account records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthProviderRefresh {
+    pub provider: AuthProviderId,
+    pub access_secret: SecretHandle,
+    pub refresh_secret: Option<SecretHandle>,
+    pub scopes: Vec<ProviderScope>,
+}
+
 #[async_trait]
 pub trait AuthProviderClient: Send + Sync {
     async fn exchange_callback(
         &self,
+        context: OAuthProviderExchangeContext,
         request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError>;
+
+    async fn refresh_token(
+        &self,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError>;
+
+    async fn cleanup_exchange(
+        &self,
+        _context: OAuthProviderExchangeContext,
+        _exchange: &OAuthProviderExchange,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
 }
 
-pub(crate) fn validate_provider_callback_request(
+pub fn validate_provider_callback_request(
     request: &OAuthProviderCallbackRequest,
 ) -> Result<(), AuthProductError> {
     if request.authorization_code.expose_secret().trim().is_empty()

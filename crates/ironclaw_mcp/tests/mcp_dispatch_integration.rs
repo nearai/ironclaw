@@ -49,7 +49,9 @@ async fn mcp_lane_executes_manifest_transport_and_reconciles_resources() {
 
 #[tokio::test]
 async fn mcp_lane_client_failure_releases_reservation() {
-    let client = RecordingMcpClient::new(Err("server disconnected with raw stderr".to_string()));
+    let client = RecordingMcpClient::new(Err(McpClientError::client(
+        "server disconnected with raw stderr",
+    )));
     let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
     let (governor, account) = mcp_governor();
 
@@ -59,6 +61,46 @@ async fn mcp_lane_client_failure_releases_reservation() {
         .unwrap_err();
 
     assert!(matches!(err, McpError::Client { .. }));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[tokio::test]
+async fn mcp_lane_auth_failure_returns_manifest_credential_context_and_releases_reservation() {
+    let client = RecordingMcpClient::new(Err(McpClientError::AuthRequired));
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
+    let (governor, account) = mcp_governor();
+
+    let err = runtime
+        .execute_extension_json(
+            &governor,
+            mcp_request_from_manifest(MCP_PRODUCT_AUTH_MANIFEST, json!({"query":"auth"})),
+        )
+        .await
+        .unwrap_err();
+
+    match err {
+        McpError::AuthRequired {
+            required_secrets,
+            credential_requirements,
+        } => {
+            assert!(required_secrets.is_empty());
+            assert_eq!(credential_requirements.len(), 1);
+            assert_eq!(
+                credential_requirements[0].provider,
+                RuntimeCredentialAccountProviderId::new("github").unwrap()
+            );
+            assert_eq!(
+                credential_requirements[0].requester_extension,
+                ExtensionId::new("github-mcp").unwrap()
+            );
+            assert_eq!(
+                credential_requirements[0].provider_scopes,
+                vec!["repo".to_string()]
+            );
+        }
+        other => panic!("expected auth-required MCP error, got {other:?}"),
+    }
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
@@ -90,12 +132,12 @@ async fn mcp_lane_output_limit_releases_reservation() {
 
 #[derive(Clone)]
 struct RecordingMcpClient {
-    output: Result<McpClientOutput, String>,
+    output: Result<McpClientOutput, McpClientError>,
     requests: Arc<Mutex<Vec<McpClientRequest>>>,
 }
 
 impl RecordingMcpClient {
-    fn new(output: Result<McpClientOutput, String>) -> Self {
+    fn new(output: Result<McpClientOutput, McpClientError>) -> Self {
         Self {
             output,
             requests: Arc::new(Mutex::new(Vec::new())),
@@ -113,7 +155,10 @@ impl McpClient for RecordingMcpClient {
         true
     }
 
-    async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String> {
+    async fn call_tool(
+        &self,
+        request: McpClientRequest,
+    ) -> Result<McpClientOutput, McpClientError> {
         self.requests.lock().unwrap().push(request);
         self.output.clone()
     }
@@ -162,7 +207,14 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
 }
 
 fn mcp_request(input: serde_json::Value) -> McpExecutionRequest<'static> {
-    let package = Box::leak(Box::new(package_from_manifest(MCP_MANIFEST)));
+    mcp_request_from_manifest(MCP_MANIFEST, input)
+}
+
+fn mcp_request_from_manifest(
+    manifest: &'static str,
+    input: serde_json::Value,
+) -> McpExecutionRequest<'static> {
+    let package = Box::leak(Box::new(package_from_manifest(manifest)));
     let capability_id = Box::leak(Box::new(CapabilityId::new("github-mcp.search").unwrap()));
     McpExecutionRequest {
         package,
@@ -217,6 +269,37 @@ section = "capability_provider.tools"
 id = "github-mcp.search"
 description = "Search GitHub"
 effects = ["network", "dispatch_capability"]
+default_permission = "ask"
+visibility = "api"
+input_schema_ref = "schemas/github-mcp/search.input.v1.json"
+output_schema_ref = "schemas/github-mcp/search.output.v1.json"
+"#;
+
+const MCP_PRODUCT_AUTH_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "github-mcp"
+name = "GitHub MCP"
+version = "0.1.0"
+description = "GitHub MCP adapter"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.example.test/rpc"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "github-mcp.search"
+description = "Search GitHub"
+effects = ["network", "dispatch_capability", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, provider_scopes = ["repo"], audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
 default_permission = "ask"
 visibility = "api"
 input_schema_ref = "schemas/github-mcp/search.input.v1.json"

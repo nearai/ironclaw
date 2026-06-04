@@ -77,8 +77,8 @@ A loop implementation may normalize its next action into stronger internal types
 
 ```rust
 pub enum LoopDecision {
-    FinalReply,
-    AskUser,
+    AcceptFinalReply,
+    RejectFinalReply,
     CallCapabilities,
 }
 ```
@@ -86,9 +86,16 @@ pub enum LoopDecision {
 Or, more explicitly:
 
 ```rust
-pub enum ReplyKind {
-    Final,
-    AskUser,
+pub enum ReplyAdmission {
+    AcceptFinal,
+    RejectFinal {
+        reason_code: ReplyAdmissionRejectionReason,
+        unmet_obligation_refs: Vec<String>,
+    },
+}
+
+pub enum ReplyAdmissionRejectionReason {
+    StopConditionNotMet,
 }
 ```
 
@@ -153,9 +160,11 @@ Host-managed run-state remains typed and separate:
 A reply that asks the user a question does not by itself become `BlockedApproval` or `BlockedAuth`.
 Those blocked states are host-managed transitions driven by approval or auth services.
 
-Similarly:
-
-- `Reply(kind = AskUser)` is loop metadata about user-visible output
+- A rejected reply candidate is loop-private admission metadata, not a
+  finalized assistant message.
+- Repeated rejected reply candidates fail as invalid model output rather than
+  generic no-progress, so recovery can distinguish bad final-answer candidates
+  from repeated capability work.
 - `BlockedApproval` / `BlockedAuth` is host control-plane state
 
 These must not be collapsed into a single vague text outcome.
@@ -169,7 +178,8 @@ Loops should persist typed records even though the external envelope is small.
 Recommended durable distinction:
 
 - assistant reply message/artifact
-- reply metadata (`final` vs `ask_user`) when the loop chooses to classify it
+- reply-admission metadata (`accepted` vs `rejected`, and typed ask-user
+  metadata only for loops that explicitly model blocking user questions)
 - capability call batch
 - capability results
 - approval/auth blocking milestones
@@ -200,5 +210,5 @@ When the loop and host services exist, add caller-level tests for:
 - parent replies cannot trigger side effects without a capability call
 - `spawn_subagent`, `create_job`, and `script.run` go through capability authorization/dispatch
 - provider-native tool calls normalize into `CapabilityCalls`
-- loop-specific reply classification (`final` vs `ask_user`) does not alter the host envelope
+- loop-specific reply admission does not alter the host envelope
 - approval/auth blocked transitions remain host-managed state, not free-form reply text

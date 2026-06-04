@@ -34,7 +34,8 @@
 
 use std::borrow::Cow;
 use std::fs;
-use std::path::Path;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -64,6 +65,8 @@ pub struct RebornConfigFile {
     pub drivers: Option<DriversSection>,
     pub harness: Option<HarnessSection>,
     pub runner: Option<RunnerSection>,
+    /// Skill activation selection settings for local-dev runtime skill context.
+    pub skills: Option<SkillsSection>,
     /// Per-slot LLM selection. Keyed by Reborn model slot name. Today
     /// composition wires only the `default` slot; the `mission` slot
     /// becomes live when the planned driver lands. Operators are free
@@ -74,11 +77,19 @@ pub struct RebornConfigFile {
     /// `serve` subcommand is invoked. Optional — sparse configs
     /// fall back to compiled defaults documented on each field.
     pub webui: Option<WebuiSection>,
+    /// Slack Events API host-beta route settings. Consumed by
+    /// `ironclaw-reborn serve` only when the binary is built with the
+    /// Slack host-beta feature. Secrets are env-only; this section stores
+    /// IDs and environment variable names.
+    pub slack: Option<SlackSection>,
     /// Cost-based budgets. Composition seeds defaults on first reservation
     /// for each user/project; per-account overrides happen through the
     /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
     /// "unlimited" for that dimension.
     pub budget: Option<BudgetSection>,
+    /// Trigger poller lifecycle settings. All fields optional; absent section
+    /// leaves the worker at the compiled defaults in the composition root.
+    pub trigger_poller: Option<TriggerPollerConfigSection>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -86,7 +97,7 @@ pub struct RebornConfigFile {
 pub struct BootSection {
     /// Composition profile name. Stringly typed; composition validates
     /// against `RebornCompositionProfile`. Examples: `"local-dev"`,
-    /// `"production"`, `"migration-dry-run"`.
+    /// `"local-dev-yolo"`, `"production"`, `"migration-dry-run"`.
     pub profile: Option<String>,
 }
 
@@ -137,6 +148,14 @@ pub struct HarnessSection {
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsSection {
+    /// When false, regex activation criteria no longer auto-load full skill context.
+    /// Keyword/tag activation and explicit skill mentions still work.
+    pub regex_activation_enabled: Option<bool>,
 }
 
 /// WebChat v2 HTTP gateway configuration.
@@ -203,6 +222,38 @@ pub struct WebuiSection {
     pub canonical_host: Option<String>,
 }
 
+/// Slack Events API host-beta configuration.
+///
+/// `enabled = true` is required before the standalone Reborn listener mounts
+/// `/webhooks/slack/events`; the route is never enabled by ambient Slack
+/// environment variables alone. Signing secret and bot token values stay
+/// env-only: `signing_secret_env` and `bot_token_env` are variable names.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlackSection {
+    /// Explicit host-beta enablement gate. Omitted/false means the Slack route
+    /// is not mounted by `ironclaw-reborn serve`.
+    pub enabled: Option<bool>,
+    /// Adapter installation id for this Slack workspace/app installation.
+    pub installation_id: Option<String>,
+    /// Slack team id used to select this installation from signed envelopes.
+    pub team_id: Option<String>,
+    /// Slack app id for tenant app-scoped pairing. Required by the
+    /// host-beta personal-binding pairing path.
+    pub api_app_id: Option<String>,
+    /// Optional legacy static Slack user id to map directly to `user_id`.
+    /// Omit this for the pairing-code flow, where unknown Slack actors are
+    /// prompted to bind in WebUI.
+    pub slack_user_id: Option<String>,
+    /// Reborn user id the configured Slack user maps to. Defaults in the CLI
+    /// to the same user as the WebUI env-bearer authenticator.
+    pub user_id: Option<String>,
+    /// Environment variable name containing the Slack signing secret.
+    pub signing_secret_env: Option<String>,
+    /// Environment variable name containing the Slack bot token.
+    pub bot_token_env: Option<String>,
+}
+
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
 ///
 /// Composition uses these as defaults when first seeding a user/project
@@ -238,6 +289,39 @@ pub struct BudgetSection {
     pub overestimate_factor: Option<f64>,
 }
 
+/// `[trigger_poller]` section. Controls the background trigger-poller worker.
+///
+/// All fields are optional so a sparse or absent section is valid; the
+/// composition root applies its own compiled defaults for any field not set
+/// here. Env vars (`IRONCLAW_TRIGGER_POLLER_*`) override this section.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerPollerConfigSection {
+    /// Enable or disable the trigger poller. Default `false` (off) in
+    /// composition; operators MUST set `enabled = true` to activate it.
+    pub enabled: Option<bool>,
+    /// How often the poller ticks, in seconds. Default in composition is 30.
+    /// Range `1..=3600` is enforced at boot by the CLI settings layer;
+    /// values outside the range are a fatal startup error.
+    pub poll_interval_secs: Option<u64>,
+    /// Maximum triggers to fire per tick. Default in composition is 32.
+    /// Range `1..=1000` is enforced at boot by the CLI settings layer;
+    /// values outside the range are a fatal startup error.
+    pub fires_per_tick: Option<u32>,
+    /// Maximum concurrent fires allowed for a single trigger. Default in
+    /// composition is 1. V1 invariant: must equal 1, enforced at boot by
+    /// the CLI settings layer; any other value is a fatal startup error.
+    pub max_concurrent_fires_per_trigger: Option<u32>,
+    /// Upper bound (seconds) of a random jitter delay before the first tick.
+    /// Spreads startup load across instances. Default in composition is 0.
+    /// Range `0..=3600` is enforced at boot by the CLI settings layer.
+    pub startup_jitter_max_secs: Option<u64>,
+    /// Upper bound (seconds) of a random jitter added to each tick interval.
+    /// Prevents synchronized thundering-herd across instances. Default 0.
+    /// Range `0..=3600` is enforced at boot by the CLI settings layer.
+    pub tick_jitter_max_secs: Option<u64>,
+}
+
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
 /// `"mission"`) is the TOML table key.
 ///
@@ -258,6 +342,79 @@ pub struct LlmSlotSelection {
     pub api_key_env: Option<String>,
     /// Override the provider's `default_base_url`. Optional.
     pub base_url: Option<String>,
+}
+
+/// Field update for an existing LLM slot selection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LlmSlotFieldUpdate {
+    /// Preserve the field exactly as it appears in the current document.
+    #[default]
+    Keep,
+    /// Set the field to a new string value.
+    Set(String),
+    /// Remove the field from the slot selection.
+    Remove,
+}
+
+/// Typed patch for `[llm.default]` in the operator config file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DefaultLlmSlotUpdate {
+    pub provider_id: LlmSlotFieldUpdate,
+    pub model: LlmSlotFieldUpdate,
+    pub api_key_env: LlmSlotFieldUpdate,
+    pub base_url: LlmSlotFieldUpdate,
+}
+
+/// Held exclusive lock plus editable config document for one config update.
+pub struct DefaultLlmSlotUpdateSession {
+    path: PathBuf,
+    doc: toml_edit::DocumentMut,
+    _lock_file: fs::File,
+}
+
+impl DefaultLlmSlotUpdateSession {
+    pub fn default_llm_slot(
+        &self,
+    ) -> Result<Option<LlmSlotSelection>, RebornConfigFileUpdateError> {
+        let Some(default_slot) = self
+            .doc
+            .get("llm")
+            .and_then(|llm| llm.get("default"))
+            .and_then(toml_edit::Item::as_table_like)
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(LlmSlotSelection {
+            provider_id: default_slot
+                .get("provider_id")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            model: default_slot
+                .get("model")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            api_key_env: default_slot
+                .get("api_key_env")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            base_url: default_slot
+                .get("base_url")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+        }))
+    }
+
+    pub fn apply(
+        mut self,
+        update: &DefaultLlmSlotUpdate,
+    ) -> Result<(), RebornConfigFileUpdateError> {
+        apply_llm_slot_field(&mut self.doc, "provider_id", &update.provider_id);
+        apply_llm_slot_field(&mut self.doc, "model", &update.model);
+        apply_llm_slot_field(&mut self.doc, "api_key_env", &update.api_key_env);
+        apply_llm_slot_field(&mut self.doc, "base_url", &update.base_url);
+        write_edit_document(&self.path, &self.doc)
+    }
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -296,6 +453,35 @@ pub enum RebornConfigFileError {
         path: String,
         found: String,
         reason: String,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum RebornConfigFileUpdateError {
+    #[error("lock Reborn config `{}`: {source}", path.display())]
+    Lock {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("read Reborn config `{}`: {source}", path.display())]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("parse Reborn config `{}` as TOML: {source}", path.display())]
+    Parse {
+        path: PathBuf,
+        source: toml_edit::TomlError,
+    },
+    #[error("validate Reborn config `{}`: {source}", path.display())]
+    Validate {
+        path: PathBuf,
+        source: Box<RebornConfigFileError>,
+    },
+    #[error("write Reborn config `{}`: {source}", path.display())]
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
     },
 }
 
@@ -438,6 +624,32 @@ impl RebornConfigFile {
                 check(Cow::Borrowed("webui.canonical_host"), host)?;
             }
         }
+        if let Some(slack) = &self.slack {
+            if let Some(installation_id) = &slack.installation_id {
+                check(Cow::Borrowed("slack.installation_id"), installation_id)?;
+            }
+            if let Some(team_id) = &slack.team_id {
+                check(Cow::Borrowed("slack.team_id"), team_id)?;
+            }
+            if let Some(api_app_id) = &slack.api_app_id {
+                check(Cow::Borrowed("slack.api_app_id"), api_app_id)?;
+            }
+            if let Some(slack_user_id) = &slack.slack_user_id {
+                check(Cow::Borrowed("slack.slack_user_id"), slack_user_id)?;
+            }
+            if let Some(user_id) = &slack.user_id {
+                check(Cow::Borrowed("slack.user_id"), user_id)?;
+            }
+            if let Some(signing_secret_env) = &slack.signing_secret_env {
+                check(
+                    Cow::Borrowed("slack.signing_secret_env"),
+                    signing_secret_env,
+                )?;
+            }
+            if let Some(bot_token_env) = &slack.bot_token_env {
+                check(Cow::Borrowed("slack.bot_token_env"), bot_token_env)?;
+            }
+        }
         if let Some(budget) = &self.budget {
             if let Some(tz) = &budget.default_tz {
                 check(Cow::Borrowed("budget.default_tz"), tz)?;
@@ -508,8 +720,151 @@ impl RebornConfigFile {
     }
 }
 
+/// Apply a typed patch to `[llm.default]` while preserving unrelated TOML.
+pub fn update_default_llm_slot(
+    path: &Path,
+    update: &DefaultLlmSlotUpdate,
+) -> Result<(), RebornConfigFileUpdateError> {
+    begin_default_llm_slot_update(path)?.apply(update)
+}
+
 fn llm_slot_field_label(slot: &str, field: &str) -> Cow<'static, str> {
     Cow::Owned(format!("llm.{slot}.{field}"))
+}
+
+pub fn begin_default_llm_slot_update(
+    path: &Path,
+) -> Result<DefaultLlmSlotUpdateSession, RebornConfigFileUpdateError> {
+    let lock_file = acquire_update_lock(path)?;
+    let doc = load_edit_document(path)?;
+    Ok(DefaultLlmSlotUpdateSession {
+        path: path.to_path_buf(),
+        doc,
+        _lock_file: lock_file,
+    })
+}
+
+fn acquire_update_lock(path: &Path) -> Result<fs::File, RebornConfigFileUpdateError> {
+    use fs4::FileExt as _;
+
+    let lock_path = config_update_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| RebornConfigFileUpdateError::Lock {
+            path: lock_path.clone(),
+            source,
+        })?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|source| RebornConfigFileUpdateError::Lock {
+            path: lock_path.clone(),
+            source,
+        })?;
+    file.lock_exclusive()
+        .map_err(|source| RebornConfigFileUpdateError::Lock {
+            path: lock_path,
+            source,
+        })?;
+    Ok(file)
+}
+
+fn config_update_lock_path(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name() else {
+        return path.with_extension("lock");
+    };
+    let mut lock_name = file_name.to_os_string();
+    lock_name.push(".lock");
+    path.with_file_name(lock_name)
+}
+
+fn load_edit_document(path: &Path) -> Result<toml_edit::DocumentMut, RebornConfigFileUpdateError> {
+    match fs::read_to_string(path) {
+        Ok(text) => text.parse::<toml_edit::DocumentMut>().map_err(|source| {
+            RebornConfigFileUpdateError::Parse {
+                path: path.to_path_buf(),
+                source,
+            }
+        }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            Ok(toml_edit::DocumentMut::new())
+        }
+        Err(source) => Err(RebornConfigFileUpdateError::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn apply_llm_slot_field(
+    doc: &mut toml_edit::DocumentMut,
+    field: &str,
+    update: &LlmSlotFieldUpdate,
+) {
+    match update {
+        LlmSlotFieldUpdate::Keep => {}
+        LlmSlotFieldUpdate::Set(value) => {
+            ensure_llm_default_table(doc);
+            doc["llm"]["default"][field] = toml_edit::value(value);
+        }
+        LlmSlotFieldUpdate::Remove => {
+            ensure_llm_default_table(doc);
+            if let Some(table) = doc["llm"]["default"].as_table_like_mut() {
+                table.remove(field);
+            }
+        }
+    }
+}
+
+fn ensure_llm_default_table(doc: &mut toml_edit::DocumentMut) {
+    let root = doc.as_table_mut();
+    if root.get("llm").is_none_or(|item| !item.is_table()) {
+        root.insert("llm", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    if let Some(llm) = doc["llm"].as_table_mut()
+        && llm.get("default").is_none_or(|item| !item.is_table())
+    {
+        llm.insert("default", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+}
+
+fn write_edit_document(
+    path: &Path,
+    doc: &toml_edit::DocumentMut,
+) -> Result<(), RebornConfigFileUpdateError> {
+    let text = doc.to_string();
+    RebornConfigFile::parse_text(&text, path).map_err(|source| {
+        RebornConfigFileUpdateError::Validate {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        }
+    })?;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| RebornConfigFileUpdateError::Write {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut tmp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))
+        .map_err(|source| RebornConfigFileUpdateError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    tmp.write_all(text.as_bytes())
+        .map_err(|source| RebornConfigFileUpdateError::Write {
+            path: tmp.path().to_path_buf(),
+            source,
+        })?;
+    tmp.persist(path)
+        .map_err(|error| RebornConfigFileUpdateError::Write {
+            path: path.to_path_buf(),
+            source: error.error,
+        })?;
+    Ok(())
 }
 
 fn validate_api_version(found: &str, path: &Path) -> Result<(), RebornConfigFileError> {
@@ -588,7 +943,9 @@ mod tests {
         assert!(cfg.drivers.is_none());
         assert!(cfg.harness.is_none());
         assert!(cfg.runner.is_none());
+        assert!(cfg.skills.is_none());
         assert!(cfg.llm.is_none());
+        assert!(cfg.slack.is_none());
     }
 
     #[test]
@@ -620,6 +977,9 @@ id = "red-team"
 heartbeat_interval_secs = 5
 poll_interval_ms = 200
 
+[skills]
+regex_activation_enabled = false
+
 [llm.default]
 provider_id = "openai"
 model = "gpt-4o-mini"
@@ -629,6 +989,16 @@ api_key_env = "OPENAI_API_KEY"
 provider_id = "anthropic"
 model = "claude-3-5-sonnet-latest"
 api_key_env = "ANTHROPIC_API_KEY"
+
+[slack]
+enabled = true
+installation_id = "install-alpha"
+team_id = "T123"
+api_app_id = "A123"
+slack_user_id = "U123"
+user_id = "operator"
+signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
+bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         assert_eq!(cfg.api_version.as_deref(), Some("ironclaw.runtime/v1"));
@@ -644,12 +1014,119 @@ api_key_env = "ANTHROPIC_API_KEY"
             cfg.drivers.as_ref().unwrap().additional.as_deref(),
             Some(&["planned".to_string()][..])
         );
+        assert_eq!(
+            cfg.skills.as_ref().unwrap().regex_activation_enabled,
+            Some(false)
+        );
         let default_slot = cfg.default_llm_slot().expect("default slot present");
         assert_eq!(default_slot.provider_id.as_deref(), Some("openai"));
         assert_eq!(default_slot.model.as_deref(), Some("gpt-4o-mini"));
         assert_eq!(default_slot.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         let llm = cfg.llm.as_ref().unwrap();
         assert!(llm.contains_key("mission"));
+        let slack = cfg.slack.as_ref().expect("slack section present");
+        assert_eq!(slack.enabled, Some(true));
+        assert_eq!(slack.team_id.as_deref(), Some("T123"));
+        assert_eq!(
+            slack.signing_secret_env.as_deref(),
+            Some("IRONCLAW_REBORN_SLACK_SIGNING_SECRET")
+        );
+    }
+
+    #[test]
+    fn default_llm_update_preserves_unrelated_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[identity]
+tenant = "acme"
+
+[llm.default]
+provider_id = "openai"
+model = "gpt-5-mini"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://example.test/v1"
+
+[llm.mission]
+provider_id = "anthropic"
+"#,
+        )
+        .expect("write config");
+
+        update_default_llm_slot(
+            &path,
+            &DefaultLlmSlotUpdate {
+                provider_id: LlmSlotFieldUpdate::Keep,
+                model: LlmSlotFieldUpdate::Set("gpt-5.3-codex".to_string()),
+                api_key_env: LlmSlotFieldUpdate::Keep,
+                base_url: LlmSlotFieldUpdate::Remove,
+            },
+        )
+        .expect("update config");
+
+        let text = fs::read_to_string(&path).expect("read config");
+        assert!(text.contains("[identity]"), "config: {text}");
+        assert!(text.contains("tenant = \"acme\""), "config: {text}");
+        assert!(text.contains("[llm.mission]"), "config: {text}");
+        assert!(text.contains("model = \"gpt-5.3-codex\""), "config: {text}");
+        assert!(
+            text.contains("api_key_env = \"OPENAI_API_KEY\""),
+            "config: {text}"
+        );
+        assert!(!text.contains("base_url"), "config: {text}");
+        RebornConfigFile::load(&path)
+            .expect("valid config")
+            .expect("config present");
+    }
+
+    #[test]
+    fn default_llm_update_rejects_malformed_existing_toml() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(&path, "[llm.default\nprovider_id = \"openai\"").expect("write config");
+
+        let err = update_default_llm_slot(
+            &path,
+            &DefaultLlmSlotUpdate {
+                model: LlmSlotFieldUpdate::Set("gpt-5-mini".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("malformed existing TOML should reject");
+
+        assert!(matches!(err, RebornConfigFileUpdateError::Parse { .. }));
+    }
+
+    #[test]
+    fn default_llm_update_rejects_inline_secret_value_without_writing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[llm.default]
+provider_id = "openai"
+model = "gpt-5-mini"
+"#,
+        )
+        .expect("write config");
+        let before = fs::read_to_string(&path).expect("read config");
+
+        let err = update_default_llm_slot(
+            &path,
+            &DefaultLlmSlotUpdate {
+                api_key_env: LlmSlotFieldUpdate::Set(
+                    "sk-proj-1234567890abcdef1234567890".to_string(),
+                ),
+                ..Default::default()
+            },
+        )
+        .expect_err("inline secret should reject");
+
+        assert!(matches!(err, RebornConfigFileUpdateError::Validate { .. }));
+        assert_eq!(fs::read_to_string(&path).expect("read config"), before);
     }
 
     #[test]
@@ -690,6 +1167,22 @@ api_key_env = "sk-proj-1234567890abcdef1234567890"
         assert!(
             rendered.contains("llm.default.api_key_env"),
             "slot-specific label should guide operator to the bad field: {rendered}"
+        );
+    }
+
+    #[test]
+    fn rejects_inline_secret_in_slack_secret_env_name() {
+        let toml = r#"
+[slack]
+enabled = true
+signing_secret_env = "sk-proj-1234567890abcdef1234567890"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("inline Slack secret must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InlineSecret { .. }));
+        assert!(
+            err.to_string().contains("slack.signing_secret_env"),
+            "error should identify Slack field: {err}"
         );
     }
 
@@ -888,6 +1381,72 @@ not_a_field = 1.0
 "#;
         let err = RebornConfigFile::parse_text(toml, &attributed())
             .expect_err("deny_unknown_fields must catch typos in [budget]");
+        assert!(matches!(err, RebornConfigFileError::Toml { .. }));
+    }
+
+    #[test]
+    fn trigger_poller_full_section_parses() {
+        let toml = r#"
+[trigger_poller]
+enabled = true
+poll_interval_secs = 30
+fires_per_tick = 50
+max_concurrent_fires_per_trigger = 3
+startup_jitter_max_secs = 10
+tick_jitter_max_secs = 5
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("full trigger_poller section must parse");
+        let tp = cfg
+            .trigger_poller
+            .as_ref()
+            .expect("trigger_poller section present");
+        assert_eq!(tp.enabled, Some(true));
+        assert_eq!(tp.poll_interval_secs, Some(30));
+        assert_eq!(tp.fires_per_tick, Some(50));
+        // max_concurrent_fires_per_trigger is intentionally not 1 here: this test
+        // exercises the parse layer, which deliberately accepts any u32. The CLI
+        // settings layer (trigger_poller_settings) enforces the V1 invariant that
+        // the value must equal 1 — see runtime/trigger_poller.rs.
+        assert_eq!(tp.max_concurrent_fires_per_trigger, Some(3));
+        assert_eq!(tp.startup_jitter_max_secs, Some(10));
+        assert_eq!(tp.tick_jitter_max_secs, Some(5));
+    }
+
+    #[test]
+    fn trigger_poller_absent_section_yields_none() {
+        let cfg = RebornConfigFile::parse_text("", &attributed()).expect("empty TOML must parse");
+        assert!(cfg.trigger_poller.is_none());
+    }
+
+    #[test]
+    fn trigger_poller_partial_section_other_fields_none() {
+        let toml = r#"
+[trigger_poller]
+enabled = true
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("partial trigger_poller section must parse");
+        let tp = cfg
+            .trigger_poller
+            .as_ref()
+            .expect("trigger_poller section present");
+        assert_eq!(tp.enabled, Some(true));
+        assert_eq!(tp.poll_interval_secs, None);
+        assert_eq!(tp.fires_per_tick, None);
+        assert_eq!(tp.max_concurrent_fires_per_trigger, None);
+        assert_eq!(tp.startup_jitter_max_secs, None);
+        assert_eq!(tp.tick_jitter_max_secs, None);
+    }
+
+    #[test]
+    fn trigger_poller_rejects_unknown_key() {
+        let toml = r#"
+[trigger_poller]
+not_a_field = true
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("deny_unknown_fields must catch typos in [trigger_poller]");
         assert!(matches!(err, RebornConfigFileError::Toml { .. }));
     }
 }

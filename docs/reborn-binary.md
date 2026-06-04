@@ -19,6 +19,11 @@ ironclaw-reborn completion --shell bash
 ironclaw-reborn completion --shell zsh
 ironclaw-reborn config path
 ironclaw-reborn doctor
+ironclaw-reborn extension search github
+ironclaw-reborn extension search github --json
+ironclaw-reborn extension install github-mcp
+ironclaw-reborn extension activate github-mcp
+ironclaw-reborn extension remove github-mcp
 ironclaw-reborn hooks list
 ironclaw-reborn hooks list --json
 ironclaw-reborn hooks list --verbose
@@ -31,7 +36,11 @@ ironclaw-reborn models status
 ironclaw-reborn models status --json
 ironclaw-reborn profile list
 ironclaw-reborn profile list --json
+ironclaw-reborn repl
 ironclaw-reborn run
+ironclaw-reborn run --confirm-host-access
+ironclaw-reborn serve
+ironclaw-reborn serve --confirm-host-access
 ironclaw-reborn skills list
 ironclaw-reborn skills list --json
 ironclaw-reborn skills list --verbose
@@ -65,6 +74,28 @@ Expected fields include:
 - `configured: 0`
 - `status: not-wired`
 - `v1_state: not-used`
+
+### `extension`
+
+Searches and manages local-dev Reborn extensions through the same lifecycle facade exposed to product surfaces. Available extension packages are read from `/system/extensions`, which maps to `<reborn-home>/local-dev/system/extensions` for the local-dev profile.
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension search github
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension search github --json
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension install github-mcp
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension activate github-mcp
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension remove github-mcp
+```
+
+The commands are scoped to Reborn boot/config resolution and do not create or read v1 state directories.
+
+Expected fields include:
+
+- `phase`
+- `package_ref.id` for package-specific commands
+- `payload.kind`
+- `payload.count` and `payload.extensions[].package_ref.id` for search
+- `payload.installed`, `payload.activated`, or `payload.removed` for lifecycle mutations
 
 ### `completion`
 
@@ -176,6 +207,7 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- profile list --json
 Supported profiles:
 
 - `local-dev` (default)
+- `local-dev-yolo`
 - `production`
 - `migration-dry-run`
 
@@ -209,11 +241,17 @@ Expected fields include:
 - `local_runtime_shell_readiness: ready`
 - `planned_default_profile: available`
 
+For `IRONCLAW_REBORN_PROFILE=local-dev-yolo`, `run`, `repl`, and `serve` require `--confirm-host-access` before the runtime receives trusted-laptop host access. Confirmed access mounts the host home through `/host`; Unix-style raw home aliases are also accepted when they can be represented as scoped mount aliases.
+
+When `serve --confirm-host-access` grants trusted-laptop access, `serve` refuses non-loopback listeners such as `0.0.0.0`. Bind to `127.0.0.1` or `::1`, or use a less privileged profile for non-loopback test listeners.
+
 ### `skills list`
 
-Reports configured Reborn skills without resolving Reborn home, reading v1 skill discovery paths, or creating directories.
-
-The Reborn skill catalog is not wired yet, so the command currently reports an explicit empty surface:
+Reports configured Reborn local-dev skills from `<reborn-home>/local-dev/skills`
+and `<reborn-home>/local-dev/system/skills` through the Reborn composition
+skill listing function. It does not read v1 skill discovery paths, and a missing
+local-dev storage root is reported as an empty skill list without creating
+directories.
 
 ```bash
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list
@@ -223,9 +261,17 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list --verbo
 
 Expected fields include:
 
-- `configured: 0`
-- `status: not-wired`
-- `v1_state: not-used`
+- `configured: <count>`
+- `source: reborn-local-dev`
+- per-skill `name`, `source`, and `description` in text output
+- per-skill `name`, `version`, `description`, `source`, `keywords`, `tags`,
+  and `requires_skills` in JSON output
+
+`--verbose` adds the resolved `profile`, `reborn_home`, `local_dev_root`, and
+`owner_id`; text output also includes per-skill `version`, `keywords`, `tags`,
+and `requires_skills` when present. `skills list` currently supports
+`local-dev` and `local-dev-yolo` profiles and rejects `production` /
+`migration-dry-run` until those catalog backends are wired.
 
 ## State and config root
 
@@ -245,6 +291,7 @@ Use `IRONCLAW_REBORN_PROFILE` to select the boot profile.
 Supported values:
 
 - `local-dev` (default)
+- `local-dev-yolo`
 - `production`
 - `migration-dry-run`
 

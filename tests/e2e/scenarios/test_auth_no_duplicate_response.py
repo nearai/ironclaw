@@ -11,7 +11,8 @@ This test:
 2. Connects to the SSE stream
 3. Sends a chat message that triggers the GitHub skill → HTTP 401 → auth onboarding
 4. Collects SSE events and asserts:
-   - onboarding_state/auth_required event IS present
+   - an auth prompt event is present (gate_required/Authentication or
+     onboarding_state/auth_required)
    - No response event contains auth instruction text (the regression)
 """
 
@@ -94,11 +95,12 @@ def _write_skill(skills_dir: str, mock_api_host: str):
         f.write(f"""---
 name: github
 version: "1.0.0"
-keywords:
-  - github
-  - issues
-tags:
-  - github
+activation:
+  keywords:
+    - github
+    - issues
+  tags:
+    - github
 credentials:
   - name: github_token
     provider: github
@@ -231,8 +233,22 @@ async def _pin_mock_github_api_url(mock_llm_server, mock_api):
 # Test
 # ---------------------------------------------------------------------------
 
+def _is_auth_prompt_event(event: dict) -> bool:
+    if (
+        event.get("type") == "onboarding_state"
+        and event.get("state") == "auth_required"
+    ):
+        return True
+    if event.get("type") != "gate_required":
+        return False
+    resume = event.get("resume_kind") or {}
+    return (event.get("gate_name") or "").lower() == "authentication" or (
+        isinstance(resume, dict) and isinstance(resume.get("Authentication"), dict)
+    )
+
+
 async def test_auth_required_sse_without_duplicate_response(auth_sse_server):
-    """When auth is triggered, SSE emits onboarding_state but NOT a response with instructions."""
+    """Auth emits an auth gate but NOT a response with instructions."""
     base_url = auth_sse_server
 
     # Create thread
@@ -275,15 +291,14 @@ async def test_auth_required_sse_without_duplicate_response(auth_sse_server):
     )
     assert send_r.status_code == 202
 
-    # Wait for onboarding_state/auth_required, then collect for a grace period to catch any
-    # trailing duplicate response events that might arrive shortly after.
+    # Wait for an auth prompt event, then collect for a grace period to catch any
+    # trailing duplicate response events that might arrive shortly after. Engine-v2
+    # auth gates are surfaced as gate_required/Authentication; legacy paths may
+    # still emit onboarding_state/auth_required.
     deadline = asyncio.get_running_loop().time() + 45
     auth_seen_at = None
     while asyncio.get_running_loop().time() < deadline:
-        has_auth_event = any(
-            e.get("type") == "onboarding_state" and e.get("state") == "auth_required"
-            for e in collected_events
-        )
+        has_auth_event = any(_is_auth_prompt_event(e) for e in collected_events)
         if has_auth_event and auth_seen_at is None:
             auth_seen_at = asyncio.get_running_loop().time()
         if auth_seen_at and (asyncio.get_running_loop().time() - auth_seen_at) > 3:
@@ -296,13 +311,10 @@ async def test_auth_required_sse_without_duplicate_response(auth_sse_server):
     except asyncio.CancelledError:
         pass
 
-    # Assert onboarding_state/auth_required event was emitted
-    has_auth_event = any(
-        e.get("type") == "onboarding_state" and e.get("state") == "auth_required"
-        for e in collected_events
-    )
+    # Assert an auth prompt event was emitted.
+    has_auth_event = any(_is_auth_prompt_event(e) for e in collected_events)
     assert has_auth_event, (
-        f"Expected onboarding_state/auth_required in SSE events, got: {collected_events}"
+        f"Expected auth prompt SSE event, got: {collected_events}"
     )
 
     # Assert NO response event contains auth instruction text.

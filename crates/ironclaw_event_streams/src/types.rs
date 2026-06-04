@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ironclaw_event_projections::{
     ProjectionCursor, ProjectionReplay, ProjectionScope, ProjectionSnapshot,
 };
-use ironclaw_host_api::{InvocationId, MissionId, ProcessId, ThreadId};
+use ironclaw_host_api::{CapabilityId, InvocationId, MissionId, ProcessId, ThreadId};
 use ironclaw_outbound::{OutboundPushKind, ProjectionUpdateRef};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
@@ -131,6 +131,7 @@ pub enum LagReason {
 pub enum ProductProjectionEnvelope {
     ThreadSnapshot(ProjectionSnapshot),
     ThreadUpdates(ProjectionReplay),
+    ThreadLiveUpdate(ThreadLiveProjectionUpdate),
     DeliveryStatus(DeliveryStatusProjectionPayload),
     Debug(DebugProjectionPayload),
 }
@@ -140,6 +141,7 @@ impl ProductProjectionEnvelope {
         match self {
             Self::ThreadSnapshot(snapshot) => snapshot.next_cursor.clone(),
             Self::ThreadUpdates(replay) => replay.next_cursor.clone(),
+            Self::ThreadLiveUpdate(update) => update.cursor.clone(),
             Self::DeliveryStatus(payload) => payload.cursor.clone(),
             Self::Debug(payload) => payload.cursor.clone(),
         }
@@ -149,10 +151,54 @@ impl ProductProjectionEnvelope {
         match self {
             Self::ThreadSnapshot(snapshot) => &snapshot.next_cursor.scope,
             Self::ThreadUpdates(replay) => &replay.next_cursor.scope,
+            Self::ThreadLiveUpdate(update) => &update.cursor.scope,
             Self::DeliveryStatus(payload) => &payload.cursor.scope,
             Self::Debug(payload) => &payload.cursor.scope,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadLiveProjectionUpdate {
+    pub cursor: ProjectionCursor,
+    pub thread_id: ThreadId,
+    pub items: Vec<ThreadLiveProjectionItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadLiveProjectionItem {
+    Thinking {
+        id: String,
+        run_id: TurnRunId,
+        body: String,
+    },
+    CapabilityActivity {
+        run_id: TurnRunId,
+        invocation_id: InvocationId,
+        capability_id: CapabilityId,
+    },
+    WorkSummary {
+        id: String,
+        run_id: TurnRunId,
+        phase: ThreadLiveWorkSummaryPhase,
+        body: String,
+    },
+    SkillActivation {
+        id: String,
+        run_id: TurnRunId,
+        skill_names: Vec<String>,
+        feedback: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadLiveWorkSummaryPhase {
+    Planning,
+    Waiting,
+    Retrying,
+    Context,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +282,26 @@ impl ProjectionSubscription {
                     let item = self.receiver.recv().await;
                     self.observe_item(item)
                 }
+            }
+        }
+    }
+
+    pub fn try_next_buffered(&mut self) -> Option<ProjectionStreamItem> {
+        if self.terminated {
+            return None;
+        }
+        if let Some(item) = self.pending_terminal.take() {
+            return self.observe_terminal_item(item);
+        }
+        match self.terminal_receiver.try_recv() {
+            Ok(item) => return self.observe_terminal_item(item),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {}
+        }
+        match self.receiver.try_recv() {
+            Ok(item) => self.observe_item(Some(item)),
+            Err(mpsc::error::TryRecvError::Empty) => None,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.observe_item_or_terminal_on_close(None)
             }
         }
     }
@@ -335,4 +401,52 @@ fn with_observed_terminal_cursor(
 
 pub fn keep_alive_item() -> ProjectionStreamItem {
     ProjectionStreamItem::KeepAlive
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_next_buffered_returns_ready_item_without_waiting() {
+        let (sender, receiver) = mpsc::channel(2);
+        let (_terminal_sender, terminal_receiver) = mpsc::channel(1);
+        sender.try_send(ProjectionStreamItem::KeepAlive).unwrap();
+        let mut subscription = ProjectionSubscription::new(
+            receiver,
+            terminal_receiver,
+            ProjectionStreamAdmissionPermit::detached(),
+        );
+
+        assert!(matches!(
+            subscription.try_next_buffered(),
+            Some(ProjectionStreamItem::KeepAlive)
+        ));
+        assert!(subscription.try_next_buffered().is_none());
+    }
+
+    #[test]
+    fn try_next_buffered_defers_terminal_item_until_buffered_items_drain() {
+        let (sender, receiver) = mpsc::channel(2);
+        let (terminal_sender, terminal_receiver) = mpsc::channel(1);
+        sender.try_send(ProjectionStreamItem::KeepAlive).unwrap();
+        terminal_sender
+            .try_send(ProjectionStreamItem::KeepAlive)
+            .unwrap();
+        let mut subscription = ProjectionSubscription::new(
+            receiver,
+            terminal_receiver,
+            ProjectionStreamAdmissionPermit::detached(),
+        );
+
+        assert!(matches!(
+            subscription.try_next_buffered(),
+            Some(ProjectionStreamItem::KeepAlive)
+        ));
+        assert!(matches!(
+            subscription.try_next_buffered(),
+            Some(ProjectionStreamItem::KeepAlive)
+        ));
+        assert!(subscription.try_next_buffered().is_none());
+    }
 }

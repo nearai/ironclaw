@@ -153,7 +153,7 @@ impl ExtensionCredentialHandle {
 
 impl fmt::Display for ExtensionCredentialHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(&self.0)
     }
 }
 
@@ -454,6 +454,12 @@ pub trait ExtensionInstallationStore: Send + Sync {
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError>;
 
+    async fn upsert_manifest_and_installation(
+        &self,
+        manifest: ExtensionManifestRecord,
+        installation: ExtensionInstallation,
+    ) -> Result<(), ExtensionInstallationError>;
+
     async fn list_installations(
         &self,
     ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError>;
@@ -476,6 +482,16 @@ pub trait ExtensionInstallationStore: Send + Sync {
         &self,
         installation_id: &ExtensionInstallationId,
         state: ExtensionActivationState,
+    ) -> Result<(), ExtensionInstallationError>;
+
+    async fn delete_installation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<(), ExtensionInstallationError>;
+
+    async fn delete_manifest(
+        &self,
+        extension_id: &ExtensionId,
     ) -> Result<(), ExtensionInstallationError>;
 
     async fn update_health(
@@ -510,6 +526,16 @@ where
         (**self).upsert_manifest(manifest).await
     }
 
+    async fn upsert_manifest_and_installation(
+        &self,
+        manifest: ExtensionManifestRecord,
+        installation: ExtensionInstallation,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self)
+            .upsert_manifest_and_installation(manifest, installation)
+            .await
+    }
+
     async fn list_installations(
         &self,
     ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
@@ -542,6 +568,20 @@ where
         state: ExtensionActivationState,
     ) -> Result<(), ExtensionInstallationError> {
         (**self).set_activation_state(installation_id, state).await
+    }
+
+    async fn delete_installation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self).delete_installation(installation_id).await
+    }
+
+    async fn delete_manifest(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self).delete_manifest(extension_id).await
     }
 
     async fn update_health(
@@ -598,6 +638,22 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         inner
             .manifests
             .insert(manifest.extension_id().clone(), manifest);
+        Ok(())
+    }
+
+    async fn upsert_manifest_and_installation(
+        &self,
+        manifest: ExtensionManifestRecord,
+        installation: ExtensionInstallation,
+    ) -> Result<(), ExtensionInstallationError> {
+        validate_installation_against_one_manifest(&manifest, &installation)?;
+        let mut inner = self.inner.write().await;
+        inner
+            .manifests
+            .insert(manifest.extension_id().clone(), manifest);
+        inner
+            .installations
+            .insert(installation.installation_id().clone(), installation);
         Ok(())
     }
 
@@ -678,6 +734,44 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         Ok(())
     }
 
+    async fn delete_installation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<(), ExtensionInstallationError> {
+        self.inner
+            .write()
+            .await
+            .installations
+            .remove(installation_id)
+            .map(|_| ())
+            .ok_or_else(|| ExtensionInstallationError::InstallationNotFound {
+                installation_id: installation_id.clone(),
+            })
+    }
+
+    async fn delete_manifest(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ExtensionInstallationError> {
+        let mut inner = self.inner.write().await;
+        if inner
+            .installations
+            .values()
+            .any(|installation| installation.extension_id() == extension_id)
+        {
+            return Err(ExtensionInstallationError::InvalidInstallation {
+                reason: format!("extension {extension_id} still has installations"),
+            });
+        }
+        inner
+            .manifests
+            .remove(extension_id)
+            .map(|_| ())
+            .ok_or_else(|| ExtensionInstallationError::ManifestNotFound {
+                extension_id: extension_id.clone(),
+            })
+    }
+
     async fn update_health(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -693,6 +787,93 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
             })?
             .set_health(health);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{ExtensionId, HostPortCatalog};
+
+    use super::*;
+    use crate::ManifestSource;
+
+    #[tokio::test]
+    async fn delete_manifest_rejects_active_installations() {
+        let store = InMemoryExtensionInstallationStore::default();
+        let manifest = manifest_record("fixture", Some("hash-1"));
+        let extension_id = manifest.extension_id().clone();
+        store
+            .upsert_manifest(manifest)
+            .await
+            .expect("upsert manifest");
+        store
+            .upsert_installation(installation("fixture", Some("hash-1")))
+            .await
+            .expect("upsert installation");
+
+        let error = store
+            .delete_manifest(&extension_id)
+            .await
+            .expect_err("active installation blocks manifest delete");
+
+        assert!(matches!(
+            error,
+            ExtensionInstallationError::InvalidInstallation { .. }
+        ));
+        assert!(store.get_manifest(&extension_id).await.unwrap().is_some());
+    }
+
+    fn manifest_record(extension_id: &str, hash: Option<&str>) -> ExtensionManifestRecord {
+        ExtensionManifestRecord::from_toml(
+            manifest_toml(extension_id),
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            hash.map(|value| ManifestHash::new(value).expect("hash")),
+        )
+        .expect("manifest record")
+    }
+
+    fn installation(extension_id: &str, hash: Option<&str>) -> ExtensionInstallation {
+        let extension_id = ExtensionId::new(extension_id.to_string()).expect("extension id");
+        ExtensionInstallation::new(
+            ExtensionInstallationId::new(extension_id.as_str().to_string())
+                .expect("installation id"),
+            extension_id.clone(),
+            ExtensionActivationState::Installed,
+            ExtensionManifestRef::new(
+                extension_id,
+                hash.map(|value| ManifestHash::new(value).expect("hash")),
+            ),
+            Vec::new(),
+            Utc::now(),
+        )
+        .expect("installation")
+    }
+
+    fn manifest_toml(extension_id: &str) -> String {
+        format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id}"
+name = "{extension_id}"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{extension_id}.wasm"
+
+[[capabilities]]
+id = "{extension_id}.read"
+description = "read"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/read.input.json"
+output_schema_ref = "schemas/read.output.json"
+"#
+        )
     }
 }
 
@@ -719,6 +900,10 @@ pub enum ExtensionInstallationError {
     InstallationNotFound {
         installation_id: ExtensionInstallationId,
     },
+    #[error("extension manifest {extension_id} was not found")]
+    ManifestNotFound { extension_id: ExtensionId },
+    #[error("invalid installation: {reason}")]
+    InvalidInstallation { reason: String },
     #[error("duplicate credential binding {handle}")]
     DuplicateCredentialBinding { handle: ExtensionCredentialHandle },
 }

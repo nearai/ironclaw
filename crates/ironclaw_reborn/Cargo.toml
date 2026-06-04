@@ -19,7 +19,14 @@ libsql-secrets = [
     "dep:secrecy",
     "dep:ironclaw_filesystem",
     "ironclaw_filesystem/libsql",
+    "filesystem-goal-store",
 ]
+filesystem-goal-store = ["dep:ironclaw_filesystem"]
+# libSQL-backed user + OAuth-identity store for the WebChat v2 SSO login
+# surface (the host's `UserDirectory` delegate). Opt-in so it only
+# compiles into builds that mount the login surface (the reborn CLI's
+# `webui-v2-beta`), not every `ironclaw_reborn` consumer.
+webui-user-store = ["dep:libsql", "dep:uuid"]
 # Opt-in because the restart coverage opens real libSQL-backed turn/thread stores.
 # Keep separate from `libsql-secrets` so local `cargo test -p ironclaw_reborn`
 # stays fast, while CI can exercise process-restart persistence explicitly.
@@ -27,6 +34,7 @@ libsql-restart-tests = [
     "dep:libsql",
     "dep:ironclaw_filesystem",
     "ironclaw_filesystem/libsql",
+    "filesystem-goal-store",
 ]
 
 [dependencies]
@@ -45,9 +53,12 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", opti
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+parking_lot = "0.12"
 secrecy = { version = "0.10", optional = true }
+uuid = { version = "1", optional = true, features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
@@ -75,3 +86,6 @@ wat = "1.245.1"
 [[test]]
 name = "llm_gateway"
 required-features = ["root-llm-provider"]
+
+[lints]
+workspace = true

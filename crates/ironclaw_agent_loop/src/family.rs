@@ -13,6 +13,7 @@ pub struct LoopFamilyId(Cow<'static, str>);
 
 impl LoopFamilyId {
     pub const DEFAULT: Self = Self(Cow::Borrowed("default"));
+    pub const SUBAGENT: Self = Self(Cow::Borrowed("subagent"));
 
     pub fn new(id: impl Into<Cow<'static, str>>) -> Result<Self, String> {
         let id = id.into();
@@ -192,6 +193,15 @@ mod tests {
         assert_eq!(json, "\"default\"");
         let decoded: LoopFamilyId = serde_json::from_str(&json).expect("deserialize id");
         assert_eq!(decoded, LoopFamilyId::DEFAULT);
+    }
+
+    #[test]
+    fn loop_family_id_subagent_is_flat_string() {
+        assert_eq!(LoopFamilyId::SUBAGENT.as_str(), "subagent");
+        let json = serde_json::to_string(&LoopFamilyId::SUBAGENT).expect("serialize id");
+        assert_eq!(json, "\"subagent\"");
+        let decoded: LoopFamilyId = serde_json::from_str(&json).expect("deserialize id");
+        assert_eq!(decoded, LoopFamilyId::SUBAGENT);
     }
 
     #[test]

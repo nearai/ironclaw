@@ -2,36 +2,44 @@ use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
 use ironclaw_events::InMemoryAuditSink;
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, InvocationId, MountView,
-    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
-    ResourceEstimate, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
-    RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeKind, SecretHandle, TenantId, TrustClass, UserId,
+    AgentId, CapabilityId, CapabilitySet, CredentialStageError, ExecutionContext, ExtensionId,
+    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod,
+    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation, ProjectId, ResourceEstimate,
+    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialInjection,
+    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSaveTarget, RuntimeKind,
+    ScopedPath, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
 };
-use ironclaw_host_runtime::{BuiltinObligationServices, HostHttpEgressService};
+use ironclaw_host_runtime::{
+    BuiltinObligationServices, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
+    RuntimeCredentialAccountResolver, RuntimeHttpBodyStore, RuntimeHttpBodyStoreError,
+};
 use ironclaw_mcp::{
     McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpHostHttpRequest,
     McpRuntimeHttpAdapter, StaticMcpHostHttpEgressPlanner,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
+    PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_scripts::{ScriptHostHttpRequest, ScriptRuntimeHttpAdapter};
-use ironclaw_secrets::{
-    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
-    SecretStoreError,
-};
+use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_wasm::{WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter};
 use serde_json::{Value, json};
 use std::{
+    fs,
+    io::{Read, Write},
+    net::TcpListener,
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tempfile::tempdir;
 
-#[test]
-fn host_http_egress_consumes_staged_obligation_secret_once() {
+#[tokio::test]
+async fn host_http_egress_consumes_staged_obligation_secret_once() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -78,15 +86,95 @@ fn host_http_egress_consumes_staged_obligation_secret_once() {
             required: true,
         }],
         response_body_limit: Some(4096),
+        save_body_to: None,
         timeout_ms: None,
     };
 
     service
         .execute(request.clone())
+        .await
         .expect("staged secret should be injected through host egress");
+
+    {
+        let requests = network_recorder.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization"),
+            Some(&(
+                "authorization".to_string(),
+                "Bearer sk-staged-secret".to_string()
+            ))
+        );
+    }
+
+    let error = service
+        .execute(request)
+        .await
+        .expect_err("staged secret must not be reusable");
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert_eq!(network_recorder.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn host_http_egress_records_injected_credentials_in_zeroizing_network_request() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress(network);
+
+    block_on_test(service.execute(RuntimeHttpEgressRequest {
+        runtime: RuntimeKind::Script,
+        scope,
+        capability_id: capability_id.clone(),
+        method: NetworkMethod::Post,
+        url: "https://api.example.test/v1/run".to_string(),
+        headers: vec![],
+        body: b"hello".to_vec(),
+        network_policy: sample_policy(),
+        credential_injections: vec![RuntimeCredentialInjection {
+            handle,
+            source: RuntimeCredentialSource::StagedObligation { capability_id },
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        }],
+        response_body_limit: Some(4096),
+        save_body_to: None,
+        timeout_ms: None,
+    }))
+    .expect("staged secret should be injected through host egress");
 
     let requests = network_recorder.lock().unwrap();
     assert_eq!(requests.len(), 1);
+    require_zeroize_on_drop(&requests[0]);
     assert_eq!(
         requests[0]
             .headers
@@ -97,17 +185,9 @@ fn host_http_egress_consumes_staged_obligation_secret_once() {
             "Bearer sk-staged-secret".to_string()
         ))
     );
-    drop(requests);
-
-    let error = service
-        .execute(request)
-        .expect_err("staged secret must not be reusable");
-    assert!(matches!(
-        error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
-    ));
-    assert_eq!(network_recorder.lock().unwrap().len(), 1);
 }
+
+fn require_zeroize_on_drop<T: ?Sized + zeroize::ZeroizeOnDrop>(_: &T) {}
 
 #[tokio::test]
 async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler() {
@@ -183,8 +263,10 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("host egress should consume material staged by the obligation handler");
 
     let requests = network_recorder.lock().unwrap();
@@ -201,8 +283,8 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
     );
 }
 
-#[test]
-fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
+#[tokio::test]
+async fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -234,7 +316,7 @@ fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
             scope: scope.clone(),
             capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
-            url: "https://api.example.test/v1/run".to_string(),
+            url: "https://api.example.test/v1/__credential__/run".to_string(),
             headers: vec![],
             body: b"hello".to_vec(),
             network_policy: sample_policy(),
@@ -260,10 +342,22 @@ fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
                     },
                     required: true,
                 },
+                RuntimeCredentialInjection {
+                    handle: handle.clone(),
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::PathPlaceholder {
+                        placeholder: "__credential__".to_string(),
+                    },
+                    required: true,
+                },
             ],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("same staged handle should be reusable within a single request plan");
 
     let requests = network_recorder.lock().unwrap();
@@ -280,13 +374,329 @@ fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
     );
     assert_eq!(
         requests[0].url,
-        "https://api.example.test/v1/run?token=sk-staged-secret"
+        "https://api.example.test/v1/sk-staged-secret/run?token=sk-staged-secret"
     );
     drop(requests);
 }
 
-#[test]
-fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
+#[tokio::test]
+async fn host_http_egress_restores_staged_secret_when_later_injection_target_fails() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{\"ok\":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/__credential__/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![
+                RuntimeCredentialInjection {
+                    handle: handle.clone(),
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::Header {
+                        name: "authorization".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                    required: true,
+                },
+                RuntimeCredentialInjection {
+                    handle: handle.clone(),
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::PathPlaceholder {
+                        placeholder: "__missing__".to_string(),
+                    },
+                    required: true,
+                },
+            ],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("later injection target failure should fail before dispatch");
+
+    assert!(matches!(
+        error,
+        RuntimeHttpEgressError::Credential { ref reason }
+            if reason == "credential injection path placeholder was not found"
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect("staged secret should be restored after target-application failure");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-staged-secret".to_string()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_rejects_invalid_path_placeholder_before_transport() {
+    for (placeholder, url) in [
+        ("", "https://api.example.test/v1/__credential__/run"),
+        (
+            "bad/placeholder",
+            "https://api.example.test/v1/__credential__/run",
+        ),
+        (
+            "bad?placeholder",
+            "https://api.example.test/v1/__credential__/run",
+        ),
+        (
+            "bad#placeholder",
+            "https://api.example.test/v1/__credential__/run",
+        ),
+        (
+            "__missing__",
+            "https://api.example.test/v1/__credential__/run",
+        ),
+    ] {
+        let network = RecordingNetwork::ok(NetworkHttpResponse {
+            status: 200,
+            headers: vec![],
+            body: br#"{"ok":true}"#.to_vec(),
+            usage: NetworkUsage {
+                request_bytes: 5,
+                response_bytes: 11,
+                resolved_ip: None,
+            },
+        });
+        let network_recorder = network.requests.clone();
+        let scope = sample_scope();
+        let capability_id = sample_capability_id();
+        let handle = SecretHandle::new("api-token").unwrap();
+        let services = test_obligation_services();
+        stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+        stage_secret_sync(
+            &services,
+            &scope,
+            &capability_id,
+            &handle,
+            "sk-staged-secret",
+        );
+        let service = services.host_http_egress(network);
+
+        let error = service
+            .execute(RuntimeHttpEgressRequest {
+                runtime: RuntimeKind::Script,
+                scope: scope.clone(),
+                capability_id: capability_id.clone(),
+                method: NetworkMethod::Post,
+                url: url.to_string(),
+                headers: vec![],
+                body: b"hello".to_vec(),
+                network_policy: sample_policy(),
+                credential_injections: vec![RuntimeCredentialInjection {
+                    handle: handle.clone(),
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::PathPlaceholder {
+                        placeholder: placeholder.to_string(),
+                    },
+                    required: true,
+                }],
+                response_body_limit: Some(4096),
+                save_body_to: None,
+                timeout_ms: None,
+            })
+            .await
+            .expect_err("invalid path placeholder must fail before network dispatch");
+
+        assert!(matches!(
+            error,
+            ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ));
+        assert!(
+            network_recorder.lock().unwrap().is_empty(),
+            "case {placeholder:?} must not dispatch to the network"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_http_egress_rejects_path_placeholder_value_breaking_chars_before_transport() {
+    for material in [
+        "",
+        ".",
+        "..",
+        "sk-staged/secret",
+        "sk-staged?secret",
+        "sk-staged#secret",
+        "sk-staged\nsecret",
+        "sk-staged\0secret",
+        "sk-staged+secret",
+    ] {
+        let (error, network_recorder) = execute_path_placeholder_egress(
+            "https://api.example.test/v1/__credential__/run",
+            "__credential__",
+            material,
+        )
+        .await
+        .expect_err("invalid path placeholder credential value must fail before network dispatch");
+
+        assert!(matches!(
+            error,
+            ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ));
+        assert!(error.to_string().contains("path value is invalid"));
+        assert!(
+            network_recorder.lock().unwrap().is_empty(),
+            "material {material:?} must not dispatch to the network"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_http_egress_requires_https_for_path_placeholder_before_transport() {
+    let (error, network_recorder) = execute_path_placeholder_egress(
+        "http://api.example.test/v1/__credential__/run",
+        "__credential__",
+        "sk-staged-secret",
+    )
+    .await
+    .expect_err("path placeholder credential injection must require HTTPS");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(error.to_string().contains("requires HTTPS"));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_rejects_multiple_path_placeholder_occurrences_before_transport() {
+    let (error, network_recorder) = execute_path_placeholder_egress(
+        "https://api.example.test/__credential__/v1/__credential__/run",
+        "__credential__",
+        "sk-staged-secret",
+    )
+    .await
+    .expect_err("path placeholder credential injection must have one target segment");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(error.to_string().contains("exactly once"));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_preserves_existing_path_encoding_when_rewriting_placeholder() {
+    let (_response, network_recorder) = execute_path_placeholder_egress(
+        "https://api.example.test/v1/foo%20bar/__credential__/run%2Ftail",
+        "__credential__",
+        "sk-staged-secret",
+    )
+    .await
+    .expect("path placeholder rewrite should preserve existing encoded segments");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/v1/foo%20bar/sk-staged-secret/run%2Ftail"
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_rejects_path_placeholder_target_url_errors_before_transport() {
+    for (url, expected_reason) in [
+        ("not a url", "credential injection target URL is invalid"),
+        (
+            "mailto:security@example.test",
+            "credential injection path placeholder requires HTTPS",
+        ),
+    ] {
+        let (error, network_recorder) =
+            execute_path_placeholder_egress(url, "__credential__", "sk-staged-secret")
+                .await
+                .expect_err(
+                    "invalid path placeholder target URL must fail before network dispatch",
+                );
+
+        assert!(matches!(
+            error,
+            ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ));
+        assert!(error.to_string().contains(expected_reason));
+        assert!(
+            network_recorder.lock().unwrap().is_empty(),
+            "url {url:?} must not dispatch to the network"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -326,8 +736,10 @@ fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("missing staged material must fail before network dispatch");
 
     assert!(matches!(
@@ -337,8 +749,8 @@ fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
+#[tokio::test]
+async fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -387,8 +799,10 @@ fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("staged material for a different capability must not authorize egress");
 
     assert!(matches!(
@@ -398,8 +812,8 @@ fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
+#[tokio::test]
+async fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -448,8 +862,10 @@ fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("staged material for a different handle must not authorize egress");
 
     assert!(matches!(
@@ -459,8 +875,8 @@ fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_removes_staged_secret_before_network_errors() {
+#[tokio::test]
+async fn host_http_egress_removes_staged_secret_before_network_errors() {
     let network = RecordingNetwork::err(NetworkHttpError::Transport {
         reason: "upstream rejected sk-staged-secret".to_string(),
         request_bytes: 12,
@@ -503,8 +919,10 @@ fn host_http_egress_removes_staged_secret_before_network_errors() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("network error should be sanitized after staged injection is consumed");
 
     assert!(matches!(
@@ -515,8 +933,8 @@ fn host_http_egress_removes_staged_secret_before_network_errors() {
     assert_eq!(network_recorder.lock().unwrap().len(), 1);
 }
 
-#[test]
-fn host_http_egress_skips_optional_missing_staged_secret() {
+#[tokio::test]
+async fn host_http_egress_skips_optional_missing_staged_secret() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -556,8 +974,10 @@ fn host_http_egress_skips_optional_missing_staged_secret() {
                 required: false,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("optional missing staged material should not block egress");
 
     assert_eq!(response.status, 200);
@@ -572,8 +992,8 @@ fn host_http_egress_skips_optional_missing_staged_secret() {
     );
 }
 
-#[test]
-fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
+#[tokio::test]
+async fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -622,8 +1042,10 @@ fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("staged material for a different scope must not authorize egress");
 
     assert!(matches!(
@@ -633,8 +1055,8 @@ fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_rejects_header_injection_prefix_control_chars() {
+#[tokio::test]
+async fn host_http_egress_rejects_header_injection_prefix_control_chars() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -646,22 +1068,19 @@ fn host_http_egress_rejects_header_injection_prefix_control_chars() {
         },
     });
     let network_recorder = network.requests.clone();
-    let secrets = InMemorySecretStore::new();
     let scope = sample_scope();
+    let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
-    block_on_test(secrets.put(
-        scope.clone(),
-        handle.clone(),
-        SecretMaterial::from("sk-test-secret"),
-    ))
-    .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(&services, &scope, &capability_id, &handle, "sk-test-secret");
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope,
-            capability_id: sample_capability_id(),
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -669,7 +1088,9 @@ fn host_http_egress_rejects_header_injection_prefix_control_chars() {
             network_policy: sample_policy(),
             credential_injections: vec![RuntimeCredentialInjection {
                 handle,
-                source: RuntimeCredentialSource::SecretStoreLease,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
                 target: RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer \r\nx-evil: ".to_string()),
@@ -677,8 +1098,10 @@ fn host_http_egress_rejects_header_injection_prefix_control_chars() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("header injection prefixes with control characters must be rejected");
 
     assert!(matches!(
@@ -689,30 +1112,38 @@ fn host_http_egress_rejects_header_injection_prefix_control_chars() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
-    let network = RecordingNetwork::err(NetworkHttpError::Transport {
-        reason: "upstream rejected token sk-test-secret".to_string(),
-        request_bytes: 12,
-        response_bytes: 0,
+#[tokio::test]
+async fn host_http_egress_rejects_header_injection_value_control_chars() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
     });
     let network_recorder = network.requests.clone();
-    let secrets = InMemorySecretStore::new();
     let scope = sample_scope();
+    let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
-    block_on_test(secrets.put(
-        scope.clone(),
-        handle.clone(),
-        SecretMaterial::from("sk-test-secret"),
-    ))
-    .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-test-secret\r\nx-evil: injected",
+    );
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope,
-            capability_id: sample_capability_id(),
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -720,7 +1151,61 @@ fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
             network_policy: sample_policy(),
             credential_injections: vec![RuntimeCredentialInjection {
                 handle,
-                source: RuntimeCredentialSource::SecretStoreLease,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: None,
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("header injection values with control characters must be rejected");
+
+    assert_eq!(
+        credential_reason(&error),
+        "credential injection header value is invalid"
+    );
+    assert!(!error.to_string().contains("sk-test-secret"));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_injects_staged_credentials_and_redacts_errors() {
+    let network = RecordingNetwork::err(NetworkHttpError::Transport {
+        reason: "upstream rejected token sk-test-secret".to_string(),
+        request_bytes: 12,
+        response_bytes: 0,
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(&services, &scope, &capability_id, &handle, "sk-test-secret");
+    let service = services.host_http_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
                 target: RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
@@ -728,8 +1213,10 @@ fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("network error should be sanitized");
 
     let rendered = error.to_string();
@@ -750,8 +1237,8 @@ fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
     );
 }
 
-#[test]
-fn request_policy_fallback_accepts_secret_store_lease_for_legacy_tests() {
+#[tokio::test]
+async fn host_http_egress_requires_available_required_credentials_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -763,78 +1250,17 @@ fn request_policy_fallback_accepts_secret_store_lease_for_legacy_tests() {
         },
     });
     let network_recorder = network.requests.clone();
-    let secrets = InMemorySecretStore::new();
     let scope = sample_scope();
-    let handle = SecretHandle::new("api-token").unwrap();
-    block_on_test(secrets.put(
-        scope.clone(),
-        handle.clone(),
-        SecretMaterial::from("sk-test-secret"),
-    ))
-    .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
-
-    service
-        .execute(RuntimeHttpEgressRequest {
-            runtime: RuntimeKind::Script,
-            scope,
-            capability_id: sample_capability_id(),
-            method: NetworkMethod::Post,
-            url: "https://api.example.test/v1/run".to_string(),
-            headers: vec![],
-            body: b"hello".to_vec(),
-            network_policy: sample_policy(),
-            credential_injections: vec![RuntimeCredentialInjection {
-                handle,
-                source: RuntimeCredentialSource::SecretStoreLease,
-                target: RuntimeCredentialTarget::Header {
-                    name: "authorization".to_string(),
-                    prefix: Some("Bearer ".to_string()),
-                },
-                required: true,
-            }],
-            response_body_limit: Some(4096),
-            timeout_ms: None,
-        })
-        .expect("legacy/test fallback keeps direct leases available outside production wiring");
-
-    let requests = network_recorder.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-test-secret".to_string()
-        ))
-    );
-}
-
-#[test]
-fn host_http_egress_requires_available_required_credentials_before_network() {
-    let network = RecordingNetwork::ok(NetworkHttpResponse {
-        status: 200,
-        headers: vec![],
-        body: br#"{"ok":true}"#.to_vec(),
-        usage: NetworkUsage {
-            request_bytes: 5,
-            response_bytes: 11,
-            resolved_ip: None,
-        },
-    });
-    let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
-            scope: sample_scope(),
-            capability_id: sample_capability_id(),
+            scope,
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -842,7 +1268,9 @@ fn host_http_egress_requires_available_required_credentials_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![RuntimeCredentialInjection {
                 handle: SecretHandle::new("missing-token").unwrap(),
-                source: RuntimeCredentialSource::SecretStoreLease,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
                 target: RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
@@ -850,8 +1278,10 @@ fn host_http_egress_requires_available_required_credentials_before_network() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("missing required credentials should fail before network dispatch");
 
     assert!(matches!(
@@ -861,26 +1291,97 @@ fn host_http_egress_requires_available_required_credentials_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
-    let network = UrlEchoNetwork::new();
+#[tokio::test]
+async fn host_http_egress_required_credential_still_fails_after_optional_negative_cache() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
     let network_recorder = network.requests.clone();
-    let secrets = InMemorySecretStore::new();
+    let handle = SecretHandle::new("missing-token").unwrap();
     let scope = sample_scope();
-    let handle = SecretHandle::new("api-token").unwrap();
-    block_on_test(secrets.put(
-        scope.clone(),
-        handle.clone(),
-        SecretMaterial::from("secret with/slash+plus?"),
-    ))
-    .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope,
-            capability_id: sample_capability_id(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![
+                RuntimeCredentialInjection {
+                    handle: handle.clone(),
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::Header {
+                        name: "x-optional-token".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                    required: false,
+                },
+                RuntimeCredentialInjection {
+                    handle,
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::Header {
+                        name: "authorization".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                    required: true,
+                },
+            ],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("required reuse of a negatively cached credential must fail closed");
+
+    assert_eq!(
+        credential_reason(&error),
+        "required credential is unavailable"
+    );
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
+    let network = UrlEchoNetwork::new();
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "secret with/slash+plus?",
+    );
+    let service = services.host_http_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -888,15 +1389,19 @@ fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
             network_policy: sample_policy(),
             credential_injections: vec![RuntimeCredentialInjection {
                 handle,
-                source: RuntimeCredentialSource::SecretStoreLease,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
                 target: RuntimeCredentialTarget::QueryParam {
                     name: "token".to_string(),
                 },
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("network error should be sanitized");
 
     let rendered = error.to_string();
@@ -911,8 +1416,140 @@ fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
     );
 }
 
-#[test]
-fn host_http_egress_forwards_timeout_to_network() {
+#[tokio::test]
+async fn host_http_egress_redacts_path_placeholder_credentials_from_response() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 302,
+        headers: vec![(
+            "location".to_string(),
+            "https://api.example.test/v1/sk-staged-secret/next".to_string(),
+        )],
+        body: b"upstream echoed sk-staged-secret".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 30,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress(network);
+
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/__credential__/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::StagedObligation { capability_id },
+                target: RuntimeCredentialTarget::PathPlaceholder {
+                    placeholder: "__credential__".to_string(),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect("path placeholder credential response echoes should be redacted");
+
+    assert_eq!(response.status, 302);
+    assert!(response.redaction_applied);
+    let rendered_body = String::from_utf8(response.body).unwrap();
+    assert!(rendered_body.contains("[REDACTED]"));
+    assert!(!rendered_body.contains("sk-staged-secret"));
+    let location = response
+        .headers
+        .iter()
+        .find(|(name, _)| name == "location")
+        .map(|(_, value)| value.as_str())
+        .expect("location header should be preserved after redaction");
+    assert!(location.contains("[REDACTED]"));
+    assert!(!location.contains("sk-staged-secret"));
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/v1/sk-staged-secret/run"
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_redacts_path_placeholder_credentials_from_network_errors() {
+    let network = UrlEchoNetwork::new();
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/__credential__/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::StagedObligation { capability_id },
+                target: RuntimeCredentialTarget::PathPlaceholder {
+                    placeholder: "__credential__".to_string(),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("network errors after path placeholder injection should be sanitized");
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("transport_failed"));
+    assert!(!rendered.contains("sk-staged-secret"));
+    assert!(!rendered.contains("api.example.test/v1/sk-staged-secret/run"));
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/v1/sk-staged-secret/run"
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_forwards_timeout_to_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -924,10 +1561,7 @@ fn host_http_egress_forwards_timeout_to_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service = request_policy_staging_egress(network);
 
     service
         .execute(RuntimeHttpEgressRequest {
@@ -941,8 +1575,10 @@ fn host_http_egress_forwards_timeout_to_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: Some(250),
         })
+        .await
         .expect("network response should be returned");
 
     let requests = network_recorder.lock().unwrap();
@@ -950,8 +1586,47 @@ fn host_http_egress_forwards_timeout_to_network() {
     assert_eq!(requests[0].timeout_ms, Some(250));
 }
 
-#[test]
-fn host_http_egress_preserves_request_and_response_byte_accounting() {
+#[tokio::test]
+async fn host_http_egress_with_reqwest_transport_returns_redirect_without_following() {
+    let (url, server) = single_response_server(
+        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/followed\r\nContent-Length: 0\r\n\r\n",
+    );
+    let network =
+        PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(Duration::from_secs(2)));
+    let service = request_policy_staging_egress(network);
+
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url,
+            headers: vec![],
+            body: Vec::new(),
+            network_policy: local_http_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(1024),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect("redirect responses should be returned to the caller, not followed");
+    server.join().unwrap();
+
+    assert_eq!(response.status, 302);
+    assert_eq!(
+        response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+            .map(|(_, value)| value.as_str()),
+        Some("http://127.0.0.1:9/followed")
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_preserves_request_and_response_byte_accounting() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -963,10 +1638,7 @@ fn host_http_egress_preserves_request_and_response_byte_accounting() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service = request_policy_staging_egress(network);
 
     let response = service
         .execute(RuntimeHttpEgressRequest {
@@ -980,8 +1652,10 @@ fn host_http_egress_preserves_request_and_response_byte_accounting() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("network response should be returned");
 
     assert_eq!(response.request_bytes, 5);
@@ -992,8 +1666,8 @@ fn host_http_egress_preserves_request_and_response_byte_accounting() {
     assert_eq!(requests[0].response_body_limit, Some(4096));
 }
 
-#[test]
-fn host_http_egress_without_policy_store_fails_closed_before_transport() {
+#[tokio::test]
+async fn host_http_egress_without_policy_store_fails_closed_before_transport() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1005,7 +1679,7 @@ fn host_http_egress_without_policy_store_fails_closed_before_transport() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new());
+    let service = test_obligation_services().host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -1019,8 +1693,10 @@ fn host_http_egress_without_policy_store_fails_closed_before_transport() {
             network_policy: caller_supplied_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("runtime HTTP egress must not trust caller-supplied network policy without a staged-policy store");
 
     assert!(matches!(
@@ -1034,8 +1710,8 @@ fn host_http_egress_without_policy_store_fails_closed_before_transport() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_borrows_staged_network_policy_before_transport() {
+#[tokio::test]
+async fn host_http_egress_borrows_staged_network_policy_before_transport() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1066,8 +1742,10 @@ fn host_http_egress_borrows_staged_network_policy_before_transport() {
             network_policy: caller_supplied_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("staged network policy should authorize host-mediated HTTP");
 
     let requests = network_recorder.lock().unwrap();
@@ -1076,8 +1754,8 @@ fn host_http_egress_borrows_staged_network_policy_before_transport() {
     drop(requests);
 }
 
-#[test]
-fn production_host_http_egress_rejects_direct_secret_store_lease_before_transport() {
+#[tokio::test]
+async fn production_host_http_egress_rejects_direct_secret_store_lease_before_transport() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1122,8 +1800,10 @@ fn production_host_http_egress_rejects_direct_secret_store_lease_before_transpor
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: Some(1000),
         })
+        .await
         .expect_err("production egress must require staged secret obligations");
 
     assert!(matches!(
@@ -1134,8 +1814,9 @@ fn production_host_http_egress_rejects_direct_secret_store_lease_before_transpor
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn production_host_http_egress_discards_staged_policy_when_direct_secret_store_lease_is_rejected() {
+#[tokio::test]
+async fn production_host_http_egress_discards_staged_policy_when_direct_secret_store_lease_is_rejected()
+ {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1174,8 +1855,10 @@ fn production_host_http_egress_discards_staged_policy_when_direct_secret_store_l
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: Some(1000),
         })
+        .await
         .expect_err("rejected direct lease should discard staged policy");
     assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
 
@@ -1191,8 +1874,10 @@ fn production_host_http_egress_discards_staged_policy_when_direct_secret_store_l
             network_policy: caller_supplied_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: Some(1000),
         })
+        .await
         .expect_err("discarded staged policy must not authorize retry");
 
     assert!(matches!(
@@ -1206,8 +1891,9 @@ fn production_host_http_egress_discards_staged_policy_when_direct_secret_store_l
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn production_host_http_egress_rejects_cross_capability_staged_credentials_before_transport() {
+#[tokio::test]
+async fn production_host_http_egress_rejects_cross_capability_staged_credentials_before_transport()
+{
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1256,8 +1942,10 @@ fn production_host_http_egress_rejects_cross_capability_staged_credentials_befor
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: Some(1000),
         })
+        .await
         .expect_err("cross-capability staged credentials must be rejected");
 
     assert!(matches!(
@@ -1268,8 +1956,8 @@ fn production_host_http_egress_rejects_cross_capability_staged_credentials_befor
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn wasm_http_adapter_borrows_real_host_staged_network_policy() {
+#[tokio::test]
+async fn wasm_http_adapter_borrows_real_host_staged_network_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1314,8 +2002,8 @@ fn wasm_http_adapter_borrows_real_host_staged_network_policy() {
     drop(requests);
 }
 
-#[test]
-fn script_http_adapter_borrows_real_host_staged_network_policy() {
+#[tokio::test]
+async fn script_http_adapter_borrows_real_host_staged_network_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 202,
         headers: vec![],
@@ -1348,6 +2036,7 @@ fn script_http_adapter_borrows_real_host_staged_network_policy() {
             response_body_limit: Some(4096),
             timeout_ms: Some(1000),
         })
+        .await
         .expect("script adapter should reach host egress using staged policy");
 
     assert_eq!(response.status, 202);
@@ -1360,8 +2049,8 @@ fn script_http_adapter_borrows_real_host_staged_network_policy() {
     drop(requests);
 }
 
-#[test]
-fn mcp_http_adapter_borrows_real_host_staged_network_policy() {
+#[tokio::test]
+async fn mcp_http_adapter_borrows_real_host_staged_network_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 203,
         headers: vec![],
@@ -1394,6 +2083,7 @@ fn mcp_http_adapter_borrows_real_host_staged_network_policy() {
             response_body_limit: Some(4096),
             timeout_ms: Some(1000),
         })
+        .await
         .expect("MCP adapter should reach host egress using staged policy");
 
     assert_eq!(response.status, 203);
@@ -1460,7 +2150,7 @@ async fn mcp_http_client_reuses_real_host_staged_network_policy_for_json_rpc_ses
 }
 
 #[tokio::test]
-async fn mcp_http_client_uses_one_shot_staged_credential_for_tool_call_only() {
+async fn mcp_http_client_uses_one_shot_staged_credential_for_session() {
     let network = JsonRpcMcpNetwork::new();
     let network_recorder = network.requests.clone();
     let services = test_obligation_services();
@@ -1522,21 +2212,128 @@ async fn mcp_http_client_uses_one_shot_staged_credential_for_tool_call_only() {
         3,
         "initialize, initialized notification, and tools/call should all reach transport"
     );
-    assert!(requests[..2].iter().all(|request| {
-        !request
-            .headers
-            .iter()
-            .any(|(name, _)| name == "authorization")
-    }));
+    assert!(
+        requests.iter().all(|request| {
+            request
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization")
+                == Some(&(
+                    "authorization".to_string(),
+                    "Bearer sk-staged-mcp-secret".to_string(),
+                ))
+        }),
+        "initialize, initialized, and tools/call must all receive the staged MCP credential"
+    );
+    drop(requests);
+}
+
+#[tokio::test]
+async fn mcp_http_client_uses_credential_account_staged_from_resolved_source_scope() {
+    let network = JsonRpcMcpNetwork::new();
+    let network_recorder = network.requests.clone();
+    let source_scope = sample_scope();
+    let mut runtime_scope = source_scope.clone();
+    runtime_scope.project_id = Some(ProjectId::new("runtime-project").unwrap());
+    runtime_scope.invocation_id = InvocationId::new();
+    let capability_id = CapabilityId::new("mcp.search").unwrap();
+    let account_access_handle = SecretHandle::new("mcp_account_access").unwrap();
+    let runtime_slot_handle = SecretHandle::new("mcp_runtime_token").unwrap();
+    let services = test_obligation_services().with_credential_account_resolver(Arc::new(
+        SourceScopedCredentialAccountResolver {
+            source_scope: source_scope.clone(),
+            handle: account_access_handle.clone(),
+        },
+    ));
+    services
+        .secret_store()
+        .put(
+            source_scope,
+            account_access_handle,
+            SecretMaterial::from("sk-account-scope-mcp-secret"),
+        )
+        .await
+        .unwrap();
+    let context = context_for_scope(runtime_scope.clone());
+    services
+        .obligation_handler()
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &ResourceEstimate::default(),
+            obligations: &[
+                Obligation::ApplyNetworkPolicy {
+                    policy: sample_policy(),
+                },
+                Obligation::InjectCredentialAccountOnce {
+                    handle: runtime_slot_handle.clone(),
+                    provider: RuntimeCredentialAccountProviderId::new("mcp").unwrap(),
+                    provider_scopes: Vec::new(),
+                    requester_extension: ExtensionId::new("mcp").unwrap(),
+                },
+            ],
+        })
+        .await
+        .expect("credential account obligation should stage from resolved source scope");
+    let service = services.host_http_egress(network);
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(service)),
+        StaticMcpHostHttpEgressPlanner::new(McpHostHttpEgressPlan {
+            network_policy: caller_supplied_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: runtime_slot_handle,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: Some(1000),
+        }),
+    );
+
+    let output = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("mcp").unwrap(),
+            capability_id: capability_id.clone(),
+            scope: runtime_scope,
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://api.example.test/v1/run".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect("MCP tool call should use staged product-auth credential");
+
     assert_eq!(
-        requests[2]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-staged-mcp-secret".to_string()
-        ))
+        output.output,
+        json!({"content":[{"type":"text","text":"ok"}],"isError":false})
+    );
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "initialize, initialized notification, and tools/call should all reach transport"
+    );
+    assert!(
+        requests.iter().all(|request| {
+            request
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization")
+                == Some(&(
+                    "authorization".to_string(),
+                    "Bearer sk-account-scope-mcp-secret".to_string(),
+                ))
+        }),
+        "initialize, initialized, and tools/call must all receive the staged product-auth credential"
     );
     drop(requests);
 }
@@ -1593,12 +2390,12 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
         .await
         .expect_err("production MCP egress must require staged credentials");
 
-    assert_eq!(error, "credential_unavailable");
+    assert_eq!(error.stable_reason(), "request_denied");
     let requests = network_recorder.lock().unwrap();
     assert_eq!(
         requests.len(),
-        2,
-        "MCP handshake may run unauthenticated, but credentials must not be exposed before tools/call"
+        0,
+        "MCP direct leases must fail before initialize, initialized, or tools/call transport"
     );
     assert!(requests.iter().all(|request| {
         !request
@@ -1608,8 +2405,8 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
     }));
 }
 
-#[test]
-fn first_party_http_egress_cannot_use_direct_secret_store_lease_with_production_egress() {
+#[tokio::test]
+async fn first_party_http_egress_cannot_use_direct_secret_store_lease_with_production_egress() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1647,8 +2444,10 @@ fn first_party_http_egress_cannot_use_direct_secret_store_lease_with_production_
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("production first-party egress must require staged credentials");
 
     assert!(matches!(
@@ -1659,8 +2458,8 @@ fn first_party_http_egress_cannot_use_direct_secret_store_lease_with_production_
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_fails_closed_without_staged_network_policy() {
+#[tokio::test]
+async fn host_http_egress_fails_closed_without_staged_network_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1687,8 +2486,10 @@ fn host_http_egress_fails_closed_without_staged_network_policy() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("missing staged network policy should fail before transport");
 
     assert!(matches!(
@@ -1702,8 +2503,8 @@ fn host_http_egress_fails_closed_without_staged_network_policy() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
+#[tokio::test]
+async fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1737,8 +2538,10 @@ fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("cross-scope or cross-capability staged policies must not authorize egress");
 
     assert!(matches!(
@@ -1752,8 +2555,8 @@ fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_consumes_staged_policy_when_dispatch_fails_before_transport() {
+#[tokio::test]
+async fn host_http_egress_consumes_staged_policy_when_dispatch_fails_before_transport() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1791,16 +2594,18 @@ fn host_http_egress_consumes_staged_policy_when_dispatch_fails_before_transport(
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("credential failure should not leave reusable network policy state");
 
     assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_consumes_staged_policy_when_request_validation_fails() {
+#[tokio::test]
+async fn host_http_egress_consumes_staged_policy_when_request_validation_fails() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1833,16 +2638,18 @@ fn host_http_egress_consumes_staged_policy_when_request_validation_fails() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("request validation failure should not leave reusable policy state");
 
     assert!(matches!(error, RuntimeHttpEgressError::Request { .. }));
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response() {
+#[tokio::test]
+async fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![
@@ -1859,22 +2666,19 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
             resolved_ip: None,
         },
     });
-    let secrets = InMemorySecretStore::new();
     let scope = sample_scope();
+    let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
-    block_on_test(secrets.put(
-        scope.clone(),
-        handle.clone(),
-        SecretMaterial::from("sk-test-secret"),
-    ))
-    .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(&services, &scope, &capability_id, &handle, "sk-test-secret");
+    let service = services.host_http_egress(network);
 
     let response = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope,
-            capability_id: sample_capability_id(),
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -1882,7 +2686,9 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
             network_policy: sample_policy(),
             credential_injections: vec![RuntimeCredentialInjection {
                 handle,
-                source: RuntimeCredentialSource::SecretStoreLease,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
                 target: RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
@@ -1890,8 +2696,10 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("sanitized response should be returned");
 
     assert!(response.redaction_applied);
@@ -1902,8 +2710,8 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
     assert_eq!(response.body, b"upstream echoed [REDACTED]".to_vec());
 }
 
-#[test]
-fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
+#[tokio::test]
+async fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![(
@@ -1917,22 +2725,25 @@ fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
             resolved_ip: None,
         },
     });
-    let secrets = InMemorySecretStore::new();
     let scope = sample_scope();
+    let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
-    block_on_test(secrets.put(
-        scope.clone(),
-        handle.clone(),
-        SecretMaterial::from("secret with/slash+plus?"),
-    ))
-    .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "secret with/slash+plus?",
+    );
+    let service = services.host_http_egress(network);
 
     let response = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope,
-            capability_id: sample_capability_id(),
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -1940,15 +2751,19 @@ fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
             network_policy: sample_policy(),
             credential_injections: vec![RuntimeCredentialInjection {
                 handle,
-                source: RuntimeCredentialSource::SecretStoreLease,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
                 target: RuntimeCredentialTarget::QueryParam {
                     name: "token".to_string(),
                 },
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("lowercase percent-encoded echoed credentials should be redacted");
 
     assert!(response.redaction_applied);
@@ -1959,8 +2774,643 @@ fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
     assert_eq!(response.body, b"upstream echoed [REDACTED]".to_vec());
 }
 
-#[test]
-fn host_http_egress_strips_all_sensitive_response_headers() {
+#[tokio::test]
+async fn host_http_egress_saves_sanitized_response_body_to_store() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let store = Arc::new(RecordingBodyStore::default());
+    let service = request_policy_staging_egress_with_body_store(network, store.clone());
+
+    let target = save_target("/workspace/pr.diff");
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(target.clone()),
+            timeout_ms: None,
+        })
+        .await
+        .expect("response body should be saved");
+
+    assert_eq!(response.body, Vec::<u8>::new());
+    assert_eq!(response.body.capacity(), 0);
+    assert_eq!(
+        response.saved_body.as_ref().map(|saved| &saved.path),
+        Some(&target.path)
+    );
+    assert_eq!(
+        response
+            .saved_body
+            .as_ref()
+            .map(|saved| saved.bytes_written),
+        Some(16)
+    );
+    let writes = store.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].target, target);
+    assert_eq!(writes[0].body, b"large patch body".to_vec());
+}
+
+#[tokio::test]
+async fn host_http_egress_saves_response_body_to_scoped_filesystem_store() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: b"filesystem patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 21,
+            resolved_ip: None,
+        },
+    });
+    let root = Arc::new(InMemoryBackend::new());
+    let scoped_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&root),
+        MountView::new(Vec::new()).unwrap(),
+    ));
+    let save_mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+    let service = request_policy_staging_egress_with_body_store(network, scoped_filesystem.clone());
+
+    let target = save_target_with_mount("/workspace/pr.diff", &save_mounts);
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(target.clone()),
+            timeout_ms: None,
+        })
+        .await
+        .expect("response body should be saved through the scoped filesystem");
+
+    assert_eq!(response.body, Vec::<u8>::new());
+    assert_eq!(
+        response
+            .saved_body
+            .as_ref()
+            .map(|saved| saved.bytes_written),
+        Some(21)
+    );
+    let saved =
+        block_on_test(root.read_file(&VirtualPath::new("/projects/workspace/pr.diff").unwrap()))
+            .unwrap();
+    assert_eq!(saved, b"filesystem patch body".to_vec());
+}
+
+#[tokio::test]
+async fn host_http_egress_saves_response_body_to_scoped_filesystem_store_from_tokio_task() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: b"tokio filesystem body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 21,
+            resolved_ip: None,
+        },
+    });
+    let root = Arc::new(InMemoryBackend::new());
+    let scoped_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&root),
+        MountView::new(Vec::new()).unwrap(),
+    ));
+    let save_mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy(&services, &scope, &capability_id, sample_policy()).await;
+    let service = services.host_http_egress_with_body_store(network, scoped_filesystem.clone());
+
+    let target = save_target_with_mount("/workspace/from-tokio.txt", &save_mounts);
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope,
+            capability_id,
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(target),
+            timeout_ms: None,
+        })
+        .await
+        .expect("response body should be saved without nested Tokio runtime panic");
+
+    assert_eq!(
+        response
+            .saved_body
+            .as_ref()
+            .map(|saved| saved.bytes_written),
+        Some(21)
+    );
+    let saved = root
+        .read_file(&VirtualPath::new("/projects/workspace/from-tokio.txt").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(saved, b"tokio filesystem body".to_vec());
+}
+
+#[tokio::test]
+async fn host_http_egress_rejects_save_when_target_mount_view_is_read_only() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: b"filesystem patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 21,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scoped_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/projects/workspace").unwrap(),
+            MountPermissions::read_write(),
+        )])
+        .unwrap(),
+    ));
+    let service = request_policy_staging_egress_with_body_store(network, scoped_filesystem.clone());
+
+    let read_only_mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_only(),
+    )])
+    .unwrap();
+    let target = save_target_with_mount("/workspace/pr.diff", &read_only_mounts);
+    let direct_error = scoped_filesystem
+        .authorize_write(&sample_scope(), &sample_capability_id(), &target)
+        .expect_err("direct body-store authorization should fail");
+    assert!(!direct_error.to_string().contains("/workspace/pr.diff"));
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(target.clone()),
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("read-only target mount should deny saving before network");
+
+    assert_eq!(error.stable_runtime_reason(), "request_denied");
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_save_target_requires_configured_body_store_before_network() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = request_policy_staging_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/pr.diff")),
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("missing body store should fail closed");
+
+    assert!(matches!(error, RuntimeHttpEgressError::Request { .. }));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_save_target_requires_write_authorization_before_network() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let store = Arc::new(
+        RecordingBodyStore::default()
+            .with_authorize_error("write permission denied for /workspace/pr.diff"),
+    );
+    let service = request_policy_staging_egress_with_body_store(network, store);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/pr.diff")),
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("unauthorized save target should fail closed");
+
+    match error {
+        RuntimeHttpEgressError::Request {
+            reason,
+            request_bytes,
+            response_bytes,
+        } => {
+            assert_eq!(request_bytes, 0);
+            assert_eq!(response_bytes, 0);
+            assert_eq!(reason, "response_body_store_unauthorized");
+        }
+        other => panic!("expected request authorization error, got {other:?}"),
+    }
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_rejects_save_when_body_store_is_unavailable() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let store = Arc::new(RecordingBodyStore::default().with_authorize_unavailable());
+    let service = request_policy_staging_egress_with_body_store(network, store);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/pr.diff")),
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("unavailable body store should fail closed");
+
+    match error {
+        RuntimeHttpEgressError::Request {
+            reason,
+            request_bytes,
+            response_bytes,
+        } => {
+            assert_eq!(request_bytes, 0);
+            assert_eq!(response_bytes, 0);
+            assert_eq!(reason, "response_body_store_unavailable");
+        }
+        other => panic!("expected body store unavailable error, got {other:?}"),
+    }
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_discards_staged_secret_on_pre_injection_error() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let store = Arc::new(RecordingBodyStore::default().with_authorize_unavailable());
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress_with_body_store(network, store);
+
+    service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/pr.diff")),
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("pre-injection body-store failure should fail closed");
+
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("pre-injection failure should discard staged secrets");
+
+    assert!(matches!(
+        error,
+        RuntimeHttpEgressError::Credential { ref reason }
+            if reason == "required credential is unavailable"
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_fails_closed_when_body_store_write_fails() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let store = Arc::new(RecordingBodyStore::default().with_write_error("disk full"));
+    let service = request_policy_staging_egress_with_body_store(network, store.clone());
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/pr.diff")),
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("body store write failure should fail closed");
+
+    match error {
+        RuntimeHttpEgressError::Response {
+            reason,
+            request_bytes,
+            response_bytes,
+        } => {
+            assert_eq!(request_bytes, 5);
+            assert_eq!(response_bytes, 16);
+            assert_eq!(reason, "response_body_store_failed");
+        }
+        other => panic!("expected response body store error, got {other:?}"),
+    }
+    assert!(store.writes().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_fails_closed_when_real_scoped_filesystem_write_fails() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let temp = tempdir().unwrap();
+    let mut root = LocalFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects/workspace").unwrap(),
+        ironclaw_host_api::HostPath::from_path_buf(temp.path().to_path_buf()),
+    )
+    .unwrap();
+    let scoped_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(root),
+        MountView::new(Vec::new()).unwrap(),
+    ));
+    fs::write(temp.path().join("dir"), b"blocking file").unwrap();
+    let service = request_policy_staging_egress_with_body_store(network, scoped_filesystem);
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+    let target = save_target_with_mount("/workspace/dir/file.txt", &mounts);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(target),
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("real scoped filesystem write failure should fail closed");
+
+    match error {
+        RuntimeHttpEgressError::Response {
+            reason,
+            request_bytes,
+            response_bytes,
+        } => {
+            assert_eq!(request_bytes, 5);
+            assert_eq!(response_bytes, 16);
+            assert_eq!(reason, "response_body_store_failed");
+        }
+        other => panic!("expected response body store error, got {other:?}"),
+    }
+    assert_eq!(
+        fs::read(temp.path().join("dir")).unwrap(),
+        b"blocking file".to_vec()
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_saves_redacted_response_body() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"upstream echoed sk-test-secret".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 29,
+            resolved_ip: None,
+        },
+    });
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(&services, &scope, &capability_id, &handle, "sk-test-secret");
+    let store = Arc::new(RecordingBodyStore::default());
+    let service = services.host_http_egress_with_body_store(network, store.clone());
+
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope,
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/redacted.txt")),
+            timeout_ms: None,
+        })
+        .await
+        .expect("sanitized response body should be saved");
+
+    assert!(response.redaction_applied);
+    assert_eq!(response.body, Vec::<u8>::new());
+    let writes = store.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].body, b"upstream echoed [REDACTED]".to_vec());
+}
+
+#[tokio::test]
+async fn host_http_egress_strips_all_sensitive_response_headers() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![
@@ -1990,10 +3440,7 @@ fn host_http_egress_strips_all_sensitive_response_headers() {
             resolved_ip: None,
         },
     });
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service = request_policy_staging_egress(network);
 
     let response = service
         .execute(RuntimeHttpEgressRequest {
@@ -2007,8 +3454,10 @@ fn host_http_egress_strips_all_sensitive_response_headers() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("sensitive response headers should be stripped before runtime visibility");
 
     assert!(response.redaction_applied);
@@ -2018,8 +3467,8 @@ fn host_http_egress_strips_all_sensitive_response_headers() {
     );
 }
 
-#[test]
-fn host_http_egress_blocks_credential_shaped_response_body() {
+#[tokio::test]
+async fn host_http_egress_blocks_credential_shaped_response_body() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2030,10 +3479,7 @@ fn host_http_egress_blocks_credential_shaped_response_body() {
             resolved_ip: None,
         },
     });
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service = request_policy_staging_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -2047,21 +3493,24 @@ fn host_http_egress_blocks_credential_shaped_response_body() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("credential-shaped response bodies should not reach runtimes");
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Response { .. }
+        ironclaw_host_api::RuntimeHttpEgressError::Response { ref reason, .. }
+            if reason == "response_leak_blocked"
     ));
     assert!(!error.to_string().contains("sk-proj-test"));
     assert_eq!(error.request_bytes(), 5);
     assert_eq!(error.response_bytes(), 43);
 }
 
-#[test]
-fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
+#[tokio::test]
+async fn host_http_egress_blocks_percent_encoded_credential_path_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2073,10 +3522,49 @@ fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service = request_policy_staging_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/%73%6b%2d%70%72%6f%6a%2dtest1234567890abcdefghij/run"
+                .to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("percent-encoded credential-shaped path should fail before network dispatch");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Request { ref reason, .. }
+            if reason == "credential_leak_blocked"
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = request_policy_staging_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -2090,20 +3578,23 @@ fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("credential-shaped runtime requests should fail before network dispatch");
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Request { .. }
+        ironclaw_host_api::RuntimeHttpEgressError::Request { ref reason, .. }
+            if reason == "credential_leak_blocked"
     ));
     assert!(!error.to_string().contains("sk-proj-test"));
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
+#[tokio::test]
+async fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2115,10 +3606,7 @@ fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service = request_policy_staging_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -2135,8 +3623,10 @@ fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("runtime-supplied sensitive headers should fail before network dispatch");
 
     assert!(matches!(
@@ -2147,8 +3637,50 @@ fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
+#[tokio::test]
+async fn host_http_egress_blocks_leaky_response_header_values() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![(
+            "x-note".to_string(),
+            "leaked sk-proj-test1234567890abcdefghij".to_string(),
+        )],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let service = request_policy_staging_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("leaky response headers should fail closed");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Response { ref reason, .. }
+            if reason == "response_leak_blocked"
+    ));
+}
+
+#[tokio::test]
+async fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2160,10 +3692,7 @@ fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service = request_policy_staging_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -2177,8 +3706,10 @@ fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("runtime-supplied credential query params should fail before network dispatch");
 
     assert!(matches!(
@@ -2189,8 +3720,8 @@ fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
+#[tokio::test]
+async fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2202,10 +3733,7 @@ fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service = request_policy_staging_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -2219,8 +3747,10 @@ fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("percent-encoded credential values should fail before network dispatch");
 
     assert!(matches!(
@@ -2231,8 +3761,8 @@ fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
+#[tokio::test]
+async fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2244,10 +3774,7 @@ fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service = request_policy_staging_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -2261,8 +3788,10 @@ fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("runtime-supplied auth-like headers should fail before network dispatch");
 
     assert!(matches!(
@@ -2273,84 +3802,14 @@ fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_runs_async_secret_store_futures_with_tokio_context() {
-    let network = RecordingNetwork::ok(NetworkHttpResponse {
-        status: 200,
-        headers: vec![],
-        body: br#"{"ok":true}"#.to_vec(),
-        usage: NetworkUsage {
-            request_bytes: 5,
-            response_bytes: 11,
-            resolved_ip: None,
-        },
-    });
-    let network_recorder = network.requests.clone();
-    let secrets = TokioBackedSecretStore::new();
-    let scope = sample_scope();
-    let handle = SecretHandle::new("api-token").unwrap();
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(secrets.put(
-            scope.clone(),
-            handle.clone(),
-            SecretMaterial::from("sk-test-secret"),
-        ))
-        .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
-
-    let response = service
-        .execute(RuntimeHttpEgressRequest {
-            runtime: RuntimeKind::Script,
-            scope,
-            capability_id: sample_capability_id(),
-            method: NetworkMethod::Post,
-            url: "https://api.example.test/v1/run".to_string(),
-            headers: vec![],
-            body: b"hello".to_vec(),
-            network_policy: sample_policy(),
-            credential_injections: vec![RuntimeCredentialInjection {
-                handle,
-                source: RuntimeCredentialSource::SecretStoreLease,
-                target: RuntimeCredentialTarget::Header {
-                    name: "authorization".to_string(),
-                    prefix: Some("Bearer ".to_string()),
-                },
-                required: true,
-            }],
-            response_body_limit: Some(4096),
-            timeout_ms: None,
-        })
-        .expect("host egress should poll async secret stores inside a Tokio context");
-
-    assert_eq!(response.status, 200);
-    let requests = network_recorder.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-test-secret".to_string()
-        ))
-    );
-}
-
-#[test]
-fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
+#[tokio::test]
+async fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
     let network = RecordingNetwork::err(NetworkHttpError::Transport {
         reason: "connection failed for https://api.example.test/path?token=raw-secret".to_string(),
         request_bytes: 12,
         response_bytes: 0,
     });
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service = request_policy_staging_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -2364,8 +3823,10 @@ fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("network errors should surface as stable sanitized variants");
 
     assert!(matches!(
@@ -2382,6 +3843,79 @@ fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
 struct RecordingNetwork {
     response: Result<NetworkHttpResponse, NetworkHttpError>,
     requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RecordingBodyStore {
+    writes: Arc<Mutex<Vec<RecordedBodyWrite>>>,
+    authorize_error: Arc<Mutex<Option<RuntimeHttpBodyStoreError>>>,
+    write_error: Arc<Mutex<Option<RuntimeHttpBodyStoreError>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedBodyWrite {
+    scope: ResourceScope,
+    capability_id: CapabilityId,
+    target: RuntimeHttpSaveTarget,
+    body: Vec<u8>,
+}
+
+impl RecordingBodyStore {
+    fn with_authorize_error(self, reason: &str) -> Self {
+        *self.authorize_error.lock().unwrap() = Some(RuntimeHttpBodyStoreError::Unauthorized {
+            reason: reason.to_string(),
+        });
+        self
+    }
+
+    fn with_authorize_unavailable(self) -> Self {
+        *self.authorize_error.lock().unwrap() = Some(RuntimeHttpBodyStoreError::Unavailable);
+        self
+    }
+
+    fn with_write_error(self, reason: &str) -> Self {
+        *self.write_error.lock().unwrap() = Some(RuntimeHttpBodyStoreError::Failed {
+            reason: reason.to_string(),
+        });
+        self
+    }
+
+    fn writes(&self) -> Vec<RecordedBodyWrite> {
+        self.writes.lock().unwrap().clone()
+    }
+}
+
+impl RuntimeHttpBodyStore for RecordingBodyStore {
+    fn authorize_write(
+        &self,
+        _scope: &ResourceScope,
+        _capability_id: &CapabilityId,
+        _target: &RuntimeHttpSaveTarget,
+    ) -> Result<(), RuntimeHttpBodyStoreError> {
+        if let Some(error) = self.authorize_error.lock().unwrap().clone() {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn write_body(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        target: &RuntimeHttpSaveTarget,
+        body: &[u8],
+    ) -> Result<(), RuntimeHttpBodyStoreError> {
+        if let Some(error) = self.write_error.lock().unwrap().clone() {
+            return Err(error);
+        }
+        self.writes.lock().unwrap().push(RecordedBodyWrite {
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            target: target.clone(),
+            body: body.to_vec(),
+        });
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -2402,8 +3936,9 @@ impl UrlEchoNetwork {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for UrlEchoNetwork {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -2424,8 +3959,9 @@ impl JsonRpcMcpNetwork {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for JsonRpcMcpNetwork {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -2497,8 +4033,9 @@ impl RecordingNetwork {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for RecordingNetwork {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -2507,76 +4044,68 @@ impl NetworkHttpEgress for RecordingNetwork {
     }
 }
 
-struct TokioBackedSecretStore {
-    inner: InMemorySecretStore,
+type RecordedRequests = Arc<Mutex<Vec<NetworkHttpRequest>>>;
+type PathPlaceholderEgressResult = Result<
+    (RuntimeHttpEgressResponse, RecordedRequests),
+    (RuntimeHttpEgressError, RecordedRequests),
+>;
+
+async fn execute_path_placeholder_egress(
+    url: &str,
+    placeholder: &str,
+    material: &str,
+) -> PathPlaceholderEgressResult {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(&services, &scope, &capability_id, &handle, material);
+    let service = services.host_http_egress(network);
+
+    let response = service.execute(RuntimeHttpEgressRequest {
+        runtime: RuntimeKind::Script,
+        scope,
+        capability_id: capability_id.clone(),
+        method: NetworkMethod::Post,
+        url: url.to_string(),
+        headers: vec![],
+        body: b"hello".to_vec(),
+        network_policy: sample_policy(),
+        credential_injections: vec![RuntimeCredentialInjection {
+            handle,
+            source: RuntimeCredentialSource::StagedObligation { capability_id },
+            target: RuntimeCredentialTarget::PathPlaceholder {
+                placeholder: placeholder.to_string(),
+            },
+            required: true,
+        }],
+        response_body_limit: Some(4096),
+        save_body_to: None,
+        timeout_ms: None,
+    });
+
+    response
+        .await
+        .map(|response| (response, network_recorder.clone()))
+        .map_err(|error| (error, network_recorder))
 }
 
-impl TokioBackedSecretStore {
-    fn new() -> Self {
-        Self {
-            inner: InMemorySecretStore::new(),
-        }
-    }
-
-    async fn yield_to_tokio() {
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-}
-
-#[async_trait::async_trait]
-impl SecretStore for TokioBackedSecretStore {
-    async fn put(
-        &self,
-        scope: ResourceScope,
-        handle: SecretHandle,
-        material: SecretMaterial,
-    ) -> Result<SecretMetadata, SecretStoreError> {
-        Self::yield_to_tokio().await;
-        self.inner.put(scope, handle, material).await
-    }
-
-    async fn metadata(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-        Self::yield_to_tokio().await;
-        self.inner.metadata(scope, handle).await
-    }
-
-    async fn lease_once(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<SecretLease, SecretStoreError> {
-        Self::yield_to_tokio().await;
-        self.inner.lease_once(scope, handle).await
-    }
-
-    async fn consume(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretMaterial, SecretStoreError> {
-        Self::yield_to_tokio().await;
-        self.inner.consume(scope, lease_id).await
-    }
-
-    async fn revoke(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretLease, SecretStoreError> {
-        Self::yield_to_tokio().await;
-        self.inner.revoke(scope, lease_id).await
-    }
-
-    async fn leases_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<SecretLease>, SecretStoreError> {
-        Self::yield_to_tokio().await;
-        self.inner.leases_for_scope(scope).await
+fn credential_reason(error: &RuntimeHttpEgressError) -> &str {
+    match error {
+        RuntimeHttpEgressError::Credential { reason } => reason,
+        other => panic!("expected credential error, got {other:?}"),
     }
 }
 
@@ -2594,6 +4123,68 @@ fn test_obligation_services() -> BuiltinObligationServices {
         Arc::new(InMemorySecretStore::new()),
         Arc::new(InMemoryResourceGovernor::new()),
     )
+}
+
+struct RequestPolicyStagingEgress {
+    services: BuiltinObligationServices,
+    inner: Arc<dyn RuntimeHttpEgress>,
+}
+
+#[derive(Debug)]
+struct SourceScopedCredentialAccountResolver {
+    source_scope: ResourceScope,
+    handle: SecretHandle,
+}
+
+#[async_trait::async_trait]
+impl RuntimeCredentialAccountResolver for SourceScopedCredentialAccountResolver {
+    async fn resolve_access_secret(
+        &self,
+        _request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
+        Ok(RuntimeCredentialAccessSecret {
+            scope: self.source_scope.clone(),
+            handle: self.handle.clone(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for RequestPolicyStagingEgress {
+    async fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        stage_policy_sync(
+            &self.services,
+            &request.scope,
+            &request.capability_id,
+            request.network_policy.clone(),
+        );
+        self.inner.execute(request).await
+    }
+}
+
+fn request_policy_staging_egress<N>(network: N) -> Arc<dyn RuntimeHttpEgress>
+where
+    N: NetworkHttpEgress + 'static,
+{
+    let services = test_obligation_services();
+    let inner = Arc::new(services.host_http_egress(network));
+    Arc::new(RequestPolicyStagingEgress { services, inner })
+}
+
+fn request_policy_staging_egress_with_body_store<N, T>(
+    network: N,
+    body_store: Arc<T>,
+) -> Arc<dyn RuntimeHttpEgress>
+where
+    N: NetworkHttpEgress + 'static,
+    T: RuntimeHttpBodyStore + 'static,
+{
+    let services = test_obligation_services();
+    let inner = Arc::new(services.host_http_egress_with_body_store(network, body_store));
+    Arc::new(RequestPolicyStagingEgress { services, inner })
 }
 
 fn context_for_scope(scope: ResourceScope) -> ExecutionContext {
@@ -2707,6 +4298,32 @@ fn sample_capability_id() -> CapabilityId {
     CapabilityId::new("runtime.http").unwrap()
 }
 
+fn save_target(path: &str) -> RuntimeHttpSaveTarget {
+    RuntimeHttpSaveTarget {
+        path: ScopedPath::new(path).unwrap(),
+        mount_grant: None,
+    }
+}
+
+fn save_target_with_mount(path: &str, mounts: &MountView) -> RuntimeHttpSaveTarget {
+    let scoped_path = mounts.scoped_path(path.to_string()).unwrap();
+    let (virtual_path, grant) = mounts.resolve_with_grant(&scoped_path).unwrap();
+    RuntimeHttpSaveTarget {
+        mount_grant: Some(MountGrant::new(
+            MountAlias::new(path).unwrap(),
+            virtual_path,
+            MountPermissions {
+                read: false,
+                write: grant.permissions.write,
+                delete: false,
+                list: false,
+                execute: false,
+            },
+        )),
+        path: scoped_path,
+    }
+}
+
 fn sample_policy() -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
@@ -2729,4 +4346,28 @@ fn caller_supplied_policy() -> NetworkPolicy {
         deny_private_ip_ranges: false,
         max_egress_bytes: Some(1),
     }
+}
+
+fn local_http_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.1".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: Some(1024),
+    }
+}
+
+fn single_response_server(response: &'static str) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).unwrap();
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    (format!("http://127.0.0.1:{port}/test"), handle)
 }

@@ -89,9 +89,9 @@ Important v2 rules:
 - `first_party` and `system` runtimes are host-bundled only.
 - `ironclaw.*` extension IDs are reserved for host-bundled extensions.
 - Every capability uses extension-local `input_schema_ref` and `output_schema_ref`; no inline schemas, absolute paths, URLs, or `..` traversal.
-- `prompt_doc_ref` is required only for `visibility = "model"` capabilities.
+- `prompt_doc_ref` is optional lazy help metadata. Do not add one just to make a capability model-visible.
 - The default host-runtime catalog currently validates `host.runtime.http_egress`; other host-port names are future/deferred vocabulary until added to the catalog.
-- Full manifests and JSON schemas are cold registry artifacts; hot loop context gets compact resolved tool surface only.
+- Full manifests and JSON schemas are cold registry artifacts; hot loop context gets compact resolved tool surface plus on-demand `capability_info` for progressive disclosure.
 
 ## Path A: port a host-owned built-in tool to FirstParty
 
@@ -367,7 +367,8 @@ For manifest parsing:
 - [ ] HostBundled FirstParty manifest parses but still requires matching handler
 - [ ] `ironclaw.*` ID is rejected for installed manifests
 - [ ] schema refs reject absolute paths, URLs, backslashes, and `..`
-- [ ] model-visible capability without `prompt_doc_ref` is rejected
+- [ ] model-visible capability without `prompt_doc_ref` parses and publishes without prompt docs
+- [ ] declared `prompt_doc_ref` still fails closed when missing, invalid UTF-8, oversized, or outside the package root
 - [ ] unknown host port is rejected
 - [ ] capability ID must be provider-prefixed
 

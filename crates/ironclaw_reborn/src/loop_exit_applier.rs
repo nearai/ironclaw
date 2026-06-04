@@ -12,7 +12,8 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
-    GetRunStateRequest, LoopCheckpointKind, LoopMessageRef, LoopResultRef, TurnError, TurnId,
+    CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest, GetRunStateRequest,
+    LoopBlockedKind, LoopCheckpointKind, LoopMessageRef, LoopResultRef, TurnError, TurnId,
     TurnRunId, TurnScope, TurnStateStore, TurnStatus,
 };
 
@@ -162,6 +163,7 @@ where
     thread_service: Arc<S>,
     turn_state_store: Arc<dyn TurnStateStore>,
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+    checkpoint_state_store: Option<Arc<dyn CheckpointStateStore>>,
     thread_scope: Option<ThreadScope>,
     cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
 }
@@ -179,6 +181,7 @@ where
             thread_service,
             turn_state_store,
             loop_checkpoint_store,
+            checkpoint_state_store: None,
             thread_scope: None,
             cancellation_factory: None,
         }
@@ -194,9 +197,18 @@ where
             thread_service,
             turn_state_store,
             loop_checkpoint_store,
+            checkpoint_state_store: None,
             thread_scope: Some(thread_scope),
             cancellation_factory: None,
         }
+    }
+
+    pub fn with_checkpoint_state_store(
+        mut self,
+        checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+    ) -> Self {
+        self.checkpoint_state_store = Some(checkpoint_state_store);
+        self
     }
 
     pub fn with_cancellation_factory(
@@ -220,13 +232,34 @@ where
         if request.reply_message_refs.is_empty() && request.result_refs.is_empty() {
             return Ok(true);
         }
-        let thread_scope = match &self.thread_scope {
+        let mut thread_scope = match &self.thread_scope {
             Some(thread_scope) => {
                 ensure_thread_scope_matches_turn_scope(thread_scope, request.scope)?;
                 thread_scope.clone()
             }
             None => thread_scope_from_turn_scope(request.scope)?,
         };
+        // Multi-user: the loop host wrote this thread under the run's
+        // authenticated owner (`owners/<caller>`), so the completion-ref
+        // read must use the same owner — otherwise it looks in the wrong
+        // subtree and fails with `unknown thread`. Apply the SAME
+        // owner-rewrite rule the loop host uses, via the shared
+        // [`ThreadScopeResolver`], so the two cannot drift. The run-state
+        // read (for the actor) only runs when the base scope is
+        // owner-scoped; an owner-less applier keeps its shared/system slot.
+        if thread_scope.owner_user_id.is_some() {
+            let run_state = self
+                .turn_state_store
+                .get_run_state(GetRunStateRequest {
+                    scope: request.scope.clone(),
+                    run_id: request.run_id,
+                })
+                .await?;
+            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve(
+                &thread_scope,
+                run_state.actor.as_ref(),
+            );
+        }
         let history = self
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
@@ -267,23 +300,101 @@ where
 
     async fn verify_blocked_evidence(
         &self,
-        _request: BlockedEvidenceRequest<'_>,
+        request: BlockedEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
-        // A BeforeBlock checkpoint alone is not sufficient: #3424 requires a
-        // durable pending gate/process ref. The current text-only adapter has
-        // no gate/process outcome store, so it must fail closed without doing
-        // unrelated checkpoint I/O.
-        Ok(false)
+        match request.blocked.kind {
+            LoopBlockedKind::Auth => {}
+            LoopBlockedKind::Approval
+            | LoopBlockedKind::Resource
+            | LoopBlockedKind::AwaitDependentRun => {
+                // A BeforeBlock checkpoint alone is not sufficient for approval,
+                // resource, or dependent-run gates: #3424 requires a durable
+                // pending gate/process ref for those block types. Auth gates use
+                // the blocked turn state itself as the product-visible pending ref,
+                // so verifying the pre-block checkpoint is enough to let the
+                // applier persist that state.
+                return Ok(false);
+            }
+            // `LoopBlockedKind` is `#[non_exhaustive]` in a sibling crate, so
+            // the compiler requires a wildcard arm. Any unknown variant is
+            // intentionally failed closed: we have no evidence model for it
+            // yet, and treating it as unverified prevents a new variant from
+            // silently routing through the Auth carve-out.
+            _ => return Ok(false),
+        }
+
+        let Some(checkpoint) = self
+            .loop_checkpoint_store
+            .get_loop_checkpoint(GetLoopCheckpointRequest {
+                scope: request.scope.clone(),
+                turn_id: request.turn_id,
+                run_id: request.run_id,
+                checkpoint_id: request.blocked.checkpoint_id,
+            })
+            .await?
+        else {
+            return Ok(false);
+        };
+
+        // Bind gate identity: the checkpoint must have been created for the
+        // exact same gate that the blocked exit reports. This prevents a rogue
+        // driver from reusing a legitimate BeforeBlock checkpoint (e.g. from
+        // an Approval or Resource gate in the same run) as Auth evidence.
+        Ok(checkpoint.kind == LoopCheckpointKind::BeforeBlock
+            && checkpoint.state_ref == request.blocked.state_ref
+            && checkpoint.gate_ref.as_ref() == Some(&request.blocked.gate_ref))
     }
 
     async fn verify_failure_evidence(
         &self,
-        _request: FailureEvidenceRequest<'_>,
+        request: FailureEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
-        // Failure exits require durable diagnostic evidence before trusting the
-        // driver-supplied failure kind. The text-only adapter does not yet own
-        // that diagnostics store, so it fails closed.
-        Ok(false)
+        let Some(checkpoint_id) = request.failed.checkpoint_id else {
+            return Ok(false);
+        };
+        let Some(checkpoint_state_store) = &self.checkpoint_state_store else {
+            return Ok(false);
+        };
+        let Some(checkpoint) = self
+            .loop_checkpoint_store
+            .get_loop_checkpoint(GetLoopCheckpointRequest {
+                scope: request.scope.clone(),
+                turn_id: request.turn_id,
+                run_id: request.run_id,
+                checkpoint_id,
+            })
+            .await?
+        else {
+            return Ok(false);
+        };
+        if checkpoint.kind != LoopCheckpointKind::Final {
+            return Ok(false);
+        }
+        let Some(checkpoint_state) = checkpoint_state_store
+            .get_checkpoint_state(GetCheckpointStateRequest {
+                scope: request.scope.clone(),
+                turn_id: request.turn_id,
+                run_id: request.run_id,
+                state_ref: checkpoint.state_ref,
+                schema_id: checkpoint.schema_id,
+                schema_version: checkpoint.schema_version,
+                kind: checkpoint.kind,
+            })
+            .await?
+        else {
+            return Ok(false);
+        };
+        let state = match ironclaw_agent_loop::state::LoopExecutionState::from_checkpoint_payload(
+            checkpoint_state.payload.as_bytes(),
+            ironclaw_agent_loop::state::CheckpointKind::Final,
+        ) {
+            Ok(state) => state,
+            Err(_) => return Ok(false),
+        };
+        Ok(state
+            .recent_failure_kinds
+            .iter()
+            .any(|kind| *kind == request.failed.reason_kind))
     }
 
     async fn is_cancellation_observed(

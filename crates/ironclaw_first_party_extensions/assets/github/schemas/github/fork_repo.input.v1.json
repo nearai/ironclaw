@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub fork_repo input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository owner or organization."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository name."
+    },
+    "organization": {
+      "type": "string",
+      "maxLength": 100,
+      "description": "Optional destination organization."
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 100,
+      "description": "Optional fork repository name."
+    },
+    "default_branch_only": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "owner",
+    "repo"
+  ]
+}

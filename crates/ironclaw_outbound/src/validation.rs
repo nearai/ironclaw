@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use ironclaw_turns::ReplyTargetBindingRef;
 
 use crate::{
-    AdvanceSubscriptionCursorRequest, DeliveryFailureKind, LoadSubscriptionCursorRequest,
-    OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundError, ProjectionSubscriptionRecord,
-    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    AdvanceSubscriptionCursorRequest, CommunicationPreferenceRecord, DeliveryFailureKind,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundError,
+    ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
 
 const MAX_NOTIFICATION_TARGETS: usize = 32;
@@ -168,6 +168,27 @@ pub(crate) fn validate_delivery_identity(
         || existing.attempted_at != incoming.attempted_at
     {
         return Err(OutboundError::Backend);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_communication_preference(
+    record: &CommunicationPreferenceRecord,
+) -> Result<(), OutboundError> {
+    if record.tenant_id.as_str().is_empty() {
+        return Err(OutboundError::InvalidRequest {
+            reason: "communication preference tenant is required",
+        });
+    }
+    if record.user_id.as_str().is_empty() {
+        return Err(OutboundError::InvalidRequest {
+            reason: "communication preference user is required",
+        });
+    }
+    if record.updated_by.as_str().is_empty() {
+        return Err(OutboundError::InvalidRequest {
+            reason: "communication preference updater is required",
+        });
     }
     Ok(())
 }

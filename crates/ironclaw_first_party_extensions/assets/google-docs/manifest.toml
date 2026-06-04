@@ -1,0 +1,164 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "google-docs"
+name = "Google Docs"
+version = "0.1.0"
+description = "Google Docs capabilities for creating, reading, editing, and formatting documents."
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/google_docs_tool.wasm"
+
+[[capabilities]]
+id = "google-docs.create_document"
+description = "Create a new Google Docs document."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/documents"] } }, provider_scopes = ["https://www.googleapis.com/auth/documents"], audience = { scheme = "https", host_pattern = "docs.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/create_document.input.v1.json"
+output_schema_ref = "schemas/google-docs/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-docs/create_document.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-docs.get_document"
+description = "Get document metadata and structure."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/documents.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/documents.readonly"], audience = { scheme = "https", host_pattern = "docs.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/get_document.input.v1.json"
+output_schema_ref = "schemas/google-docs/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-docs/get_document.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-docs.read_content"
+description = "Read the document body as plain text."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/documents.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/documents.readonly"], audience = { scheme = "https", host_pattern = "docs.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/read_content.input.v1.json"
+output_schema_ref = "schemas/google-docs/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-docs/read_content.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-docs.insert_text"
+description = "Insert text at a document position."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/documents"] } }, provider_scopes = ["https://www.googleapis.com/auth/documents"], audience = { scheme = "https", host_pattern = "docs.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/insert_text.input.v1.json"
+output_schema_ref = "schemas/google-docs/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-docs/insert_text.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-docs.delete_content"
+description = "Delete document content in a range."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/documents"] } }, provider_scopes = ["https://www.googleapis.com/auth/documents"], audience = { scheme = "https", host_pattern = "docs.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/delete_content.input.v1.json"
+output_schema_ref = "schemas/google-docs/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-docs/delete_content.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-docs.replace_text"
+description = "Find and replace text."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/documents"] } }, provider_scopes = ["https://www.googleapis.com/auth/documents"], audience = { scheme = "https", host_pattern = "docs.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/replace_text.input.v1.json"
+output_schema_ref = "schemas/google-docs/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-docs/replace_text.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-docs.format_text"
+description = "Format text in a range."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/documents"] } }, provider_scopes = ["https://www.googleapis.com/auth/documents"], audience = { scheme = "https", host_pattern = "docs.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/format_text.input.v1.json"
+output_schema_ref = "schemas/google-docs/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-docs/format_text.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-docs.format_paragraph"
+description = "Set paragraph style."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/documents"] } }, provider_scopes = ["https://www.googleapis.com/auth/documents"], audience = { scheme = "https", host_pattern = "docs.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/format_paragraph.input.v1.json"
+output_schema_ref = "schemas/google-docs/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-docs/format_paragraph.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-docs.insert_table"
+description = "Insert a table."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/documents"] } }, provider_scopes = ["https://www.googleapis.com/auth/documents"], audience = { scheme = "https", host_pattern = "docs.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/insert_table.input.v1.json"
+output_schema_ref = "schemas/google-docs/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-docs/insert_table.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-docs.create_list"
+description = "Create a bulleted or numbered list."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/documents"] } }, provider_scopes = ["https://www.googleapis.com/auth/documents"], audience = { scheme = "https", host_pattern = "docs.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/create_list.input.v1.json"
+output_schema_ref = "schemas/google-docs/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-docs/create_list.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-docs.batch_update"
+description = "Execute raw Docs API batchUpdate requests."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/documents"] } }, provider_scopes = ["https://www.googleapis.com/auth/documents"], audience = { scheme = "https", host_pattern = "docs.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/batch_update.input.v1.json"
+output_schema_ref = "schemas/google-docs/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-docs/batch_update.md"
+required_host_ports = ["host.runtime.http_egress"]

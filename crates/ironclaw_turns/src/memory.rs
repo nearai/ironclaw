@@ -6,28 +6,30 @@ use std::{
 };
 
 use chrono::{Duration as ChronoDuration, Utc};
+use ironclaw_host_api::UserId;
 
 use crate::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason,
     AllowAllTurnAdmissionLimitProvider, BlockedReason, CancelRunRequest, CancelRunResponse,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
+    GateRef, GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
     LoopCheckpointStore, LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef,
     ResumeTurnRequest, ResumeTurnResponse, RunProfileResolutionError, RunProfileResolutionRequest,
-    RunProfileResolver, SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    RunProfileResolver, SanitizedFailure, SourceBindingRef, SpawnTreeReservation,
+    SpawnTreeReservationKey, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
     ThreadBusy, TurnActiveLockKey, TurnActiveLockRecord, TurnActor, TurnAdmissionClass,
     TurnAdmissionLimitProvider, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
-    TurnCheckpointId, TurnCheckpointRecord, TurnError, TurnEventKind, TurnIdempotencyErrorReplay,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
-    TurnIdempotencyReplay, TurnLifecycleEvent, TurnLockVersion, TurnPersistenceSnapshot,
-    TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope, TurnStateStore,
-    TurnStatus,
+    TurnCapacityResource, TurnCheckpointId, TurnCheckpointRecord, TurnError, TurnEventKind,
+    TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
+    TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLifecycleEvent, TurnLockVersion,
+    TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState,
+    TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     admission::{TurnAdmissionBucket, admission_buckets},
     events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
+        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
         TurnRunnerOutcome,
     },
 };
@@ -90,6 +92,7 @@ struct Inner {
     events: Vec<TurnLifecycleEvent>,
     event_retention_floor: EventCursor,
     admission_reservations: HashMap<TurnRunId, TurnAdmissionReservationRecord>,
+    tree_reservations: HashMap<SpawnTreeReservationKey, u64>,
     limits: InMemoryTurnStateStoreLimits,
 }
 
@@ -119,6 +122,7 @@ struct RunRecord {
     reply_target_binding_ref: ReplyTargetBindingRef,
     checkpoint_id: Option<TurnCheckpointId>,
     gate_ref: Option<crate::GateRef>,
+    credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
     failure: Option<SanitizedFailure>,
     event_cursor: EventCursor,
     runner_id: Option<crate::TurnRunnerId>,
@@ -127,6 +131,9 @@ struct RunRecord {
     last_heartbeat_at: Option<crate::TurnTimestamp>,
     claim_count: u64,
     received_at: crate::TurnTimestamp,
+    parent_run_id: Option<TurnRunId>,
+    subagent_depth: u32,
+    spawn_tree_root_run_id: Option<TurnRunId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -159,6 +166,22 @@ fn profile_resolution_error_to_turn_error(error: RunProfileResolutionError) -> T
         }
     };
     TurnError::AdmissionRejected(AdmissionRejection::new(reason))
+}
+
+fn fresh_turn_run_id() -> TurnRunId {
+    TurnRunId::new()
+}
+
+fn same_scope_envelope(candidate: &TurnScope, scope: &TurnScope) -> bool {
+    candidate.tenant_id == scope.tenant_id
+        && candidate.agent_id == scope.agent_id
+        && candidate.project_id == scope.project_id
+}
+
+fn invalid_lineage(reason: impl Into<String>) -> TurnError {
+    TurnError::InvalidRequest {
+        reason: reason.into(),
+    }
 }
 
 struct SubmitInFlightGuard<'a> {
@@ -267,6 +290,72 @@ impl InMemoryTurnStateStore {
         }
     }
 
+    pub fn blocked_approval_runs_for_actor(
+        &self,
+        scope: &TurnScope,
+        actor: &TurnActor,
+    ) -> Result<Vec<TurnRunState>, TurnError> {
+        let inner = self.lock_inner()?;
+        let mut runs = inner
+            .records
+            .values()
+            .filter(|record| {
+                record.scope == *scope
+                    && record.actor == *actor
+                    && record.status == TurnStatus::BlockedApproval
+                    && record.gate_ref.is_some()
+            })
+            .map(RunRecord::state)
+            .collect::<Vec<_>>();
+        runs.sort_by_key(|run| run.run_id.as_uuid());
+        Ok(runs)
+    }
+
+    pub fn approval_run_for_actor_and_gate(
+        &self,
+        scope: &TurnScope,
+        actor: &TurnActor,
+        gate_ref: &GateRef,
+    ) -> Result<Option<TurnRunId>, TurnError> {
+        let inner = self.lock_inner()?;
+        let active = inner
+            .records
+            .values()
+            .find(|record| {
+                record.scope == *scope
+                    && record.actor == *actor
+                    && record.status == TurnStatus::BlockedApproval
+                    && record.gate_ref.as_ref() == Some(gate_ref)
+            })
+            .map(|record| record.run_id);
+        if active.is_some() {
+            return Ok(active);
+        }
+
+        let mut historical = inner
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| {
+                checkpoint.status == TurnStatus::BlockedApproval
+                    && &checkpoint.gate_ref == gate_ref
+                    && checkpoint
+                        .scope
+                        .as_ref()
+                        .is_none_or(|stored| stored == scope)
+            })
+            .filter_map(|checkpoint| {
+                inner
+                    .records
+                    .get(&checkpoint.run_id)
+                    .filter(|record| record.scope == *scope && record.actor == *actor)
+                    .map(|record| record.run_id)
+            })
+            .collect::<Vec<_>>();
+        historical.sort_by_key(|run_id| run_id.as_uuid());
+        historical.dedup();
+        Ok(historical.into_iter().next())
+    }
+
     fn lock_inner(&self) -> Result<MutexGuard<'_, Inner>, TurnError> {
         self.inner.lock().map_err(|_| TurnError::Unavailable {
             reason: "turn state store mutex poisoned".to_string(),
@@ -290,6 +379,7 @@ impl TurnEventProjectionSource for InMemoryTurnStateStore {
     async fn read_turn_events_after(
         &self,
         scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
@@ -297,6 +387,7 @@ impl TurnEventProjectionSource for InMemoryTurnStateStore {
         Ok(project_turn_events(
             &inner.events,
             scope,
+            owner_user_id,
             after,
             limit,
             inner.event_retention_floor,
@@ -320,6 +411,7 @@ impl LoopCheckpointStore for InMemoryTurnStateStore {
             schema_id: request.schema_id,
             schema_version: request.schema_version,
             kind: request.kind,
+            gate_ref: request.gate_ref,
             created_at: Utc::now(),
         };
         let mut inner = self.lock_inner()?;
@@ -380,6 +472,29 @@ impl TurnStateStore for InMemoryTurnStateStore {
             idempotency_key.clone(),
         );
 
+        if request.parent_run_id.is_some()
+            || request.subagent_depth != 0
+            || request.spawn_tree_root_run_id.is_some()
+        {
+            let mut inner = self.lock_inner()?;
+            if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return result;
+            }
+            let response = Err(TurnError::InvalidRequest {
+                reason: "child runs must be submitted through submit_child_turn".to_string(),
+            });
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+
         let admission_result = admission_policy.check_submit(&request);
 
         {
@@ -439,7 +554,20 @@ impl TurnStateStore for InMemoryTurnStateStore {
         }
 
         let turn_id = crate::TurnId::new();
-        let run_id = TurnRunId::new();
+        let run_id = request.requested_run_id.unwrap_or_else(fresh_turn_run_id);
+        if inner.records.contains_key(&run_id) {
+            let response = Err(TurnError::Conflict {
+                reason: "requested_run_id already bound".to_string(),
+            });
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
         let admission_class = profile.admission_class.clone();
         if let Err(rejection) = inner.reserve_admission(
             run_id,
@@ -481,6 +609,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: cursor,
             runner_id: None,
@@ -489,6 +618,9 @@ impl TurnStateStore for InMemoryTurnStateStore {
             last_heartbeat_at: None,
             claim_count: 0,
             received_at: request.received_at,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
         };
         inner.turns.insert(turn_id, turn_record);
         inner.active_locks.insert(
@@ -570,6 +702,512 @@ impl TurnStateStore for InMemoryTurnStateStore {
             .filter(|record| record.scope == request.scope)
             .map(RunRecord::state)
             .ok_or(TurnError::ScopeNotFound)
+    }
+}
+
+#[async_trait]
+impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
+    async fn submit_child_turn(
+        &self,
+        request: SubmitChildRunRequest,
+        admission_policy: &dyn TurnAdmissionPolicy,
+        run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        let idempotency_key = SubmitIdempotencyKey {
+            scope: request.child_scope.clone(),
+            key: request.idempotency_key.clone(),
+        };
+        {
+            let mut inner = self.lock_inner()?;
+            loop {
+                if let Some(result) = inner.submit_idempotency.get(&idempotency_key) {
+                    return result.clone();
+                }
+                if inner
+                    .submit_idempotency_in_flight
+                    .insert(idempotency_key.clone())
+                {
+                    break;
+                }
+                inner = self.wait_for_submit_idempotency(inner)?;
+            }
+        }
+        let _in_flight_guard = SubmitInFlightGuard::new(
+            &self.inner,
+            &self.submit_idempotency_ready,
+            idempotency_key.clone(),
+        );
+
+        let submit_template = {
+            let mut inner = self.lock_inner()?;
+            if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return result;
+            }
+            let Some(parent) = inner
+                .records
+                .get(&request.parent_run_id)
+                .filter(|record| record.scope == request.parent_scope)
+            else {
+                let response = Err(TurnError::ScopeNotFound);
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            };
+            if !same_scope_envelope(&parent.scope, &request.child_scope) {
+                let response = Err(TurnError::Unauthorized);
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            }
+            if parent.subagent_depth == u32::MAX {
+                let response = Err(invalid_lineage("subagent depth would overflow"));
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            }
+            SubmitTurnRequest {
+                scope: request.child_scope.clone(),
+                actor: request.actor.clone(),
+                accepted_message_ref: request.accepted_message_ref.clone(),
+                source_binding_ref: request.source_binding_ref.clone(),
+                reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+                requested_run_profile: request.requested_run_profile.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                received_at: request.received_at,
+                requested_run_id: request.requested_run_id,
+                parent_run_id: Some(parent.run_id),
+                subagent_depth: parent.subagent_depth + 1,
+                spawn_tree_root_run_id: Some(
+                    parent.spawn_tree_root_run_id.unwrap_or(parent.run_id),
+                ),
+            }
+        };
+
+        let admission_result = admission_policy.check_submit(&submit_template);
+        {
+            let mut inner = self.lock_inner()?;
+            if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return result;
+            }
+            if let Err(rejection) = admission_result {
+                let response = Err(TurnError::AdmissionRejected(rejection));
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            }
+        }
+
+        let profile_resolution = run_profile_resolver
+            .resolve_run_profile(RunProfileResolutionRequest {
+                requested_run_profile: submit_template.requested_run_profile.clone(),
+                ..RunProfileResolutionRequest::interactive_default()
+            })
+            .await;
+
+        let mut inner = self.lock_inner()?;
+        if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return result;
+        }
+        let profile = match profile_resolution {
+            Ok(resolved) => TurnRunProfile::from_resolved(resolved),
+            Err(error) => {
+                let response = Err(profile_resolution_error_to_turn_error(error));
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            }
+        };
+
+        let Some(parent) = inner
+            .records
+            .get(&request.parent_run_id)
+            .filter(|record| record.scope == request.parent_scope)
+        else {
+            let response = Err(TurnError::ScopeNotFound);
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        };
+        if !same_scope_envelope(&parent.scope, &request.child_scope) {
+            let response = Err(TurnError::Unauthorized);
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+        if parent.subagent_depth == u32::MAX {
+            let response = Err(invalid_lineage("subagent depth would overflow"));
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+        let parent_run_id = parent.run_id;
+        let subagent_depth = parent.subagent_depth + 1;
+        let root_run_id = parent.spawn_tree_root_run_id.unwrap_or(parent.run_id);
+        let Some(root) = inner.records.get(&root_run_id) else {
+            let response = Err(TurnError::ScopeNotFound);
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        };
+        if !same_scope_envelope(&root.scope, &request.child_scope) {
+            let response = Err(TurnError::Unauthorized);
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+        if root.spawn_tree_root_run_id.unwrap_or(root.run_id) != root.run_id {
+            let response = Err(invalid_lineage(
+                "root_run_id must identify the spawn tree root",
+            ));
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+
+        let lock_key = TurnActiveLockKey::from(&request.child_scope);
+        if let Some(response) = inner.thread_busy(&lock_key) {
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return Err(TurnError::ThreadBusy(response));
+        }
+        let run_id = request.requested_run_id.unwrap_or_else(fresh_turn_run_id);
+        if inner.records.contains_key(&run_id) {
+            let response = Err(TurnError::Conflict {
+                reason: "requested_run_id already bound".to_string(),
+            });
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+
+        let reservation_key = SpawnTreeReservationKey::new(&request.child_scope, root_run_id);
+        let previous_tree_count = *inner.tree_reservations.get(&reservation_key).unwrap_or(&0);
+        let next_tree_count = previous_tree_count.checked_add(1).ok_or_else(|| {
+            TurnError::capacity_exceeded(
+                TurnCapacityResource::SpawnTreeDescendants,
+                u64::from(request.spawn_tree_descendant_cap),
+            )
+        });
+        let next_tree_count = match next_tree_count {
+            Ok(next) if next <= u64::from(request.spawn_tree_descendant_cap) => next,
+            _ => {
+                let response = Err(TurnError::capacity_exceeded(
+                    TurnCapacityResource::SpawnTreeDescendants,
+                    u64::from(request.spawn_tree_descendant_cap),
+                ));
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            }
+        };
+        inner
+            .tree_reservations
+            .insert(reservation_key.clone(), next_tree_count);
+
+        let admission_class = profile.admission_class.clone();
+        if let Err(rejection) = inner.reserve_admission(
+            run_id,
+            admission_class.clone(),
+            &request.child_scope,
+            &request.actor,
+            self.admission_limit_provider.as_ref(),
+        ) {
+            if previous_tree_count == 0 {
+                inner.tree_reservations.remove(&reservation_key);
+            } else {
+                inner
+                    .tree_reservations
+                    .insert(reservation_key, previous_tree_count);
+            }
+            let response = Err(TurnError::AdmissionRejected(rejection));
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+
+        let turn_id = crate::TurnId::new();
+        let cursor = inner.next_cursor();
+        let turn_record = TurnRecord {
+            turn_id,
+            scope: request.child_scope.clone(),
+            actor: request.actor.clone(),
+            accepted_message_ref: request.accepted_message_ref.clone(),
+            source_binding_ref: request.source_binding_ref.clone(),
+            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+            created_at: request.received_at,
+        };
+        let record = RunRecord {
+            scope: request.child_scope.clone(),
+            actor: request.actor,
+            turn_id,
+            run_id,
+            status: TurnStatus::Queued,
+            profile: profile.clone(),
+            resolved_model_route: None,
+            accepted_message_ref: request.accepted_message_ref.clone(),
+            source_binding_ref: request.source_binding_ref.clone(),
+            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+            checkpoint_id: None,
+            gate_ref: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: cursor,
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count: 0,
+            received_at: request.received_at,
+            parent_run_id: Some(parent_run_id),
+            subagent_depth,
+            spawn_tree_root_run_id: Some(root_run_id),
+        };
+        inner.turns.insert(turn_id, turn_record);
+        inner.active_locks.insert(
+            lock_key.clone(),
+            TurnActiveLockRecord {
+                key: lock_key,
+                run_id,
+                status: TurnStatus::Queued,
+                lock_version: TurnLockVersion::new(1),
+                acquired_at: request.received_at,
+                updated_at: request.received_at,
+            },
+        );
+        inner.queued_runs.push_back(run_id);
+        inner.records.insert(run_id, record.clone());
+        inner.push_event(&record, TurnEventKind::Submitted, None);
+
+        let response = Ok(SubmitTurnResponse::Accepted {
+            turn_id,
+            run_id,
+            status: TurnStatus::Queued,
+            resolved_run_profile_id: profile.id,
+            resolved_run_profile_version: profile.version,
+            event_cursor: cursor,
+            accepted_message_ref: request.accepted_message_ref,
+            reply_target_binding_ref: request.reply_target_binding_ref,
+        });
+        inner.remember_submit_idempotency(
+            idempotency_key.clone(),
+            response.clone(),
+            record.received_at,
+        );
+        inner.submit_idempotency_in_flight.remove(&idempotency_key);
+        self.submit_idempotency_ready.notify_all();
+        response
+    }
+
+    async fn children_of(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        let inner = self.lock_inner()?;
+        let Some(parent) = inner.records.get(&run_id) else {
+            return Ok(Vec::new());
+        };
+        if parent.scope != *scope {
+            return Ok(Vec::new());
+        }
+        let mut children = inner
+            .records
+            .values()
+            .filter(|record| {
+                same_scope_envelope(&record.scope, scope) && record.parent_run_id == Some(run_id)
+            })
+            .map(RunRecord::persistence_record)
+            .collect::<Vec<_>>();
+        children.sort_by_key(|record| record.received_at);
+        Ok(children)
+    }
+
+    async fn get_run_record(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        let inner = self.lock_inner()?;
+        Ok(inner
+            .records
+            .get(&run_id)
+            .filter(|record| record.scope == *scope)
+            .map(RunRecord::persistence_record))
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+        cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        if delta == 0 {
+            return Err(TurnError::InvalidRequest {
+                reason: "reservation delta must be greater than zero".to_string(),
+            });
+        }
+        let mut inner = self.lock_inner()?;
+        let Some(root) = inner.records.get(&root_run_id) else {
+            return Err(TurnError::ScopeNotFound);
+        };
+        if !same_scope_envelope(&root.scope, scope) {
+            return Err(TurnError::Unauthorized);
+        }
+        let canonical_root_run_id = root.spawn_tree_root_run_id.unwrap_or(root.run_id);
+        if canonical_root_run_id != root.run_id {
+            return Err(TurnError::InvalidRequest {
+                reason: "root_run_id must identify the spawn tree root".to_string(),
+            });
+        }
+        let key = SpawnTreeReservationKey::new(scope, canonical_root_run_id);
+        let current = *inner.tree_reservations.get(&key).unwrap_or(&0);
+        let next = current.checked_add(u64::from(delta)).ok_or_else(|| {
+            TurnError::capacity_exceeded(TurnCapacityResource::SpawnTreeDescendants, u64::from(cap))
+        })?;
+        if next > u64::from(cap) {
+            return Err(TurnError::capacity_exceeded(
+                TurnCapacityResource::SpawnTreeDescendants,
+                u64::from(cap),
+            ));
+        }
+        inner.tree_reservations.insert(key, next);
+        Ok(SpawnTreeReservation {
+            scope: scope.clone(),
+            root_run_id: canonical_root_run_id,
+            descendant_count: next,
+        })
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+    ) -> Result<(), TurnError> {
+        let mut inner = self.lock_inner()?;
+        let Some(root) = inner.records.get(&root_run_id) else {
+            return Err(TurnError::ScopeNotFound);
+        };
+        if !same_scope_envelope(&root.scope, scope) {
+            return Err(TurnError::Unauthorized);
+        }
+        let canonical_root_run_id = root.spawn_tree_root_run_id.unwrap_or(root.run_id);
+        if canonical_root_run_id != root.run_id {
+            return Err(TurnError::InvalidRequest {
+                reason: "root_run_id must identify the spawn tree root".to_string(),
+            });
+        }
+        let key = SpawnTreeReservationKey::new(scope, canonical_root_run_id);
+        let mut released_reservation = false;
+        if let Some(count) = inner.tree_reservations.get_mut(&key) {
+            let previous = *count;
+            if previous < u64::from(delta) {
+                // Reject over-release loudly so callers can diagnose
+                // double-release bugs instead of silently zeroing the
+                // reservation and uncapping the spawn tree.
+                return Err(TurnError::InvalidRequest {
+                    reason: "release delta exceeds current reservation count".to_string(),
+                });
+            }
+            *count = previous - u64::from(delta);
+            if *count == 0 {
+                inner.tree_reservations.remove(&key);
+                released_reservation = true;
+            }
+        }
+        if released_reservation
+            && inner
+                .records
+                .get(&canonical_root_run_id)
+                .is_some_and(|record| record.status.is_terminal())
+            && !inner.terminal_runs.contains(&canonical_root_run_id)
+        {
+            if inner.terminal_runs.len() >= inner.limits.max_terminal_records {
+                inner.records.remove(&canonical_root_run_id);
+                inner.admission_reservations.remove(&canonical_root_run_id);
+                return Ok(());
+            }
+            inner.terminal_runs.push_back(canonical_root_run_id);
+            inner.prune_terminal_records();
+        }
+        Ok(())
     }
 }
 
@@ -685,6 +1323,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             record.status = request.reason.status();
             record.checkpoint_id = Some(request.checkpoint_id);
             record.gate_ref = Some(request.reason.gate_ref().clone());
+            record.credential_requirements = request.reason.credential_requirements().to_vec();
             record.runner_id = None;
             record.lease_token = None;
             record.lease_expires_at = None;
@@ -737,17 +1376,25 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         )
     }
 
-    async fn record_recovery_required(
+    async fn record_runner_failure(
         &self,
-        request: RecordRecoveryRequiredRequest,
+        request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
         let mut inner = self.lock_inner()?;
-        inner.recovery_required_transition(
+        inner.runner_failure_transition(
             request.run_id,
             request.runner_id,
             request.lease_token,
             request.failure,
         )
+    }
+
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let mut inner = self.lock_inner()?;
+        inner.relinquish_transition(request.run_id, request.runner_id, request.lease_token)
     }
 
     async fn apply_validated_loop_exit(
@@ -807,6 +1454,7 @@ impl Inner {
                     reply_target_binding_ref: run.reply_target_binding_ref,
                     checkpoint_id: run.checkpoint_id,
                     gate_ref: run.gate_ref,
+                    credential_requirements: run.credential_requirements,
                     failure: run.failure,
                     event_cursor: run.event_cursor,
                     runner_id: run.runner_id,
@@ -815,6 +1463,9 @@ impl Inner {
                     last_heartbeat_at: run.last_heartbeat_at,
                     claim_count: run.claim_count,
                     received_at: run.received_at,
+                    parent_run_id: run.parent_run_id,
+                    subagent_depth: run.subagent_depth,
+                    spawn_tree_root_run_id: run.spawn_tree_root_run_id,
                 },
             );
         }
@@ -918,6 +1569,14 @@ impl Inner {
             }
         }
 
+        let mut tree_reservations = HashMap::new();
+        for reservation in snapshot.spawn_tree_reservations {
+            tree_reservations.insert(
+                SpawnTreeReservationKey::new(&reservation.scope, reservation.root_run_id),
+                reservation.descendant_count,
+            );
+        }
+
         Ok(Self {
             cursor,
             turns,
@@ -939,6 +1598,7 @@ impl Inner {
             events,
             event_retention_floor: snapshot.event_retention_floor,
             admission_reservations,
+            tree_reservations,
             limits,
         })
     }
@@ -959,12 +1619,28 @@ impl Inner {
         kind: TurnEventKind,
         sanitized_reason: Option<String>,
     ) {
+        let blocked_gate = if kind == TurnEventKind::Blocked {
+            record.gate_ref.clone().and_then(|gate_ref| {
+                crate::events::TurnBlockedGateKind::from_status(record.status).map(|gate_kind| {
+                    crate::events::TurnBlockedGateMetadata {
+                        gate_ref,
+                        gate_kind,
+                        credential_requirements: record.credential_requirements.clone(),
+                    }
+                })
+            })
+        } else {
+            None
+        };
         self.events.push(TurnLifecycleEvent {
             cursor: record.event_cursor,
             scope: record.scope.clone(),
+            occurred_at: Some(Utc::now()),
+            owner_user_id: Some(record.actor.user_id.clone()),
             run_id: record.run_id,
             status: record.status,
             kind,
+            blocked_gate,
             sanitized_reason,
         });
         if self.events.len() > self.limits.max_events {
@@ -1011,6 +1687,19 @@ impl Inner {
             .cloned()
             .collect::<Vec<_>>();
         admission_reservations.sort_by_key(|reservation| reservation.run_id.to_string());
+        let mut spawn_tree_reservations = self
+            .tree_reservations
+            .iter()
+            .filter_map(|(key, descendant_count)| {
+                let root = self.records.get(&key.root_run_id)?;
+                Some(SpawnTreeReservation {
+                    scope: root.scope.clone(),
+                    root_run_id: key.root_run_id,
+                    descendant_count: *descendant_count,
+                })
+            })
+            .collect::<Vec<_>>();
+        spawn_tree_reservations.sort_by_key(|reservation| reservation.root_run_id.to_string());
         TurnPersistenceSnapshot {
             turns,
             runs,
@@ -1021,6 +1710,7 @@ impl Inner {
             events: self.events.clone(),
             event_retention_floor: self.event_retention_floor,
             admission_reservations,
+            spawn_tree_reservations,
         }
     }
 
@@ -1060,21 +1750,22 @@ impl Inner {
             let Some(mut record) = self.records.remove(&run_id) else {
                 continue;
             };
-            record.status = TurnStatus::RecoveryRequired;
+            let outcome = expired_lease_terminal_outcome(record.status);
+            record.status = outcome.status;
+            record.failure = outcome.failure;
             record.runner_id = None;
             record.lease_token = None;
             record.lease_expires_at = None;
             record.event_cursor = self.next_cursor();
-            self.update_active_lock(&record, request.now);
+            self.release_active_lock(&record);
+            self.remove_queued_run(record.run_id);
             let state = record.state();
-            self.push_event(
-                &record,
-                TurnEventKind::RecoveryRequired,
-                Some("lease_expired".to_string()),
-            );
+            self.push_event(&record, outcome.event_kind, outcome.event_detail);
+            self.mark_terminal(record.run_id);
             recovered.push(state);
             self.records.insert(run_id, record);
         }
+        self.prune_terminal_records();
         RecoverExpiredLeasesResponse { recovered }
     }
 
@@ -1212,10 +1903,16 @@ impl Inner {
             if record.scope != request.scope {
                 return Err(TurnError::ScopeNotFound);
             }
-            if !matches!(
-                record.status,
-                TurnStatus::BlockedApproval | TurnStatus::BlockedAuth | TurnStatus::BlockedResource
-            ) {
+            let resumable_status = match request.precondition.required_status() {
+                Some(required) => record.status == required,
+                None => matches!(
+                    record.status,
+                    TurnStatus::BlockedApproval
+                        | TurnStatus::BlockedAuth
+                        | TurnStatus::BlockedResource
+                ),
+            };
+            if !resumable_status {
                 return Err(TurnError::InvalidTransition {
                     from: record.status,
                     to: TurnStatus::Queued,
@@ -1232,6 +1929,7 @@ impl Inner {
             let now = Utc::now();
             record.status = TurnStatus::Queued;
             record.gate_ref = None;
+            record.credential_requirements = Vec::new();
             record.source_binding_ref = request.source_binding_ref.clone();
             record.reply_target_binding_ref = request.reply_target_binding_ref.clone();
             record.event_cursor = self.next_cursor();
@@ -1267,6 +1965,7 @@ impl Inner {
                     status: record.status,
                     event_cursor: record.event_cursor,
                     already_terminal: true,
+                    actor: Some(record.actor.clone()),
                 });
             }
             let (next_status, event_kind) = match record.status {
@@ -1274,7 +1973,9 @@ impl Inner {
                 | TurnStatus::BlockedApproval
                 | TurnStatus::BlockedAuth
                 | TurnStatus::BlockedResource
-                | TurnStatus::RecoveryRequired => (TurnStatus::Cancelled, TurnEventKind::Cancelled),
+                | TurnStatus::BlockedDependentRun => {
+                    (TurnStatus::Cancelled, TurnEventKind::Cancelled)
+                }
                 TurnStatus::Running | TurnStatus::CancelRequested => {
                     (TurnStatus::CancelRequested, TurnEventKind::CancelRequested)
                 }
@@ -1284,6 +1985,7 @@ impl Inner {
                         status,
                         event_cursor: record.event_cursor,
                         already_terminal: true,
+                        actor: Some(record.actor.clone()),
                     });
                 }
             };
@@ -1302,6 +2004,7 @@ impl Inner {
                 status: record.status,
                 event_cursor: record.event_cursor,
                 already_terminal: false,
+                actor: Some(record.actor.clone()),
             };
             self.push_event(
                 &record,
@@ -1406,16 +2109,11 @@ impl Inner {
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed) => {
                     self.complete_claimed_record(record)
                 }
-                LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled) => {
-                    if record.status == TurnStatus::CancelRequested {
-                        self.cancel_claimed_record(record)
-                    } else {
-                        self.recover_claimed_record(
-                            record,
-                            SanitizedFailure::from_trusted_static("interrupted_unexpectedly"),
-                        )
-                    }
-                }
+                LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled) => self
+                    .cancel_or_fail_claimed_record(
+                        record,
+                        SanitizedFailure::from_trusted_static("interrupted_unexpectedly"),
+                    ),
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Blocked {
                     checkpoint_id,
                     state_ref,
@@ -1425,11 +2123,18 @@ impl Inner {
                     self.fail_claimed_record(record, failure)
                 }
                 LoopExitMapping::RecoveryRequired { failure } => {
-                    self.recover_claimed_record(record, failure)
+                    self.cancel_or_fail_claimed_record(record, failure)
                 }
             }
         })();
-        match result {
+        self.commit_transition(result)
+    }
+
+    fn commit_transition(
+        &mut self,
+        transition: AppliedLoopTransition,
+    ) -> Result<TurnRunState, TurnError> {
+        match transition {
             AppliedLoopTransition::Applied {
                 record,
                 state,
@@ -1527,6 +2232,7 @@ impl Inner {
         record.status = reason.status();
         record.checkpoint_id = Some(checkpoint_id);
         record.gate_ref = Some(reason.gate_ref().clone());
+        record.credential_requirements = reason.credential_requirements().to_vec();
         record.runner_id = None;
         record.lease_token = None;
         record.lease_expires_at = None;
@@ -1585,79 +2291,104 @@ impl Inner {
         }
     }
 
-    fn recover_claimed_record(
+    fn cancel_or_fail_claimed_record(
         &mut self,
-        mut record: RunRecord,
+        record: RunRecord,
         failure: SanitizedFailure,
     ) -> AppliedLoopTransition {
-        if !matches!(
-            record.status,
-            TurnStatus::Running | TurnStatus::CancelRequested
-        ) {
-            let from = record.status;
-            return AppliedLoopTransition::Rejected {
+        let from = record.status;
+        match from {
+            TurnStatus::Running => self.fail_claimed_record(record, failure),
+            TurnStatus::CancelRequested => self.cancel_claimed_record(record),
+            _ => AppliedLoopTransition::Rejected {
                 record: Box::new(record),
                 error: TurnError::InvalidTransition {
                     from,
-                    to: TurnStatus::RecoveryRequired,
+                    to: TurnStatus::Failed,
                 },
-            };
-        }
-        record.status = TurnStatus::RecoveryRequired;
-        record.failure = Some(failure.clone());
-        record.runner_id = None;
-        record.lease_token = None;
-        record.lease_expires_at = None;
-        record.event_cursor = self.next_cursor();
-        self.update_active_lock(&record, Utc::now());
-        let state = record.state();
-        self.push_event(
-            &record,
-            TurnEventKind::RecoveryRequired,
-            Some(failure.into_category()),
-        );
-        AppliedLoopTransition::Applied {
-            record: Box::new(record),
-            state: Box::new(state),
-            prune_terminal: false,
+            },
         }
     }
 
-    fn recovery_required_transition(
+    fn runner_failure_transition(
         &mut self,
         run_id: TurnRunId,
         runner_id: crate::TurnRunnerId,
         lease_token: crate::TurnLeaseToken,
         failure: SanitizedFailure,
     ) -> Result<TurnRunState, TurnError> {
+        let record = self.take_record(run_id)?;
+        let transition = (|| {
+            if let Err(error) = ensure_active_lease(&record, runner_id, lease_token, Utc::now()) {
+                return AppliedLoopTransition::Rejected {
+                    record: Box::new(record),
+                    error,
+                };
+            }
+            self.cancel_or_fail_claimed_record(record, failure)
+        })();
+        self.commit_transition(transition)
+    }
+
+    fn relinquish_transition(
+        &mut self,
+        run_id: TurnRunId,
+        runner_id: crate::TurnRunnerId,
+        lease_token: crate::TurnLeaseToken,
+    ) -> Result<TurnRunState, TurnError> {
+        let now = Utc::now();
         let mut record = self.take_record(run_id)?;
+        let mut requeue = false;
         let result = (|| {
-            ensure_active_lease(&record, runner_id, lease_token, Utc::now())?;
+            ensure_active_lease(&record, runner_id, lease_token, now)?;
             if !matches!(
                 record.status,
                 TurnStatus::Running | TurnStatus::CancelRequested
             ) {
                 return Err(TurnError::InvalidTransition {
                     from: record.status,
-                    to: TurnStatus::RecoveryRequired,
+                    to: TurnStatus::Queued,
                 });
             }
-            record.status = TurnStatus::RecoveryRequired;
-            record.failure = Some(failure.clone());
+            let (status, failure, event_kind) = match record.status {
+                TurnStatus::Running => {
+                    requeue = true;
+                    (TurnStatus::Queued, None, TurnEventKind::RunnerHeartbeat)
+                }
+                TurnStatus::CancelRequested => {
+                    (TurnStatus::Cancelled, None, TurnEventKind::Cancelled)
+                }
+                _ => unreachable!("status checked above"),
+            };
+            record.status = status;
+            record.failure = failure;
             record.runner_id = None;
             record.lease_token = None;
             record.lease_expires_at = None;
             record.event_cursor = self.next_cursor();
-            self.update_active_lock(&record, Utc::now());
+            if requeue {
+                self.update_active_lock(&record, now);
+            } else {
+                self.release_active_lock(&record);
+                self.remove_queued_run(record.run_id);
+            }
             let state = record.state();
-            self.push_event(
-                &record,
-                TurnEventKind::RecoveryRequired,
-                Some(failure.into_category()),
-            );
+            self.push_event(&record, event_kind, None);
+            if !requeue {
+                self.mark_terminal(record.run_id);
+            }
             Ok(state)
         })();
         self.records.insert(record.run_id, record);
+        if requeue && result.is_ok() {
+            self.queued_runs.push_back(run_id);
+        }
+        if result
+            .as_ref()
+            .is_ok_and(|state| state.status.is_terminal())
+        {
+            self.prune_terminal_records();
+        }
         result
     }
 
@@ -1812,6 +2543,10 @@ impl Inner {
                 .records
                 .get(&run_id)
                 .is_some_and(|record| record.status.is_terminal())
+                && !self
+                    .tree_reservations
+                    .keys()
+                    .any(|reservation| reservation.root_run_id == run_id)
             {
                 self.records.remove(&run_id);
                 self.admission_reservations.remove(&run_id);
@@ -1834,6 +2569,7 @@ impl RunRecord {
             resolved_model_route: self.resolved_model_route.clone(),
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
+            credential_requirements: self.credential_requirements.clone(),
             failure: self.failure.clone(),
             event_cursor: self.event_cursor,
             runner_id: self.runner_id,
@@ -1842,6 +2578,9 @@ impl RunRecord {
             last_heartbeat_at: self.last_heartbeat_at,
             claim_count: self.claim_count,
             received_at: self.received_at,
+            parent_run_id: self.parent_run_id,
+            subagent_depth: self.subagent_depth,
+            spawn_tree_root_run_id: self.spawn_tree_root_run_id,
         }
     }
 
@@ -1861,6 +2600,7 @@ impl RunRecord {
             received_at: self.received_at,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
+            credential_requirements: self.credential_requirements.clone(),
             failure: self.failure.clone(),
             event_cursor: self.event_cursor,
         }
@@ -2024,6 +2764,33 @@ fn ensure_active_lease(
         });
     }
     Ok(())
+}
+
+struct LeaseExpiredOutcome {
+    status: TurnStatus,
+    failure: Option<SanitizedFailure>,
+    event_kind: TurnEventKind,
+    event_detail: Option<String>,
+}
+
+fn expired_lease_terminal_outcome(status: TurnStatus) -> LeaseExpiredOutcome {
+    match status {
+        TurnStatus::CancelRequested => LeaseExpiredOutcome {
+            status: TurnStatus::Cancelled,
+            failure: None,
+            event_kind: TurnEventKind::Cancelled,
+            event_detail: None,
+        },
+        _ => {
+            let failure = SanitizedFailure::from_trusted_static("lease_expired");
+            LeaseExpiredOutcome {
+                status: TurnStatus::Failed,
+                failure: Some(failure.clone()),
+                event_kind: TurnEventKind::Failed,
+                event_detail: Some(failure.into_category()),
+            }
+        }
+    }
 }
 
 fn prune_ordered_map<K, V>(

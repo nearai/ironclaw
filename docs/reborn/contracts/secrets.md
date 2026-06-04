@@ -38,8 +38,11 @@ SecretLease
 SecretStoreError
 SecretStore
 InMemorySecretStore
-LibSqlSecretsStore     // durable backend when the libsql feature is enabled
-PostgresSecretsStore   // durable backend when the postgres feature is enabled
+FilesystemSecretStore      // durable when backed by libSQL/Postgres RootFilesystem
+CredentialAccountStore
+CredentialSessionStore
+InMemoryCredentialBroker
+FilesystemCredentialBroker // durable when backed by libSQL/Postgres RootFilesystem
 ```
 
 `SecretMaterial` is backed by `secrecy::SecretString`, so access to raw values is explicit through `ExposeSecret`. Metadata, lease records, and errors never contain raw values.
@@ -59,7 +62,7 @@ runtimes        -> consume injected values only after host-side authorization an
 
 ## 3. Scope and isolation
 
-All operations receive a `ResourceScope`. The in-memory V1 implementation keys secrets by tenant/user/agent/project plus `SecretHandle`; leases are scoped by the full invocation context plus `SecretLeaseId`.
+All operations receive a `ResourceScope`. The in-memory and filesystem-backed V1 implementations key secrets by tenant/user/agent/project plus `SecretHandle`; leases are scoped by the full invocation context plus `SecretLeaseId`.
 
 Rules:
 
@@ -70,7 +73,7 @@ Rules:
 - consumed leases cannot be consumed again
 - revoked leases cannot be consumed
 
-This is the minimum shape needed for host-runtime composition to wire secret injection into obligation handling without exposing raw values to runtime crates.
+This is the minimum shape needed for host-runtime composition to wire secret injection and credential brokerage into obligation handling without exposing raw values to runtime crates.
 
 ---
 
@@ -89,7 +92,15 @@ let material = secrets.consume(&scope, lease.id).await?;
 
 `SecretStore::put(...)` is for trusted setup, composition, migration, or storage-code paths that are already allowed to manage secret material. It is not a runtime/plugin API, and it intentionally does not perform authorization itself.
 
-Durable libSQL/PostgreSQL stores persist only encrypted values and per-row salts in `reborn_secret_records`; names, providers, expiry, and usage metadata remain queryable. Store readiness must fail closed when the configured master key is missing, malformed, cannot decrypt existing rows, or loses a first-boot key-check race to another process with a different key. Bootstrap inserts of the `reborn_secret_store_key_check` sentinel must re-read and decrypt the committed row before reporting ready.
+Durable libSQL/PostgreSQL storage is provided by `FilesystemSecretStore` and
+`FilesystemCredentialBroker` over the database-backed `RootFilesystem`
+implementations. Backend selection is now a property of the filesystem layer;
+`ironclaw_secrets` stores encrypted payloads and per-record salts under scoped
+filesystem paths, with tenant id projected as a defense-in-depth index. Store
+readiness must fail closed when the configured master key is missing or
+malformed. The earlier filesystem-stored key-check sentinel was removed with the
+tenant-aware `ScopedFilesystem` rework; master-key mismatch is verified on the
+first per-tenant decrypt operation.
 
 The shared Reborn runtime HTTP egress service uses this surface to:
 
@@ -100,6 +111,15 @@ The shared Reborn runtime HTTP egress service uses this surface to:
 - inject material into the outgoing request shape
 - scrub leased values from runtime-visible network errors and response headers/bodies
 - strip sensitive response headers and block credential-shaped response bodies before they reach runtime callers
+- support header, query parameter, and path-placeholder credential targets. Request-body credential injection remains out of scope.
+
+Path-placeholder injection has the weakest ambient-redaction story: upstream
+access logs, CDN/proxy logs, crash dumps, and `Referer` values commonly retain
+URL paths. It must be used only for a capability with a documented upstream
+requirement that cannot use headers or query parameters. Host-runtime egress
+keeps this target HTTPS-only, rejects empty, `.`/`..`, control-character, and
+reserved-character values, and requires exactly one full-segment placeholder so
+secret material cannot rewrite the destination path structure.
 
 Runtime HTTP credential injection is authority-bearing and must be host-derived.
 `RuntimeCredentialInjection` is not a permission request supplied by guest code,
@@ -132,9 +152,16 @@ source+handle into multiple targets, the egress service consumes or leases the
 material once and reuses it only within that request. Runtime callers must not
 supply their own `Authorization`, cookie, or API-key-style headers; those values
 must come from the host-approved injection plan. WASM host-mediated HTTP
-composition can construct staged plans with `WasmStagedRuntimeCredentials` after
-attaching the invoking capability id to the adapter; exact-url rules should be
-preferred when a credential is only valid for specific destinations.
+composition should derive production staged plans from manifest v2
+`runtime_credentials`: the declaration identifies the runtime credential slot,
+source (`secret_handle` or product-auth account provider), HTTPS audience,
+required/optional behavior, and injection target, while authorization still
+decides whether material may be staged for that invocation. Product-auth account
+sources resolve to the selected account's access secret before the same
+one-shot handoff store is populated. Explicit
+`WasmStagedRuntimeCredentials` construction is retained for named legacy/test
+composition; exact-url rules should be preferred there when a credential is only
+valid for specific destinations.
 
 ---
 
@@ -165,6 +192,36 @@ The crate tests cover:
 - consumed and revoked lease records drop retained secret material
 - revoked leases cannot be consumed
 - missing secrets fail without creating leases
-- durable libSQL/PostgreSQL stores keep raw material encrypted at rest
-- durable key-check readiness rejects wrong, malformed, or concurrently conflicting master keys
+- durable filesystem-backed stores keep raw secret, credential-account, and credential-session payloads encrypted at rest
+- filesystem-backed broker records preserve tenant/user/agent/project scope isolation and session use limits
+- malformed or missing master keys fail before production composition reports ready
 - crate boundary remains low-level and does not depend on workflow/runtime/observability crates
+
+---
+
+## 7. Reborn issue #3088 closeout notes
+
+This contract is the current status source for the secrets side of
+[#3088](https://github.com/nearai/ironclaw/issues/3088), alongside:
+
+- [#3068](https://github.com/nearai/ironclaw/issues/3068) for credential-injection parity
+- [#3085](https://github.com/nearai/ironclaw/issues/3085) for shared runtime HTTP egress
+- [#3026](https://github.com/nearai/ironclaw/issues/3026) for production composition
+- [#3032](https://github.com/nearai/ironclaw/issues/3032) for no-exposure safeguards
+
+Closed in the current Reborn slice:
+
+- durable encrypted secret storage over libSQL/PostgreSQL-backed RootFilesystem
+- durable credential account/session storage through `FilesystemCredentialBroker`
+- production wiring guardrails for credential account/session stores
+- staged-obligation production egress as the canonical direct-secret-injection boundary
+- V1 HTTP credential target coverage for headers, query params, and path placeholders
+
+Deferred outside this issue's V1 slice:
+
+- request-body credential injection
+- non-HTTP credentials
+- arbitrary script or external MCP process ambient-network credential injection
+- external proxy/sidecar credential enforcement
+- provider-specific OAuth refresh UX
+- redirect-following credential reinjection. Current built-in host HTTP returns redirect responses without following them, so credentials are not forwarded across redirect hops.

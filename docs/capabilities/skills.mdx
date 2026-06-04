@@ -36,7 +36,11 @@ Skills pass through four stages before injection:
   <Step title="Score">
     Each gated skill is scored against the current message using a deterministic algorithm: keyword matches, tag overlaps, and regex pattern matches. Higher scores indicate stronger relevance.
 
-    Scoring is fully deterministic — no LLM involved. A skill must declare its activation criteria in the frontmatter so the scorer knows what to match.
+    Scoring is fully deterministic — no LLM involved. A skill must declare its activation criteria in the frontmatter so the scorer knows what to match. Legacy agent-loop selection can use this score to inject full skill context.
+
+    Set `SKILLS_REGEX_ACTIVATION_ENABLED=false` to disable regex pattern auto-activation. Keyword/tag activation and explicit skill mentions, such as `$my-skill`, still inject skills.
+
+    Reborn local-dev uses Codex-style selection: `skill_list` exposes a compact catalog, natural-language keyword/tag/pattern matches do not inject full skill bodies, and full `SKILL.md` context is loaded only after an explicit `$skill` mention or a model-selected local-dev `skill_activate` call.
 
     <Warning>
     A skill without an `activation` block scores zero on every message and is never injected.
