@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     str::FromStr,
     sync::{
@@ -353,16 +353,8 @@ pub struct SubagentSpawnCapabilityPort {
     spawn_id: CapabilityId,
     limits: SubagentSpawnLimits,
     deps: Arc<SubagentSpawnDeps>,
-    auth_input_refs: Mutex<HashMap<CapabilityInputRef, SpawnAuthorizationInput>>,
+    auth_input_refs: Mutex<HashSet<CapabilityInputRef>>,
     spawned_this_turn: AtomicU32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SpawnAuthorizationInput {
-    // Retained for inner-backed spawn authorization paths exercised by tests.
-    #[allow(dead_code)]
-    Inner(CapabilityInputRef),
-    LocalProviderRegistration,
 }
 
 struct SpawnContext {
@@ -437,7 +429,7 @@ impl SubagentSpawnCapabilityPort {
             spawn_id,
             limits,
             deps,
-            auth_input_refs: Mutex::new(HashMap::new()),
+            auth_input_refs: Mutex::new(HashSet::new()),
             spawned_this_turn: AtomicU32::new(0),
         }
     }
@@ -618,40 +610,20 @@ impl SubagentSpawnCapabilityPort {
         &self,
         invocation: &CapabilityInvocation,
     ) -> Result<Option<CapabilityOutcome>, AgentLoopHostError> {
-        let auth_input = {
+        let is_registered = {
             let auth_input_refs = self.auth_input_refs.lock().map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Unavailable,
                     "subagent spawn authorization input store is unavailable",
                 )
             })?;
-            auth_input_refs.get(&invocation.input_ref).cloned()
+            auth_input_refs.contains(&invocation.input_ref)
         };
-        let Some(auth_input) = auth_input else {
+        if !is_registered {
             return Ok(Some(spawn_rejected("spawn_requires_provider_registration")));
-        };
-        let SpawnAuthorizationInput::Inner(auth_input_ref) = auth_input else {
-            self.remove_auth_input_ref(&invocation.input_ref)?;
-            return Ok(None);
-        };
-        let mut auth_invocation = invocation.clone();
-        auth_invocation.input_ref = auth_input_ref;
-        match self.inner.invoke_capability(auth_invocation).await? {
-            CapabilityOutcome::Completed(result) => {
-                let _ = self
-                    .deps
-                    .result_writer
-                    .delete_capability_result(&self.run_context, &result.result_ref)
-                    .await;
-                self.remove_auth_input_ref(&invocation.input_ref)?;
-                Ok(None)
-            }
-            other if other.is_suspension() => Ok(Some(other)),
-            other => {
-                self.remove_auth_input_ref(&invocation.input_ref)?;
-                Ok(Some(other))
-            }
         }
+        self.remove_auth_input_ref(&invocation.input_ref)?;
+        Ok(None)
     }
 
     fn remove_auth_input_ref(
@@ -938,10 +910,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                         "subagent spawn authorization input store is unavailable",
                     )
                 })?
-                .insert(
-                    input_ref.clone(),
-                    SpawnAuthorizationInput::LocalProviderRegistration,
-                );
+                .insert(input_ref.clone());
             return Ok(CapabilityCallCandidate {
                 surface_version: surface.version,
                 capability_id: self.spawn_id.clone(),
