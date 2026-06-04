@@ -1332,16 +1332,26 @@ fn attested_invalid_field(field: &str) -> RebornServicesError {
 }
 
 /// Map a sanitized attested-continuation rejection to the WebUI error surface.
-/// The continuation runs after the resume guard already consumed the one-shot,
-/// so every category here is non-retryable from the client's perspective.
+///
+/// Every category is terminal: the one-shot resume guard / sealed grant was
+/// already consumed (or the request was rejected before it could be), so the
+/// client cannot retry the same proof. `Unavailable` is a POST-verification
+/// broadcast-tail failure (RPC timeout, etc.) where the grant is already
+/// claimed, but it is still non-retryable: there is no broadcast-tail-only
+/// re-drive path — the only public retry re-enters `verify_and_claim` and is
+/// rejected by the grant/ledger CAS. A real tail-retry path (re-fetch the
+/// verified handle from a durable store and re-drive only the broadcast) is
+/// deferred to the durable binding store follow-up. The per-arm `retryable`
+/// flag reflects that everything here is `false` for now.
 fn map_attested_continuation_rejection(
     rejection: AttestedContinuationRejection,
 ) -> RebornServicesError {
-    let (code, kind, status) = match rejection {
+    let (code, kind, status, retryable) = match rejection {
         AttestedContinuationRejection::MissingBinding => (
             RebornServicesErrorCode::NotFound,
             RebornServicesErrorKind::NotFound,
             404,
+            false,
         ),
         AttestedContinuationRejection::ProviderMismatch
         | AttestedContinuationRejection::ProofRejected
@@ -1349,19 +1359,44 @@ fn map_attested_continuation_rejection(
             RebornServicesErrorCode::InvalidRequest,
             RebornServicesErrorKind::Validation,
             400,
+            false,
+        ),
+        // A context mismatch is an ownership/tenant divergence (the caller's
+        // turn scope / run / gate_ref did not match the authoritative binding
+        // recorded at raise), not a malformed request. Surface it as 403
+        // Forbidden so the classification matches how this crate already maps an
+        // unauthorized turn (`TurnErrorCategory::Unauthorized`), rather than
+        // collapsing it into the generic proof-validation 400.
+        AttestedContinuationRejection::ContextMismatch => (
+            RebornServicesErrorCode::Forbidden,
+            RebornServicesErrorKind::ParticipantDenied,
+            403,
+            false,
         ),
         AttestedContinuationRejection::LedgerGuard => (
             RebornServicesErrorCode::Conflict,
             RebornServicesErrorKind::Conflict,
             409,
+            false,
         ),
+        // Broadcast-tail failure after the grant was already claimed. There is
+        // no broadcast-tail-only re-drive path today: `broadcast_resolved` is
+        // only ever reached from inside `resolve_attested_gate`, after
+        // `verify_and_claim` has already burned the one-shot grant, and the
+        // sole public retry re-enters `verify_and_claim` where the grant/ledger
+        // CAS rejects the second claim as `LedgerGuard`/409. Ledger idempotency
+        // only prevents a *double* broadcast; it does not provide a *re-drive*
+        // path for the consumed `verified` handle. So this is non-retryable
+        // until the durable binding store lands and a real tail-retry path can
+        // re-fetch the handle (tracked alongside the PR12 dedup TODO).
         AttestedContinuationRejection::Unavailable => (
             RebornServicesErrorCode::Unavailable,
             RebornServicesErrorKind::ServiceUnavailable,
             503,
+            false,
         ),
     };
-    RebornServicesError::from_status_kind(code, kind, status, false)
+    RebornServicesError::from_status_kind(code, kind, status, retryable)
 }
 
 fn segment(name: &str, value: &str) -> String {
@@ -1587,5 +1622,68 @@ fn generated_thread_id(
             // Fallback remains valid under ThreadId validation rules.
             ThreadId::new("generated-thread-fallback").unwrap_or_else(|_| unreachable!())
         }
+    }
+}
+
+#[cfg(test)]
+mod attested_rejection_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn context_mismatch_maps_to_forbidden_not_validation() {
+        // A context mismatch is an ownership/tenant divergence — it must surface
+        // as 403 Forbidden (ParticipantDenied), not be collapsed into the
+        // generic 400 proof-validation bucket.
+        let err =
+            map_attested_continuation_rejection(AttestedContinuationRejection::ContextMismatch);
+        assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+        assert_eq!(err.kind, RebornServicesErrorKind::ParticipantDenied);
+        assert_eq!(err.status_code, 403);
+        assert!(!err.retryable);
+    }
+
+    #[test]
+    fn proof_rejections_stay_validation_400() {
+        for rejection in [
+            AttestedContinuationRejection::ProviderMismatch,
+            AttestedContinuationRejection::ProofRejected,
+            AttestedContinuationRejection::MalformedProof,
+        ] {
+            let err = map_attested_continuation_rejection(rejection.clone());
+            assert_eq!(
+                err.code,
+                RebornServicesErrorCode::InvalidRequest,
+                "{rejection:?} should remain a 400 validation error"
+            );
+            assert_eq!(err.status_code, 400);
+        }
+    }
+
+    #[test]
+    fn missing_binding_and_guards_keep_their_codes() {
+        let missing =
+            map_attested_continuation_rejection(AttestedContinuationRejection::MissingBinding);
+        assert_eq!(missing.code, RebornServicesErrorCode::NotFound);
+        assert_eq!(missing.status_code, 404);
+
+        let guard = map_attested_continuation_rejection(AttestedContinuationRejection::LedgerGuard);
+        assert_eq!(guard.code, RebornServicesErrorCode::Conflict);
+        assert_eq!(guard.status_code, 409);
+        // The grant was already consumed — replaying the same proof is terminal.
+        assert!(!guard.retryable);
+
+        let unavailable =
+            map_attested_continuation_rejection(AttestedContinuationRejection::Unavailable);
+        assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(unavailable.status_code, 503);
+        // Broadcast-tail failure after a claimed grant is NOT retryable through
+        // any public path: the only retry re-enters `verify_and_claim`, where
+        // the already-burned one-shot grant rejects the second claim. There is
+        // no broadcast-tail-only re-drive path until the durable binding store
+        // lands, so the client must not be told to retry.
+        assert!(
+            !unavailable.retryable,
+            "a post-verification broadcast-tail Unavailable has no retry path and must be non-retryable"
+        );
     }
 }

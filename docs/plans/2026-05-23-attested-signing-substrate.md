@@ -147,3 +147,60 @@ chain / crypto / secrets dependency.
 - HSM/KMS mainnet threshold.
 - Multi-sig / quorum.
 - WC session TTL / re-auth.
+
+## Whole-Stack Coherence Review (2026-05-25)
+
+**Verdict.** The assembled raise -> resolve -> continue flow is coherent
+end-to-end and the seams compose at their intended contracts:
+turns <-> composition, grant-seal <-> claim, sync-resume-port <-> async-driver,
+binding-store <-> resolve, and driver <-> ledger. The substrate's invariants
+compose rather than conflict: one-shot grant (sealed-grant CAS), exact-bytes
+hash binding (`ApprovedTxHash` recomputed from the persisted decoded tx),
+deterministic resume with no LLM re-entry, fail-closed handling of all external
+input, tenant isolation, and the KMS/mainnet ship-gate. The external-wallet
+raise path and the production runtime are correctly fail-closed / safe-inert:
+absent wiring fails closed (503 `Unavailable`) rather than resuming a gate it
+cannot complete.
+
+**Findings.**
+
+- (a) **Continuation now asserts caller scope/run/gate_ref vs `binding.context`
+  — fixed in this change.** `RebornAttestedContinuation::verify_and_claim` and
+  `broadcast_resolved` previously ignored their `scope` / `run_id` arguments and
+  drove the continuation off `gate_ref` alone. They now read the authoritative
+  `AttestedGateBinding` by `gate_ref` and fail closed
+  (`AttestedContinuationRejection::ContextMismatch`) BEFORE claiming the grant /
+  verifying / broadcasting if the caller-supplied identity diverges. Comparable
+  axes under the pre-reconciliation (PR5) identity vocabulary are `gate_ref`
+  (the authoritative join key) and `tenant` (the multi-tenant isolation axis,
+  `TurnScope::tenant_id` vs `SigningContext::tenant`). `run_id` / `user` /
+  `scope` are intentionally NOT asserted yet: `TurnRunId` (a UUID) and
+  `TurnScope` (tenant/agent/project/thread, `user` -> system sentinel) carry no
+  axis that maps by value to `SigningContext`'s free-string `run_id`/`user`/
+  `scope` until the raise side derives them from the turn identity. This is
+  defense-in-depth layered ON TOP of the driver's own binding read + bound-hash
+  re-check + one-shot grant CAS; safe under today's single caller sequencing but
+  load-bearing for alternate ingress + multi-tenant robustness. Once the
+  identity reconciliation lands, this should tighten to a full `SigningContext`
+  identity match.
+
+- (b) **EVM signer/account binding lives in `ApprovedTxHash` via the explicit
+  `SigningContext` signer in PR2's reworked `approved_tx_hash_for`.** The
+  pre-rework `signer_account()` recipient-binding has been removed. Noted
+  because a review of the *un-rebased* assembled tip still shows the pre-fix
+  code; the rebased PR2 is authoritative.
+
+  Traceability note: `signer_account()` is the *pre-rebase* symbol — it is not
+  defined anywhere in the current assembled head, so this assertion cannot be
+  verified against this tree alone. To confirm the removal, diff against the
+  pre-rebase PR2 tip (the commit that last defined `signer_account()`); after
+  the bottom-up rebase cascade lands, the authoritative form is
+  `approved_tx_hash_for` taking the explicit `SigningContext` signer.
+
+**Integration caveat (important).** The *fixed* whole stack does not exist as a
+single artifact yet. The per-PR review-fixes and the multi-tenant / trust / KMS
+additions live on separate branches; the integrated tree materializes only
+after the bottom-up merge / rebase cascade. Until that cascade completes, the
+assembled tip carries pre-fix per-PR code, and the inert paths (external wallet,
+production multi-tenant) MUST NOT be enabled before the cascade lands AND the
+documented gaps close: durable audit, gap D, and the #4051 lifecycle items.

@@ -31,7 +31,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use ironclaw_attested_runtime::{BindingOwner, ContinuationError, VerifiedContinuation};
+use ironclaw_attested_runtime::{
+    AttestedGateBindingStore, BindingOwner, ContinuationError, InMemoryAttestedGateBindingStore,
+    VerifiedContinuation,
+};
 use ironclaw_product_workflow::{
     AttestedContinuationOutcome, AttestedContinuationRejection, AttestedGateContinuationPort,
     AttestedProofClaim, AttestedProofKind, VerifiedAttestedContinuation,
@@ -55,6 +58,12 @@ use crate::attested::{LocalDevContinuationDriver, RebornAttestedComposition};
 /// runtime (the same driver + binding store + ledger the resume port reads).
 pub struct RebornAttestedContinuation {
     driver: Arc<LocalDevContinuationDriver>,
+    /// The same authoritative gate-binding store the driver reads. Held here so
+    /// this port can assert the caller-supplied turn scope / run / gate_ref
+    /// against the persisted `binding.context` BEFORE claiming the grant /
+    /// signing / broadcasting (defense-in-depth, layered on top of the driver's
+    /// own binding read + hash re-check + one-shot grant CAS).
+    bindings: Arc<InMemoryAttestedGateBindingStore>,
 }
 
 impl RebornAttestedContinuation {
@@ -62,7 +71,81 @@ impl RebornAttestedContinuation {
     pub fn new(composition: &RebornAttestedComposition) -> Self {
         Self {
             driver: Arc::clone(composition.driver()),
+            bindings: Arc::clone(composition.bindings()),
         }
+    }
+
+    /// Assert the caller-supplied turn `scope` / `run_id` / `gate_ref` against
+    /// the authoritative [`AttestedGateBinding`] recorded when the gate was
+    /// raised, and fail closed on any divergence BEFORE the grant is claimed /
+    /// the proof is verified / anything is broadcast.
+    ///
+    /// This is defense-in-depth ON TOP of the driver (which independently reads
+    /// the binding, re-checks the bound hash, and claims the one-shot grant). It
+    /// guards the alternate-ingress / multi-tenant case: a binding raised for
+    /// tenant A's run must never be driven by a continuation request bearing
+    /// tenant B's — or another run's — identity.
+    ///
+    /// Comparable axes under the current identity vocabulary
+    /// ([`SigningContext`](ironclaw_signing_provider::SigningContext)'s
+    /// transparent-string newtypes vs the `ironclaw_turns` types):
+    ///
+    /// - `gate_ref`: the authoritative join key. The binding is fetched BY
+    ///   `gate_ref`, and the store's insert-time
+    ///   [`validate_binding`](ironclaw_attested_runtime::validate_binding)
+    ///   (`GateRefMismatch` guard) enforces `binding.context.gate_ref ==` the
+    ///   key it is stored under for EVERY backend (in-memory here, durable in
+    ///   PR12). So a successful `get(gate_ref)` already guarantees
+    ///   `binding.context.gate_ref == gate_ref` by construction — a separate
+    ///   equality re-check here would be dead code. A wrong `gate_ref` instead
+    ///   surfaces as [`MissingBinding`](AttestedContinuationRejection::MissingBinding)
+    ///   (the lookup finds no row / a different gate's row), which the
+    ///   `MissingBinding` arm below already fails closed on.
+    /// - `tenant`: the incoming [`TurnScope::tenant_id`] string must equal
+    ///   `binding.context.tenant`. This is the multi-tenant isolation axis and
+    ///   the real defense-in-depth work this helper does — a binding raised for
+    ///   tenant A must never be driven by a continuation bearing tenant B's
+    ///   identity even when both reference the same `gate_ref`.
+    ///
+    /// `run_id` / `user` / `scope` are intentionally NOT asserted here: the
+    /// `TurnRunId` (a UUID) and `TurnScope` (tenant / agent / project / thread,
+    /// with `user` resolving to the system sentinel in
+    /// [`TurnScope::to_resource_scope`]) carry no axis that maps by value to
+    /// `SigningContext`'s free-string `run_id` / `user` / `scope` under the
+    /// pre-reconciliation (PR5) vocabulary — the raise side does not derive them
+    /// from the turn identity. Asserting them would fail-closed the *legitimate*
+    /// path. They are documented here so the cross-PR identity reconciliation can
+    /// tighten this to a full `SigningContext` identity match once the raise side
+    /// derives those axes from the turn.
+    async fn assert_caller_matches_binding(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &GateRef,
+    ) -> Result<(), AttestedContinuationRejection> {
+        // TODO(PR12): this read and the driver's own subsequent binding read in
+        // `verify_and_sign` hit the same row twice per `verify_and_claim`.
+        // Harmless on the in-memory store (synchronous under a `Mutex`), but once
+        // the durable PG/libSQL store lands this is two DB round-trips for the
+        // same row. Dedup by threading this pre-fetched binding into the driver
+        // (accept a pre-validated binding) rather than re-reading it there.
+        let binding = self
+            .bindings
+            .get(&SigningGateRef::new(gate_ref.as_str()))
+            .await
+            .ok_or(AttestedContinuationRejection::MissingBinding)?;
+
+        // gate_ref is NOT re-checked here: the binding is fetched by `gate_ref`
+        // and the store's insert-time `validate_binding` (`GateRefMismatch`)
+        // guarantees `binding.context.gate_ref == gate_ref` for any row that was
+        // successfully persisted. An equality re-check would be dead code; a
+        // wrong `gate_ref` already failed closed above as `MissingBinding`.
+
+        // tenant: multi-tenant isolation axis — the real defense-in-depth check.
+        if binding.context.tenant.as_str() != scope.tenant_id.as_str() {
+            return Err(AttestedContinuationRejection::ContextMismatch);
+        }
+
+        Ok(())
     }
 }
 
@@ -98,6 +181,16 @@ impl AttestedGateContinuationPort for RebornAttestedContinuation {
             .await
             .map_err(map_continuation_error)?;
 
+        // Defense-in-depth (layered ON TOP of the driver's `assert_binding_owner`
+        // above): re-assert the caller's turn scope / gate_ref against the
+        // authoritative binding context from this port's own binding-store
+        // handle, surfacing a tenant divergence as the dedicated
+        // `ContextMismatch` (403) classification rather than collapsing it into
+        // the existence-oracle-safe `MissingBinding` (404) the driver check maps
+        // to. A binding raised for one tenant/gate must not be driven by a
+        // continuation request bearing another's identity. Fail closed.
+        self.assert_caller_matches_binding(scope, gate_ref).await?;
+
         // FULL verification + one-shot grant claim, run BEFORE the facade
         // transitions the turn. A malformed proof fails closed here at decode; a
         // forged signature / signer mismatch / already-claimed grant fails closed
@@ -122,11 +215,18 @@ impl AttestedGateContinuationPort for RebornAttestedContinuation {
 
     async fn broadcast_resolved(
         &self,
-        _scope: &TurnScope,
+        scope: &TurnScope,
         _run_id: TurnRunId,
-        _gate_ref: &GateRef,
+        gate_ref: &GateRef,
         verified: VerifiedAttestedContinuation,
     ) -> Result<AttestedContinuationOutcome, AttestedContinuationRejection> {
+        // Defense-in-depth: re-assert the caller's turn scope / gate_ref against
+        // the authoritative binding context before broadcasting. Same fail-closed
+        // guard as `verify_and_claim`, re-checked on the broadcast half so an
+        // alternate-ingress caller cannot drive the broadcast of a binding that
+        // does not match its identity.
+        self.assert_caller_matches_binding(scope, gate_ref).await?;
+
         // Recover the concrete verified continuation produced by
         // `verify_and_claim`. A type mismatch (only possible if a different port
         // implementation produced the handle) fails closed rather than panicking.

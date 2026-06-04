@@ -35,8 +35,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_workflow::{
     AttestedContinuationOutcome, AttestedContinuationRejection, AttestedGateContinuationPort,
-    AttestedProofClaim, RebornServices, RebornServicesApi, WebUiAuthenticatedCaller,
-    WebUiResolveGateRequest,
+    AttestedProofClaim, AttestedProofKind, RebornServices, RebornServicesApi,
+    WebUiAuthenticatedCaller, WebUiResolveGateRequest,
 };
 use ironclaw_reborn_composition::{
     RebornAttestedComposition, RebornAttestedContinuation, RegisterAttestedGateError,
@@ -109,14 +109,16 @@ fn bound_hash(account_hex: &str) -> ApprovedTxHash {
     .expect("recompute approved hash in test")
 }
 
-fn signing_ctx(account_hex: &str) -> SigningContext {
+/// `SigningContext` for an arbitrary `gate_ref`, so a test can register more
+/// than one authoritative binding (each gate carries its own one-shot grant).
+fn signing_ctx_for(gate: &str, account_hex: &str) -> SigningContext {
     SigningContext {
         tenant: SigningTenantId::new(TENANT),
         user: SigningUserId::new(USER),
         scope: ScopeId::new("scope"),
         actor: ActorId::new("actor"),
         run_id: RunId::new("run"),
-        gate_ref: SigningGateRef::new(GATE),
+        gate_ref: SigningGateRef::new(gate),
         chain_id: ChainId::new("solana:mainnet"),
         key_or_account_id: KeyOrAccountId::new(account_hex),
     }
@@ -269,9 +271,15 @@ fn attested_request(
 }
 
 fn binding(account_hex: &str, hash: ApprovedTxHash) -> AttestedGateBinding {
+    binding_for(GATE, account_hex, hash)
+}
+
+/// `binding` whose `context.gate_ref` is `gate`, so a second authoritative gate
+/// can be registered alongside the default `GATE`.
+fn binding_for(gate: &str, account_hex: &str, hash: ApprovedTxHash) -> AttestedGateBinding {
     AttestedGateBinding {
         provider_id: ProviderId::Injected,
-        context: signing_ctx(account_hex),
+        context: signing_ctx_for(gate, account_hex),
         approved_tx_hash: hash,
         decoded: placeholder_decoded(),
         chain: ChainKeyId::new("solana:mainnet").expect("valid chain id in test"),
@@ -922,5 +930,194 @@ async fn register_attested_gate_rejects_mismatch_and_is_insert_only() {
     assert!(
         matches!(dup, Err(RegisterAttestedGateError::DuplicateBinding)),
         "a second raise for the same gate must be refused, got {dup:?}"
+    );
+}
+
+/// Build a valid injected-wallet (Solana) `AttestedProofClaim` for the bound
+/// hash, signed by `key`.
+fn attested_claim(
+    key: &EdSigningKey,
+    hash: &ApprovedTxHash,
+    account_hex: &str,
+) -> AttestedProofClaim {
+    let signature = key.sign(hash.as_bytes());
+    AttestedProofClaim {
+        kind: AttestedProofKind::InjectedWallet,
+        approved_tx_hash_hex: lower_hex(hash.as_bytes()),
+        proof_json: json!({
+            "scheme": "solana",
+            "approved_tx_hash": lower_hex(hash.as_bytes()),
+            "claimed_signer": account_hex,
+            "signature": lower_hex(&signature.to_bytes()),
+            "public_key": account_hex,
+        }),
+    }
+}
+
+/// A turn scope whose tenant DIFFERS from the test bindings' `context.tenant`
+/// (an alternate-ingress / wrong-tenant caller), with every other axis matching.
+fn mismatched_tenant_scope() -> TurnScope {
+    TurnScope::new(
+        TenantId::new("tenant-other").unwrap(),
+        Some(AgentId::new(AGENT).unwrap()),
+        Some(ProjectId::new(PROJECT).unwrap()),
+        ThreadId::new(THREAD).unwrap(),
+    )
+}
+
+/// Defense-in-depth (whole-stack coherence review): the continuation asserts the
+/// caller-supplied turn scope / gate_ref against the authoritative
+/// `binding.context` BEFORE claiming the grant / verifying / broadcasting, on
+/// BOTH halves of the two-phase port.
+///
+/// Two layered IDOR guards run on `verify_and_claim`, in order:
+///   1. the driver's `assert_binding_owner` (tenant + user), which fails closed
+///      as `MissingBinding` (404, no existence oracle) — the authoritative
+///      ownership gate; and
+///   2. this port's `assert_caller_matches_binding` (tenant), which surfaces a
+///      tenant divergence as the dedicated `ContextMismatch` (403).
+///
+/// `verify_and_claim` half: a request bearing a DIFFERENT tenant must fail
+/// closed without claiming the one-shot grant — caught by guard (1) first, so it
+/// surfaces as `MissingBinding` (404, no oracle) — so a later MATCHING
+/// continuation for the same gate still succeeds (the grant was never burned),
+/// and the matching path then BROADCASTS successfully, proving the verify-side
+/// guard passes on a match and the matching broadcast completes end-to-end.
+///
+/// `broadcast_resolved` half: this is exercised INDEPENDENTLY of the one-shot
+/// grant CAS, and does NOT re-run the driver's owner check, so its
+/// composition-layer re-assertion exercises the `ContextMismatch` (403) path
+/// directly. Using a SECOND gate (its own grant), a matching `verify_and_claim`
+/// hands back a fresh, un-consumed `VerifiedAttestedContinuation` handle; a
+/// mismatched-tenant `broadcast_resolved` against that handle must fail closed
+/// as `ContextMismatch` — proving the broadcast-side assert fires before the
+/// downcast/broadcast and is not merely the grant-CAS rejecting a replay.
+#[tokio::test]
+async fn continuation_fails_closed_on_scope_mismatch_then_matching_succeeds() {
+    const GATE2: &str = "gate:pr11-attested-ingress-2";
+
+    // Deterministic test-only ed25519 key. `[0x77; 32]` is an intentionally
+    // fixed scalar so the bound signer/account is reproducible across runs; it
+    // is NOT a security-relevant key and never leaves the test.
+    let key = EdSigningKey::from_bytes(&[0x77u8; 32]);
+    let account_hex = lower_hex(&key.verifying_key().to_bytes());
+    let hash = bound_hash(&account_hex);
+
+    let bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
+    let composition = build_composition(Arc::clone(&bindings));
+    // Two authoritative gates, each with its own one-shot grant: GATE drives the
+    // verify-side + matching-broadcast path; GATE2 isolates the broadcast-side
+    // guard on a fresh handle (its grant is never replayed).
+    composition
+        .register_attested_gate(
+            SigningGateRef::new(GATE),
+            binding(&account_hex, hash),
+            0,
+            None,
+        )
+        .await
+        .expect("register attested gate");
+    composition
+        .register_attested_gate(
+            SigningGateRef::new(GATE2),
+            binding_for(GATE2, &account_hex, hash),
+            0,
+            None,
+        )
+        .await
+        .expect("register second attested gate");
+
+    let continuation = RebornAttestedContinuation::new(&composition);
+    let gate_ref = GateRef::new(GATE).unwrap();
+    let gate_ref2 = GateRef::new(GATE2).unwrap();
+    let run_id = TurnRunId::new();
+    let claim = attested_claim(&key, &hash, &account_hex);
+    let mismatched_scope = mismatched_tenant_scope();
+
+    // The actor whose user matches the binding's authoritative `context.user`.
+    let owner_actor = TurnActor::new(UserId::new(USER).unwrap());
+
+    // --- verify_and_claim guard ---
+
+    // Mismatched tenant fails closed BEFORE any grant claim or proof
+    // verification. The driver's `assert_binding_owner` runs first and catches
+    // the divergence as `MissingBinding` (404, no existence oracle); the
+    // `ContextMismatch` (403) classification is exercised on the broadcast half
+    // below, which does not re-run the driver owner check.
+    let mismatch = continuation
+        .verify_and_claim(&mismatched_scope, &owner_actor, run_id, &gate_ref, &claim)
+        .await;
+    assert!(
+        matches!(mismatch, Err(AttestedContinuationRejection::MissingBinding)),
+        "mismatched-tenant verify_and_claim must fail closed as MissingBinding (no oracle), got {:?}",
+        mismatch.as_ref().err()
+    );
+
+    // A gate_ref the binding store has no entry for fails closed too (no binding
+    // to assert against). Matching tenant, to isolate the gate axis.
+    let unknown_gate = GateRef::new("gate:unknown").unwrap();
+    let unknown = continuation
+        .verify_and_claim(&turn_scope(), &owner_actor, run_id, &unknown_gate, &claim)
+        .await;
+    assert!(
+        matches!(unknown, Err(AttestedContinuationRejection::MissingBinding)),
+        "unknown gate_ref must fail closed (no binding), got {:?}",
+        unknown.as_ref().err()
+    );
+
+    // --- matching path runs verify + broadcast end-to-end on GATE ---
+
+    // The mismatched attempt never claimed the one-shot grant, so the matching
+    // verify succeeds...
+    let verified = continuation
+        .verify_and_claim(&turn_scope(), &owner_actor, run_id, &gate_ref, &claim)
+        .await
+        .expect("matching verify_and_claim succeeds (grant was not burned by the mismatch)");
+
+    // ...and the matching broadcast half COMPLETES: the broadcast-side assert
+    // passes on a match and the ledger-guarded broadcast runs to an outcome. This
+    // is the positive broadcast path the prior revision never exercised.
+    let outcome = continuation
+        .broadcast_resolved(&turn_scope(), run_id, &gate_ref, verified)
+        .await
+        .expect("matching broadcast_resolved completes after a matching verify");
+    assert!(
+        !outcome.signer.is_empty(),
+        "the broadcast outcome reports the bound signer"
+    );
+
+    // The GATE grant was claimed by that matching verify — a replay now hits the
+    // one-shot CAS, proving the matching path is the ONLY one that ever claimed it
+    // (the earlier fail-closed attempts did not burn it).
+    let replay = continuation
+        .verify_and_claim(&turn_scope(), &owner_actor, run_id, &gate_ref, &claim)
+        .await;
+    assert!(
+        replay.is_err(),
+        "the one-shot grant was claimed exactly once by the matching path"
+    );
+
+    // --- broadcast_resolved guard, isolated on GATE2's fresh handle ---
+
+    // A matching verify on GATE2 hands back a fresh, un-consumed handle whose
+    // grant has NOT been replayed.
+    let verified2 = continuation
+        .verify_and_claim(&turn_scope(), &owner_actor, run_id, &gate_ref2, &claim)
+        .await
+        .expect("matching verify_and_claim on the second gate succeeds");
+
+    // A mismatched-tenant broadcast against that fresh handle fails closed at the
+    // broadcast-side assert — BEFORE the downcast/broadcast, and NOT because of
+    // the grant CAS (the grant for GATE2 is still unclaimed-for-broadcast here).
+    let bad_broadcast = continuation
+        .broadcast_resolved(&mismatched_scope, run_id, &gate_ref2, verified2)
+        .await;
+    assert!(
+        matches!(
+            bad_broadcast,
+            Err(AttestedContinuationRejection::ContextMismatch)
+        ),
+        "mismatched-tenant broadcast_resolved must fail closed as ContextMismatch, got {:?}",
+        bad_broadcast.as_ref().err()
     );
 }
