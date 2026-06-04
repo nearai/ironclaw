@@ -116,14 +116,6 @@ fn check_config_file(path: &std::path::Path) -> DoctorCheck {
 }
 
 fn check_providers_file(path: &std::path::Path) -> DoctorCheck {
-    if !path.exists() {
-        return DoctorCheck {
-            name: "providers_file".to_string(),
-            category: CheckCategory::Core,
-            outcome: CheckOutcome::Skip,
-            detail: "absent (using built-in providers)".to_string(),
-        };
-    }
     match std::fs::read_to_string(path) {
         Ok(contents) => match serde_json::from_str::<serde_json::Value>(&contents) {
             Ok(_) => DoctorCheck {
@@ -138,6 +130,12 @@ fn check_providers_file(path: &std::path::Path) -> DoctorCheck {
                 outcome: CheckOutcome::Fail,
                 detail: format!("invalid JSON: {error}"),
             },
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DoctorCheck {
+            name: "providers_file".to_string(),
+            category: CheckCategory::Core,
+            outcome: CheckOutcome::Skip,
+            detail: "absent (using built-in providers)".to_string(),
         },
         Err(error) => DoctorCheck {
             name: "providers_file".to_string(),
