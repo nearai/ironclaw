@@ -4050,6 +4050,221 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_claimed_terminal_states_rolls_back_first_delivery_when_second_mark_fails() {
+        let tenant = TenantId::new("tenant").unwrap();
+        let agent = AgentId::new("agent").unwrap();
+        let owner = UserId::new("owner").unwrap();
+        let parent_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("rollback-parent-thread").unwrap(),
+        );
+        let parent_thread_scope = ThreadScope {
+            tenant_id: tenant.clone(),
+            agent_id: agent.clone(),
+            project_id: None,
+            owner_user_id: Some(owner.clone()),
+            mission_id: None,
+        };
+        let child_a_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("rollback-child-a-thread").unwrap(),
+        );
+        let child_b_scope = TurnScope::new(
+            tenant,
+            Some(agent),
+            None,
+            ThreadId::new("rollback-child-b-thread").unwrap(),
+        );
+        let child_thread_scope = ThreadScope {
+            tenant_id: parent_thread_scope.tenant_id.clone(),
+            agent_id: parent_thread_scope.agent_id.clone(),
+            project_id: None,
+            owner_user_id: Some(owner.clone()),
+            mission_id: None,
+        };
+        let parent_run_id = TurnRunId::new();
+        let child_a_run_id = TurnRunId::new();
+        let child_b_run_id = TurnRunId::new();
+        let result_ref = LoopResultRef::new("result:subagent.rollback").unwrap();
+
+        let turn_state_store = Arc::new(RecordingTurnStateStore::default());
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: parent_thread_scope.clone(),
+                thread_id: Some(parent_scope.thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        thread_service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: parent_thread_scope,
+                thread_id: parent_scope.thread_id.clone(),
+                turn_run_id: parent_run_id.to_string(),
+                result_ref: result_ref.as_str().to_string(),
+                safe_summary: ToolResultSafeSummary::new("subagents completed").unwrap(),
+                provider_call: None,
+            })
+            .await
+            .unwrap();
+        for (scope, run_id, final_text) in [
+            (
+                child_a_scope.clone(),
+                child_a_run_id,
+                "first rollback child final",
+            ),
+            (
+                child_b_scope.clone(),
+                child_b_run_id,
+                "second rollback child final",
+            ),
+        ] {
+            thread_service
+                .ensure_thread(EnsureThreadRequest {
+                    scope: child_thread_scope.clone(),
+                    thread_id: Some(scope.thread_id.clone()),
+                    created_by_actor_id: "test".to_string(),
+                    title: None,
+                    metadata_json: None,
+                })
+                .await
+                .unwrap();
+            let draft = thread_service
+                .append_assistant_draft(AppendAssistantDraftRequest {
+                    scope: child_thread_scope.clone(),
+                    thread_id: scope.thread_id.clone(),
+                    turn_run_id: run_id.to_string(),
+                    content: MessageContent::text("draft"),
+                })
+                .await
+                .unwrap();
+            thread_service
+                .finalize_assistant_message(
+                    &child_thread_scope,
+                    &scope.thread_id,
+                    draft.message_id,
+                    MessageContent::text(final_text),
+                )
+                .await
+                .unwrap();
+        }
+
+        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let mut parent_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("completion-observer-rollback");
+        parent_run_context.scope = parent_scope.clone();
+        parent_run_context.thread_id = parent_scope.thread_id.clone();
+        parent_run_context.run_id = parent_run_id;
+        let records = [
+            (
+                GateRef::new("gate:subagent-rollback-a").unwrap(),
+                child_a_scope.clone(),
+                child_a_run_id,
+            ),
+            (
+                GateRef::new("gate:subagent-rollback-b").unwrap(),
+                child_b_scope.clone(),
+                child_b_run_id,
+            ),
+        ]
+        .map(
+            |(gate_ref, child_scope, child_run_id)| AwaitedChildSetRecord {
+                gate_ref,
+                parent_run_context: parent_run_context.clone(),
+                tree_root_run_id: parent_run_id,
+                child_scope: child_scope.clone(),
+                child_run_id,
+                child_thread_id: child_scope.thread_id,
+                source_binding_ref: SourceBindingRef::new(format!(
+                    "subagent-source:rollback-{child_run_id}"
+                ))
+                .unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
+                    "subagent-reply:rollback-{child_run_id}"
+                ))
+                .unwrap(),
+                subagent_kind: SubagentKindId::new("general").unwrap(),
+                spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                    .unwrap(),
+                result_ref: result_ref.clone(),
+                mode: SpawnSubagentMode::Background,
+            },
+        );
+        for record in &records {
+            gate_store
+                .record_awaited_child(record.clone())
+                .await
+                .unwrap();
+        }
+
+        let observer = SubagentCompletionObserver::new(
+            Arc::clone(&gate_store),
+            goal_store,
+            turn_state_store,
+            Arc::new(RecordingResultWriter::new(result_ref)),
+            Arc::new(RecordingCoordinator::default()),
+            thread_service,
+        )
+        .unwrap();
+        gate_store.fail_mark_child_delivered_on_call(2);
+
+        let states = records
+            .iter()
+            .cloned()
+            .map(|record| AwaitedChildState {
+                record,
+                terminal_status: Some(TurnStatus::Completed),
+                terminal_event: Some(AwaitedChildTerminalEvent {
+                    status: TurnStatus::Completed,
+                    kind: TurnEventKind::Completed,
+                    cursor: EventCursor(50),
+                    sanitized_reason: None,
+                    owner_user_id: Some(owner.clone()),
+                }),
+                terminal_result_written: true,
+                descendant_reservation_release_claimed: false,
+                descendant_reservation_released: false,
+                delivery_claimed: true,
+                delivered_to_parent: false,
+            })
+            .collect::<Vec<_>>();
+
+        let error = observer
+            .handle_claimed_terminal_states(states)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, TurnError::Unavailable { ref reason } if reason.contains("injected mark_child_delivered failure")),
+            "original delivery error should be returned, got {error:?}"
+        );
+        assert!(
+            !gate_store
+                .state_for_gate(&GateRef::new("gate:subagent-rollback-a").unwrap())
+                .unwrap()
+                .unwrap()
+                .delivered_to_parent,
+            "first record should be compensated after the second delivery fails"
+        );
+        assert!(
+            !gate_store
+                .state_for_gate(&GateRef::new("gate:subagent-rollback-b").unwrap())
+                .unwrap()
+                .unwrap()
+                .delivered_to_parent,
+            "failed second record must remain undelivered"
+        );
+    }
+
+    #[tokio::test]
     async fn blocking_terminal_event_on_unbound_coordinator_returns_unavailable() {
         let tenant = TenantId::new("tenant").unwrap();
         let agent = AgentId::new("agent").unwrap();

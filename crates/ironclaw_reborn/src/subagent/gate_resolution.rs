@@ -1,4 +1,6 @@
 use std::collections::{HashMap, VecDeque};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use ironclaw_host_api::UserId;
@@ -35,6 +37,10 @@ pub struct AwaitedChildTerminalEvent {
 #[derive(Default)]
 pub struct BoundedSubagentGateResolutionStore {
     inner: Mutex<GateResolutionInner>,
+    #[cfg(test)]
+    mark_child_delivered_calls: AtomicUsize,
+    #[cfg(test)]
+    fail_mark_child_delivered_on_call: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -51,6 +57,13 @@ struct GateResolutionInner {
 impl BoundedSubagentGateResolutionStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_mark_child_delivered_on_call(&self, call: usize) {
+        self.mark_child_delivered_calls.store(0, Ordering::SeqCst);
+        self.fail_mark_child_delivered_on_call
+            .store(call, Ordering::SeqCst);
     }
 
     pub fn record_child_terminal(
@@ -178,6 +191,24 @@ impl BoundedSubagentGateResolutionStore {
         gate_ref: &GateRef,
         child_run_id: TurnRunId,
     ) -> Result<bool, AgentLoopHostError> {
+        #[cfg(test)]
+        {
+            let call = self
+                .mark_child_delivered_calls
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
+            if self
+                .fail_mark_child_delivered_on_call
+                .load(Ordering::SeqCst)
+                == call
+            {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "injected mark_child_delivered failure",
+                ));
+            }
+        }
+
         let mut inner = lock(&self.inner)?;
         let Some(states) = inner.by_gate.get_mut(gate_ref) else {
             return Ok(false);
@@ -206,6 +237,9 @@ impl BoundedSubagentGateResolutionStore {
                 .iter_mut()
                 .filter(|state| state.record.child_run_id == child_run_id)
             {
+                // Only requeue if this child was already delivered and no
+                // concurrent terminal claim is still active; the claiming
+                // path will requeue itself when that claim is released.
                 if state.delivered_to_parent {
                     state.delivered_to_parent = false;
                     if state.terminal_status.is_some() && !state.delivery_claimed {
