@@ -181,6 +181,7 @@ fn phase_label(phase: LifecyclePhase) -> &'static str {
 fn extension_source_label(source: LifecycleExtensionSource) -> &'static str {
     match source {
         LifecycleExtensionSource::HostBundled => "host_bundled",
+        LifecycleExtensionSource::Registry => "registry",
     }
 }
 

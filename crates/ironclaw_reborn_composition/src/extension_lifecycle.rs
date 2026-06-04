@@ -281,14 +281,36 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let available = self.catalog.resolve(&package_ref)?;
-        let plan = prepare_install(available)?;
+        self.install_available_package(available.clone(), false)
+            .await
+    }
+
+    pub(crate) async fn install_available_package(
+        &self,
+        available: AvailableExtensionPackage,
+        force: bool,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let package_ref = available.package_ref.clone();
+        let plan = prepare_install(&available)?;
+        if force
+            && self
+                .installation_store
+                .get_installation(plan.installation.installation_id())
+                .await
+                .map_err(map_extension_installation_error)?
+                .is_some()
+        {
+            self.remove(package_ref.clone()).await?;
+        }
         let _operation_guard = self.operation_lock.lock().await;
-        self.ensure_not_installed(&available.package.id, plan.installation.installation_id())
-            .await?;
+        if !force {
+            self.ensure_not_installed(&available.package.id, plan.installation.installation_id())
+                .await?;
+        }
         self.register_lifecycle_package(&available.package).await?;
 
         if let Err(error) =
-            materialize_available_extension(self.filesystem.as_ref(), available).await
+            materialize_available_extension(self.filesystem.as_ref(), &available).await
         {
             if let Err(rollback_error) =
                 self.rollback_lifecycle_install(&available.package.id).await
@@ -322,7 +344,7 @@ impl RebornLocalExtensionManagementPort {
             LifecyclePhase::Installed,
             LifecycleProductPayload::ExtensionInstall {
                 installed: true,
-                visible_capability_ids: visible_capability_ids(available)
+                visible_capability_ids: visible_capability_ids(&available)
                     .map(|id| id.as_str().to_string())
                     .collect(),
             },
@@ -902,7 +924,7 @@ fn prepare_install(
         })?;
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
         &available.manifest_toml,
-        ManifestSource::HostBundled,
+        available.package.manifest.source,
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,

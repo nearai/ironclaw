@@ -87,6 +87,26 @@ impl RebornLocalSkillManagementPort {
         .await?)
     }
 
+    pub(crate) async fn install_from_ironhub(
+        &self,
+        name: Option<&str>,
+        content: &str,
+        source_url: &str,
+    ) -> Result<ironclaw_skills::SkillInstallResult, RebornLocalSkillManagementError> {
+        let context = self.skill_context()?;
+        Ok(install_skill(
+            &context,
+            SkillInstallRequest {
+                name,
+                content,
+                files: &[],
+                source: SkillInstallSource::InstalledUrl,
+                source_url: Some(source_url),
+            },
+        )
+        .await?)
+    }
+
     async fn remove(
         &self,
         name: &str,
@@ -397,8 +417,8 @@ fn skill_summary(
         description: skill.description,
         source: match skill.source {
             ironclaw_skills::ManagedSkillSource::System => LifecycleSkillSource::System,
-            ironclaw_skills::ManagedSkillSource::User
-            | ironclaw_skills::ManagedSkillSource::Installed => LifecycleSkillSource::User,
+            ironclaw_skills::ManagedSkillSource::User => LifecycleSkillSource::User,
+            ironclaw_skills::ManagedSkillSource::Installed => LifecycleSkillSource::Installed,
         },
         keywords: skill.keywords,
         tags: skill.tags,

@@ -301,6 +301,11 @@ pub enum LifecycleProductPayload {
         extensions: Vec<LifecycleExtensionSummary>,
         count: usize,
     },
+    CatalogSearch {
+        tools: Vec<LifecycleExtensionSummary>,
+        skills: Vec<LifecycleSkillSummary>,
+        count: usize,
+    },
     ExtensionList {
         extensions: Vec<LifecycleInstalledExtensionSummary>,
         count: usize,
@@ -387,6 +392,7 @@ pub enum LifecycleExtensionCredentialSetup {
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleExtensionSource {
     HostBundled,
+    Registry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -426,6 +432,7 @@ pub struct LifecycleSkillSummary {
 pub enum LifecycleSkillSource {
     System,
     User,
+    Installed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -263,6 +263,34 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["extension_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/ironhub_search.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Optional search query for the signed IronHub catalog. Omit to list all entries." }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/ironhub_info.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "IronHub tool or skill name." }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/ironhub_install.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "IronHub tool or skill name." },
+                "kind": { "type": "string", "enum": ["tool", "skill"], "description": "Disambiguate when a name exists as both a tool and a skill." },
+                "force": { "type": "boolean", "description": "Replace an already installed package.", "default": false },
+                "acknowledge_unverified": { "type": "boolean", "description": "Required for unverified community content.", "default": false },
+                "expected_version": { "type": "string", "description": "Optional catalog version pin for signed install intents." },
+                "expected_artifact_digest": { "type": "string", "description": "Optional artifact digest pin for signed install intents." }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_list.input.v1.json" => json!({
             "type": "object",
             "properties": {},

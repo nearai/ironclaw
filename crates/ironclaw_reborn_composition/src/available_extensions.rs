@@ -48,19 +48,19 @@ const WEB_ACCESS_MANIFEST: &str =
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
     pub(crate) path: String,
     pub(crate) content: AvailableExtensionAssetContent,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AvailableExtensionAssetContent {
     Bytes(Vec<u8>),
     Filesystem(VirtualPath),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
     pub(crate) manifest_toml: String,
@@ -81,7 +81,12 @@ impl AvailableExtensionPackage {
             name: self.package.manifest.name.clone(),
             version: self.package.manifest.version.clone(),
             description: self.package.manifest.description.clone(),
-            source: LifecycleExtensionSource::HostBundled,
+            source: match self.package.manifest.source {
+                ManifestSource::HostBundled => LifecycleExtensionSource::HostBundled,
+                ManifestSource::InstalledLocal | ManifestSource::RegistryInstalled => {
+                    LifecycleExtensionSource::Registry
+                }
+            },
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             visible_capability_ids,
             visible_read_only_capability_ids,
