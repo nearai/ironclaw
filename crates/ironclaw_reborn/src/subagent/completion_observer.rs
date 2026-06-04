@@ -116,12 +116,14 @@ where
         let event = if event.owner_user_id.is_some() {
             event.clone()
         } else {
-            self.terminal_event_with_recovered_owner(event).await?
+            self.terminal_event_with_recovered_owner(event, child_record.as_ref())
+                .await?
         };
         self.gate_store
             .record_child_terminal(event.run_id, terminal_event_from_lifecycle(&event))
             .map_err(map_host_error)?;
-        self.recover_missing_gate_record(&event).await?;
+        self.recover_missing_gate_record(&event, has_gate_record)
+            .await?;
         let claimed = self
             .gate_store
             .claim_all_terminal_states_for_child(event.run_id)
@@ -143,8 +145,8 @@ where
         &self,
         states: Vec<AwaitedChildState>,
     ) -> Result<(), TurnError> {
-        let mut parent_resume_gates = HashSet::new();
         let mut blocking_resumes = Vec::new();
+        let mut blocking_resume_gates = HashSet::new();
         let mut background_deliveries = Vec::new();
         for state in states {
             let terminal_event =
@@ -158,9 +160,11 @@ where
             match state.record.mode {
                 SpawnSubagentMode::Blocking => {
                     self.write_terminal_result(&state, &terminal_event).await?;
-                    if parent_resume_gates.insert(state.record.gate_ref.clone()) {
-                        blocking_resumes.push((state.record.clone(), terminal_event));
-                    }
+                    blocking_resumes.push((
+                        state.record.clone(),
+                        terminal_event,
+                        blocking_resume_gates.insert(state.record.gate_ref.clone()),
+                    ));
                 }
                 SpawnSubagentMode::Background => {
                     self.write_terminal_result(&state, &terminal_event).await?;
@@ -173,8 +177,10 @@ where
                 .await
                 .map_err(map_host_error)?;
         }
-        for (record, terminal_event) in blocking_resumes {
-            self.resume_parent(&terminal_event, &record).await?;
+        for (record, terminal_event, should_resume_parent) in blocking_resumes {
+            if should_resume_parent {
+                self.resume_parent(&terminal_event, &record).await?;
+            }
             self.mark_child_delivered(&record).await?;
         }
         for record in background_deliveries {
@@ -186,28 +192,38 @@ where
     async fn terminal_event_with_recovered_owner(
         &self,
         event: &TurnLifecycleEvent,
+        child_record: Option<&TurnRunRecord>,
     ) -> Result<TurnLifecycleEvent, TurnError> {
-        if event.owner_user_id.is_some() {
-            return Ok(event.clone());
-        }
-        let owner_user_id = self.recover_owner_user_id(event).await?;
+        let owner_user_id = self.recover_owner_user_id(event, child_record).await?;
         let mut recovered = event.clone();
         recovered.owner_user_id = Some(owner_user_id);
         Ok(recovered)
     }
 
-    async fn recover_owner_user_id(&self, event: &TurnLifecycleEvent) -> Result<UserId, TurnError> {
-        let Some(child_record) = self
-            .turn_state_store
-            .get_run_record(&event.scope, event.run_id)
-            .await?
-        else {
-            return Err(TurnError::Unavailable {
-                reason: format!(
-                    "subagent terminal event {} missing owner user id and run record",
-                    event.run_id
-                ),
-            });
+    async fn recover_owner_user_id(
+        &self,
+        event: &TurnLifecycleEvent,
+        child_record: Option<&TurnRunRecord>,
+    ) -> Result<UserId, TurnError> {
+        let (child_tenant_id, thread_id) = if let Some(child_record) = child_record {
+            (
+                child_record.scope.tenant_id.clone(),
+                child_record.scope.thread_id.clone(),
+            )
+        } else {
+            let Some(child_record) = self
+                .turn_state_store
+                .get_run_record(&event.scope, event.run_id)
+                .await?
+            else {
+                return Err(TurnError::Unavailable {
+                    reason: format!(
+                        "subagent terminal event {} missing owner user id and run record",
+                        event.run_id
+                    ),
+                });
+            };
+            (child_record.scope.tenant_id, child_record.scope.thread_id)
         };
         if !self.thread_service.supports_resolve_scope() {
             return Err(TurnError::Unavailable {
@@ -219,7 +235,7 @@ where
         }
         let thread_scope = self
             .thread_service
-            .resolve_scope(child_record.scope.thread_id.clone())
+            .resolve_scope(thread_id)
             .await
             .map_err(|error| TurnError::Unavailable {
                 reason: format!(
@@ -227,12 +243,16 @@ where
                     event.run_id
                 ),
             })?;
-        if thread_scope.tenant_id != child_record.scope.tenant_id {
+        if thread_scope.tenant_id != child_tenant_id {
+            tracing::warn!(
+                run_id = %event.run_id,
+                resolved_thread_tenant_id = %thread_scope.tenant_id,
+                child_record_tenant_id = %child_tenant_id,
+                "subagent terminal event owner user id recovery resolved mismatched tenant"
+            );
             return Err(TurnError::Unavailable {
-                reason: format!(
-                    "subagent terminal event {} owner user id recovery resolved thread tenant {} that did not match child record tenant {}",
-                    event.run_id, thread_scope.tenant_id, child_record.scope.tenant_id
-                ),
+                reason: "subagent terminal event owner user id recovery resolved mismatched tenant"
+                    .to_string(),
             });
         }
         thread_scope
@@ -248,13 +268,9 @@ where
     async fn recover_missing_gate_record(
         &self,
         event: &TurnLifecycleEvent,
+        has_gate_record: bool,
     ) -> Result<(), TurnError> {
-        if self
-            .gate_store
-            .subagent_kind_for_child(event.run_id)
-            .map_err(map_host_error)?
-            .is_some()
-        {
+        if has_gate_record {
             return Ok(());
         }
         let Some(record) = self.reconstruct_record(event).await? else {
@@ -664,17 +680,7 @@ fn wrap_untrusted_subagent_text(value: String) -> String {
 }
 
 fn sanitize_untrusted_terminal_reason(value: &str) -> String {
-    let mut safe = sanitize_model_visible_text(value.to_string())
-        .chars()
-        .map(|character| match character {
-            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\' => ' ',
-            character if character == '\0' || character.is_control() => ' ',
-            character => character,
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut safe = sanitize_untrusted_text_body(value);
     if safe.len() > 512 {
         truncate_to_char_boundary(&mut safe, 512);
     }
@@ -682,17 +688,7 @@ fn sanitize_untrusted_terminal_reason(value: &str) -> String {
 }
 
 fn sanitize_tool_result_summary(value: String) -> String {
-    let mut safe = sanitize_model_visible_text(value)
-        .chars()
-        .map(|character| match character {
-            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\' => ' ',
-            character if character == '\0' || character.is_control() => ' ',
-            character => character,
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut safe = sanitize_untrusted_text_body(&value);
     if safe.len() > 512 {
         truncate_to_char_boundary(&mut safe, 512);
     }
@@ -701,6 +697,25 @@ fn sanitize_tool_result_summary(value: String) -> String {
     } else {
         "Subagent result available".to_string()
     }
+}
+
+fn sanitize_untrusted_text_body(value: &str) -> String {
+    let sanitized = sanitize_model_visible_text(value.to_string())
+        .chars()
+        .map(|character| match character {
+            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\' => ' ',
+            character if character == '\0' || character.is_control() => ' ',
+            character => character,
+        })
+        .collect::<String>();
+    let mut collapsed = String::new();
+    for part in sanitized.split_whitespace() {
+        if !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(part);
+    }
+    collapsed
 }
 
 fn truncate_to_char_boundary(value: &mut String, max_bytes: usize) {
@@ -819,7 +834,7 @@ fn parse_optional_subagent_thread_metadata(
         Err(error) => {
             tracing::warn!(
                 child_run_id = %child_run_id,
-                error = %error,
+                error_category = ?error.classify(),
                 "subagent completion recovery ignored malformed thread metadata"
             );
             return Ok(None);
@@ -830,7 +845,7 @@ fn parse_optional_subagent_thread_metadata(
         Err(error) => {
             tracing::warn!(
                 child_run_id = %child_run_id,
-                error = %error,
+                error_category = ?error.classify(),
                 "subagent completion recovery ignored malformed thread metadata"
             );
             Ok(None)
@@ -841,14 +856,11 @@ fn parse_optional_subagent_thread_metadata(
 fn peek_subagent_thread_kind(raw: &str) -> Result<Option<SubagentThreadKind>, serde_json::Error> {
     #[derive(serde::Deserialize)]
     struct ThreadMetadataKindProbe {
-        kind: Option<String>,
+        kind: Option<SubagentThreadKind>,
     }
 
     let probe = serde_json::from_str::<ThreadMetadataKindProbe>(raw)?;
-    Ok(match probe.kind.as_deref() {
-        Some("subagent") => Some(SubagentThreadKind::Subagent),
-        _ => None,
-    })
+    Ok(probe.kind)
 }
 
 fn parse_subagent_thread_metadata(
@@ -1054,19 +1066,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_optional_subagent_thread_metadata_returns_none_for_missing_raw() {
+        assert_eq!(
+            parse_optional_subagent_thread_metadata(None, TurnRunId::new()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
     fn parse_optional_subagent_thread_metadata_warns_on_invalid_json_without_raw_preview() {
         let raw = "{not json";
-        let logs = capture_logs(|| {
-            assert_eq!(
-                parse_optional_subagent_thread_metadata(Some(raw), TurnRunId::new()).unwrap(),
-                None
-            );
-        });
+        assert_eq!(
+            parse_optional_subagent_thread_metadata(Some(raw), TurnRunId::new()).unwrap(),
+            None
+        );
 
-        assert!(logs.iter().any(|line| {
-            line.contains("subagent completion recovery ignored malformed thread metadata")
-        }));
-        assert!(!logs.iter().any(|line| line.contains(raw)));
+        assert!(logs_contain(
+            "subagent completion recovery ignored malformed thread metadata"
+        ));
+        assert!(!logs_contain(raw));
     }
 
     struct RecordingResultWriter {
@@ -1488,69 +1507,6 @@ mod tests {
         )
     }
 
-    #[derive(Clone, Default)]
-    struct LogCapture(Arc<Mutex<Vec<String>>>);
-
-    impl LogCapture {
-        fn lines(&self) -> Vec<String> {
-            self.0.lock().unwrap().clone()
-        }
-    }
-
-    impl tracing::Subscriber for LogCapture {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _attrs: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            struct Visitor {
-                fields: Vec<String>,
-            }
-
-            impl tracing::field::Visit for Visitor {
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    self.fields
-                        .push(format!("{}={value:?}", field.name(), value = value));
-                }
-            }
-
-            let mut visitor = Visitor { fields: Vec::new() };
-            event.record(&mut visitor);
-            self.0.lock().unwrap().push(format!(
-                "{} {} {}",
-                event.metadata().level(),
-                event.metadata().target(),
-                visitor.fields.join(" ")
-            ));
-        }
-
-        fn enter(&self, _span: &tracing::span::Id) {}
-
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    fn capture_logs<F>(f: F) -> Vec<String>
-    where
-        F: FnOnce(),
-    {
-        let capture = LogCapture::default();
-        let dispatch = tracing::Dispatch::new(capture.clone());
-        tracing::dispatcher::with_default(&dispatch, f);
-        capture.lines()
-    }
-
     fn test_state(status: TurnStatus) -> TurnRunState {
         TurnRunState {
             scope: TurnScope::new(
@@ -1698,7 +1654,10 @@ mod tests {
             TurnRunId::new(),
         );
 
-        let error = observer.recover_owner_user_id(&event).await.unwrap_err();
+        let error = observer
+            .recover_owner_user_id(&event, None)
+            .await
+            .unwrap_err();
 
         assert!(
             matches!(error, TurnError::Unavailable { reason } if reason.contains("missing owner user id and run record"))
@@ -1737,10 +1696,13 @@ mod tests {
             .unwrap();
 
         let event = test_terminal_event(child_scope, run_id);
-        let error = observer.recover_owner_user_id(&event).await.unwrap_err();
+        let error = observer
+            .recover_owner_user_id(&event, None)
+            .await
+            .unwrap_err();
 
         assert!(
-            matches!(error, TurnError::Unavailable { reason } if reason.contains("did not match child record tenant"))
+            matches!(error, TurnError::Unavailable { reason } if reason == "subagent terminal event owner user id recovery resolved mismatched tenant")
         );
     }
 
@@ -1766,7 +1728,7 @@ mod tests {
         turn_state_store.add_record(test_turn_record(scope.clone(), run_id));
 
         let error = observer
-            .recover_owner_user_id(&test_terminal_event(scope, run_id))
+            .recover_owner_user_id(&test_terminal_event(scope, run_id), None)
             .await
             .unwrap_err();
 
@@ -1806,13 +1768,56 @@ mod tests {
             .unwrap();
 
         let error = observer
-            .recover_owner_user_id(&test_terminal_event(child_scope, run_id))
+            .recover_owner_user_id(&test_terminal_event(child_scope, run_id), None)
             .await
             .unwrap_err();
 
         assert!(
             matches!(error, TurnError::Unavailable { reason } if reason.contains("without owner user id"))
         );
+    }
+
+    #[tokio::test]
+    async fn recover_owner_user_id_uses_preloaded_child_record_when_available() {
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let (observer, _turn_state_store) = observer_with_thread_service(thread_service.clone());
+        let run_id = TurnRunId::new();
+        let thread_id = ThreadId::new("thread-preloaded").unwrap();
+        let child_scope = TurnScope::new(
+            TenantId::new("tenant1").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            None,
+            thread_id.clone(),
+        );
+        let owner = UserId::new("owner-preloaded").unwrap();
+        let child_record = test_turn_record(child_scope.clone(), run_id);
+
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: ThreadScope {
+                    tenant_id: child_scope.tenant_id.clone(),
+                    agent_id: child_scope.agent_id.clone().unwrap(),
+                    project_id: None,
+                    owner_user_id: Some(owner.clone()),
+                    mission_id: None,
+                },
+                thread_id: Some(thread_id),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        let recovered = observer
+            .recover_owner_user_id(
+                &test_terminal_event(child_scope, run_id),
+                Some(&child_record),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(recovered, owner);
     }
 
     #[tokio::test]
@@ -2344,7 +2349,7 @@ mod tests {
                 cursor: EventCursor(11),
                 scope: child_scope,
                 occurred_at: None,
-                owner_user_id: Some(owner),
+                owner_user_id: None,
                 run_id: child_run_id,
                 status: TurnStatus::Completed,
                 kind: TurnEventKind::Completed,
@@ -2749,6 +2754,7 @@ mod tests {
         let gate_ref = GateRef::new(format!("gate:subagent-{}", child_run_id)).unwrap();
         let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
         let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        turn_state_store.add_record(test_turn_record(child_scope.clone(), child_run_id));
         let mut parent_run_context =
             ironclaw_agent_loop::test_support::test_run_context("completion-observer-blocking");
         parent_run_context.scope = parent_scope.clone();
@@ -2791,7 +2797,7 @@ mod tests {
                 cursor: EventCursor(11),
                 scope: child_scope,
                 occurred_at: None,
-                owner_user_id: Some(owner),
+                owner_user_id: None,
                 run_id: child_run_id,
                 status: TurnStatus::Completed,
                 kind: TurnEventKind::Completed,
@@ -3243,6 +3249,7 @@ mod tests {
                 (parent_scope, parent_run_id, 1),
             ]
         );
+        assert!(gate_store.is_empty().unwrap());
     }
 
     #[tokio::test]
