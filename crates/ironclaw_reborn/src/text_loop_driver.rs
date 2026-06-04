@@ -18,7 +18,7 @@ use ironclaw_turns::{
 };
 
 use crate::failure_categories::{
-    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_SUMMARY,
+    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_REASON_KIND,
 };
 
 pub(crate) const TEXT_ONLY_DRIVER_ID: &str = "reborn:text-only-model-reply";
@@ -175,12 +175,13 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
     tracing::warn!(
         stage,
         kind = ?error.kind,
+        reason_kind = ?error.reason_kind,
         diagnostic_ref = ?error.diagnostic_ref,
         safe_summary = %error.safe_summary,
         "loop host port returned sanitized error"
     );
 
-    if stage == STAGE_MODEL && error.safe_summary == MODEL_CREDITS_EXHAUSTED_SUMMARY {
+    if stage == STAGE_MODEL && error.reason_kind == Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND) {
         return AgentLoopDriverError::Failed {
             reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
         };
@@ -270,14 +271,35 @@ mod tests {
             "model",
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::CredentialUnavailable,
-                MODEL_CREDITS_EXHAUSTED_SUMMARY,
-            ),
+                "safe summary wording is display-only",
+            )
+            .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
         );
 
         assert_eq!(
             mapped,
             AgentLoopDriverError::Failed {
                 reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn non_model_stage_with_credit_reason_does_not_map_to_credits_category() {
+        const CREDIT_SUMMARY: &str = "model provider account is out of credits";
+        let mapped = map_host_error(
+            "prompt",
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::CredentialUnavailable,
+                CREDIT_SUMMARY,
+            )
+            .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string()
             }
         );
     }

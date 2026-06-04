@@ -36,10 +36,11 @@ use ironclaw_turns::{
     LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
     TurnId, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
+        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
+        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
+        FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
@@ -3072,6 +3073,41 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
     }
 }
 
+#[tokio::test]
+async fn model_port_preserves_gateway_safe_reason_kind() {
+    let fixture = ThreadFixture::new().await;
+    let gateway = Arc::new(RecordingGateway::model_error_with_reason_kind(
+        HostManagedModelErrorKind::CredentialUnavailable,
+        "display summary can change without changing the reason",
+        AgentLoopHostErrorReasonKind::ModelCreditsExhausted,
+    ));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::CredentialUnavailable);
+    assert_eq!(
+        error.reason_kind,
+        Some(AgentLoopHostErrorReasonKind::ModelCreditsExhausted)
+    );
+}
+
 #[derive(Clone)]
 struct StaticLoopContextPort {
     bundle: LoopContextBundle,
@@ -3938,6 +3974,20 @@ impl RecordingGateway {
             calls: Mutex::new(Vec::new()),
             tool_definition_calls: Mutex::new(Vec::new()),
             response: Err(HostManagedModelError::safe(kind, safe_summary)),
+        }
+    }
+
+    fn model_error_with_reason_kind(
+        kind: HostManagedModelErrorKind,
+        safe_summary: &str,
+        reason_kind: AgentLoopHostErrorReasonKind,
+    ) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Err(
+                HostManagedModelError::safe(kind, safe_summary).with_reason_kind(reason_kind)
+            ),
         }
     }
 

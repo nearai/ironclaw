@@ -56,8 +56,8 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopCancelledReasonKind, LoopDiagnosticRef, LoopExit,
     run_profile::{
-        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, LoopInputAckToken,
-        LoopSafeSummary,
+        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind,
+        AgentLoopHostErrorReasonKind, LoopInputAckToken, LoopSafeSummary,
     },
 };
 
@@ -98,6 +98,7 @@ pub enum AgentLoopExecutorError {
         stage: HostStage,
         kind: AgentLoopHostErrorKind,
         safe_summary: LoopSafeSummary,
+        reason_kind: Option<AgentLoopHostErrorReasonKind>,
         diagnostic_ref: Option<LoopDiagnosticRef>,
     },
     #[error("planner returned a contract violation: {detail}")]

@@ -119,18 +119,18 @@ use ironclaw_turns::{
     LoopMessageRef, TurnId, TurnRunId,
     run_profile::ModelProfileId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
-        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-        LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor,
-        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
-        LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
-        LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
-        sort_instruction_snippets_for_prompt,
+        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
+        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
+        CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
+        InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
+        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage,
+        LoopContextPort, LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter,
+        LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
+        LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRunContext,
+        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
+        PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -1464,6 +1464,7 @@ pub enum HostManagedModelErrorKind {
 pub struct HostManagedModelError {
     pub kind: HostManagedModelErrorKind,
     pub safe_summary: String,
+    pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
 }
 
 impl HostManagedModelError {
@@ -1471,6 +1472,7 @@ impl HostManagedModelError {
         Self {
             kind,
             safe_summary: safe_model_summary(kind).to_string(),
+            reason_kind: None,
         }
     }
 
@@ -1478,7 +1480,13 @@ impl HostManagedModelError {
         Self {
             kind,
             safe_summary: safe_summary.into(),
+            reason_kind: None,
         }
+    }
+
+    pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
+        self.reason_kind = Some(reason_kind);
+        self
     }
 }
 
@@ -1754,7 +1762,11 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     } else {
         safe_model_summary(error.kind).to_string()
     };
-    AgentLoopHostError::new(model_error_kind(error.kind), safe_summary)
+    let mut host_error = AgentLoopHostError::new(model_error_kind(error.kind), safe_summary);
+    if let Some(reason_kind) = error.reason_kind {
+        host_error = host_error.with_reason_kind(reason_kind);
+    }
+    host_error
 }
 
 fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {

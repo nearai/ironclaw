@@ -67,14 +67,19 @@ where
 
 fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
     let diagnostic_ref = error.diagnostic_ref;
+    let reason_kind = error.reason_kind;
     let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
         Ok(error) => error,
         Err(_) => LoopModelGatewayError {
             kind: error.kind,
             safe_summary: LoopSafeSummary::model_gateway_failed(),
+            reason_kind: None,
             diagnostic_ref: None,
         },
     };
+    if let Some(reason_kind) = reason_kind {
+        converted = converted.with_reason_kind(reason_kind);
+    }
     if let Some(diagnostic_ref) = diagnostic_ref {
         converted = converted.with_diagnostic_ref(diagnostic_ref);
     }

@@ -26,7 +26,7 @@ use ironclaw_turns::{
 };
 
 use crate::failure_categories::{
-    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_SUMMARY,
+    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_REASON_KIND,
 };
 
 pub const PLANNED_DRIVER_DEFAULT_ID: &str = "reborn:planned-default";
@@ -235,16 +235,18 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             stage,
             kind,
             safe_summary,
+            reason_kind,
             diagnostic_ref,
         } => {
             tracing::warn!(
                 stage = ?stage,
                 kind = ?kind,
+                reason_kind = ?reason_kind,
                 diagnostic_ref = ?diagnostic_ref,
                 safe_summary = %safe_summary,
                 "planned driver host stage unavailable"
             );
-            if stage == HostStage::Model && safe_summary.as_str() == MODEL_CREDITS_EXHAUSTED_SUMMARY
+            if stage == HostStage::Model && reason_kind == Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
             {
                 return AgentLoopDriverError::Failed {
                     reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
@@ -438,6 +440,7 @@ mod tests {
             stage: HostStage::Model,
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
+            reason_kind: None,
             diagnostic_ref: None,
         });
 
@@ -454,7 +457,9 @@ mod tests {
         let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
             stage: HostStage::Model,
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
-            safe_summary: LoopSafeSummary::new(MODEL_CREDITS_EXHAUSTED_SUMMARY).expect("safe"),
+            safe_summary: LoopSafeSummary::new("safe summary wording is display-only")
+                .expect("safe"),
+            reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
             diagnostic_ref: None,
         });
 
@@ -462,6 +467,25 @@ mod tests {
             mapped,
             AgentLoopDriverError::Failed {
                 reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn non_model_stage_with_credit_reason_maps_to_unavailable() {
+        const CREDIT_SUMMARY: &str = "model provider account is out of credits";
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::CredentialUnavailable,
+            safe_summary: LoopSafeSummary::new(CREDIT_SUMMARY).expect("safe"),
+            reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
+            diagnostic_ref: None,
+        });
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Unavailable {
+                reason: format!("Prompt: {CREDIT_SUMMARY}")
             }
         );
     }

@@ -26,14 +26,14 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostErrorKind, CapabilitySurfaceVersion, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, InstructionSafetyContext,
-        LoopCapabilityPort, LoopHostMilestoneKind, LoopModelGateway, LoopModelGatewayRequest,
-        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, ModelProfileId, ParentLoopOutput, PromptMode, ProviderToolCall,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, CapabilitySurfaceVersion,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
+        InMemoryRunProfileResolver, InstructionSafetyContext, LoopCapabilityPort,
+        LoopHostMilestoneKind, LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        ModelProfileId, ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay,
+        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use rust_decimal::Decimal;
@@ -1781,6 +1781,10 @@ async fn gateway_maps_nearai_credit_exhaustion_to_safe_summary() {
     assert_eq!(
         error.safe_summary,
         "model provider account is out of credits"
+    );
+    assert_eq!(
+        error.reason_kind,
+        Some(AgentLoopHostErrorReasonKind::ModelCreditsExhausted)
     );
     assert!(!format!("{error:?}").contains("RAW_PROVIDER_SECRET"));
 }
