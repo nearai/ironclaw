@@ -32,13 +32,18 @@ use ironclaw_turns::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter};
+use crate::{
+    CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    subagent_prompt_port::DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
+};
 
 pub const DEFAULT_SUBAGENT_MAX_DEPTH: u32 = 1;
 pub const DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN: u32 = 4;
 pub const DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS: u32 = 16;
 pub const DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID: &str = "builtin.spawn_subagent";
 const SPAWN_SUBAGENT_PROVIDER_TOOL_NAME: &str = "builtin__spawn_subagent";
+pub(crate) const SPAWN_SUBAGENT_DESCRIPTION: &str =
+    "Spawn a scoped child subagent to handle a focused task and return its result.";
 
 fn spawn_subagent_parameters_schema() -> serde_json::Value {
     serde_json::json!({
@@ -52,10 +57,12 @@ fn spawn_subagent_parameters_schema() -> serde_json::Value {
             },
             "task": {
                 "type": "string",
+                "maxLength": DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
                 "description": "Self-contained task for the child subagent run."
             },
             "handoff": {
                 "type": "string",
+                "maxLength": DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
                 "description": "Optional context appended to the child subagent prompt."
             }
         }
@@ -179,6 +186,14 @@ impl TryFrom<SpawnSubagentWireArgs> for SpawnSubagentArgs {
         }
         if value.mode == Some(SpawnSubagentWireMode::Background) {
             return Err(background_subagents_disabled());
+        }
+        if value.task.len() > DEFAULT_SUBAGENT_GOAL_MAX_BYTES {
+            return Err(spawn_goal_field_too_large("task", value.task.len()));
+        }
+        if let Some(handoff) = value.handoff.as_deref()
+            && handoff.len() > DEFAULT_SUBAGENT_GOAL_MAX_BYTES
+        {
+            return Err(spawn_goal_field_too_large("handoff", handoff.len()));
         }
         Ok(Self {
             subagent_kind: value.subagent_kind,
@@ -431,9 +446,7 @@ impl SubagentSpawnCapabilityPort {
         ProviderToolDefinition {
             capability_id: self.spawn_id.clone(),
             name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
-            description:
-                "Spawn a scoped child subagent to handle a focused task and return its result."
-                    .to_string(),
+            description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
             parameters: spawn_subagent_parameters_schema(),
         }
     }
@@ -444,12 +457,25 @@ impl SubagentSpawnCapabilityPort {
             provider: None,
             runtime: RuntimeKind::FirstParty,
             safe_name: self.spawn_id.as_str().to_string(),
-            safe_description:
-                "Spawn a scoped child subagent to handle a focused task and return its result."
-                    .to_string(),
+            safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
             concurrency_hint: ConcurrencyHint::Exclusive,
             parameters_schema: spawn_subagent_parameters_schema(),
         }
+    }
+
+    fn validate_spawn_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        serde_json::from_value::<SpawnSubagentWireArgs>(tool_call.arguments.clone())
+            .map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    format!("invalid spawn_subagent input: {error}"),
+                )
+            })?
+            .try_into()
+            .map(|_: SpawnSubagentArgs| ())
     }
 
     fn try_reserve_spawn_slot(&self) -> bool {
@@ -866,7 +892,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         tool_call: &ProviderToolCall,
     ) -> Result<(), AgentLoopHostError> {
         if self.is_spawn_provider_tool_name(&tool_call.name) {
-            return Ok(());
+            return self.validate_spawn_provider_tool_call(tool_call);
         }
         self.inner.validate_provider_tool_call(tool_call)
     }
@@ -1118,6 +1144,15 @@ fn background_subagents_disabled() -> AgentLoopHostError {
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::InvalidInvocation,
         "background subagents are disabled pending durable completion delivery design (#4147)",
+    )
+}
+
+fn spawn_goal_field_too_large(field: &'static str, len: usize) -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        format!(
+            "spawn_subagent {field} is too large: {len} bytes (max {DEFAULT_SUBAGENT_GOAL_MAX_BYTES})"
+        ),
     )
 }
 
