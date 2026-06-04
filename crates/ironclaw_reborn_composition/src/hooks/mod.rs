@@ -111,12 +111,23 @@ pub struct HooksActivationConfig {
     /// declaration is discovered and projected. Default OFF: with this off the
     /// activation path is byte-identical to the builtin-only #3938 behavior.
     ///
-    /// **Filesystem-hardening gate (read before flipping in production):**
+    /// **Production-enablement gate (read before flipping in production):**
     /// `HOOKS_THIRD_PARTY_ENABLED` MUST NOT be enabled in multi-tenant
-    /// production until the `openat2(RESOLVE_BENEATH)` / `O_NOFOLLOW` backend
-    /// hardening lands. v1 ships a projection-layer strict-child / no-`..` /
-    /// no-symlink-escape containment check plus the canonicalizing local
-    /// backend; that is the documented gating follow-up.
+    /// production until BOTH prerequisites land:
+    ///
+    /// 1. **Filesystem hardening:** an `openat2(RESOLVE_BENEATH)` / `O_NOFOLLOW`
+    ///    backend. v1 ships a projection-layer strict-child / no-`..` /
+    ///    no-symlink-escape containment check plus the canonicalizing local
+    ///    backend as the interim mitigation; the hardened backend is the
+    ///    documented gating follow-up.
+    /// 2. **Durable quarantine surfacing:** `hook.quarantined` security-audit
+    ///    events are emitted only via `tracing` at the `security_audit` target
+    ///    and at `debug!` level (see [`crate::hooks::audit`]). Production
+    ///    typically disables debug logging, so operators would have no
+    ///    visibility into active quarantine activity (e.g. an extension
+    ///    attempting a scope escalation) unless `RUST_LOG=security_audit=debug`
+    ///    is explicitly set. A durable sink for these events must land before
+    ///    production enablement.
     third_party_enabled: bool,
 }
 

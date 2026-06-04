@@ -832,12 +832,18 @@ pub async fn build_reborn_runtime(
     // authenticated identity, and the discovery root is DERIVED from
     // `tenant_id`, never caller-supplied.
     //
-    // FS-hardening gate: `HOOKS_THIRD_PARTY_ENABLED` MUST NOT be enabled in
-    // multi-tenant production until `openat2(RESOLVE_BENEATH)` / `O_NOFOLLOW`
-    // backend hardening lands. v1 ships the projection-layer strict-child /
-    // no-`..` / no-symlink-escape containment check plus the canonicalizing
-    // local backend. With the sub-flag OFF, this path is byte-identical to
-    // #3938 (builtin-only).
+    // Production-enablement gate: `HOOKS_THIRD_PARTY_ENABLED` MUST NOT be
+    // enabled in multi-tenant production until BOTH prerequisites land:
+    //   1. FS hardening — an `openat2(RESOLVE_BENEATH)` / `O_NOFOLLOW` backend.
+    //      v1 ships the projection-layer strict-child / no-`..` /
+    //      no-symlink-escape containment check plus the canonicalizing local
+    //      backend as the interim mitigation.
+    //   2. Durable quarantine surfacing — `hook.quarantined` audit events are
+    //      emitted only via `tracing` at the `security_audit` target / `debug!`
+    //      level (see `crate::hooks::audit`), which production typically
+    //      disables; a durable sink must land so operators retain visibility
+    //      into quarantine activity. See `HooksActivationConfig` for details.
+    // With the sub-flag OFF, this path is byte-identical to #3938 (builtin-only).
     let hook_dispatcher_builder_factory = {
         let third_party_input = crate::hooks::ThirdPartyDiscoveryInput {
             filesystem: local_runtime.extension_filesystem.as_ref(),

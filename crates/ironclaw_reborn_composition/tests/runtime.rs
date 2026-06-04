@@ -263,6 +263,13 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
     .await
     .unwrap()
     .unwrap();
+    // TODO(coverage gap, inherited from the removed test): the stub local-dev
+    // gateway cancels the turn before any capability call dispatches, so this
+    // asserts `Cancelled` rather than observing the projected `deny-run` hook
+    // actually firing on `example-hook-ext.run`. The wiring (discovery +
+    // projection + tenant threading) is exercised at build/start; end-to-end
+    // hook *enforcement* through `build_reborn_runtime` still needs a harness
+    // that drives a real capability call to completion.
     assert_eq!(reply.status, TurnStatus::Cancelled);
 
     runtime.shutdown().await.unwrap();

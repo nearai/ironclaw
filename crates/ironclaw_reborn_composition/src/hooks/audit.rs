@@ -3,7 +3,10 @@
 //! Composition is a pre-run phase (no run-scoped `LoopHostMilestoneSink` exists
 //! yet), so quarantine decisions are surfaced via `tracing` at a stable,
 //! filterable target rather than a durable sink. Durable surfacing is a
-//! documented follow-up.
+//! documented follow-up — and a hard prerequisite for production enablement of
+//! `HOOKS_THIRD_PARTY_ENABLED`, alongside `openat2` FS hardening. See the
+//! production-enablement gate on
+//! [`crate::hooks::HooksActivationConfig`] for the full prerequisite list.
 
 /// Structured target for the security-audit `tracing` channel. Composition is a
 /// pre-run phase (no run-scoped `LoopHostMilestoneSink` exists yet), so

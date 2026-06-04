@@ -193,12 +193,16 @@ fn composition_crate_installs_installed_tier_only_through_registrar() {
     );
 }
 
-/// Strip a trailing `#[cfg(test)] mod tests { .. }` unit-test module so the
+/// Strip trailing `#[cfg(test)] mod <name> { .. }` unit-test module(s) so the
 /// architecture invariant applies to production code only (tests legitimately
-/// exercise builder APIs directly). Matches the module attribute line
-/// specifically — a bare `#[cfg(test)]` substring also appears in doc comments.
+/// exercise builder APIs directly). Matches the `#[cfg(test)]` attribute line
+/// immediately followed by a `mod ` declaration of ANY name (so a refactor that
+/// renames `mod tests` or adds a second `#[cfg(test)] mod` block is still fully
+/// stripped), and cuts from the FIRST such occurrence onward — a bare
+/// `#[cfg(test)]` substring also appears in doc comments, hence the `\nmod `
+/// anchor rather than a bare match.
 fn strip_test_module(contents: &str) -> &str {
-    match contents.find("#[cfg(test)]\nmod tests") {
+    match contents.find("#[cfg(test)]\nmod ") {
         Some(idx) => &contents[..idx],
         None => contents,
     }
