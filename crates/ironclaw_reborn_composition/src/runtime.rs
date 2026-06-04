@@ -93,7 +93,8 @@ use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{
-    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings,
+    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
+    TriggerPollerSettings,
 };
 use crate::trigger_poller::{
     ConversationContentRefMaterializer, LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup,
@@ -336,12 +337,16 @@ fn validate_trigger_poller_authorization(
     trigger_poller: &TriggerPollerSettings,
 ) -> Result<(), RebornRuntimeError> {
     debug_assert!(trigger_poller.enabled);
-    if !trigger_poller.allow_tenant_scoped_authorizer_without_creator_membership {
-        return Err(RebornRuntimeError::InvalidArgument {
-            reason: "trigger poller cannot be enabled until fire-time creator authorization is backed by the real agent/project membership source of truth".to_string(),
-        });
+    match trigger_poller.authorizer {
+        #[cfg(any(test, feature = "test-support"))]
+        TriggerPollerAuthorizerConfig::TenantScopedPlaceholderForTest => Ok(()),
+        TriggerPollerAuthorizerConfig::CreatorMembershipRequired => {
+            let reason = "trigger poller cannot be enabled until fire-time creator authorization is backed by the real agent/project membership source of truth";
+            Err(RebornRuntimeError::InvalidArgument {
+                reason: reason.to_string(),
+            })
+        }
     }
-    Ok(())
 }
 
 struct TriggerPollerServicesInner {

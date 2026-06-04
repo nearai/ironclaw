@@ -135,7 +135,14 @@ pub struct TriggerPollerSettings {
     pub worker: TriggerPollerWorkerConfig,
     pub startup_jitter_max: Duration,
     pub tick_jitter_max: Duration,
-    pub(crate) allow_tenant_scoped_authorizer_without_creator_membership: bool,
+    pub(crate) authorizer: TriggerPollerAuthorizerConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerPollerAuthorizerConfig {
+    CreatorMembershipRequired,
+    #[cfg(any(test, feature = "test-support"))]
+    TenantScopedPlaceholderForTest,
 }
 
 impl Default for TriggerPollerSettings {
@@ -145,7 +152,7 @@ impl Default for TriggerPollerSettings {
             worker: TriggerPollerWorkerConfig::default(),
             startup_jitter_max: Duration::ZERO,
             tick_jitter_max: Duration::ZERO,
-            allow_tenant_scoped_authorizer_without_creator_membership: false,
+            authorizer: TriggerPollerAuthorizerConfig::CreatorMembershipRequired,
         }
     }
 }
@@ -170,7 +177,7 @@ impl TriggerPollerSettings {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_tenant_scoped_authorizer_for_test(mut self) -> Self {
-        self.allow_tenant_scoped_authorizer_without_creator_membership = true;
+        self.authorizer = TriggerPollerAuthorizerConfig::TenantScopedPlaceholderForTest;
         self
     }
 }
