@@ -25,8 +25,9 @@
  *   - Subscribers receive a snapshot Map; the internal map is never
  *     handed out so a misbehaving listener cannot mutate the store.
  *
- * No persistence. Server-truth re-seeds via the writer on reconnect,
- * so reload-loss is acceptable.
+ * Persistence: NEEDS_ATTENTION and FAILED survive page refresh via
+ * localStorage (key: ironclaw:v2-thread-attention). RUNNING is not persisted;
+ * see PERSISTED_STATES below for the full rationale.
  */
 
 import { React } from "./html.js";
@@ -38,20 +39,31 @@ export const THREAD_STATE = Object.freeze({
   FAILED: "failed",
 });
 
-/* Persistence policy: only the "the user has something to do" subset
- * survives reload. RUNNING is the most-likely-stale state across a page
- * lifetime (the run almost certainly completed while the tab was closed),
- * so writing it to localStorage would cause confusing false-positive
- * green dots on first load. NEEDS_ATTENTION is the opposite — a pending
- * gate remains pending until the user acts, so persisting it is exactly
- * what the user expects ("I left an approval hanging; the app remembered").
- * FAILED is not yet populated by any writer but is treated like
+/* Only the "user must act" subset survives page refresh.
+ *
+ * RUNNING is intentionally excluded: across a page lifetime the run almost
+ * certainly completed while the tab was closed, so a persisted RUNNING
+ * would show a false-positive green dot on reload.
+ *
+ * NEEDS_ATTENTION is the opposite — a pending gate remains pending until
+ * the user acts. Persisting it is exactly what the user expects
+ * ("I left an approval hanging; the app remembered").
+ *
+ * FAILED is not yet populated by any writer but is grouped with
  * NEEDS_ATTENTION for symmetry when it lands. */
 const PERSISTED_STATES = new Set([
   THREAD_STATE.NEEDS_ATTENTION,
   THREAD_STATE.FAILED,
 ]);
 const STORAGE_KEY = "ironclaw:v2-thread-attention";
+
+// ── Module state (declared before the functions that mutate it) ────────
+
+const subscribers = new Set();
+/** @type {Map<string, string>} */
+const states = new Map();
+
+// ── Storage helpers ────────────────────────────────────────────────────
 
 function readPersisted() {
   try {
@@ -87,23 +99,19 @@ function writePersisted() {
   }
 }
 
-const subscribers = new Set();
-/** @type {Map<string, string>} */
-const states = new Map();
-
 // Seed from previous session so a pending approval survives page refresh.
 for (const [id, state] of readPersisted()) {
   states.set(id, state);
 }
 
+// ── Internal helpers ───────────────────────────────────────────────────
+
 function snapshot() {
   return new Map(states);
 }
 
+/* Notify subscribers with a fresh snapshot. Pure — no side-effects. */
 function emit() {
-  // Persist before notifying so subscribers reading the store observe a
-  // consistent in-memory + persisted view.
-  writePersisted();
   const snap = snapshot();
   for (const listener of subscribers) {
     try {
@@ -118,15 +126,22 @@ function emit() {
  * Set the state of a thread. Passing `null`/`undefined` clears the
  * entry, returning the thread to the implicit `idle`. No-op when the
  * new state matches the current one (suppresses redundant emits).
+ *
+ * Writes to localStorage only when the persisted subset (NEEDS_ATTENTION,
+ * FAILED) actually changes — RUNNING transitions never touch storage.
  */
 export function setThreadState(threadId, state) {
   if (!threadId) return;
+  const prevState = states.get(threadId);
   if (state == null) {
-    if (states.delete(threadId)) emit();
+    if (!states.delete(threadId)) return;
+    if (PERSISTED_STATES.has(prevState)) writePersisted();
+    emit();
     return;
   }
-  if (states.get(threadId) === state) return;
+  if (prevState === state) return;
   states.set(threadId, state);
+  if (PERSISTED_STATES.has(state) || PERSISTED_STATES.has(prevState)) writePersisted();
   emit();
 }
 
