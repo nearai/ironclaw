@@ -837,7 +837,7 @@ Two gaps block shipping user-creatable cron jobs:
    `ironclaw_conversations`; product/adapter crates cannot mint host-trusted
    inbound turns directly. Fire-time creator authorization is still a
    tenant-ID-equality placeholder
-   (`TrustedTenantTriggerFireAuthorizer`), not wired to a real agent/project
+   (`TenantScopedTrustedTriggerFireAuthorizer`), not wired to a real agent/project
    access source. Both are plan-mandated before any user-visible trigger launch
    path or external delivery ships (see PR 18 follow-up status and PR 19).
 
@@ -927,7 +927,7 @@ Three independent tracks branch from the PR 18 baseline.
   `creator_user_id`, `agent_id`, `project_id`, `trigger_id`, and `fire_slot`
   (today the trait takes the whole `TriggerFire`).
 - Implement the port against the real agent/project access-control source of
-  truth (today `TrustedTenantTriggerFireAuthorizer` checks tenant-ID equality
+  truth (today `TenantScopedTrustedTriggerFireAuthorizer` checks tenant-ID equality
   only). If no real source exists, keep external delivery disabled.
 - Add a `TriggerFireAuthError::Retryable` variant for backend unavailability;
   `Denied`/revoked stays permanent (clear claim, advance slot); retryable does

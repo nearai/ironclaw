@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::runtime_input::TriggerPollerSettings;
 pub(crate) use crate::trigger_poller_trusted_submit::{
-    ConversationContentRefMaterializer, TrustedTenantTriggerFireAuthorizer,
+    ConversationContentRefMaterializer, TenantScopedTrustedTriggerFireAuthorizer,
 };
 
 pub(crate) const TRIGGER_POLLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
