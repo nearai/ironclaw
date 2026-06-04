@@ -77,8 +77,6 @@ mod provider_admin_product_command;
 #[cfg(feature = "root-llm-provider")]
 mod provider_repo;
 mod readiness;
-#[cfg(feature = "slack-v2-host-beta")]
-mod reborn_identity_actor;
 mod runtime;
 mod runtime_input;
 mod skill_listing;
@@ -188,8 +186,6 @@ pub use provider_repo::{ProviderRepo, ProviderRepoError};
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessState, RebornWorkerReadiness,
 };
-#[cfg(feature = "slack-v2-host-beta")]
-pub use reborn_identity_actor::CanonicalRebornUserIdentityStore;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,

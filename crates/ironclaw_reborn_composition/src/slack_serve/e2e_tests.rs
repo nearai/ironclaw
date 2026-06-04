@@ -58,11 +58,8 @@ use crate::slack_delivery::{
     SlackFinalReplyDeliverySettings,
 };
 use crate::{
-    CanonicalRebornUserIdentityStore, RebornIdentityProviderId, RebornIdentityProviderUserId,
-    RebornUserIdentityBinding, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
-    RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
+    RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
 };
-use ironclaw_reborn_identity::RebornLibSqlIdentityStore;
 
 const TENANT: &str = "tenant:slack";
 const AGENT: &str = "agent:slack";
@@ -83,22 +80,6 @@ struct Harness {
     state: SlackEventsRouteState,
     egress: RecordingEgress,
     approvals: Arc<RecordingApprovalInteractionService>,
-    coordinator_state: Arc<Mutex<RecordingTurnState>>,
-}
-
-impl Harness {
-    /// The canonical `UserId`s turns were submitted under — i.e. the
-    /// binding-resolved actors. Lets a test assert the binding used the
-    /// resolved canonical user, not just that a reply was delivered.
-    fn submitted_actor_user_ids(&self) -> Vec<String> {
-        self.coordinator_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .submitted_actors
-            .iter()
-            .map(|actor| actor.user_id.as_str().to_string())
-            .collect()
-    }
 }
 
 type HmacSha256 = Hmac<sha2::Sha256>;
@@ -224,7 +205,6 @@ async fn build_harness_with_actor_user_resolver(
 
     let threads = InMemorySessionThreadService::default();
     let coordinator = RecordingTurnCoordinator::new(threads.clone(), mode);
-    let coordinator_state = coordinator.state.clone();
     let approvals = Arc::new(RecordingApprovalInteractionService::new(
         coordinator.clone(),
         threads.clone(),
@@ -299,7 +279,6 @@ async fn build_harness_with_actor_user_resolver(
         state,
         egress,
         approvals,
-        coordinator_state,
     }
 }
 
@@ -317,48 +296,6 @@ fn user_identity_actor_user_resolver() -> Arc<dyn ProductActorUserResolver> {
             UserId::new(USER).expect("user"), // safety: static test user id is valid.
         )]),
     )))
-}
-
-/// Open a fresh canonical Reborn identity store (issue #4381) on a temp
-/// libSQL db and return a Slack actor resolver backed by it. When
-/// `bind_actor` is set, the Slack actor is bound to that user first
-/// (mirroring the personal-binding flow after the user authenticated);
-/// otherwise the store has no binding and the actor must fail closed.
-async fn canonical_identity_actor_user_resolver(
-    bind_actor: Option<&str>,
-) -> Arc<dyn ProductActorUserResolver> {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    // Leak the tempdir so the libSQL file outlives the harness.
-    let path = tmp.keep().join("reborn-local-dev.db");
-    let db = Arc::new(
-        libsql::Builder::new_local(&path)
-            .build()
-            .await
-            .expect("open libsql"),
-    );
-    let canonical = Arc::new(
-        RebornLibSqlIdentityStore::open(db)
-            .await
-            .expect("open canonical identity store"),
-    );
-    let store = Arc::new(CanonicalRebornUserIdentityStore::new(
-        canonical,
-        TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-    ));
-    if let Some(user) = bind_actor {
-        store
-            .bind_user_identity(RebornUserIdentityBinding {
-                provider: RebornIdentityProviderId::new("slack").expect("provider"),
-                provider_user_id: RebornIdentityProviderUserId::new(format!(
-                    "{INSTALLATION}:{SLACK_USER}"
-                ))
-                .expect("subject"),
-                user_id: UserId::new(user).expect("user"),
-            })
-            .await
-            .expect("bind canonical identity");
-    }
-    Arc::new(SlackUserIdentityActorResolver::new(store))
 }
 
 #[tokio::test]
@@ -420,68 +357,6 @@ async fn slack_dm_for_personally_bound_user_routes_through_reborn_identity() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["channel"], CHANNEL);
     assert_eq!(messages[0]["text"], "hello personal Slack binding");
-}
-
-#[tokio::test]
-async fn slack_dm_for_canonically_bound_actor_routes_through_canonical_identity_store() {
-    // The Slack actor resolves through the SAME canonical Reborn identity
-    // store as WebUI OAuth login (issue #4381), not a parallel one. The
-    // reply being delivered proves the canonical store resolved the bound
-    // actor and the conversation binding ran under the resolved user; an
-    // unresolved actor would fail closed with BindingRequired (see the
-    // unbound test below) and deliver nothing.
-    let harness = build_harness_with_actor_user_resolver(
-        TurnMode::Complete {
-            assistant_text: "hello canonical binding".into(),
-        },
-        canonical_identity_actor_user_resolver(Some(USER)).await,
-    )
-    .await;
-
-    let response = harness
-        .post_event(dm_message("Ev-canonical", "hello"))
-        .await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_body(response, "ok").await;
-    harness.drain().await;
-
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["channel"], CHANNEL);
-    assert_eq!(messages[0]["text"], "hello canonical binding");
-
-    // Direct proof (AC #6): the turn was submitted under the canonical
-    // `UserId` the binding resolved from the canonical identity store —
-    // not a hardcoded or default user.
-    assert_eq!(
-        harness.submitted_actor_user_ids(),
-        vec![USER.to_string()],
-        "the conversation binding must run the turn under the resolved canonical UserId"
-    );
-}
-
-#[tokio::test]
-async fn slack_dm_for_unbound_canonical_actor_fails_closed() {
-    // No binding in the canonical store → the actor resolves to `None` →
-    // conversation binding fails closed and NO reply is delivered. Proves
-    // channel actors are link-only: messaging the bot does not
-    // auto-provision a Reborn account.
-    let harness = build_harness_with_actor_user_resolver(
-        TurnMode::Complete {
-            assistant_text: "must not send".into(),
-        },
-        canonical_identity_actor_user_resolver(None).await,
-    )
-    .await;
-
-    let _ = harness.post_event(dm_message("Ev-unbound", "hello")).await;
-    harness.drain().await;
-
-    assert!(
-        harness.slack_messages().is_empty(),
-        "an unbound channel actor must fail closed, never auto-provision"
-    );
 }
 
 #[tokio::test]
@@ -578,9 +453,6 @@ struct RecordingTurnCoordinator {
 struct RecordingTurnState {
     runs: std::collections::HashMap<TurnRunId, TurnRunState>,
     blocked_run_id: Option<TurnRunId>,
-    /// Every actor a turn was submitted under, captured so tests can assert
-    /// the turn ran as the binding-resolved canonical `UserId`.
-    submitted_actors: Vec<TurnActor>,
 }
 
 impl RecordingTurnCoordinator {
@@ -589,7 +461,6 @@ impl RecordingTurnCoordinator {
             state: Arc::new(Mutex::new(RecordingTurnState {
                 runs: std::collections::HashMap::new(),
                 blocked_run_id: None,
-                submitted_actors: Vec::new(),
             })),
             threads,
             mode,
@@ -641,11 +512,6 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .submitted_actors
-            .push(request.actor.clone());
         let run_id = request.requested_run_id.unwrap_or_default();
         let status = match &self.mode {
             TurnMode::Complete { assistant_text } => {
@@ -956,10 +822,6 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         ("Ev-approve", "approve") => DM_APPROVE,
         ("Ev-forged", "hello") => DM_FORGED,
         ("Ev-identity", "hello") => DM_IDENTITY,
-        // Canonical-identity tests reuse the same `SLACK_USER` DM fixture;
-        // they differ only in whether the canonical store has a binding.
-        ("Ev-canonical", "hello") => DM_IDENTITY,
-        ("Ev-unbound", "hello") => DM_IDENTITY,
         _ => panic!("unknown fixture"),
     }
 }
