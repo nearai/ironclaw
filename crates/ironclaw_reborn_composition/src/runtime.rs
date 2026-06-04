@@ -31,8 +31,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
 use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
@@ -275,13 +273,12 @@ async fn build_trigger_poller_services(
     let authorizer = Arc::new(TrustedTenantTriggerFireAuthorizer::new(tenant_id));
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     {
-        let conversations = RebornFilesystemConversationServices::new(Arc::clone(
-            &local_runtime.subagent_goal_filesystem,
-        ))
-        .await
-        .map_err(|error| RebornRuntimeError::InvalidArgument {
-            reason: format!("trigger conversation services unavailable: {error}"),
-        })?;
+        let conversations = local_runtime
+            .durable_trigger_conversation_services()
+            .await
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("trigger conversation services unavailable: {error}"),
+            })?;
         #[cfg(any(test, feature = "test-support"))]
         let pairing_service: Arc<
             dyn ironclaw_conversations::ConversationActorPairingService,

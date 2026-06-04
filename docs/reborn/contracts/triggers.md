@@ -324,8 +324,21 @@ The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_re
   persists the trigger. This pairing is composition-owned trigger management
   wiring; trigger repositories remain storage-only, and the poller must still
   fail closed for records whose creator actor was not paired.
+- `trigger_create` pairs the creator before persisting the trigger record. This
+  intentionally fails closed before storage if the actor pairing cannot be
+  established, instead of storing a trigger that the poller cannot fire. A
+  pairing that remains after a later trigger-record write failure is reusable
+  creator-scoped authorization state, not a trigger-specific fire gate.
+- Durable local-dev composition must share the same trigger conversation
+  services between `trigger_create` pairing and trigger-poller fire submission.
+  The shared service preserves the conversation store's mutation lock across
+  both paths and avoids racing optimistic durable-state writes.
 - `trigger_list` is caller-scoped and surfaces the current schedule state plus `last_status`.
 - `trigger_remove` is caller-scoped delete.
+- Local-dev builds compiled with `libsql` store trigger records in the
+  local-dev libSQL database (`reborn-local-dev.db`) through the same
+  `TriggerRepository` contract used by production libSQL. Local-dev builds
+  without `libsql` keep the existing in-memory repository behavior.
 
 Exact wiring of the capability registry and handler dependencies may land in later implementation PRs, but the capability names and semantics are frozen here.
 

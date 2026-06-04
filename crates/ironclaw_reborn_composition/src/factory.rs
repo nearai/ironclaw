@@ -17,6 +17,8 @@ use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_conversations::{
     AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
 };
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_conversations::{InboundTurnError, RebornFilesystemConversationServices};
 #[cfg(feature = "libsql")]
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
 #[cfg(not(feature = "libsql"))]
@@ -123,6 +125,12 @@ use crate::{
 };
 
 pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
+
+struct LocalDevRootFilesystemBundle {
+    filesystem: Arc<LocalDevRootFilesystem>,
+    #[cfg(feature = "libsql")]
+    database: Arc<libsql::Database>,
+}
 
 type LocalDevWorkspaceFilesystems = (
     Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -330,6 +338,8 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     pub(crate) trigger_conversation_services: InMemoryConversationServices,
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    trigger_conversation_services: tokio::sync::OnceCell<RebornFilesystemConversationServices>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
@@ -389,6 +399,21 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+impl RebornLocalRuntimeServices {
+    pub(crate) async fn durable_trigger_conversation_services(
+        &self,
+    ) -> Result<RebornFilesystemConversationServices, InboundTurnError> {
+        let filesystem = Arc::clone(&self.subagent_goal_filesystem);
+        self.trigger_conversation_services
+            .get_or_try_init(|| async move {
+                RebornFilesystemConversationServices::new(filesystem).await
+            })
+            .await
+            .cloned()
+    }
+}
+
 struct RebornLocalDevStoreGraph {
     run_state: Arc<LocalDevRunStateStore>,
     approval_requests: Arc<LocalDevApprovalRequestStore>,
@@ -397,6 +422,17 @@ struct RebornLocalDevStoreGraph {
     local_runtime: Arc<RebornLocalRuntimeServices>,
     resource_governor: Arc<LocalDevResourceGovernor>,
     process_services: LocalDevProcessServices,
+    trigger_repository: Arc<dyn TriggerRepository>,
+}
+
+struct RebornLocalDevStoreGraphInput {
+    filesystem: Arc<LocalDevRootFilesystem>,
+    owner_user_id: UserId,
+    skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    workspace_mounts: MountView,
+    local_dev_storage_root: PathBuf,
+    default_system_prompt_path: PathBuf,
     trigger_repository: Arc<dyn TriggerRepository>,
 }
 
@@ -554,8 +590,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         }
     })?;
     crate::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
-    let filesystem =
+    let filesystem_bundle =
         build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
+    let filesystem = filesystem_bundle.filesystem;
+    #[cfg(feature = "libsql")]
+    let trigger_repository =
+        local_dev_trigger_repository(Arc::clone(&filesystem_bundle.database)).await?;
+    #[cfg(not(feature = "libsql"))]
+    let trigger_repository = local_dev_trigger_repository();
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
         build_workspace_filesystems(
             Arc::clone(&filesystem),
@@ -569,15 +611,16 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
-    let mut store_graph = build_local_dev_store_graph(
-        Arc::clone(&filesystem),
+    let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
+        filesystem: Arc::clone(&filesystem),
         owner_user_id,
         skill_filesystem,
         workspace_filesystem,
-        runtime_workspace_mounts,
-        root.clone(),
+        workspace_mounts: runtime_workspace_mounts,
+        local_dev_storage_root: root.clone(),
         default_system_prompt_path,
-    )?;
+        trigger_repository,
+    })?;
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
@@ -591,12 +634,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let secret_store: Arc<dyn SecretStore> = local_dev_secret_store.clone();
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
-    let trigger_create_hook = local_dev_trigger_create_hook(&store_graph.local_runtime);
-    let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
-        Arc::clone(&store_graph.trigger_repository),
-        trigger_create_hook,
-    )?;
-
     let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let mut services = HostRuntimeServices::new(
@@ -696,22 +733,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             product_auth.runtime_credential_account_selection_service(),
         ),
     ));
-    register_bundled_gsuite_first_party_handlers(
-        &mut first_party_registry,
-        product_auth.credential_account_service(),
-        product_auth.credential_account_record_source(),
-        Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
-            product_auth_runtime_ports.clone(),
-        )),
-    )
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("GSuite first-party handlers are invalid: {error}"),
-    })?;
-    register_bundled_web_access_first_party_handlers(&mut first_party_registry).map_err(
-        |error| RebornBuildError::InvalidConfig {
-            reason: format!("web access first-party handlers are invalid: {error}"),
-        },
-    )?;
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
         filesystem.as_ref(),
         &VirtualPath::new("/system/extensions")?,
@@ -762,22 +783,41 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         extension_lifecycle_service,
         active_extensions,
     ));
-    insert_extension_lifecycle_handlers(
-        &mut first_party_registry,
-        Arc::clone(&extension_management),
-    )
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
-    })?;
-    services = services.with_first_party_capabilities(Arc::new(first_party_registry));
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
-        local_runtime.extension_management = Some(extension_management);
+        local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
     } else {
         return Err(RebornBuildError::InvalidConfig {
             reason: "local-dev extension lifecycle facade could not be attached".to_string(),
         });
     }
+    let trigger_create_hook = local_dev_trigger_create_hook(&store_graph.local_runtime);
+    let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
+        Arc::clone(&store_graph.trigger_repository),
+        trigger_create_hook,
+    )?;
+    register_bundled_gsuite_first_party_handlers(
+        &mut first_party_registry,
+        product_auth.credential_account_service(),
+        product_auth.credential_account_record_source(),
+        Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
+            product_auth_runtime_ports.clone(),
+        )),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("GSuite first-party handlers are invalid: {error}"),
+    })?;
+    register_bundled_web_access_first_party_handlers(&mut first_party_registry).map_err(
+        |error| RebornBuildError::InvalidConfig {
+            reason: format!("web access first-party handlers are invalid: {error}"),
+        },
+    )?;
+    insert_extension_lifecycle_handlers(&mut first_party_registry, extension_management).map_err(
+        |error| RebornBuildError::InvalidConfig {
+            reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
+        },
+    )?;
+    services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
@@ -797,14 +837,18 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
 
 #[cfg(feature = "libsql")]
 fn build_local_dev_store_graph(
-    filesystem: Arc<LocalDevRootFilesystem>,
-    owner_user_id: UserId,
-    skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    workspace_mounts: MountView,
-    local_dev_storage_root: PathBuf,
-    default_system_prompt_path: PathBuf,
+    input: RebornLocalDevStoreGraphInput,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
+    let RebornLocalDevStoreGraphInput {
+        filesystem,
+        owner_user_id,
+        skill_filesystem,
+        workspace_filesystem,
+        workspace_mounts,
+        local_dev_storage_root,
+        default_system_prompt_path,
+        trigger_repository,
+    } = input;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
     let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
@@ -848,7 +892,6 @@ fn build_local_dev_store_graph(
             }
         })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
-    let trigger_repository = local_dev_trigger_repository();
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
@@ -856,6 +899,8 @@ fn build_local_dev_store_graph(
         trigger_repository: Arc::clone(&trigger_repository),
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        trigger_conversation_services: tokio::sync::OnceCell::new(),
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
@@ -897,14 +942,18 @@ fn build_local_dev_store_graph(
 
 #[cfg(not(feature = "libsql"))]
 fn build_local_dev_store_graph(
-    filesystem: Arc<LocalDevRootFilesystem>,
-    owner_user_id: UserId,
-    skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    workspace_mounts: MountView,
-    local_dev_storage_root: PathBuf,
-    default_system_prompt_path: PathBuf,
+    input: RebornLocalDevStoreGraphInput,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
+    let RebornLocalDevStoreGraphInput {
+        filesystem,
+        owner_user_id,
+        skill_filesystem,
+        workspace_filesystem,
+        workspace_mounts,
+        local_dev_storage_root,
+        default_system_prompt_path,
+        trigger_repository,
+    } = input;
     #[cfg(feature = "postgres")]
     let subagent_goal_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
@@ -938,7 +987,6 @@ fn build_local_dev_store_graph(
             }
         })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
-    let trigger_repository = local_dev_trigger_repository();
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let trigger_conversation_services = local_dev_trigger_conversation_services();
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
@@ -948,6 +996,8 @@ fn build_local_dev_store_graph(
         trigger_repository: Arc::clone(&trigger_repository),
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        trigger_conversation_services: tokio::sync::OnceCell::new(),
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
@@ -988,6 +1038,21 @@ fn build_local_dev_store_graph(
     })
 }
 
+#[cfg(feature = "libsql")]
+async fn local_dev_trigger_repository(
+    database: Arc<libsql::Database>,
+) -> Result<Arc<dyn TriggerRepository>, RebornBuildError> {
+    let repository = ironclaw_triggers::LibSqlTriggerRepository::new(database);
+    repository
+        .run_migrations()
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("local-dev trigger repository migrations failed: {error}"),
+        })?;
+    Ok(Arc::new(repository))
+}
+
+#[cfg(not(feature = "libsql"))]
 fn local_dev_trigger_repository() -> Arc<dyn TriggerRepository> {
     Arc::new(ironclaw_triggers::InMemoryTriggerRepository::default())
 }
@@ -998,13 +1063,13 @@ fn local_dev_trigger_conversation_services() -> InMemoryConversationServices {
 }
 
 fn local_dev_trigger_create_hook(
-    local_runtime: &RebornLocalRuntimeServices,
+    local_runtime: &Arc<RebornLocalRuntimeServices>,
 ) -> Arc<dyn TriggerCreateHook> {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     {
-        Arc::new(FilesystemTriggerCreatorPairingHook::new(Arc::clone(
-            &local_runtime.subagent_goal_filesystem,
-        )))
+        Arc::new(LocalRuntimeTriggerCreatorPairingHook {
+            runtime: Arc::clone(local_runtime),
+        })
     }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     {
@@ -1028,17 +1093,34 @@ impl TriggerCreateHook for InMemoryTriggerCreatorPairingHook {
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-struct FilesystemTriggerCreatorPairingHook<F>
+struct LocalRuntimeTriggerCreatorPairingHook {
+    runtime: Arc<RebornLocalRuntimeServices>,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[async_trait::async_trait]
+impl TriggerCreateHook for LocalRuntimeTriggerCreatorPairingHook {
+    async fn before_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+        let conversations = self
+            .runtime
+            .durable_trigger_conversation_services()
+            .await
+            .map_err(trigger_pairing_error)?;
+        pair_trigger_creator(&conversations, record).await
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+struct ScopedFilesystemTriggerCreatorPairingHook<F>
 where
     F: RootFilesystem + 'static,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
-    conversations:
-        tokio::sync::OnceCell<ironclaw_conversations::RebornFilesystemConversationServices>,
+    conversations: tokio::sync::OnceCell<RebornFilesystemConversationServices>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-impl<F> FilesystemTriggerCreatorPairingHook<F>
+impl<F> ScopedFilesystemTriggerCreatorPairingHook<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -1052,7 +1134,7 @@ where
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait::async_trait]
-impl<F> TriggerCreateHook for FilesystemTriggerCreatorPairingHook<F>
+impl<F> TriggerCreateHook for ScopedFilesystemTriggerCreatorPairingHook<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -1061,12 +1143,13 @@ where
         let conversations = self
             .conversations
             .get_or_try_init(|| async move {
-                ironclaw_conversations::RebornFilesystemConversationServices::new(filesystem)
+                RebornFilesystemConversationServices::new(filesystem)
                     .await
                     .map_err(trigger_pairing_error)
             })
-            .await?;
-        pair_trigger_creator(conversations, record).await
+            .await
+            .cloned()?;
+        pair_trigger_creator(&conversations, record).await
     }
 }
 
@@ -1136,7 +1219,7 @@ async fn build_local_dev_root_filesystem(
     root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Result<Arc<LocalDevRootFilesystem>, RebornBuildError> {
+) -> Result<LocalDevRootFilesystemBundle, RebornBuildError> {
     let db_path = root.join("reborn-local-dev.db");
     let db = Arc::new(
         libsql::Builder::new_local(&db_path)
@@ -1146,7 +1229,7 @@ async fn build_local_dev_root_filesystem(
                 reason: format!("local-dev libSQL database could not be opened: {error}"),
             })?,
     );
-    let database = Arc::new(LibSqlRootFilesystem::new(db));
+    let database = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     database.run_migrations().await?;
 
     let local = Arc::new(local_dev_project_filesystem(
@@ -1181,7 +1264,10 @@ async fn build_local_dev_root_filesystem(
         database,
     )?;
     mount_local_dev_project_roots(&mut root, local)?;
-    Ok(Arc::new(root))
+    Ok(LocalDevRootFilesystemBundle {
+        filesystem: Arc::new(root),
+        database: db,
+    })
 }
 
 #[cfg(not(feature = "libsql"))]
@@ -1189,7 +1275,7 @@ async fn build_local_dev_root_filesystem(
     root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Result<Arc<LocalDevRootFilesystem>, RebornBuildError> {
+) -> Result<LocalDevRootFilesystemBundle, RebornBuildError> {
     let local = Arc::new(local_dev_project_filesystem(
         root,
         workspace_root,
@@ -1201,7 +1287,9 @@ async fn build_local_dev_root_filesystem(
     let mut composite = CompositeRootFilesystem::new();
     mount_local_dev_memory_root(&mut composite, Arc::new(InMemoryBackend::new()))?;
     mount_local_dev_project_roots(&mut composite, local)?;
-    Ok(Arc::new(composite))
+    Ok(LocalDevRootFilesystemBundle {
+        filesystem: Arc::new(composite),
+    })
 }
 
 fn local_dev_project_filesystem(
@@ -2218,7 +2306,7 @@ where
         oauth_dcr_provider_configs,
     } = context;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
-    let trigger_create_hook = Arc::new(FilesystemTriggerCreatorPairingHook::new(Arc::clone(
+    let trigger_create_hook = Arc::new(ScopedFilesystemTriggerCreatorPairingHook::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
     let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
@@ -2716,7 +2804,7 @@ mod tests {
         .expect("local-dev filesystem rebuild");
         let rebuilt_secret_store = build_local_dev_secret_store(
             &local_dev_root,
-            local_dev_scoped_filesystem(rebuilt_filesystem),
+            local_dev_scoped_filesystem(rebuilt_filesystem.filesystem),
         )
         .expect("local-dev secret store rebuild");
         let lease = rebuilt_secret_store
