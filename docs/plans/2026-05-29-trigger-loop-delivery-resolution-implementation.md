@@ -832,10 +832,11 @@ Two gaps block shipping user-creatable cron jobs:
    section, no env var, and no `.env.example` entry. Cron triggers can only
    fire from Rust test code today. This is the hard blocker between "backend
    exists" and "cron actually fires."
-2. **Security hardening is deferred.** Trusted-ingress sealing is feature-flag
-   gated (`HostTrustedTriggerIngress::new_for_composition_root()` is a public
-   zero-arg fn behind `#[cfg(feature = "composition-root")]`), not type-sealed.
-   Fire-time creator authorization is a tenant-ID-equality placeholder
+2. **Some security hardening is deferred.** Trusted trigger submission is now
+   type-sealed through `TrustedTriggerSubmitRequest` and converted inside
+   `ironclaw_conversations`; product/adapter crates cannot mint host-trusted
+   inbound turns directly. Fire-time creator authorization is still a
+   tenant-ID-equality placeholder
    (`TrustedTenantTriggerFireAuthorizer`), not wired to a real agent/project
    access source. Both are plan-mandated before any user-visible trigger launch
    path or external delivery ships (see PR 18 follow-up status and PR 19).
@@ -907,10 +908,10 @@ Three independent tracks branch from the PR 18 baseline.
 
 **PR 18.5a — Type-Seal Trusted Ingress Facade (Prereq A)**
 
-- Replace the public zero-arg `HostTrustedTriggerIngress::new_for_composition_root()`
-  with a shape product/adapter crates cannot mint even by adding the dependency
-  and enabling the feature — e.g. construction gated on a private
-  composition-owned witness, or a sealed-trait / private-module token.
+- Seal trusted trigger submission so product/adapter crates cannot mint
+  host-trusted inbound turns even by adding dependencies. Authority lives in
+  `TrustedTriggerSubmitRequest`, constructed only by the trigger worker and
+  converted inside `ironclaw_conversations`.
 - Keep `TrustedInboundTurnRequest` raw construction private in
   `ironclaw_conversations` (already done) and expose only the narrow
   trigger-fire submission operation.
