@@ -56,6 +56,12 @@ CREATE INDEX IF NOT EXISTS idx_hooks_predicate_invocations_key_ts
     ON hooks_predicate_invocations (key_hash, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_invocations_scope
     ON hooks_predicate_invocations (scope_hash);
+-- Per-tenant LRU quota: the distinct-key COUNT (WHERE scope_hash = ?) and the
+-- GROUP BY key_hash ORDER BY min(occurred_at) victim scan both filter by
+-- scope_hash then group/aggregate by key_hash. This composite keeps that
+-- access pattern off a full per-tenant row scan.
+CREATE INDEX IF NOT EXISTS idx_hooks_predicate_invocations_scope_key
+    ON hooks_predicate_invocations (scope_hash, key_hash);
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_invocations_ts
     ON hooks_predicate_invocations (occurred_at);
 
@@ -71,5 +77,9 @@ CREATE INDEX IF NOT EXISTS idx_hooks_predicate_values_key_ts
     ON hooks_predicate_values (key_hash, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_values_scope
     ON hooks_predicate_values (scope_hash);
+-- Mirror of the invocations composite: per-tenant LRU quota over the value
+-- table also filters by scope_hash and groups by key_hash.
+CREATE INDEX IF NOT EXISTS idx_hooks_predicate_values_scope_key
+    ON hooks_predicate_values (scope_hash, key_hash);
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_values_ts
     ON hooks_predicate_values (occurred_at);
