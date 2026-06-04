@@ -1,0 +1,72 @@
+name: Deploy to GCP Testnet
+
+# Manual promote from staging. Pulls the staging image at the given git SHA
+# (or latest if omitted), re-tags as :testnet, pushes, then deploys to the
+# testnet VM.
+on:
+  workflow_dispatch:
+    inputs:
+      image_sha:
+        description: 'Git SHA to promote (leave blank for current staging :latest)'
+        required: false
+        default: ''
+
+concurrency:
+  group: deploy-gcp-testnet
+  cancel-in-progress: true
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Promote images → :testnet
+        run: |
+          AR="us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw"
+          SHA="${{ github.event.inputs.image_sha }}"
+          SRC_TAG="${SHA:-latest}"
+          gcloud artifacts docker tags add "${AR}/agent:${SRC_TAG}" "${AR}/agent:testnet" \
+            --project=gen-lang-client-0263867259
+          gcloud artifacts docker tags add "${AR}/t3n-mcp-sidecar:${SRC_TAG}" "${AR}/t3n-mcp-sidecar:testnet" \
+            --project=gen-lang-client-0263867259
+          echo "Promoted :${SRC_TAG} → :testnet for agent and sidecar"
+
+      - name: Rolling update on testnet VM
+        run: |
+          gcloud compute ssh t3claw-testnet \
+            --zone=asia-southeast1-a \
+            --project=gen-lang-client-0263867259 \
+            --tunnel-through-iap \
+            --ssh-key-expire-after=10m \
+            --quiet \
+            -- 'sudo bash -c "cd /opt/t3claw && docker compose --profile app pull && sudo systemctl restart t3claw"'
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS https://t3claw-testnet.agent.prod.gc.terminal3.io/api/health; then
+              echo
+              exit 0
+            fi
+            echo "Attempt $i/10 — waiting 10 s..."
+            sleep 10
+          done
+          echo "Health check failed after 100 s"
+          exit 1

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Self-contained GCP startup script for T3Claw staging VM.
-# Injected via (then reset to run on boot):
-#   gcloud compute instances add-metadata t3claw-staging \
+# Self-contained GCP startup script for T3Claw VMs.
+# Used for the "hard reset" path (instances reset). Injected via:
+#
+#   gcloud compute instances add-metadata VM_NAME \
 #     --zone=asia-southeast1-a --project=gen-lang-client-0263867259 \
 #     --metadata-from-file startup-script=deploy-gcp/startup-script.sh
-#   gcloud compute instances reset t3claw-staging \
+#   gcloud compute instances reset VM_NAME \
 #     --zone=asia-southeast1-a --project=gen-lang-client-0263867259
 #
-# Runs as root automatically on VM boot. Logs to /var/log/t3claw-startup.log
-# and to the serial port (visible via: gcloud compute instances get-serial-port-output).
+# Runs as root automatically on VM boot. The VM must have a `t3env` metadata
+# attribute (staging or testnet) — set by gcp-provision.sh at VM creation.
+# Logs to /var/log/t3claw-startup.log and to the serial port.
 
 set -euo pipefail
 exec > >(tee /var/log/t3claw-startup.log | logger -t t3claw-startup) 2>&1
@@ -18,7 +20,21 @@ REGION="us-central1"
 REPO="t3claw"
 IMAGE_PREFIX="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}"
 
-echo "==> [1/7] Installing Docker (official repo)"
+# Read environment from instance metadata (set by gcp-provision.sh).
+T3ENV=$(curl -sf \
+  "http://metadata.google.internal/computeMetadata/v1/instance/attributes/t3env" \
+  -H "Metadata-Flavor: Google" 2>/dev/null || echo "staging")
+SECRET_NAME="t3claw-${T3ENV}-env"
+IMAGE_TAG="${T3ENV}"
+# staging uses :latest; other envs use their own tag
+if [ "${T3ENV}" = "staging" ]; then
+  IMAGE_TAG="latest"
+fi
+
+echo "==> T3ENV  : ${T3ENV}"
+echo "==> Secret : ${SECRET_NAME}"
+
+echo "==> [1/6] Installing Docker (official repo)"
 apt-get update -qq
 apt-get install -y --no-install-recommends ca-certificates curl gnupg
 install -m 0755 -d /etc/apt/keyrings
@@ -34,7 +50,7 @@ apt-get install -y --no-install-recommends \
 systemctl enable docker
 systemctl start docker
 
-echo "==> [2/7] Installing gcloud CLI (required for AR auth and Secret Manager)"
+echo "==> [2/6] Installing gcloud CLI"
 if ! command -v gcloud &>/dev/null; then
   apt-get install -y --no-install-recommends apt-transport-https ca-certificates gnupg curl
   curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
@@ -45,26 +61,26 @@ if ! command -v gcloud &>/dev/null; then
   apt-get install -y google-cloud-cli
 fi
 
-echo "==> [3/7] Configuring Artifact Registry auth"
+echo "==> [3/6] Configuring Artifact Registry auth"
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
-echo "==> [4/7] Setting up /opt/t3claw"
+echo "==> [4/6] Setting up /opt/t3claw"
 mkdir -p /opt/t3claw
 chmod 700 /opt/t3claw
 
-# Write docker-compose.yml — uses AR images, no local build needed
-cat > /opt/t3claw/docker-compose.yml << 'COMPOSE'
+# Write docker-compose.yml — parametrized by IMAGE_TAG from metadata
+cat > /opt/t3claw/docker-compose.yml << COMPOSE
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    ports:
-      - "127.0.0.1:5432:5432"
+    profiles: ["app"]
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: t3claw
       POSTGRES_USER: t3claw
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-t3claw}
+      POSTGRES_PASSWORD: \${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: t3claw
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U t3claw"]
       interval: 5s
@@ -73,7 +89,7 @@ services:
 
   t3claw:
     profiles: ["app"]
-    image: us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/agent:latest
+    image: ${IMAGE_PREFIX}/agent:${IMAGE_TAG}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -83,50 +99,60 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgres://t3claw:${POSTGRES_PASSWORD:-t3claw}@postgres:5432/t3claw
+      DATABASE_URL: postgres://t3claw:\${POSTGRES_PASSWORD}@postgres:5432/t3claw
       GATEWAY_ENABLED: "true"
       GATEWAY_HOST: "0.0.0.0"
       GATEWAY_PORT: "3000"
       CLI_ENABLED: "false"
       ONBOARD_COMPLETED: "true"
       T3CLAW_IN_DOCKER: "true"
-      SANDBOX_ENABLED: "false"
-      # Triggers bootstrap_t3n_mcp_server() at agent startup so the t3n-mcp
-      # server is auto-registered in the DB under owner_id. Without this the
-      # CLI still works (it falls back to the seeded mcp-servers.json on
-      # disk) but the gateway settings API returns 404 and the web UI shows
-      # nothing under MCP servers.
+      SANDBOX_ENABLED: \${SANDBOX_ENABLED:-false}
+      SANDBOX_POLICY: \${SANDBOX_POLICY:-readonly}
       T3N_MCP_SOCKET_PATH: /var/run/t3n-mcp/t3n-mcp.sock
     volumes:
-      - t3claw_data:/home/t3claw/.t3claw
-      - t3n_mcp_socket:/var/run/t3n-mcp
+      - t3claw-data:/home/t3claw/.t3claw
+      - t3n-mcp-socket:/var/run/t3n-mcp
+      - /var/run/docker.sock:/var/run/docker.sock
 
   t3n-mcp-sidecar:
     profiles: ["app"]
     user: "0:0"
-    image: us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/t3n-mcp-sidecar:latest
+    image: ${IMAGE_PREFIX}/t3n-mcp-sidecar:${IMAGE_TAG}
     restart: unless-stopped
     environment:
-      T3N_SDK_ENV: ${T3N_MCP_ENV:-staging}
-      T3N_MCP_RPC_URL: ${T3N_MCP_RPC_URL:-}
-      T3N_MCP_DASHBOARD_URL: ${T3N_MCP_DASHBOARD_URL:-}
-      PRIVATE_KEY: ${T3N_MCP_PRIVATE_KEY:-}
-      T3N_MCP_AGENT_SECRET_HEX: ${T3N_MCP_AGENT_SECRET_HEX:-}
-      # Optional static headers (JSON string->string) the SDK attaches to every
-      # /api/rpc request. Staging gates /api/rpc behind a Cloud Armor bypass
-      # header, so set T3N_RPC_EXTRA_HEADERS={"x-staging-bypass":"…"} in .env.
-      T3N_RPC_EXTRA_HEADERS: ${T3N_RPC_EXTRA_HEADERS:-}
+      T3N_SDK_ENV: \${T3N_SDK_ENV:-${T3ENV}}
+      T3N_MCP_RPC_URL: \${T3N_MCP_RPC_URL:-}
+      T3N_MCP_DASHBOARD_URL: \${T3N_MCP_DASHBOARD_URL:-}
+      PRIVATE_KEY: \${T3N_MCP_PRIVATE_KEY:-}
+      T3N_MCP_AGENT_SECRET_HEX: \${T3N_MCP_AGENT_SECRET_HEX:-}
+      T3N_RPC_EXTRA_HEADERS: \${T3N_RPC_EXTRA_HEADERS:-}
       MCP_SOCKET_PATH: /var/run/t3n-mcp/t3n-mcp.sock
     volumes:
-      - t3n_mcp_socket:/var/run/t3n-mcp
+      - t3n-mcp-socket:/var/run/t3n-mcp
 
 volumes:
-  pgdata:
-  t3claw_data:
-  t3n_mcp_socket:
+  postgres-data:
+  t3claw-data:
+  t3n-mcp-socket:
 COMPOSE
 
-echo "==> [5/7] Installing t3claw.service"
+echo "==> [5/6] Installing fetch-env.sh and t3claw.service"
+# Use a helper script for the secret fetch so systemd doesn't expand shell variables.
+cat > /opt/t3claw/fetch-env.sh << 'FETCHENV'
+#!/bin/bash
+set -e
+PROJECT="gen-lang-client-0263867259"
+T3ENV=$(curl -sf \
+  "http://metadata.google.internal/computeMetadata/v1/instance/attributes/t3env" \
+  -H "Metadata-Flavor: Google" 2>/dev/null || echo "staging")
+SECRET="t3claw-${T3ENV}-env"
+tmp=$(mktemp /opt/t3claw/.env.XXXXXX)
+chmod 600 "$tmp"
+gcloud secrets versions access latest --secret="${SECRET}" --project="${PROJECT}" > "$tmp"
+mv "$tmp" /opt/t3claw/.env
+FETCHENV
+chmod 755 /opt/t3claw/fetch-env.sh
+
 cat > /etc/systemd/system/t3claw.service << 'SERVICE'
 [Unit]
 Description=T3Claw AI Assistant
@@ -137,7 +163,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/t3claw
-ExecStartPre=/bin/bash -c 'set -e; tmp=$(mktemp /opt/t3claw/.env.XXXXXX); chmod 600 "$tmp"; gcloud secrets versions access latest --secret=t3claw-staging-env --project=gen-lang-client-0263867259 > "$tmp"; mv "$tmp" /opt/t3claw/.env'
+ExecStartPre=/opt/t3claw/fetch-env.sh
 ExecStartPre=/usr/bin/docker compose --profile app pull
 ExecStart=/usr/bin/docker compose --profile app up --remove-orphans
 ExecStop=/usr/bin/docker compose --profile app down
@@ -152,44 +178,18 @@ WantedBy=multi-user.target
 SERVICE
 systemctl daemon-reload
 
-echo "==> [6/7] Seeding t3n-mcp server config"
-mkdir -p /home/t3claw/.t3claw 2>/dev/null || true
-# Pre-register t3n-mcp as a Unix socket MCP server so it appears in the UI on
-# first boot without a manual `t3claw mcp add` step.
-# The file lives inside the t3claw_data volume; write it there now so it's
-# present before the agent container starts.
-VOLUME_PATH=$(docker volume inspect t3claw_t3claw_data --format '{{.Mountpoint}}' 2>/dev/null || true)
-if [ -n "$VOLUME_PATH" ]; then
-  cat > "${VOLUME_PATH}/mcp-servers.json" << 'MCP'
-{
-  "schema_version": 1,
-  "servers": [
-    {
-      "name": "t3n-mcp",
-      "url": "",
-      "transport": { "transport": "unix", "socket_path": "/var/run/t3n-mcp/t3n-mcp.sock" },
-      "enabled": true,
-      "description": "Trinity MCP — on-chain actions via the t3n sidecar"
-    }
-  ]
-}
-MCP
-  echo "     wrote mcp-servers.json to volume"
-else
-  echo "     WARNING: t3claw_data volume not found yet, skipping mcp seed (run after first compose up)"
-fi
-
-echo "==> [7/7] Pre-pulling images and starting service"
-docker pull "${IMAGE_PREFIX}/agent:latest"
-docker pull "${IMAGE_PREFIX}/t3n-mcp-sidecar:latest"
-
+echo "==> [6/6] Pre-pulling images and starting service"
+docker pull "${IMAGE_PREFIX}/agent:${IMAGE_TAG}"
+docker pull "${IMAGE_PREFIX}/t3n-mcp-sidecar:${IMAGE_TAG}"
 systemctl enable t3claw
-if gcloud secrets versions list t3claw-staging-env \
+
+if gcloud secrets versions list "${SECRET_NAME}" \
      --filter="state=ENABLED" --limit=1 --format="value(name)" \
      --project="${PROJECT}" 2>/dev/null | grep -q .; then
   systemctl restart t3claw
   echo "==> Bootstrap complete — t3claw.service started"
 else
-  echo "==> Bootstrap complete — start manually after uploading t3claw-staging-env:"
+  echo "==> Bootstrap complete — upload the secret, then start manually:"
+  echo "      gcloud secrets versions add ${SECRET_NAME} --data-file=your.env --project=${PROJECT}"
   echo "      systemctl start t3claw"
 fi

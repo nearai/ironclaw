@@ -1,11 +1,8 @@
-# Compose file used on the GCP staging VM.
+# Compose file used on the GCP testnet VM.
 #
-# Differences from the repo-root docker-compose.yml:
-#   1. Pulls images from Artifact Registry instead of building from source.
-#   2. Binds t3claw on 0.0.0.0:3000 (no public IP on the VM, LB reaches it
-#      via internal network).
-#   3. Uses profiles: ["app"] on all services so systemd can manage them with
-#      `docker compose --profile app up/down/pull`.
+# Identical to docker-compose.staging.yml except:
+#   1. Images use the :testnet tag (promoted from staging via testnet-gcp.yml).
+#   2. T3N_SDK_ENV defaults to "testnet".
 
 services:
   postgres:
@@ -26,7 +23,7 @@ services:
 
   t3claw:
     profiles: ["app"]
-    image: us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/agent:latest
+    image: us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/agent:testnet
     restart: unless-stopped
     depends_on:
       postgres:
@@ -54,10 +51,10 @@ services:
   t3n-mcp-sidecar:
     profiles: ["app"]
     user: "0:0"
-    image: us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/t3n-mcp-sidecar:latest
+    image: us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/t3n-mcp-sidecar:testnet
     restart: unless-stopped
     environment:
-      T3N_SDK_ENV: ${T3N_SDK_ENV:-staging}
+      T3N_SDK_ENV: ${T3N_SDK_ENV:-testnet}
       T3N_MCP_RPC_URL: ${T3N_MCP_RPC_URL:-}
       T3N_MCP_DASHBOARD_URL: ${T3N_MCP_DASHBOARD_URL:-}
       PRIVATE_KEY: ${T3N_MCP_PRIVATE_KEY:-}
