@@ -6402,8 +6402,7 @@ where
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
-    .with_runtime_http_egress(Arc::clone(&egress))
-    .with_tool_call_http_egress(egress)
+    .with_first_party_http_egress(egress)
     .with_trust_policy(Arc::new(trust_policy()))
     .with_runtime_policy(policy)
     .host_runtime_for_local_testing()
@@ -6427,8 +6426,7 @@ where
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
-    .with_runtime_http_egress(Arc::clone(&egress))
-    .with_tool_call_http_egress(egress)
+    .with_first_party_http_egress(egress)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }

@@ -623,6 +623,13 @@ where
             .with_credential_session_store(broker)
     }
 
+    /// Attaches strict runtime HTTP egress only.
+    ///
+    /// This port keeps generic [`RuntimeHttpEgress`] response-limit semantics:
+    /// response body limit overruns remain errors. First-party `builtin.http`
+    /// inline output also needs [`crate::ToolCallHttpEgress`]; use
+    /// [`Self::with_first_party_http_egress`] when one service should satisfy
+    /// both ports.
     pub fn with_runtime_http_egress<T>(mut self, runtime_http_egress: Arc<T>) -> Self
     where
         T: RuntimeHttpEgress + 'static,
@@ -634,6 +641,26 @@ where
         self
     }
 
+    /// Attaches one HTTP service to both the strict runtime and model-visible
+    /// first-party tool-call egress ports.
+    ///
+    /// This is the intended test/local composition helper for `builtin.http`:
+    /// strict callers still use [`RuntimeHttpEgress`], while inline tool output
+    /// goes through [`crate::ToolCallHttpEgress`] for sanitized partial response
+    /// handling.
+    pub fn with_first_party_http_egress<T>(self, http_egress: Arc<T>) -> Self
+    where
+        T: RuntimeHttpEgress + crate::ToolCallHttpEgress + 'static,
+    {
+        self.with_runtime_http_egress(Arc::clone(&http_egress))
+            .with_tool_call_http_egress(http_egress)
+    }
+
+    /// Attaches model-visible HTTP egress for first-party tool calls.
+    ///
+    /// Use this when the tool-call path intentionally differs from the strict
+    /// runtime HTTP path, such as tests that assert `builtin.http.save` does not
+    /// route through model-visible output handling.
     pub fn with_tool_call_http_egress<T>(self, tool_call_http_egress: Arc<T>) -> Self
     where
         T: crate::ToolCallHttpEgress + 'static,
