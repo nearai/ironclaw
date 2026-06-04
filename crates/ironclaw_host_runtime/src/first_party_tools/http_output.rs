@@ -219,46 +219,39 @@ fn enforce_final_model_visible_output_budget(
         .saturating_add(MODEL_VISIBLE_HTTP_OUTPUT_OVERHEAD_BYTES)
         .saturating_sub(MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES);
     let mut trim = FinalBudgetTrim::default();
+    let mut current_len = serialized_output_len(output);
 
-    if output.get("body_text").and_then(Value::as_str).is_some() {
-        let current_len = serialized_output_len(output);
-        if current_len > final_budget {
-            let excess_bytes = current_len.saturating_sub(final_budget);
-            let body_text = output
-                .get("body_text")
-                .and_then(Value::as_str)
-                .expect("checked body_text string");
-            let current_body_budget = serialized_json_content_len(body_text);
-            let target_body_budget = current_body_budget.saturating_sub(excess_bytes);
-            let (body_text, _) =
-                truncate_str_for_json_content_budget(body_text, target_body_budget);
-            let returned_body_bytes = body_text.len();
-            output.insert(
-                "body_text".to_string(),
-                Value::String(body_text.to_string()),
-            );
-            mark_inline_body_truncated(output, returned_body_bytes);
-            trim.body_bytes_returned = Some(returned_body_bytes);
-        }
-    }
-    if output.get("body_base64").and_then(Value::as_str).is_some() {
-        let current_len = serialized_output_len(output);
-        if current_len > final_budget {
-            let excess_bytes = current_len.saturating_sub(final_budget);
-            let body_base64 = output
-                .get("body_base64")
-                .and_then(Value::as_str)
-                .expect("checked body_base64 string");
-            let target_len = body_base64.len().saturating_sub(excess_bytes) / 4 * 4;
-            let body_base64 = body_base64[..target_len].to_string();
-            let returned_body_bytes = max_binary_bytes_for_base64_budget(target_len);
-            output.insert("body_base64".to_string(), Value::String(body_base64));
-            mark_inline_body_truncated(output, returned_body_bytes);
-            trim.body_bytes_returned = Some(returned_body_bytes);
-        }
+    if current_len > final_budget
+        && let Some(body_text) = output.get("body_text").and_then(Value::as_str)
+    {
+        let excess_bytes = current_len.saturating_sub(final_budget);
+        let current_body_budget = serialized_json_content_len(body_text);
+        let target_body_budget = current_body_budget.saturating_sub(excess_bytes);
+        let (body_text, _) = truncate_str_for_json_content_budget(body_text, target_body_budget);
+        let returned_body_bytes = body_text.len();
+        output.insert(
+            "body_text".to_string(),
+            Value::String(body_text.to_string()),
+        );
+        mark_inline_body_truncated(output, returned_body_bytes);
+        trim.body_bytes_returned = Some(returned_body_bytes);
+        current_len = serialized_output_len(output);
     }
 
-    trim.headers_truncated = trim_headers_for_final_budget(output, final_budget);
+    if current_len > final_budget
+        && let Some(body_base64) = output.get("body_base64").and_then(Value::as_str)
+    {
+        let excess_bytes = current_len.saturating_sub(final_budget);
+        let target_len = body_base64.len().saturating_sub(excess_bytes) / 4 * 4;
+        let body_base64 = body_base64[..target_len].to_string();
+        let returned_body_bytes = max_binary_bytes_for_base64_budget(target_len);
+        output.insert("body_base64".to_string(), Value::String(body_base64));
+        mark_inline_body_truncated(output, returned_body_bytes);
+        trim.body_bytes_returned = Some(returned_body_bytes);
+        current_len = serialized_output_len(output);
+    }
+
+    trim.headers_truncated = trim_headers_for_final_budget(output, final_budget, current_len);
     trim
 }
 
@@ -266,20 +259,32 @@ fn serialized_output_len(output: &Map<String, Value>) -> usize {
     serde_json::to_vec(output).map_or(usize::MAX, |serialized| serialized.len())
 }
 
-fn trim_headers_for_final_budget(output: &mut Map<String, Value>, final_budget: usize) -> bool {
+fn trim_headers_for_final_budget(
+    output: &mut Map<String, Value>,
+    final_budget: usize,
+    mut current_len: usize,
+) -> bool {
     let mut trimmed = false;
+    let mut headers_truncated_marked = output.contains_key("headers_truncated");
     loop {
-        if serialized_output_len(output) <= final_budget {
+        if current_len <= final_budget {
             return trimmed;
         }
         let Some(headers) = output.get_mut("headers").and_then(Value::as_array_mut) else {
             return trimmed;
         };
-        if headers.pop().is_none() {
+        let Some(popped) = headers.pop() else {
             return trimmed;
+        };
+        let separator_bytes = usize::from(!headers.is_empty());
+        current_len = current_len
+            .saturating_sub(serialized_json_len(&popped).saturating_add(separator_bytes));
+        if !headers_truncated_marked {
+            output.insert("headers_truncated".to_string(), json!(true));
+            current_len = serialized_output_len(output);
+            headers_truncated_marked = true;
         }
         trimmed = true;
-        output.insert("headers_truncated".to_string(), json!(true));
     }
 }
 

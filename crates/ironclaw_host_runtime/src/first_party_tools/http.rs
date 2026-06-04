@@ -348,10 +348,7 @@ fn response_body_limit(
         HttpSaveMode::Required => MAX_SAVE_RESPONSE_BODY_LIMIT,
     };
     let limit = ranged_u64(input, "response_body_limit", default, 1, max)?;
-    Ok(match save_mode {
-        HttpSaveMode::Disabled => limit,
-        HttpSaveMode::Required => limit,
-    })
+    Ok(limit)
 }
 
 fn timeout_ms(input: &Value) -> Result<u32, FirstPartyCapabilityError> {
