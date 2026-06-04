@@ -34,8 +34,9 @@ use ironclaw_host_runtime::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
-    TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    TenantSandboxProcessPort, TriggerCreateHook, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -48,7 +49,8 @@ use ironclaw_network::{
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
-    InMemoryTriggerRepository, MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerRepository,
+    InMemoryTriggerRepository, MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError,
+    TriggerRecord, TriggerRepository,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -313,6 +315,80 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(records[0].creator_user_id, context.resource_scope.user_id);
     assert_eq!(records[0].agent_id, context.resource_scope.agent_id);
     assert_eq!(records[0].project_id, context.resource_scope.project_id);
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_runs_create_hook_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let hook = Arc::new(RecordingTriggerCreateHook::default());
+    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Hooked trigger",
+            "prompt": "Pair trigger creator",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let hooked_records = hook.records();
+    assert_eq!(hooked_records.len(), 1);
+    assert_eq!(hooked_records[0].name, "Hooked trigger");
+    assert_eq!(hooked_records[0].prompt, "Pair trigger creator");
+    assert_eq!(
+        hooked_records[0].creator_user_id,
+        context.resource_scope.user_id
+    );
+    assert_eq!(hooked_records[0].agent_id, context.resource_scope.agent_id);
+    assert_eq!(
+        hooked_records[0].project_id,
+        context.resource_scope.project_id
+    );
+
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].trigger_id, hooked_records[0].trigger_id);
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_maps_create_hook_error_to_backend_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository_and_create_hook(
+        repository.clone(),
+        Arc::new(FailingTriggerCreateHook),
+    );
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Hook failure",
+            "prompt": "Do not persist this trigger",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -5164,6 +5240,32 @@ fn runtime_with_trigger_repository(repository: Arc<dyn TriggerRepository>) -> im
     )
 }
 
+fn runtime_with_trigger_repository_and_create_hook(
+    trigger_repository: Arc<dyn TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+) -> impl HostRuntime {
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers_with_trigger_create_hook(
+            trigger_repository,
+            trigger_create_hook,
+        )
+        .unwrap(),
+    ))
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
+    .with_runtime_policy(local_dev_policy())
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
 #[cfg(feature = "test-support")]
 fn runtime_with_trigger_repository_and_clock(
     trigger_repository: Arc<dyn TriggerRepository>,
@@ -5211,6 +5313,37 @@ where
     .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
+}
+
+#[derive(Debug, Default)]
+struct RecordingTriggerCreateHook {
+    records: std::sync::Mutex<Vec<TriggerRecord>>,
+}
+
+impl RecordingTriggerCreateHook {
+    fn records(&self) -> Vec<TriggerRecord> {
+        self.records.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TriggerCreateHook for RecordingTriggerCreateHook {
+    async fn before_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+        self.records.lock().unwrap().push(record.clone());
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct FailingTriggerCreateHook;
+
+#[async_trait]
+impl TriggerCreateHook for FailingTriggerCreateHook {
+    async fn before_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "hook unavailable".to_string(),
+        })
+    }
 }
 
 #[derive(Debug)]

@@ -319,7 +319,11 @@ messages directly.
 
 The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_remove` as first-party Reborn capabilities.
 
-- `trigger_create` validates the schedule, captures caller scope, and persists the trigger.
+- `trigger_create` validates the schedule, captures caller scope, pairs the
+  caller as the host-trusted synthetic trigger actor used by the poller, and
+  persists the trigger. This pairing is composition-owned trigger management
+  wiring; trigger repositories remain storage-only, and the poller must still
+  fail closed for records whose creator actor was not paired.
 - `trigger_list` is caller-scoped and surfaces the current schedule state plus `last_status`.
 - `trigger_remove` is caller-scoped delete.
 

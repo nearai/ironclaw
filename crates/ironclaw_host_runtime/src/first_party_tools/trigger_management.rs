@@ -60,10 +60,19 @@ pub(super) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
 ) -> Result<(), HostApiError> {
+    insert_handlers_with_create_hook(registry, repository, Arc::new(NoopTriggerCreateHook))
+}
+
+pub(super) fn insert_handlers_with_create_hook(
+    registry: &mut FirstPartyCapabilityRegistry,
+    repository: Arc<dyn TriggerRepository>,
+    create_hook: Arc<dyn TriggerCreateHook>,
+) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
         Arc::new(TriggerManagementToolHandler {
             repository,
+            create_hook,
             clock: Arc::new(SystemTriggerManagementClock),
         }),
     )
@@ -77,7 +86,11 @@ pub(super) fn insert_handlers_with_clock(
 ) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
-        Arc::new(TriggerManagementToolHandler { repository, clock }),
+        Arc::new(TriggerManagementToolHandler {
+            repository,
+            create_hook: Arc::new(NoopTriggerCreateHook),
+            clock,
+        }),
     )
 }
 
@@ -108,6 +121,21 @@ trait TriggerManagementClock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
 
+#[async_trait]
+pub trait TriggerCreateHook: Send + Sync {
+    async fn before_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
+}
+
+#[derive(Debug)]
+struct NoopTriggerCreateHook;
+
+#[async_trait]
+impl TriggerCreateHook for NoopTriggerCreateHook {
+    async fn before_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct SystemTriggerManagementClock;
 
@@ -119,6 +147,7 @@ impl TriggerManagementClock for SystemTriggerManagementClock {
 
 struct TriggerManagementToolHandler {
     repository: Arc<dyn TriggerRepository>,
+    create_hook: Arc<dyn TriggerCreateHook>,
     clock: Arc<dyn TriggerManagementClock>,
 }
 
@@ -134,6 +163,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
             TRIGGER_CREATE_CAPABILITY_ID => {
                 create_trigger(
                     &*self.repository,
+                    &*self.create_hook,
                     &request.scope,
                     request.input,
                     self.clock.now(),
@@ -179,6 +209,7 @@ struct TriggerListInput {
 
 async fn create_trigger(
     repository: &dyn TriggerRepository,
+    create_hook: &dyn TriggerCreateHook,
     scope: &ResourceScope,
     input: Value,
     now: DateTime<Utc>,
@@ -207,6 +238,10 @@ async fn create_trigger(
         created_at: now,
     };
     record.validate().map_err(trigger_input_error)?;
+    create_hook
+        .before_trigger_persisted(&record)
+        .await
+        .map_err(|error| trigger_create_hook_error("before_trigger_persisted", error))?;
     repository
         .upsert_trigger(record.clone())
         .await
@@ -318,6 +353,19 @@ fn trigger_repository_error(
         repository_operation,
         trigger_error_kind = trigger_error_kind(&error),
         "trigger management capability repository operation failed"
+    );
+    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+}
+
+fn trigger_create_hook_error(
+    hook_operation: &'static str,
+    error: TriggerError,
+) -> FirstPartyCapabilityError {
+    tracing::debug!(
+        runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::Backend,
+        hook_operation,
+        trigger_error_kind = trigger_error_kind(&error),
+        "trigger management capability create hook failed"
     );
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
 }

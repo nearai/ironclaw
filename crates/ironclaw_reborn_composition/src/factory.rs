@@ -12,6 +12,11 @@ use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
 #[cfg(not(feature = "libsql"))]
 use ironclaw_authorization::InMemoryCapabilityLeaseStore;
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+use ironclaw_conversations::InMemoryConversationServices;
+use ironclaw_conversations::{
+    AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
+};
 #[cfg(feature = "libsql")]
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
 #[cfg(not(feature = "libsql"))]
@@ -41,8 +46,8 @@ use ironclaw_host_api::{
 use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
-    LocalHostProcessPort, ProductAuthProviderRuntimePorts, builtin_first_party_handlers,
-    builtin_first_party_package,
+    LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
+    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
@@ -65,7 +70,7 @@ use ironclaw_threads::FilesystemSessionThreadService;
 #[cfg(not(feature = "libsql"))]
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_threads::SessionThreadService;
-use ironclaw_triggers::TriggerRepository;
+use ironclaw_triggers::{TriggerError, TriggerRecord, TriggerRepository};
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(feature = "libsql")]
 use ironclaw_turns::FilesystemTurnStateStore;
@@ -320,6 +325,8 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    pub(crate) trigger_conversation_services: InMemoryConversationServices,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
@@ -581,8 +588,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let secret_store: Arc<dyn SecretStore> = local_dev_secret_store.clone();
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
-    let mut first_party_registry =
-        builtin_first_party_registry(Arc::clone(&store_graph.trigger_repository))?;
+    let trigger_create_hook = local_dev_trigger_create_hook(&store_graph.local_runtime);
+    let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
+        Arc::clone(&store_graph.trigger_repository),
+        trigger_create_hook,
+    )?;
 
     let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
@@ -836,11 +846,15 @@ fn build_local_dev_store_graph(
         })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
     let trigger_repository = local_dev_trigger_repository();
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let trigger_conversation_services = InMemoryConversationServices::default();
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        trigger_conversation_services,
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
@@ -924,11 +938,15 @@ fn build_local_dev_store_graph(
         })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
     let trigger_repository = local_dev_trigger_repository();
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let trigger_conversation_services = InMemoryConversationServices::default();
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        trigger_conversation_services,
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
@@ -971,6 +989,107 @@ fn build_local_dev_store_graph(
 
 fn local_dev_trigger_repository() -> Arc<dyn TriggerRepository> {
     Arc::new(ironclaw_triggers::InMemoryTriggerRepository::default())
+}
+
+fn local_dev_trigger_create_hook(
+    local_runtime: &RebornLocalRuntimeServices,
+) -> Arc<dyn TriggerCreateHook> {
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    {
+        Arc::new(FilesystemTriggerCreatorPairingHook::new(Arc::clone(
+            &local_runtime.subagent_goal_filesystem,
+        )))
+    }
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    {
+        Arc::new(InMemoryTriggerCreatorPairingHook {
+            conversations: local_runtime.trigger_conversation_services.clone(),
+        })
+    }
+}
+
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+struct InMemoryTriggerCreatorPairingHook {
+    conversations: InMemoryConversationServices,
+}
+
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+#[async_trait::async_trait]
+impl TriggerCreateHook for InMemoryTriggerCreatorPairingHook {
+    async fn before_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+        pair_trigger_creator(&self.conversations, record).await
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+struct FilesystemTriggerCreatorPairingHook<F>
+where
+    F: RootFilesystem + 'static,
+{
+    filesystem: Arc<ScopedFilesystem<F>>,
+    conversations:
+        tokio::sync::OnceCell<ironclaw_conversations::RebornFilesystemConversationServices>,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+impl<F> FilesystemTriggerCreatorPairingHook<F>
+where
+    F: RootFilesystem + 'static,
+{
+    fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self {
+            filesystem,
+            conversations: tokio::sync::OnceCell::new(),
+        }
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[async_trait::async_trait]
+impl<F> TriggerCreateHook for FilesystemTriggerCreatorPairingHook<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn before_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+        let conversations = self
+            .conversations
+            .get_or_try_init(|| async {
+                ironclaw_conversations::RebornFilesystemConversationServices::new(Arc::clone(
+                    &self.filesystem,
+                ))
+                .await
+                .map_err(trigger_pairing_error)
+            })
+            .await?;
+        pair_trigger_creator(conversations, record).await
+    }
+}
+
+async fn pair_trigger_creator(
+    pairing: &dyn ConversationActorPairingService,
+    record: &TriggerRecord,
+) -> Result<(), TriggerError> {
+    let adapter_kind = AdapterKind::new("trigger").map_err(trigger_pairing_error)?;
+    let adapter_installation_id =
+        AdapterInstallationId::new("reborn-trigger-poller").map_err(trigger_pairing_error)?;
+    let external_actor_ref = ExternalActorRef::new("user", record.creator_user_id.as_str())
+        .map_err(trigger_pairing_error)?;
+    pairing
+        .pair_external_actor(
+            record.tenant_id.clone(),
+            adapter_kind,
+            adapter_installation_id,
+            external_actor_ref,
+            record.creator_user_id.clone(),
+        )
+        .await
+        .map_err(trigger_pairing_error)
+}
+
+fn trigger_pairing_error(error: impl std::fmt::Display) -> TriggerError {
+    TriggerError::Backend {
+        reason: format!("trigger creator actor pairing failed: {error}"),
+    }
 }
 
 struct BudgetSinks {
@@ -1498,14 +1617,14 @@ fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
     Ok(registry)
 }
 
-fn builtin_first_party_registry(
+fn builtin_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers(trigger_repository).map_err(|error| {
-        RebornBuildError::InvalidConfig {
+    builtin_first_party_handlers_with_trigger_create_hook(trigger_repository, trigger_create_hook)
+        .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party handlers are invalid: {error}"),
-        }
-    })
+        })
 }
 
 fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
@@ -2088,7 +2207,13 @@ where
         oauth_dcr_provider_configs,
     } = context;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
-    let mut first_party_registry = builtin_first_party_registry(trigger_repository)?;
+    let trigger_create_hook = Arc::new(FilesystemTriggerCreatorPairingHook::new(Arc::clone(
+        &stores.scoped_filesystem,
+    )));
+    let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
+        trigger_repository,
+        trigger_create_hook,
+    )?;
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
@@ -3124,7 +3249,7 @@ mod tests {
         assert!(ids.contains(&TRIGGER_LIST_CAPABILITY_ID));
         assert!(ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID));
 
-        let registry = builtin_first_party_registry(Arc::new(
+        let registry = ironclaw_host_runtime::builtin_first_party_handlers(Arc::new(
             ironclaw_triggers::InMemoryTriggerRepository::default(),
         ))
         .expect("built-in handlers build");

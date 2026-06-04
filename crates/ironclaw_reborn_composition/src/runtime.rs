@@ -31,8 +31,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_conversations::InMemoryConversationServices;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
@@ -308,8 +306,7 @@ async fn build_trigger_poller_services(
     }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     {
-        let _ = local_runtime;
-        let conversations = InMemoryConversationServices::default();
+        let conversations = local_runtime.trigger_conversation_services.clone();
         #[cfg(any(test, feature = "test-support"))]
         let pairing_service: Arc<
             dyn ironclaw_conversations::ConversationActorPairingService,

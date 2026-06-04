@@ -17,7 +17,14 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::{AgentId, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
+    ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy, Principal,
+    ResourceEstimate, RuntimeKind, TenantId, TrustClass, UserId,
+};
+use ironclaw_host_runtime::{
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, TRIGGER_CREATE_CAPABILITY_ID,
+};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
@@ -30,6 +37,8 @@ use ironclaw_triggers::{
     TriggerCompletionPolicy, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
     TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
+use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
 
 const TENANT: &str = "trigger-e2e-tenant";
@@ -141,6 +150,82 @@ async fn build_runtime_with(
         );
 
     build_reborn_runtime(input).await.expect("runtime builds")
+}
+
+async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
+    let host_runtime = runtime
+        .services()
+        .host_runtime
+        .as_deref()
+        .expect("runtime exposes host runtime");
+    let outcome = host_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            trigger_management_execution_context(),
+            CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
+            ResourceEstimate::default(),
+            input,
+            trigger_management_trust_decision(),
+        ))
+        .await
+        .expect("trigger create invocation completes");
+    let RuntimeCapabilityOutcome::Completed(completed) = outcome else {
+        panic!("expected trigger create to complete, got {outcome:?}");
+    };
+    completed.output
+}
+
+fn trigger_management_execution_context() -> ExecutionContext {
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let user_id = UserId::new(USER).expect("user id");
+    let agent_id = AgentId::new(AGENT).expect("agent id");
+    let extension_id = ExtensionId::new("trigger-e2e-caller").expect("extension id");
+    let mut context = ExecutionContext::local_default(
+        user_id.clone(),
+        extension_id.clone(),
+        RuntimeKind::FirstParty,
+        TrustClass::UserTrusted,
+        CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
+                grantee: Principal::Extension(extension_id),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![
+                        EffectKind::DispatchCapability,
+                        EffectKind::ExternalWrite,
+                    ],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        },
+        MountView::default(),
+    )
+    .expect("execution context");
+    context.tenant_id = tenant_id.clone();
+    context.agent_id = Some(agent_id.clone());
+    context.project_id = None;
+    context.resource_scope.tenant_id = tenant_id;
+    context.resource_scope.agent_id = Some(agent_id);
+    context.resource_scope.project_id = None;
+    context
+}
+
+fn trigger_management_trust_decision() -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::user_trusted(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::AdminConfig,
+        evaluated_at: Utc::now(),
+    }
 }
 
 #[tokio::test]
@@ -301,6 +386,133 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         final_record.last_status,
         Some(TriggerRunStatus::Ok),
         "CompleteAfterFirstFire policy: last_status should be Ok after fire — record: {final_record:?}",
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let recording_gateway = Arc::new(RecordingGateway {
+        requests: Arc::new(TokioMutex::new(Vec::new())),
+    });
+
+    let runtime = build_runtime_with(
+        &root,
+        Arc::clone(&recording_gateway),
+        TriggerPollerSettings {
+            enabled: true,
+            worker: TriggerPollerWorkerConfig {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+            startup_jitter_max: Duration::ZERO,
+            tick_jitter_max: Duration::ZERO,
+        },
+    )
+    .await;
+
+    let created = invoke_trigger_create(
+        &runtime,
+        json!({
+            "name": "trigger-e2e-created-by-tool",
+            "prompt": TRIGGER_PROMPT,
+            "cron": "* * * * *"
+        }),
+    )
+    .await;
+    assert_eq!(
+        created["trigger"]["name"],
+        json!("trigger-e2e-created-by-tool")
+    );
+    assert_eq!(created["trigger"]["state"], json!("scheduled"));
+    assert_eq!(created["trigger"]["completion_policy"], json!("recurring"));
+    assert!(created["trigger"]["last_status"].is_null());
+    assert!(created["trigger"]["prompt"].is_null());
+    assert!(created["trigger"]["tenant_id"].is_null());
+    assert!(created["trigger"]["creator_user_id"].is_null());
+
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let user_id = UserId::new(USER).expect("user id");
+    let trigger_id = TriggerId::parse(
+        created["trigger"]["trigger_id"]
+            .as_str()
+            .expect("created trigger id"),
+    )
+    .expect("valid trigger id");
+
+    let mut record = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get created trigger")
+        .expect("created trigger persisted");
+    assert_eq!(record.prompt, TRIGGER_PROMPT);
+    assert_eq!(record.creator_user_id, user_id);
+    assert_eq!(record.name, "trigger-e2e-created-by-tool");
+
+    let original_next_run_at = record.next_run_at;
+    record.next_run_at = Utc::now() - chrono::Duration::seconds(120);
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("make created trigger due");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut record_was_mutated = false;
+    let mut prompt_seen = false;
+
+    while Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let current = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("get trigger")
+            .expect("record present");
+
+        let mutated = current.last_fired_slot.is_some()
+            || current.last_run_at.is_some()
+            || current.last_status.is_some()
+            || current.active_fire_slot.is_some();
+
+        if mutated {
+            record_was_mutated = true;
+            let contents = recording_gateway.captured_message_contents().await;
+            if contents
+                .iter()
+                .any(|content| content.contains(TRIGGER_PROMPT))
+            {
+                prompt_seen = true;
+            }
+        }
+
+        if record_was_mutated && prompt_seen {
+            break;
+        }
+    }
+
+    let settled = wait_for_settled(&repo, &tenant_id, trigger_id, Duration::from_secs(5), |r| {
+        r.last_fired_slot.is_some() && r.next_run_at > original_next_run_at
+    })
+    .await;
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let captured_contents = recording_gateway.captured_message_contents().await;
+    assert!(
+        record_was_mutated,
+        "poller did not mutate trigger created through builtin.trigger_create — record: {settled:?}",
+    );
+    assert!(
+        prompt_seen,
+        "LLM gateway never received trigger prompt for builtin-created trigger — \
+         captured_messages: {captured_contents:?}"
+    );
+    assert_eq!(settled.last_status, Some(TriggerRunStatus::Ok));
+    assert!(
+        settled.last_run_at.is_some(),
+        "builtin-created trigger should record last_run_at after poller fire"
     );
 }
 
