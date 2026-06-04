@@ -20,6 +20,7 @@ registerPack("en", {
   "nav.projects": "Projects",
   "nav.jobs": "Jobs",
   "nav.routines": "Routines",
+  "nav.automations": "Automations",
   "nav.missions": "Missions",
   "nav.extensions": "Extensions",
   "nav.settings": "Settings",
