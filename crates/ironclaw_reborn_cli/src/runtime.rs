@@ -412,7 +412,7 @@ fn runner_settings(
 mod tests {
     use ironclaw_reborn_config::RebornBootConfig;
 
-    use super::{RuntimeInputCaller, build_runtime_input};
+    use super::{HooksActivationConfig, RuntimeInputCaller, build_runtime_input};
 
     #[test]
     fn build_runtime_input_maps_configured_cli_identity() {
@@ -444,6 +444,27 @@ default_owner = "custom-owner"
         assert_eq!(runtime_input.identity.agent_id, "custom-agent");
         assert_eq!(runtime_input.identity.source_binding_id, "reborn-cli");
         assert_eq!(runtime_input.identity.reply_target_binding_id, "reborn-cli");
+
+        // Per `.claude/rules/testing.md` ("Test Through the Caller"):
+        // `with_hooks_config(HooksActivationConfig::from_env())` (the wrapper)
+        // gates dispatcher composition on the activation flag, so the caller
+        // test must pin that the `hooks` field is actually threaded through.
+        // Threading: the wired value must equal what the edge resolves from the
+        // environment — proves `with_hooks_config` is not silently dropped.
+        assert_eq!(
+            runtime_input.hooks,
+            HooksActivationConfig::from_env(),
+            "build_runtime_input must thread the env-resolved hooks config"
+        );
+        // Default-OFF rollout-safety contract: with `HOOKS_ENABLED` unset the
+        // framework stays disabled. Guard against a CI environment that exports
+        // it so this assertion only pins the contract it claims to.
+        if std::env::var(ironclaw_reborn_composition::HOOKS_ENABLED_ENV).is_err() {
+            assert!(
+                !runtime_input.hooks.is_enabled(),
+                "hooks must be disabled by default when HOOKS_ENABLED is unset"
+            );
+        }
     }
 
     // Regression for the review point that `serve` rejected legitimate
