@@ -4,14 +4,18 @@
 //! an unbound actor issues a short code, and the authenticated WebUI user
 //! redeems that code to bind their Reborn user to the Slack actor.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_product_workflow::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductWorkflowError,
 };
-use ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND;
+use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 use thiserror::Error;
 
 use crate::slack_actor_identity::RebornUserIdentityLookup;
@@ -21,7 +25,9 @@ use crate::slack_personal_binding::{
 };
 use crate::slack_serve::SlackUserId;
 
-const SLACK_ADAPTER_ID: &str = "slack_v2";
+const SLACK_PAIRING_CODE_MIN_LEN: usize = 8;
+const SLACK_PAIRING_CODE_MAX_LEN: usize = 32;
+const SLACK_PAIRING_CHALLENGE_DEDUP_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SlackPersonalBindingPairingCode(String);
@@ -35,9 +41,12 @@ impl SlackPersonalBindingPairingCode {
                 reason: "pairing code is required",
             });
         }
-        if normalized.len() > 32 || !normalized.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        if normalized.len() < SLACK_PAIRING_CODE_MIN_LEN
+            || normalized.len() > SLACK_PAIRING_CODE_MAX_LEN
+            || !normalized.chars().all(|ch| ch.is_ascii_alphanumeric())
+        {
             return Err(SlackPersonalBindingPairingError::InvalidCode {
-                reason: "pairing code must be 1-32 ASCII letters or digits",
+                reason: "pairing code must be 8-32 ASCII letters or digits",
             });
         }
         Ok(Self(normalized))
@@ -91,6 +100,11 @@ pub trait SlackPersonalBindingPairingChallengeStore: Send + Sync {
         &self,
         challenge: SlackPersonalBindingPairingChallenge,
     ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>;
+
+    async fn get_challenge(
+        &self,
+        code: &SlackPersonalBindingPairingCode,
+    ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>;
 
     async fn consume_challenge(
         &self,
@@ -153,6 +167,14 @@ impl SlackPersonalBindingPairingService {
         principal: SlackPersonalBindingPrincipal,
         code: SlackPersonalBindingPairingCode,
     ) -> Result<RebornUserIdentityBinding, SlackPersonalBindingPairingError> {
+        let preview = self.challenge_store.get_challenge(&code).await?;
+        self.binding_service
+            .validate_installation_actor(
+                &principal,
+                &preview.installation_id,
+                &preview.slack_user_id,
+            )
+            .map_err(SlackPersonalBindingPairingError::Binding)?;
         let challenge = self.challenge_store.consume_challenge(&code).await?;
         self.binding_service
             .bind_installation_actor(
@@ -183,6 +205,8 @@ impl std::fmt::Debug for SlackPersonalBindingPairingService {
 pub struct SlackPairingActorResolver {
     lookup: Arc<dyn RebornUserIdentityLookup>,
     pairing: SlackPersonalBindingPairingService,
+    pending_challenge_cache: Arc<Mutex<HashMap<SlackPairingChallengeCacheKey, Instant>>>,
+    challenge_dedup_ttl: Duration,
 }
 
 impl SlackPairingActorResolver {
@@ -190,8 +214,50 @@ impl SlackPairingActorResolver {
         lookup: Arc<dyn RebornUserIdentityLookup>,
         pairing: SlackPersonalBindingPairingService,
     ) -> Self {
-        Self { lookup, pairing }
+        Self {
+            lookup,
+            pairing,
+            pending_challenge_cache: Arc::new(Mutex::new(HashMap::new())),
+            challenge_dedup_ttl: SLACK_PAIRING_CHALLENGE_DEDUP_TTL,
+        }
     }
+
+    fn reserve_pairing_challenge(
+        &self,
+        key: SlackPairingChallengeCacheKey,
+    ) -> Result<bool, ProductWorkflowError> {
+        let mut cache = self.pending_challenge_cache.lock().map_err(|_| {
+            ProductWorkflowError::BindingResolutionFailed {
+                reason: "slack pairing challenge cache lock poisoned".into(),
+            }
+        })?;
+        let now = Instant::now();
+        cache.retain(|_, expires_at| *expires_at > now);
+        if cache.contains_key(&key) {
+            return Ok(false);
+        }
+        cache.insert(key, now + self.challenge_dedup_ttl);
+        Ok(true)
+    }
+
+    fn clear_pairing_challenge_reservation(
+        &self,
+        key: &SlackPairingChallengeCacheKey,
+    ) -> Result<(), ProductWorkflowError> {
+        self.pending_challenge_cache
+            .lock()
+            .map_err(|_| ProductWorkflowError::BindingResolutionFailed {
+                reason: "slack pairing challenge cache lock poisoned".into(),
+            })?
+            .remove(key);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SlackPairingChallengeCacheKey {
+    installation_id: AdapterInstallationId,
+    slack_user_id: SlackUserId,
 }
 
 impl std::fmt::Debug for SlackPairingActorResolver {
@@ -206,7 +272,7 @@ impl ProductActorUserResolver for SlackPairingActorResolver {
         &self,
         request: ProductActorUserResolutionRequest,
     ) -> Result<Option<UserId>, ProductWorkflowError> {
-        if request.adapter_id.as_str() != SLACK_ADAPTER_ID
+        if request.adapter_id.as_str() != SLACK_V2_ADAPTER_ID
             || request.external_actor_ref.kind() != SLACK_USER_ACTOR_KIND
         {
             return Ok(None);
@@ -230,15 +296,24 @@ impl ProductActorUserResolver for SlackPairingActorResolver {
             return Ok(resolved);
         }
 
-        self.pairing
-            .issue_challenge(
-                request.installation_id,
-                SlackUserId::new(request.external_actor_ref.id()),
-            )
+        let key = SlackPairingChallengeCacheKey {
+            installation_id: request.installation_id,
+            slack_user_id: SlackUserId::new(request.external_actor_ref.id()),
+        };
+        if !self.reserve_pairing_challenge(key.clone())? {
+            return Ok(None);
+        }
+
+        if let Err(error) = self
+            .pairing
+            .issue_challenge(key.installation_id.clone(), key.slack_user_id.clone())
             .await
-            .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
+        {
+            self.clear_pairing_challenge_reservation(&key)?;
+            return Err(ProductWorkflowError::BindingResolutionFailed {
                 reason: error.to_string(),
-            })?;
+            });
+        }
         Ok(None)
     }
 }
@@ -265,7 +340,7 @@ mod tests {
         let service = SlackPersonalBindingPairingService::new(
             binding_service(store.clone()),
             Arc::new(StaticChallengeStore::new(
-                "ABC123",
+                "ABC12345",
                 SlackPersonalBindingPairingChallenge {
                     installation_id: installation("install-a"),
                     slack_user_id: SlackUserId::new("U123"),
@@ -275,7 +350,7 @@ mod tests {
         );
 
         let binding = service
-            .redeem_challenge(principal("tenant-a", "user:alice"), code("abc123"))
+            .redeem_challenge(principal("tenant-a", "user:alice"), code("abc12345"))
             .await
             .expect("redeem challenge");
 
@@ -291,20 +366,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redeem_challenge_rejects_foreign_tenant_without_consuming_code() {
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let challenge_store = Arc::new(StaticChallengeStore::new(
+            "ABC12345",
+            SlackPersonalBindingPairingChallenge {
+                installation_id: installation("install-a"),
+                slack_user_id: SlackUserId::new("U123"),
+            },
+        ));
+        let service = SlackPersonalBindingPairingService::new(
+            binding_service(binding_store.clone()),
+            challenge_store.clone(),
+            Arc::new(RecordingNotifier::default()),
+        );
+
+        let error = service
+            .redeem_challenge(principal("tenant-b", "user:eve"), code("abc12345"))
+            .await
+            .expect_err("foreign tenant is rejected");
+
+        assert!(matches!(
+            error,
+            SlackPersonalBindingPairingError::Binding(
+                SlackPersonalUserBindingError::UnknownInstallation { .. }
+            )
+        ));
+        assert_eq!(challenge_store.consumes(), 0);
+        assert_eq!(
+            binding_store.bindings(),
+            Vec::<RebornUserIdentityBinding>::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn redeem_challenge_returns_challenge_not_found_for_unknown_code() {
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let service = SlackPersonalBindingPairingService::new(
+            binding_service(binding_store.clone()),
+            Arc::new(StaticIssueStore::new("PAIR4242")),
+            Arc::new(RecordingNotifier::default()),
+        );
+
+        let error = service
+            .redeem_challenge(principal("tenant-a", "user:alice"), code("unknown1"))
+            .await
+            .expect_err("unknown code is rejected");
+
+        assert!(matches!(
+            error,
+            SlackPersonalBindingPairingError::ChallengeNotFound
+        ));
+        assert_eq!(
+            binding_store.bindings(),
+            Vec::<RebornUserIdentityBinding>::new()
+        );
+    }
+
+    #[test]
+    fn pairing_code_rejects_empty_oversize_short_and_non_alphanumeric() {
+        assert!(SlackPersonalBindingPairingCode::new("").is_err());
+        assert!(SlackPersonalBindingPairingCode::new("A".repeat(33)).is_err());
+        assert!(SlackPersonalBindingPairingCode::new("ABC-1234").is_err());
+        assert!(SlackPersonalBindingPairingCode::new("ABC123").is_err());
+        assert_eq!(
+            SlackPersonalBindingPairingCode::new(" abc12345 ")
+                .expect("valid code")
+                .as_str(),
+            "ABC12345"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_challenge_propagates_notifier_error() {
+        let service = SlackPersonalBindingPairingService::new(
+            binding_service(Arc::new(RecordingBindingStore::default())),
+            Arc::new(StaticIssueStore::new("PAIR4242")),
+            Arc::new(FailingNotifier),
+        );
+
+        let error = service
+            .issue_challenge(installation("install-a"), SlackUserId::new("U123"))
+            .await
+            .expect_err("notifier error is propagated");
+
+        assert!(matches!(
+            error,
+            SlackPersonalBindingPairingError::Backend(_)
+        ));
+    }
+
+    #[tokio::test]
     async fn resolver_sends_pairing_challenge_for_unknown_slack_actor() {
         let notifier = Arc::new(RecordingNotifier::default());
         let pairing = SlackPersonalBindingPairingService::new(
             binding_service(Arc::new(RecordingBindingStore::default())),
-            Arc::new(StaticIssueStore::new("PAIR42")),
+            Arc::new(StaticIssueStore::new("PAIR4242")),
             notifier.clone(),
         );
         let resolver = SlackPairingActorResolver::new(Arc::new(EmptyLookup), pairing);
 
         let resolved = resolver
-            .resolve_product_actor_user(ProductActorUserResolutionRequest::new(
-                ProductAdapterId::new("slack_v2").unwrap(),
-                installation("install-a"),
-                ExternalActorRef::new("slack_user", "U123", None::<String>).unwrap(),
+            .resolve_product_actor_user(actor_request(
+                "slack_v2",
+                "install-a",
+                "slack_user",
+                "U123",
             ))
             .await
             .expect("resolution completes");
@@ -315,9 +482,128 @@ mod tests {
             vec![SlackPersonalBindingPairingNotification {
                 installation_id: installation("install-a"),
                 slack_user_id: SlackUserId::new("U123"),
-                code: code("PAIR42"),
+                code: code("PAIR4242"),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn resolver_suppresses_duplicate_pairing_challenges_during_cooldown() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let pairing = SlackPersonalBindingPairingService::new(
+            binding_service(Arc::new(RecordingBindingStore::default())),
+            Arc::new(StaticIssueStore::new("PAIR4242")),
+            notifier.clone(),
+        );
+        let resolver = SlackPairingActorResolver::new(Arc::new(EmptyLookup), pairing);
+        let request = actor_request("slack_v2", "install-a", "slack_user", "U123");
+
+        resolver
+            .resolve_product_actor_user(request.clone())
+            .await
+            .expect("first resolution completes");
+        resolver
+            .resolve_product_actor_user(request)
+            .await
+            .expect("second resolution completes");
+
+        assert_eq!(notifier.notifications().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn resolver_skips_non_slack_shapes_and_existing_binding_without_issuing() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let pairing = SlackPersonalBindingPairingService::new(
+            binding_service(Arc::new(RecordingBindingStore::default())),
+            Arc::new(StaticIssueStore::new("PAIR4242")),
+            notifier.clone(),
+        );
+        let resolver = SlackPairingActorResolver::new(
+            Arc::new(StaticLookup::new(Some(user("user:alice")))),
+            pairing,
+        );
+
+        assert_eq!(
+            resolver
+                .resolve_product_actor_user(actor_request(
+                    "github",
+                    "install-a",
+                    "slack_user",
+                    "U123"
+                ))
+                .await
+                .expect("wrong adapter returns none"),
+            None
+        );
+        assert_eq!(
+            resolver
+                .resolve_product_actor_user(actor_request(
+                    "slack_v2",
+                    "install-a",
+                    "github_user",
+                    "U123"
+                ))
+                .await
+                .expect("wrong actor kind returns none"),
+            None
+        );
+        assert_eq!(
+            resolver
+                .resolve_product_actor_user(actor_request(
+                    "slack_v2",
+                    "install-a",
+                    "slack_user",
+                    "U123"
+                ))
+                .await
+                .expect("existing binding returns user"),
+            Some(user("user:alice"))
+        );
+        assert!(notifier.notifications().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolver_propagates_lookup_and_issue_errors() {
+        let pairing = SlackPersonalBindingPairingService::new(
+            binding_service(Arc::new(RecordingBindingStore::default())),
+            Arc::new(StaticIssueStore::new("PAIR4242")),
+            Arc::new(RecordingNotifier::default()),
+        );
+        let resolver = SlackPairingActorResolver::new(Arc::new(FailingLookup), pairing);
+
+        let lookup_error = resolver
+            .resolve_product_actor_user(actor_request(
+                "slack_v2",
+                "install-a",
+                "slack_user",
+                "U123",
+            ))
+            .await
+            .expect_err("lookup error propagates");
+        assert!(matches!(
+            lookup_error,
+            ProductWorkflowError::BindingResolutionFailed { .. }
+        ));
+
+        let failing_pairing = SlackPersonalBindingPairingService::new(
+            binding_service(Arc::new(RecordingBindingStore::default())),
+            Arc::new(FailingIssueStore),
+            Arc::new(RecordingNotifier::default()),
+        );
+        let resolver = SlackPairingActorResolver::new(Arc::new(EmptyLookup), failing_pairing);
+        let issue_error = resolver
+            .resolve_product_actor_user(actor_request(
+                "slack_v2",
+                "install-a",
+                "slack_user",
+                "U123",
+            ))
+            .await
+            .expect_err("issue error propagates");
+        assert!(matches!(
+            issue_error,
+            ProductWorkflowError::BindingResolutionFailed { .. }
+        ));
     }
 
     fn binding_service(
@@ -352,6 +638,19 @@ mod tests {
         SlackPersonalBindingPairingCode::new(value).unwrap()
     }
 
+    fn actor_request(
+        adapter_id: &str,
+        installation_id: &str,
+        actor_kind: &str,
+        actor_id: &str,
+    ) -> ProductActorUserResolutionRequest {
+        ProductActorUserResolutionRequest::new(
+            ProductAdapterId::new(adapter_id).unwrap(),
+            installation(installation_id),
+            ExternalActorRef::new(actor_kind, actor_id, None::<String>).unwrap(),
+        )
+    }
+
     #[derive(Default)]
     struct RecordingBindingStore {
         bindings: Mutex<Vec<RebornUserIdentityBinding>>,
@@ -377,6 +676,7 @@ mod tests {
     struct StaticChallengeStore {
         code: SlackPersonalBindingPairingCode,
         challenge: SlackPersonalBindingPairingChallenge,
+        consumes: Mutex<usize>,
     }
 
     impl StaticChallengeStore {
@@ -384,7 +684,12 @@ mod tests {
             Self {
                 code: super::tests::code(code),
                 challenge,
+                consumes: Mutex::new(0),
             }
+        }
+
+        fn consumes(&self) -> usize {
+            *self.consumes.lock().unwrap()
         }
     }
 
@@ -401,11 +706,26 @@ mod tests {
             })
         }
 
-        async fn consume_challenge(
+        async fn get_challenge(
             &self,
-            _code: &SlackPersonalBindingPairingCode,
+            code: &SlackPersonalBindingPairingCode,
         ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
         {
+            if code != &self.code {
+                return Err(SlackPersonalBindingPairingError::ChallengeNotFound);
+            }
+            Ok(self.challenge.clone())
+        }
+
+        async fn consume_challenge(
+            &self,
+            code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            if code != &self.code {
+                return Err(SlackPersonalBindingPairingError::ChallengeNotFound);
+            }
+            *self.consumes.lock().unwrap() += 1;
             Ok(self.challenge.clone())
         }
     }
@@ -433,6 +753,14 @@ mod tests {
                 code: self.code.clone(),
                 challenge,
             })
+        }
+
+        async fn get_challenge(
+            &self,
+            _code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            Err(SlackPersonalBindingPairingError::ChallengeNotFound)
         }
 
         async fn consume_challenge(
@@ -466,6 +794,51 @@ mod tests {
         }
     }
 
+    struct FailingNotifier;
+
+    #[async_trait::async_trait]
+    impl SlackPersonalBindingPairingNotifier for FailingNotifier {
+        async fn send_pairing_challenge(
+            &self,
+            _notification: SlackPersonalBindingPairingNotification,
+        ) -> Result<(), SlackPersonalBindingPairingError> {
+            Err(SlackPersonalBindingPairingError::Backend(
+                "notifier down".into(),
+            ))
+        }
+    }
+
+    struct FailingIssueStore;
+
+    #[async_trait::async_trait]
+    impl SlackPersonalBindingPairingChallengeStore for FailingIssueStore {
+        async fn issue_challenge(
+            &self,
+            _challenge: SlackPersonalBindingPairingChallenge,
+        ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            Err(SlackPersonalBindingPairingError::Backend(
+                "store down".into(),
+            ))
+        }
+
+        async fn get_challenge(
+            &self,
+            _code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            Err(SlackPersonalBindingPairingError::ChallengeNotFound)
+        }
+
+        async fn consume_challenge(
+            &self,
+            _code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            Err(SlackPersonalBindingPairingError::ChallengeNotFound)
+        }
+    }
+
     struct EmptyLookup;
 
     #[async_trait::async_trait]
@@ -476,6 +849,40 @@ mod tests {
             _provider_user_id: &str,
         ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
             Ok(None)
+        }
+    }
+
+    struct StaticLookup {
+        user_id: Option<UserId>,
+    }
+
+    impl StaticLookup {
+        fn new(user_id: Option<UserId>) -> Self {
+            Self { user_id }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RebornUserIdentityLookup for StaticLookup {
+        async fn resolve_user_identity(
+            &self,
+            _provider: &str,
+            _provider_user_id: &str,
+        ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
+            Ok(self.user_id.clone())
+        }
+    }
+
+    struct FailingLookup;
+
+    #[async_trait::async_trait]
+    impl RebornUserIdentityLookup for FailingLookup {
+        async fn resolve_user_identity(
+            &self,
+            _provider: &str,
+            _provider_user_id: &str,
+        ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
+            Err(RebornUserIdentityLookupError::Backend("lookup down".into()))
         }
     }
 }

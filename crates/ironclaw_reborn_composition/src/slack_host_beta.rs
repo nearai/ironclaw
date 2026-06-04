@@ -21,7 +21,7 @@ use ironclaw_product_workflow::{
     ProductInstallationScope, StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
-    SLACK_USER_ACTOR_KIND, SlackV2Adapter, SlackV2AdapterConfig,
+    SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackV2Adapter, SlackV2AdapterConfig,
     slack_request_signature_auth_requirement,
 };
 use ironclaw_wasm_product_adapters::{
@@ -43,7 +43,6 @@ use crate::slack_serve::{
 };
 use crate::webui_serve::PublicRouteMount;
 
-const SLACK_ADAPTER_ID: &str = "slack_v2";
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
 const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
@@ -153,7 +152,7 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
     // The resolver controls inbound Slack actor binding. `config.user_id` still
     // scopes the host-mediated Slack bot-token egress for this beta route.
-    let adapter_id = ProductAdapterId::new(SLACK_ADAPTER_ID)
+    let adapter_id = ProductAdapterId::new(SLACK_V2_ADAPTER_ID)
         .map_err(|reason| invalid_config("adapter_id", reason.to_string()))?;
     let token_handle = EgressCredentialHandle::new(SLACK_BOT_TOKEN_HANDLE)
         .map_err(|reason| invalid_config("bot_token_handle", reason.to_string()))?;
@@ -406,7 +405,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let calls = wait_for_resolver_calls(&resolver, 1).await;
         assert!(!calls.is_empty());
-        assert_eq!(calls[0].adapter_id.as_str(), SLACK_ADAPTER_ID);
+        assert_eq!(calls[0].adapter_id.as_str(), SLACK_V2_ADAPTER_ID);
         assert_eq!(calls[0].installation_id.as_str(), INSTALLATION);
         assert_eq!(calls[0].external_actor_ref.kind(), SLACK_USER_ACTOR_KIND);
         assert_eq!(calls[0].external_actor_ref.id(), SLACK_USER);

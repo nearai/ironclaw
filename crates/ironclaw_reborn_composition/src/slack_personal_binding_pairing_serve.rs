@@ -35,7 +35,7 @@ const SLACK_PERSONAL_BINDING_PAIRING_BODY_LIMIT_BYTES: NonZeroU64 =
 const SLACK_PERSONAL_BINDING_PAIRING_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(20).unwrap(); // safety: 20 is non-zero.
 const SLACK_PERSONAL_BINDING_PAIRING_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 is non-zero.
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SlackPersonalBindingPairingRouteConfig {
     pairing_service: SlackPersonalBindingPairingService,
 }
@@ -46,26 +46,13 @@ impl SlackPersonalBindingPairingRouteConfig {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct SlackPersonalBindingPairingRouteState {
-    pairing_service: SlackPersonalBindingPairingService,
-}
-
-impl SlackPersonalBindingPairingRouteState {
-    pub(crate) fn new(config: SlackPersonalBindingPairingRouteConfig) -> Self {
-        Self {
-            pairing_service: config.pairing_service,
-        }
-    }
-}
-
 pub(crate) struct SlackPersonalBindingPairingRouteMount {
     pub(crate) protected: Router,
     pub(crate) descriptors: Vec<IngressRouteDescriptor>,
 }
 
 pub(crate) fn slack_personal_binding_pairing_route_mount(
-    state: SlackPersonalBindingPairingRouteState,
+    config: SlackPersonalBindingPairingRouteConfig,
 ) -> SlackPersonalBindingPairingRouteMount {
     SlackPersonalBindingPairingRouteMount {
         protected: Router::new()
@@ -73,7 +60,7 @@ pub(crate) fn slack_personal_binding_pairing_route_mount(
                 SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH,
                 post(slack_personal_binding_pairing_redeem_handler),
             )
-            .with_state(state),
+            .with_state(config),
         descriptors: slack_personal_binding_pairing_route_descriptors(),
     }
 }
@@ -86,7 +73,7 @@ pub(crate) fn slack_personal_binding_pairing_route_descriptors() -> Vec<IngressR
             SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH,
             redeem_policy(),
         )
-        .expect("Slack personal binding pairing route descriptor must validate at startup"),
+        .expect("Slack personal binding pairing route descriptor must validate at startup"), // safety: route id, method, path, and policy are static typed literals.
     ]
 }
 
@@ -111,7 +98,7 @@ fn redeem_policy() -> IngressPolicy {
         audit: AuditTraceClass::UserAction,
         effect_path: AllowedEffectPath::ProductWorkflow,
     })
-    .expect("Slack personal binding pairing policy must validate")
+    .expect("Slack personal binding pairing policy must validate") // safety: policy fields are typed static literals with non-zero limits.
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,13 +113,13 @@ pub struct SlackPersonalBindingPairingRedeemResponse {
 }
 
 async fn slack_personal_binding_pairing_redeem_handler(
-    State(state): State<SlackPersonalBindingPairingRouteState>,
+    State(config): State<SlackPersonalBindingPairingRouteConfig>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(request): Json<SlackPersonalBindingPairingRedeemRequest>,
 ) -> Result<Json<SlackPersonalBindingPairingRedeemResponse>, SlackPersonalBindingPairingRouteError>
 {
     let code = SlackPersonalBindingPairingCode::new(request.code)?;
-    let binding = state
+    let binding = config
         .pairing_service
         .redeem_challenge(
             SlackPersonalBindingPrincipal {
@@ -151,7 +138,6 @@ async fn slack_personal_binding_pairing_redeem_handler(
 #[derive(Debug)]
 enum SlackPersonalBindingPairingRouteError {
     BadRequest,
-    Unauthorized,
     Unavailable,
 }
 
@@ -169,8 +155,8 @@ impl From<SlackPersonalBindingPairingError> for SlackPersonalBindingPairingRoute
                 }
                 | crate::slack_personal_binding::SlackPersonalUserBindingError::SlackInstallationContextMismatch {
                     ..
-                } => Self::Unauthorized,
-                crate::slack_personal_binding::SlackPersonalUserBindingError::InvalidSlackId {
+                }
+                | crate::slack_personal_binding::SlackPersonalUserBindingError::InvalidSlackId {
                     ..
                 } => Self::BadRequest,
                 crate::slack_personal_binding::SlackPersonalUserBindingError::BindingStore(_) => {
@@ -188,10 +174,6 @@ impl IntoResponse for SlackPersonalBindingPairingRouteError {
             Self::BadRequest => (
                 StatusCode::BAD_REQUEST,
                 "Invalid or expired Slack pairing code.",
-            ),
-            Self::Unauthorized => (
-                StatusCode::FORBIDDEN,
-                "Slack pairing code does not belong to this tenant.",
             ),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -227,6 +209,88 @@ mod tests {
     #[tokio::test]
     async fn redeem_route_binds_code_to_authenticated_caller() {
         let binding_store = Arc::new(RecordingBindingStore::default());
+        let mount = route_mount(
+            binding_store.clone(),
+            Arc::new(StaticChallengeStore::found()),
+        );
+        let response = mount
+            .protected
+            .oneshot(redeem_request("tenant-a", r#"{"code":"abc12345"}"#))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(binding_store.bound_user_ids(), vec!["user:alice"]);
+    }
+
+    #[tokio::test]
+    async fn redeem_route_maps_invalid_code_to_bad_request() {
+        let mount = route_mount(
+            Arc::new(RecordingBindingStore::default()),
+            Arc::new(StaticChallengeStore::found()),
+        );
+
+        let response = mount
+            .protected
+            .oneshot(redeem_request("tenant-a", r#"{"code":"abc123"}"#))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn redeem_route_maps_unknown_code_to_bad_request() {
+        let mount = route_mount(
+            Arc::new(RecordingBindingStore::default()),
+            Arc::new(StaticChallengeStore::missing()),
+        );
+
+        let response = mount
+            .protected
+            .oneshot(redeem_request("tenant-a", r#"{"code":"abc12345"}"#))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn redeem_route_maps_foreign_tenant_code_to_opaque_bad_request() {
+        let mount = route_mount(
+            Arc::new(RecordingBindingStore::default()),
+            Arc::new(StaticChallengeStore::found()),
+        );
+
+        let response = mount
+            .protected
+            .oneshot(redeem_request("tenant-b", r#"{"code":"abc12345"}"#))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn redeem_route_maps_binding_store_error_to_unavailable() {
+        let binding_store = Arc::new(RecordingBindingStore::with_error(
+            RebornUserIdentityBindingError::Backend("store down".into()),
+        ));
+        let mount = route_mount(binding_store, Arc::new(StaticChallengeStore::found()));
+
+        let response = mount
+            .protected
+            .oneshot(redeem_request("tenant-a", r#"{"code":"abc12345"}"#))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    fn route_mount(
+        binding_store: Arc<RecordingBindingStore>,
+        challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore>,
+    ) -> SlackPersonalBindingPairingRouteMount {
         let pairing = SlackPersonalBindingPairingService::new(
             SlackPersonalUserBindingService::new(
                 [SlackPersonalBindingInstallation {
@@ -234,36 +298,29 @@ mod tests {
                     installation_id: installation("install-a"),
                     selector: SlackInstallationSelector::app_team("A-app", "T-team"),
                 }],
-                binding_store.clone(),
+                binding_store,
             ),
-            Arc::new(StaticChallengeStore),
+            challenge_store,
             Arc::new(NoopNotifier),
         );
-        let mount =
-            slack_personal_binding_pairing_route_mount(SlackPersonalBindingPairingRouteState::new(
-                SlackPersonalBindingPairingRouteConfig::new(pairing),
-            ));
-        let response = mount
-            .protected
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH)
-                    .header("content-type", "application/json")
-                    .extension(WebUiAuthenticatedCaller {
-                        tenant_id: TenantId::new("tenant-a").unwrap(),
-                        user_id: UserId::new("user:alice").unwrap(),
-                        agent_id: None,
-                        project_id: None,
-                    })
-                    .body(Body::from(r#"{"code":"abc123"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        slack_personal_binding_pairing_route_mount(SlackPersonalBindingPairingRouteConfig::new(
+            pairing,
+        ))
+    }
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(binding_store.bound_user_ids(), vec!["user:alice"]);
+    fn redeem_request(tenant_id: &str, body: &'static str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH)
+            .header("content-type", "application/json")
+            .extension(WebUiAuthenticatedCaller {
+                tenant_id: TenantId::new(tenant_id).unwrap(),
+                user_id: UserId::new("user:alice").unwrap(),
+                agent_id: None,
+                project_id: None,
+            })
+            .body(Body::from(body))
+            .unwrap()
     }
 
     fn installation(value: &str) -> AdapterInstallationId {
@@ -273,9 +330,17 @@ mod tests {
     #[derive(Default)]
     struct RecordingBindingStore {
         bindings: Mutex<Vec<RebornUserIdentityBinding>>,
+        error: Option<RebornUserIdentityBindingError>,
     }
 
     impl RecordingBindingStore {
+        fn with_error(error: RebornUserIdentityBindingError) -> Self {
+            Self {
+                bindings: Mutex::new(Vec::new()),
+                error: Some(error),
+            }
+        }
+
         fn bound_user_ids(&self) -> Vec<String> {
             self.bindings
                 .lock()
@@ -293,11 +358,31 @@ mod tests {
             binding: RebornUserIdentityBinding,
         ) -> Result<(), RebornUserIdentityBindingError> {
             self.bindings.lock().unwrap().push(binding);
-            Ok(())
+            match &self.error {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
         }
     }
 
-    struct StaticChallengeStore;
+    struct StaticChallengeStore {
+        challenge: Option<SlackPersonalBindingPairingChallenge>,
+    }
+
+    impl StaticChallengeStore {
+        fn found() -> Self {
+            Self {
+                challenge: Some(SlackPersonalBindingPairingChallenge {
+                    installation_id: installation("install-a"),
+                    slack_user_id: SlackUserId::new("U123"),
+                }),
+            }
+        }
+
+        fn missing() -> Self {
+            Self { challenge: None }
+        }
+    }
 
     #[async_trait::async_trait]
     impl SlackPersonalBindingPairingChallengeStore for StaticChallengeStore {
@@ -307,9 +392,22 @@ mod tests {
         ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
         {
             Ok(IssuedSlackPersonalBindingPairingChallenge {
-                code: SlackPersonalBindingPairingCode::new("ABC123").unwrap(),
+                code: SlackPersonalBindingPairingCode::new("ABC12345").unwrap(),
                 challenge,
             })
+        }
+
+        async fn get_challenge(
+            &self,
+            code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            if code.as_str() != "ABC12345" {
+                return Err(SlackPersonalBindingPairingError::ChallengeNotFound);
+            }
+            self.challenge
+                .clone()
+                .ok_or(SlackPersonalBindingPairingError::ChallengeNotFound)
         }
 
         async fn consume_challenge(
@@ -317,11 +415,7 @@ mod tests {
             code: &SlackPersonalBindingPairingCode,
         ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
         {
-            assert_eq!(code.as_str(), "ABC123");
-            Ok(SlackPersonalBindingPairingChallenge {
-                installation_id: installation("install-a"),
-                slack_user_id: SlackUserId::new("U123"),
-            })
+            self.get_challenge(code).await
         }
     }
 

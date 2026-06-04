@@ -174,11 +174,20 @@ impl SlackPersonalUserBindingService {
         installation_id: AdapterInstallationId,
         slack_user_id: SlackUserId,
     ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
-        validate_slack_id("slack user", slack_user_id.as_str())?;
-        let installation = self.installation_for_principal(&principal, &installation_id)?;
-        ensure_tenant_app_scoped(&installation.selector, &principal, &installation_id)?;
+        self.validate_installation_actor(&principal, &installation_id, &slack_user_id)?;
         self.bind_validated_actor(installation_id, slack_user_id, principal.user_id)
             .await
+    }
+
+    pub(crate) fn validate_installation_actor(
+        &self,
+        principal: &SlackPersonalBindingPrincipal,
+        installation_id: &AdapterInstallationId,
+        slack_user_id: &SlackUserId,
+    ) -> Result<(), SlackPersonalUserBindingError> {
+        validate_slack_id("slack user", slack_user_id.as_str())?;
+        let installation = self.installation_for_principal(principal, installation_id)?;
+        ensure_tenant_app_scoped(&installation.selector, principal, installation_id)
     }
 
     fn installation_for_principal(
@@ -318,7 +327,7 @@ fn tenant_app_selector_matches_request(
             api_app_id,
             team_id,
         } => Ok(team_id == &request.team_id && api_app_id == &request.api_app_id),
-        _ => Ok(false),
+        _ => unreachable!("ensure_tenant_app_scoped rejects non-AppTeam selectors"),
     }
 }
 
@@ -516,6 +525,134 @@ mod tests {
             .bind_personal_user(
                 principal("tenant-alpha", "user:alice"),
                 request("install-alpha"),
+            )
+            .await
+            .expect_err("store error is propagated");
+
+        assert_eq!(
+            error,
+            SlackPersonalUserBindingError::BindingStore(RebornUserIdentityBindingError::Backend(
+                "store down".into()
+            ))
+        );
+        assert_eq!(
+            store.bindings(),
+            vec![RebornUserIdentityBinding {
+                provider: provider("slack"),
+                provider_user_id: provider_user_id("install-alpha:U123"),
+                user_id: user("user:alice"),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_installation_actor_rejects_wrong_tenant_without_write() {
+        let store = Arc::new(RecordingBindingStore::default());
+        let service = service(
+            SlackInstallationSelector::app_team("A-app", "T-team"),
+            store.clone(),
+        );
+
+        let error = service
+            .bind_installation_actor(
+                principal("tenant-beta", "user:alice"),
+                installation("install-alpha"),
+                SlackUserId::new("U123"),
+            )
+            .await
+            .expect_err("wrong tenant is rejected");
+
+        assert!(matches!(
+            error,
+            SlackPersonalUserBindingError::UnknownInstallation { .. }
+        ));
+        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
+    }
+
+    #[tokio::test]
+    async fn bind_installation_actor_rejects_unknown_installation_without_write() {
+        let store = Arc::new(RecordingBindingStore::default());
+        let service = service(
+            SlackInstallationSelector::app_team("A-app", "T-team"),
+            store.clone(),
+        );
+
+        let error = service
+            .bind_installation_actor(
+                principal("tenant-alpha", "user:alice"),
+                installation("install-beta"),
+                SlackUserId::new("U123"),
+            )
+            .await
+            .expect_err("unknown installation is rejected");
+
+        assert!(matches!(
+            error,
+            SlackPersonalUserBindingError::UnknownInstallation { .. }
+        ));
+        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
+    }
+
+    #[tokio::test]
+    async fn bind_installation_actor_rejects_non_app_scoped_installation_without_write() {
+        let store = Arc::new(RecordingBindingStore::default());
+        let service = service(SlackInstallationSelector::team("T-team"), store.clone());
+
+        let error = service
+            .bind_installation_actor(
+                principal("tenant-alpha", "user:alice"),
+                installation("install-alpha"),
+                SlackUserId::new("U123"),
+            )
+            .await
+            .expect_err("team-scoped app is rejected");
+
+        assert!(matches!(
+            error,
+            SlackPersonalUserBindingError::InstallationNotTenantScoped { .. }
+        ));
+        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
+    }
+
+    #[tokio::test]
+    async fn bind_installation_actor_rejects_invalid_slack_user_without_write() {
+        let store = Arc::new(RecordingBindingStore::default());
+        let service = service(
+            SlackInstallationSelector::app_team("A-app", "T-team"),
+            store.clone(),
+        );
+
+        let error = service
+            .bind_installation_actor(
+                principal("tenant-alpha", "user:alice"),
+                installation("install-alpha"),
+                SlackUserId::new("bad\nuser"),
+            )
+            .await
+            .expect_err("invalid slack user is rejected");
+
+        assert!(matches!(
+            error,
+            SlackPersonalUserBindingError::InvalidSlackId { .. }
+        ));
+        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
+    }
+
+    #[tokio::test]
+    async fn bind_installation_actor_propagates_store_error() {
+        let store = Arc::new(RecordingBindingStore::with_error(
+            RebornUserIdentityBindingError::Backend("store down".into()),
+        ));
+        let service = service(
+            SlackInstallationSelector::app_team("A-app", "T-team"),
+            store.clone(),
+        );
+
+        let error = service
+            .bind_installation_actor(
+                principal("tenant-alpha", "user:alice"),
+                installation("install-alpha"),
+                SlackUserId::new("U123"),
             )
             .await
             .expect_err("store error is propagated");

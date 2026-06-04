@@ -56,8 +56,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use crate::product_auth_serve::{ProductAuthRouteState, product_auth_route_mount};
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_personal_binding_pairing_serve::{
-    SlackPersonalBindingPairingRouteConfig, SlackPersonalBindingPairingRouteState,
-    slack_personal_binding_pairing_route_mount,
+    SlackPersonalBindingPairingRouteConfig, slack_personal_binding_pairing_route_mount,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_personal_binding_serve::{
@@ -296,9 +295,18 @@ impl WebuiServeConfig {
     }
 
     /// Attach a host-supplied public sub-router plus descriptors outside bearer
-    /// auth but inside the shared policy stack. Do not pass v1 gateway routers
-    /// here; this seam is only for host-native public routes such as v2 login
-    /// and protocol webhooks.
+    /// auth but inside the shared policy stack.
+    ///
+    /// # Important
+    ///
+    /// Do NOT pass a v1 gateway router through this hook. v1's `/auth/*`
+    /// handlers in `src/channels/web/handlers/auth.rs` share path names with
+    /// the v2-native auth router (`/auth/providers`, `/auth/login/{p}`,
+    /// `/auth/callback/{p}`, `/auth/logout`) by design: they implement the
+    /// same protocol on independent listeners. Merging the v1 router here
+    /// would conflict with the v2-native router and route v1 traffic into the
+    /// v2 host-owned `SessionStore` it never had access to. This seam is only
+    /// for host-native public routes such as v2 login and protocol webhooks.
     pub fn with_public_route_mount(mut self, mount: PublicRouteMount) -> Self {
         self.public_mounts.push(mount);
         self
@@ -476,7 +484,6 @@ pub fn webui_v2_app_with_lifecycle(
     let slack_personal_binding_pairing_mount = config
         .slack_personal_binding_pairing
         .clone()
-        .map(SlackPersonalBindingPairingRouteState::new)
         .map(slack_personal_binding_pairing_route_mount);
     let public_mounts = config.public_mounts;
     let public_route_drains = PublicRouteDrains::new(

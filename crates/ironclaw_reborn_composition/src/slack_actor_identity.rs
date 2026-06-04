@@ -15,10 +15,9 @@ use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_product_workflow::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductWorkflowError,
 };
-use ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND;
+use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 use thiserror::Error;
 
-const SLACK_ADAPTER_ID: &str = "slack_v2";
 pub(crate) const SLACK_IDENTITY_PROVIDER: &str = "slack";
 const SLACK_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -110,7 +109,7 @@ impl ProductActorUserResolver for SlackUserIdentityActorResolver {
         &self,
         request: ProductActorUserResolutionRequest,
     ) -> Result<Option<UserId>, ProductWorkflowError> {
-        if request.adapter_id.as_str() != SLACK_ADAPTER_ID {
+        if request.adapter_id.as_str() != SLACK_V2_ADAPTER_ID {
             return Ok(None);
         }
         if request.external_actor_ref.kind() != SLACK_USER_ACTOR_KIND {
