@@ -76,10 +76,27 @@ impl RebornLlmConfigService {
     /// Persist-then-reload: the file write already happened; refresh the
     /// running provider. A reload failure is logged, not fatal — the on-disk
     /// config is authoritative and applies on next restart.
+    ///
+    /// The reload swaps the live provider's *inner* backend. It does NOT yet
+    /// update the model gateway's pinned model-profile route or cost table
+    /// (those are built once at boot), so changing the active *model* fully
+    /// applies on restart; for providers that honor per-request model overrides
+    /// the gateway still pins the boot model until then. A swappable model
+    /// gateway (and live reload from a no-LLM cold boot, where no reload handle
+    /// exists at all) is owned by the first-run provider work.
     async fn refresh_running_provider(&self) {
-        if let Some(reload) = self.reload.as_ref()
-            && let Err(reason) = reload.reload().await
-        {
+        let Some(reload) = self.reload.as_ref() else {
+            // Cold boot: no LLM was configured at startup, so there is no live
+            // provider to swap into. Don't fail silently — tell the operator the
+            // saved config needs a restart to take effect.
+            tracing::warn!(
+                "LLM configuration saved, but no live LLM provider was configured at startup \
+                 (no config.toml or provider env creds), so it cannot be applied to the running \
+                 process. Restart the server to use the new configuration."
+            );
+            return;
+        };
+        if let Err(reason) = reload.reload().await {
             tracing::warn!(
                 reason = %reason,
                 "LLM config persisted but live provider reload failed; change applies on restart"
@@ -214,36 +231,48 @@ impl LlmConfigService for RebornLlmConfigService {
         request: UpsertLlmProviderRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let id = validate_provider_id(&request.id)?;
-        let protocol = parse_adapter(&request.adapter).ok_or_else(|| {
-            LlmConfigServiceError::InvalidRequest {
-                field: Some("adapter".to_string()),
-                reason: format!("unknown adapter `{}`", request.adapter),
-            }
-        })?;
 
-        let mut definition = custom_definition(
-            &id,
-            protocol,
-            request
-                .base_url
-                .clone()
-                .filter(|url| !url.trim().is_empty()),
-            request.default_model.clone().unwrap_or_default(),
-        );
-        definition.description = request
-            .name
+        let base_url = request
+            .base_url
             .clone()
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| id.clone());
+            .filter(|url| !url.trim().is_empty());
+        let model = request
+            .default_model
+            .clone()
+            .filter(|model| !model.trim().is_empty());
+        let has_new_key = request
+            .api_key
+            .as_ref()
+            .is_some_and(|key| !is_masked_sentinel(key));
+        let key_present = has_new_key
+            || self
+                .keys
+                .exists(&id)
+                .await
+                .map_err(|_| LlmConfigServiceError::Unavailable)?;
+
+        // Editing a built-in must PRESERVE its compiled-in definition (protocol,
+        // setup hints, env-var names) and overlay only what the operator
+        // changed. Writing a fresh generic definition would strip OAuth/setup
+        // from providers like openai_codex, gemini_oauth, nearai, and bedrock.
+        let builtin_registry = ironclaw_llm::ProviderRegistry::try_load_from_path(None)
+            .map_err(|_| LlmConfigServiceError::Unavailable)?;
+        let definition = build_overlay_definition(
+            &id,
+            builtin_registry.find(&id),
+            &request.adapter,
+            base_url,
+            model,
+            key_present,
+            request.name.as_deref(),
+        )?;
 
         self.repo
             .upsert(definition)
             .map_err(|_| LlmConfigServiceError::Unavailable)?;
 
         // Store the key value only when a real (non-sentinel) one was supplied.
-        if let Some(key) = request.api_key.as_ref()
-            && !is_masked_sentinel(key)
-        {
+        if has_new_key && let Some(key) = request.api_key.as_ref() {
             self.keys
                 .put(&id, key.clone())
                 .await
@@ -340,6 +369,50 @@ impl LlmConfigService for RebornLlmConfigService {
 /// Parse a wire adapter name (e.g. `open_ai_completions`) into a protocol.
 fn parse_adapter(adapter: &str) -> Option<ProviderProtocol> {
     serde_json::from_value(serde_json::Value::String(adapter.to_string())).ok()
+}
+
+/// Resolve the overlay `ProviderDefinition` to write for an upsert.
+///
+/// When `builtin` is `Some` the id names a compiled-in provider: clone its
+/// definition (preserving protocol, setup hints, env-var names) and overlay
+/// only the operator's `base_url`/`model`, relaxing `api_key_required` when a
+/// key is stored (so resolution doesn't demand the env var; the stored value is
+/// injected at provider-build time). When `builtin` is `None` it's a brand-new
+/// custom provider, which needs a valid `adapter`.
+fn build_overlay_definition(
+    id: &str,
+    builtin: Option<&ProviderDefinition>,
+    adapter: &str,
+    base_url: Option<String>,
+    model: Option<String>,
+    key_present: bool,
+    name: Option<&str>,
+) -> Result<ProviderDefinition, LlmConfigServiceError> {
+    if let Some(builtin) = builtin {
+        let mut def = builtin.clone();
+        if let Some(base_url) = base_url {
+            def.default_base_url = Some(base_url);
+        }
+        if let Some(model) = model {
+            def.default_model = model;
+        }
+        if key_present {
+            def.api_key_required = false;
+        }
+        return Ok(def);
+    }
+
+    let protocol = parse_adapter(adapter).ok_or_else(|| LlmConfigServiceError::InvalidRequest {
+        field: Some("adapter".to_string()),
+        reason: format!("unknown adapter `{adapter}`"),
+    })?;
+    let mut def = custom_definition(id, protocol, base_url, model.unwrap_or_default());
+    def.description = name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| id.to_string());
+    Ok(def)
 }
 
 /// Build a custom (operator-defined) provider definition. The API key is never
@@ -525,5 +598,78 @@ mod tests {
         assert!(validate_provider_id("Acme").is_err());
         assert!(validate_provider_id("has space").is_err());
         assert!(validate_provider_id("  ").is_err());
+    }
+
+    #[test]
+    fn editing_a_builtin_preserves_protocol_and_setup() {
+        // openai_codex is a built-in with a dedicated protocol + OAuth setup.
+        let registry = ironclaw_llm::ProviderRegistry::try_load_from_path(None).expect("registry");
+        let builtin = registry.find("openai_codex").expect("openai_codex builtin");
+        assert_eq!(builtin.protocol, ProviderProtocol::OpenAiCodex);
+        let had_setup = builtin.setup.is_some();
+
+        let def = build_overlay_definition(
+            "openai_codex",
+            Some(builtin),
+            "ignored_adapter",
+            None,
+            Some("gpt-5.3-codex".to_string()),
+            false,
+            None,
+        )
+        .expect("overlay def");
+
+        // Protocol + setup preserved; only the model changed.
+        assert_eq!(def.protocol, ProviderProtocol::OpenAiCodex);
+        assert_eq!(def.setup.is_some(), had_setup);
+        assert_eq!(def.default_model, "gpt-5.3-codex");
+        assert_eq!(def.id, "openai_codex");
+    }
+
+    #[test]
+    fn editing_a_builtin_relaxes_key_requirement_when_key_stored() {
+        let registry = ironclaw_llm::ProviderRegistry::try_load_from_path(None).expect("registry");
+        let openai = registry.find("openai").expect("openai builtin");
+        assert!(openai.api_key_required, "openai requires a key by default");
+
+        let def = build_overlay_definition(
+            "openai",
+            Some(openai),
+            "open_ai_completions",
+            None,
+            None,
+            true, // a key is stored
+            None,
+        )
+        .expect("overlay def");
+        assert!(
+            !def.api_key_required,
+            "stored key means resolution must not demand the env var"
+        );
+        assert_eq!(def.protocol, ProviderProtocol::OpenAiCompletions);
+    }
+
+    #[test]
+    fn brand_new_custom_provider_uses_the_request_adapter() {
+        let def = build_overlay_definition(
+            "acme",
+            None,
+            "anthropic",
+            Some("https://acme.test/v1".to_string()),
+            Some("acme-1".to_string()),
+            false,
+            Some("Acme"),
+        )
+        .expect("overlay def");
+        assert_eq!(def.protocol, ProviderProtocol::Anthropic);
+        assert_eq!(def.description, "Acme");
+        assert!(!def.api_key_required);
+    }
+
+    #[test]
+    fn brand_new_custom_provider_rejects_unknown_adapter() {
+        let err = build_overlay_definition("acme", None, "nonsense", None, None, false, None)
+            .expect_err("unknown adapter must fail");
+        assert!(matches!(err, LlmConfigServiceError::InvalidRequest { .. }));
     }
 }
