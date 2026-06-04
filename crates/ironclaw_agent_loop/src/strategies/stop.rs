@@ -1,7 +1,9 @@
 //! Stop-condition strategy contract.
 
 use async_trait::async_trait;
-use ironclaw_turns::{LoopFailureKind, LoopMessageRef, LoopResultRef};
+use ironclaw_turns::{
+    LoopFailureKind, LoopMessageRef, LoopResultRef, run_profile::CapabilityProgress,
+};
 
 use crate::state::{LoopExecutionState, StopStrategyState};
 
@@ -41,6 +43,8 @@ pub(crate) struct TurnSummary {
     pub kind: TurnEndKind,
     pub assistant_message_ref: Option<LoopMessageRef>,
     pub batch_result_refs: Vec<LoopResultRef>,
+    #[serde(default)]
+    pub capability_batch: CapabilityBatchTurnSummary,
 }
 
 impl TurnSummary {
@@ -49,14 +53,19 @@ impl TurnSummary {
             kind: TurnEndKind::ReplyOnly,
             assistant_message_ref: Some(reply_ref),
             batch_result_refs: Vec::new(),
+            capability_batch: CapabilityBatchTurnSummary::default(),
         }
     }
 
-    pub(crate) fn after_capability_batch(result_refs: Vec<LoopResultRef>) -> Self {
+    pub(crate) fn after_capability_batch(
+        result_refs: Vec<LoopResultRef>,
+        capability_batch: CapabilityBatchTurnSummary,
+    ) -> Self {
         Self {
             kind: TurnEndKind::AfterCapabilityBatch,
             assistant_message_ref: None,
             batch_result_refs: result_refs,
+            capability_batch,
         }
     }
 
@@ -65,6 +74,40 @@ impl TurnSummary {
             kind: TurnEndKind::ReplyRejected,
             assistant_message_ref: None,
             batch_result_refs: Vec::new(),
+            capability_batch: CapabilityBatchTurnSummary::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CapabilityBatchTurnSummary {
+    /// Number of capability invocations in the executed batch.
+    pub invocation_count: u32,
+    /// Count of completed results in the batch that requested natural termination.
+    pub terminate_hint_count: u32,
+    /// Count of completed results in the batch whose typed progress said no
+    /// evidence/state changed.
+    pub no_progress_count: u32,
+}
+
+impl CapabilityBatchTurnSummary {
+    pub(crate) fn for_invocation_count(invocation_count: usize) -> Self {
+        Self {
+            invocation_count: invocation_count as u32,
+            terminate_hint_count: 0,
+            no_progress_count: 0,
+        }
+    }
+
+    pub(crate) fn record_result(&mut self, progress: CapabilityProgress, terminate_hint: bool) {
+        if matches!(
+            progress,
+            CapabilityProgress::NoChange | CapabilityProgress::Blocked
+        ) {
+            self.no_progress_count = self.no_progress_count.saturating_add(1);
+        }
+        if terminate_hint {
+            self.terminate_hint_count = self.terminate_hint_count.saturating_add(1);
         }
     }
 }
@@ -180,9 +223,9 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
         // completed turn counts.
         let all_results_reported_no_progress = just_completed.kind
             == TurnEndKind::AfterCapabilityBatch
-            && state.stop_state.last_batch_total > 0
-            && state.stop_state.no_progress_results_in_last_batch
-                == state.stop_state.last_batch_total;
+            && just_completed.capability_batch.invocation_count > 0
+            && just_completed.capability_batch.no_progress_count
+                == just_completed.capability_batch.invocation_count;
 
         StopStrategyState {
             turns_completed: state.stop_state.turns_completed.saturating_add(1),
@@ -199,7 +242,6 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
             } else {
                 0
             },
-            ..state.stop_state.clone()
         }
     }
 
@@ -220,8 +262,9 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
         // (b) graceful terminate-hint: every result in the just-completed
         // batch said terminate.
         if just_completed.kind == TurnEndKind::AfterCapabilityBatch
-            && state.stop_state.last_batch_total > 0
-            && state.stop_state.terminate_hints_in_last_batch == state.stop_state.last_batch_total
+            && just_completed.capability_batch.invocation_count > 0
+            && just_completed.capability_batch.terminate_hint_count
+                == just_completed.capability_batch.invocation_count
         {
             return StopOutcome::Stop {
                 kind: StopKind::GracefulStop,
@@ -336,6 +379,7 @@ mod tests {
                 LoopResultRef::new("result:call-1").unwrap(),
                 LoopResultRef::new("result:call-2").unwrap(),
             ],
+            capability_batch: CapabilityBatchTurnSummary::default(),
         };
 
         let serialized = serde_json::to_string(&summary).unwrap();
@@ -406,8 +450,8 @@ mod tests {
         use serde_json::json;
 
         use super::super::{
-            DefaultStopConditionStrategy, StopConditionStrategy, StopKind, StopOutcome,
-            TurnEndKind, TurnSummary,
+            CapabilityBatchTurnSummary, DefaultStopConditionStrategy, StopConditionStrategy,
+            StopKind, StopOutcome, TurnEndKind, TurnSummary,
         };
         use crate::state::{CapabilityCallSignature, LoopExecutionState, StopStrategyState};
 
@@ -493,6 +537,16 @@ mod tests {
                     LoopMessageRef::new("msg:default-stop").expect("valid"),
                 ),
                 batch_result_refs: Vec::new(),
+                capability_batch: CapabilityBatchTurnSummary::default(),
+            }
+        }
+
+        fn after_batch_with_capability_summary(
+            capability_batch: CapabilityBatchTurnSummary,
+        ) -> TurnSummary {
+            TurnSummary {
+                capability_batch,
+                ..after_batch()
             }
         }
 
@@ -523,8 +577,6 @@ mod tests {
             let mut state = LoopExecutionState::initial_for_run(&test_run_context());
             state.stop_state = StopStrategyState {
                 turns_completed: 4,
-                terminate_hints_in_last_batch: 0,
-                last_batch_total: 0,
                 trailing_rejected_replies: 0,
                 ..StopStrategyState::default()
             };
@@ -541,13 +593,16 @@ mod tests {
             let mut state = LoopExecutionState::initial_for_run(&test_run_context());
             state.stop_state = StopStrategyState {
                 turns_completed: 1,
-                terminate_hints_in_last_batch: 3,
-                last_batch_total: 3,
                 trailing_rejected_replies: 0,
                 ..StopStrategyState::default()
             };
+            let summary = after_batch_with_capability_summary(CapabilityBatchTurnSummary {
+                invocation_count: 3,
+                terminate_hint_count: 3,
+                no_progress_count: 0,
+            });
 
-            let (state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
+            let (state, outcome) = observe_and_decide(&strategy, state, summary).await;
 
             match outcome {
                 StopOutcome::Stop { kind } => {
@@ -556,6 +611,21 @@ mod tests {
                 }
                 other => panic!("expected Stop GracefulStop, got {other:?}"),
             }
+        }
+
+        #[tokio::test]
+        async fn partial_terminate_hint_batch_continues() {
+            let strategy = DefaultStopConditionStrategy::default();
+            let state = LoopExecutionState::initial_for_run(&test_run_context());
+            let summary = after_batch_with_capability_summary(CapabilityBatchTurnSummary {
+                invocation_count: 2,
+                terminate_hint_count: 1,
+                no_progress_count: 0,
+            });
+
+            let (_state, outcome) = observe_and_decide(&strategy, state, summary).await;
+
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
         }
 
         #[tokio::test]
@@ -572,6 +642,7 @@ mod tests {
                         LoopMessageRef::new("msg:default-stop").expect("valid"),
                     ),
                     batch_result_refs: Vec::new(),
+                    capability_batch: CapabilityBatchTurnSummary::default(),
                 },
             )
             .await;
@@ -601,12 +672,10 @@ mod tests {
         async fn terminate_hint_ignored_when_batch_was_empty() {
             let strategy = DefaultStopConditionStrategy::default();
             let mut state = LoopExecutionState::initial_for_run(&test_run_context());
-            // last_batch_total == 0: no batch this turn — strategy must not
+            // invocation_count == 0: no batch this turn — strategy must not
             // graceful-stop on a vacuous "all-terminated" check.
             state.stop_state = StopStrategyState {
                 turns_completed: 0,
-                terminate_hints_in_last_batch: 0,
-                last_batch_total: 0,
                 trailing_rejected_replies: 0,
                 ..StopStrategyState::default()
             };
@@ -618,6 +687,11 @@ mod tests {
                     kind: TurnEndKind::AfterCapabilityBatch,
                     assistant_message_ref: None,
                     batch_result_refs: Vec::new(),
+                    capability_batch: CapabilityBatchTurnSummary {
+                        invocation_count: 0,
+                        terminate_hint_count: 0,
+                        no_progress_count: 0,
+                    },
                 },
             )
             .await;
@@ -652,9 +726,11 @@ mod tests {
         async fn three_typed_no_progress_batches_trigger_no_progress() {
             let strategy = DefaultStopConditionStrategy::default();
             let mut state = LoopExecutionState::initial_for_run(&test_run_context());
-            state.stop_state.last_batch_total = 1;
-            state.stop_state.no_progress_results_in_last_batch = 1;
-            let summary = after_batch();
+            let summary = after_batch_with_capability_summary(CapabilityBatchTurnSummary {
+                invocation_count: 1,
+                terminate_hint_count: 0,
+                no_progress_count: 1,
+            });
 
             for _ in 0..3 {
                 state.stop_state = strategy.observe_completed_turn(&state, &summary).await;
@@ -670,6 +746,23 @@ mod tests {
                     kind: StopKind::NoProgressDetected
                 }
             ));
+        }
+
+        #[tokio::test]
+        async fn mixed_progress_batch_resets_trailing_no_progress_results() {
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            state.stop_state.trailing_no_progress_results = 2;
+            let summary = after_batch_with_capability_summary(CapabilityBatchTurnSummary {
+                invocation_count: 2,
+                terminate_hint_count: 0,
+                no_progress_count: 1,
+            });
+
+            let (state, outcome) = observe_and_decide(&strategy, state, summary).await;
+
+            assert_eq!(state.stop_state.trailing_no_progress_results, 0);
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
         }
 
         /// F1 regression: four consecutive turns with output ≤

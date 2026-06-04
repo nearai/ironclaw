@@ -51,8 +51,8 @@ pub(crate) use reply_admission::{
     DefaultReplyAdmissionStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy,
 };
 pub(crate) use stop::{
-    DefaultStopConditionStrategy, StopConditionStrategy, StopKind, StopOutcome, TurnEndKind,
-    TurnSummary,
+    CapabilityBatchTurnSummary, DefaultStopConditionStrategy, StopConditionStrategy, StopKind,
+    StopOutcome, TurnEndKind, TurnSummary,
 };
 
 #[cfg(test)]

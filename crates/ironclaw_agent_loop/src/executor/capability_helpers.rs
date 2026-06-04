@@ -219,23 +219,6 @@ pub(super) fn push_completed_result(
     state: &mut LoopExecutionState,
     result: CapabilityResultMessage,
 ) {
-    use ironclaw_turns::run_profile::CapabilityProgress;
-
     state.recovery_state = state.recovery_state.cleared_attempts();
-    if matches!(
-        result.progress,
-        CapabilityProgress::NoChange | CapabilityProgress::Blocked
-    ) {
-        state.stop_state.no_progress_results_in_last_batch = state
-            .stop_state
-            .no_progress_results_in_last_batch
-            .saturating_add(1);
-    }
     state.result_refs.push(result.result_ref);
-    if result.terminate_hint {
-        state.stop_state.terminate_hints_in_last_batch = state
-            .stop_state
-            .terminate_hints_in_last_batch
-            .saturating_add(1);
-    }
 }

@@ -492,11 +492,20 @@ impl ScriptedCapabilityOutcome {
         }
     }
 
+    /// Creates a completed outcome whose typed progress reports a blocker.
+    pub fn completed_blocked(result_ref: impl Into<String>) -> Self {
+        Self::Completed {
+            result_ref: result_ref.into(),
+            progress: CapabilityProgress::Blocked,
+            terminate_hint: false,
+        }
+    }
+
     /// Creates a completed outcome with `terminate_hint = true`.
     pub fn completed_with_terminate_hint(result_ref: impl Into<String>) -> Self {
         Self::Completed {
             result_ref: result_ref.into(),
-            progress: CapabilityProgress::Complete,
+            progress: CapabilityProgress::MadeProgress,
             terminate_hint: true,
         }
     }

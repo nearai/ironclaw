@@ -1462,14 +1462,13 @@ pub enum CapabilityProgress {
     #[default]
     Unknown,
     /// The capability produced new evidence or changed host/runtime state.
+    #[serde(alias = "complete")]
     MadeProgress,
     /// The capability ran successfully but observed the same state/evidence as
     /// before.
     NoChange,
     /// The capability reached a deterministic non-suspending blocker.
     Blocked,
-    /// The capability completed the requested objective.
-    Complete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

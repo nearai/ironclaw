@@ -10,7 +10,7 @@ use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     DefaultTurnCoordinator, IdempotencyKey, InMemoryTurnStateStore, LoopBlocked, LoopBlockedKind,
     LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
-    ReplyTargetBindingRef, RunProfileRequest, RunProfileVersion, SourceBindingRef,
+    LoopResultRef, ReplyTargetBindingRef, RunProfileRequest, RunProfileVersion, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
     TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnStatus,
     events::EventCursor,
@@ -18,8 +18,9 @@ use ironclaw_turns::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint,
-        FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        CapabilityInvocation, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
+        CapabilitySurfaceVersion, ConcurrencyHint, FinalizeAssistantMessage,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
         InstructionMaterializationStore, InstructionSafetyContext,
@@ -1977,6 +1978,24 @@ fn capability_denied_reason_kind_is_typed_and_wire_compatible() {
     assert_eq!(constructed_unknown.as_str(), "host_policy_denied");
     assert!(CapabilityDeniedReasonKind::unknown("api_key").is_err());
     assert!(CapabilityDeniedReasonKind::unknown("secret_policy").is_err());
+}
+
+#[test]
+fn capability_progress_accepts_legacy_complete_wire_value() {
+    let legacy_result = serde_json::json!({
+        "result_ref": "result:legacy-complete",
+        "safe_summary": "legacy host completed the requested objective",
+        "progress": "complete"
+    });
+
+    let decoded = serde_json::from_value::<CapabilityResultMessage>(legacy_result).unwrap();
+
+    assert_eq!(
+        decoded.result_ref,
+        LoopResultRef::new("result:legacy-complete").unwrap()
+    );
+    assert_eq!(decoded.progress, CapabilityProgress::MadeProgress);
+    assert!(!decoded.terminate_hint);
 }
 
 #[tokio::test]

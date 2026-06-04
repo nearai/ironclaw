@@ -5,16 +5,16 @@ use ironclaw_turns::{
     LoopFailureKind, LoopResultRef,
     run_profile::{
         CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityFailureKind,
-        CapabilityOutcome, CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent,
-        VisibleCapabilitySurface,
+        CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, LoopDriverNoteKind,
+        LoopProgressEvent, VisibleCapabilitySurface,
     },
 };
 
 use crate::{
     state::{CheckpointKind, LoopExecutionState},
     strategies::{
-        BatchPolicy, CapabilityErrorClass, CapabilityErrorSummary, GateKind, RecoveryOutcome,
-        SanitizedStrategySummary, TurnSummary,
+        BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorClass, CapabilityErrorSummary,
+        GateKind, RecoveryOutcome, SanitizedStrategySummary, TurnSummary,
     },
 };
 
@@ -51,12 +51,10 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
     ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
         let mut state = input.state;
         let result_refs_start = state.result_refs.len();
+        let mut capability_batch = CapabilityBatchTurnSummary::default();
         let surface = &input.surface;
         let surface_index = CapabilitySurfaceIndex::new(surface);
         let calls = input.calls;
-        state.stop_state.last_batch_total = 0;
-        state.stop_state.terminate_hints_in_last_batch = 0;
-        state.stop_state.no_progress_results_in_last_batch = 0;
 
         let mut visible_calls = Vec::new();
         let mut denied_calls = Vec::new();
@@ -103,7 +101,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 diagnostic_ref: None,
             };
             match self
-                .handle_capability_error(ctx, state, call, summary)
+                .handle_capability_error(ctx, state, call, summary, &mut capability_batch)
                 .await?
             {
                 BatchStep::Continue(next) => state = *next,
@@ -111,10 +109,12 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             }
         }
 
-        state.stop_state.last_batch_total = visible_calls.len() as u32;
         if visible_calls.is_empty() {
-            return self.completed_turn(ctx, state, result_refs_start).await;
+            return self
+                .completed_turn(ctx, state, result_refs_start, capability_batch)
+                .await;
         }
+        capability_batch = CapabilityBatchTurnSummary::for_invocation_count(visible_calls.len());
 
         CheckpointStage
             .emit_progress(
@@ -185,8 +185,14 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 match outcome {
                     CapabilityOutcome::Completed(result) => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
-                        append_capability_result_ref(ctx.host, &call, &result).await?;
-                        push_completed_result(&mut state, result);
+                        append_completed_capability_result(
+                            ctx.host,
+                            &mut state,
+                            &call,
+                            result,
+                            &mut capability_batch,
+                        )
+                        .await?;
                     }
                     CapabilityOutcome::SpawnedChildRun {
                         result_ref,
@@ -200,6 +206,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             &call,
                             result_ref,
                             safe_summary,
+                            &mut capability_batch,
                         )
                         .await?;
                     }
@@ -215,11 +222,17 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         let result = CapabilityResultMessage {
                             result_ref,
                             safe_summary,
-                            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                            progress: CapabilityProgress::MadeProgress,
                             terminate_hint: false,
                         };
-                        append_capability_result_ref(ctx.host, &call, &result).await?;
-                        push_completed_result(&mut state, result);
+                        append_completed_capability_result(
+                            ctx.host,
+                            &mut state,
+                            &call,
+                            result,
+                            &mut capability_batch,
+                        )
+                        .await?;
                     }
                     other => {
                         pending_outcomes.push((call, other));
@@ -235,7 +248,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             for (call, outcome) in pending_outcomes {
                 push_call_signature_once(&mut state, &mut signatures, &call)?;
                 match self
-                    .handle_capability_outcome(ctx, state, call, outcome)
+                    .handle_capability_outcome(ctx, state, call, outcome, &mut capability_batch)
                     .await?
                 {
                     BatchStep::Continue(next) => {
@@ -259,7 +272,9 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     .await?
                 {
                     BatchStep::Continue(next) => {
-                        return self.completed_turn(ctx, *next, result_refs_start).await;
+                        return self
+                            .completed_turn(ctx, *next, result_refs_start, capability_batch)
+                            .await;
                     }
                     BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
                 }
@@ -268,7 +283,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             for (call, outcome) in visible_calls.into_iter().zip(outcomes) {
                 push_call_signature_once(&mut state, &mut signatures, &call)?;
                 match self
-                    .handle_capability_outcome(ctx, state, call, outcome)
+                    .handle_capability_outcome(ctx, state, call, outcome, &mut capability_batch)
                     .await?
                 {
                     BatchStep::Continue(next) => {
@@ -279,7 +294,8 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             }
         }
 
-        self.completed_turn(ctx, state, result_refs_start).await
+        self.completed_turn(ctx, state, result_refs_start, capability_batch)
+            .await
     }
 }
 
@@ -332,13 +348,16 @@ impl CapabilityStage {
         ctx: StageContext<'_>,
         state: LoopExecutionState,
         result_refs_start: usize,
+        capability_batch: CapabilityBatchTurnSummary,
     ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
         let state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
             CancelCheck::Continue(state) => *state,
             CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
         };
-        let summary =
-            TurnSummary::after_capability_batch(state.result_refs[result_refs_start..].to_vec());
+        let summary = TurnSummary::after_capability_batch(
+            state.result_refs[result_refs_start..].to_vec(),
+            capability_batch,
+        );
         Ok(TurnCompletedStep::Continue {
             state: Box::new(state),
             summary,
@@ -351,11 +370,18 @@ impl CapabilityStage {
         mut state: LoopExecutionState,
         call: CapabilityCallCandidate,
         outcome: CapabilityOutcome,
+        capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         match outcome {
             CapabilityOutcome::Completed(result) => {
-                append_capability_result_ref(ctx.host, &call, &result).await?;
-                push_completed_result(&mut state, result);
+                append_completed_capability_result(
+                    ctx.host,
+                    &mut state,
+                    &call,
+                    result,
+                    capability_batch,
+                )
+                .await?;
                 Ok(BatchStep::Continue(Box::new(state)))
             }
             CapabilityOutcome::SpawnedChildRun {
@@ -363,8 +389,15 @@ impl CapabilityStage {
                 safe_summary,
                 ..
             } => {
-                append_spawned_child_result(ctx.host, &mut state, &call, result_ref, safe_summary)
-                    .await?;
+                append_spawned_child_result(
+                    ctx.host,
+                    &mut state,
+                    &call,
+                    result_ref,
+                    safe_summary,
+                    capability_batch,
+                )
+                .await?;
                 Ok(BatchStep::Continue(Box::new(state)))
             }
             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
@@ -421,7 +454,7 @@ impl CapabilityStage {
                 let resolved_result = CapabilityResultMessage {
                     result_ref,
                     safe_summary,
-                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    progress: CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                 };
                 AwaitDependentRunGateStage
@@ -452,7 +485,7 @@ impl CapabilityStage {
                     )?,
                     diagnostic_ref: None,
                 };
-                self.handle_capability_error(ctx, state, call, summary)
+                self.handle_capability_error(ctx, state, call, summary, capability_batch)
                     .await
             }
             CapabilityOutcome::Failed(failure) => {
@@ -470,7 +503,7 @@ impl CapabilityStage {
                     )?,
                     diagnostic_ref: None,
                 };
-                self.handle_capability_error(ctx, state, call, summary)
+                self.handle_capability_error(ctx, state, call, summary, capability_batch)
                     .await
             }
         }
@@ -482,6 +515,7 @@ impl CapabilityStage {
         mut state: LoopExecutionState,
         call: CapabilityCallCandidate,
         mut summary: CapabilityErrorSummary,
+        capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         for _ in 0..MAX_CAPABILITY_RETRIES {
             match ctx
@@ -562,9 +596,13 @@ impl CapabilityStage {
                             };
                         }
                         promoted => {
-                            return Box::pin(
-                                self.handle_capability_outcome(ctx, state, call, promoted),
-                            )
+                            return Box::pin(self.handle_capability_outcome(
+                                ctx,
+                                state,
+                                call,
+                                promoted,
+                                capability_batch,
+                            ))
                             .await;
                         }
                     }
@@ -638,15 +676,27 @@ async fn append_spawned_child_result(
     call: &CapabilityCallCandidate,
     result_ref: LoopResultRef,
     safe_summary: String,
+    capability_batch: &mut CapabilityBatchTurnSummary,
 ) -> Result<(), AgentLoopExecutorError> {
     let safe_summary = sanitized_strategy_summary(safe_summary)?.into_inner();
     let result = CapabilityResultMessage {
         result_ref,
         safe_summary,
-        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+        progress: CapabilityProgress::MadeProgress,
         terminate_hint: false,
     };
+    append_completed_capability_result(host, state, call, result, capability_batch).await
+}
+
+async fn append_completed_capability_result(
+    host: &(dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync),
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+    result: CapabilityResultMessage,
+    capability_batch: &mut CapabilityBatchTurnSummary,
+) -> Result<(), AgentLoopExecutorError> {
     append_capability_result_ref(host, call, &result).await?;
+    capability_batch.record_result(result.progress, result.terminate_hint);
     push_completed_result(state, result);
     Ok(())
 }
@@ -720,7 +770,7 @@ mod tests {
         CapabilityOutcome::Completed(CapabilityResultMessage {
             result_ref: LoopResultRef::new(format!("result:{result}")).unwrap(),
             safe_summary: "summary".to_string(),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
         })
     }

@@ -807,6 +807,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             result_ref: LoopResultRef::new(self.capability.result_ref.clone())
                 .expect("valid harness result ref"),
             safe_summary: self.capability.safe_summary.clone(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: self.capability.terminate_hint,
         }))
     }

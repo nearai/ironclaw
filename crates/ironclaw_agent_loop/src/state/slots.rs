@@ -250,16 +250,6 @@ pub enum ReplyAdmissionRejectionReason {
 pub struct StopStrategyState {
     /// Number of completed turns the StopConditionStrategy has observed.
     pub turns_completed: u32,
-    /// Count of `terminate: true` hints seen in the most recent capability batch.
-    /// Reset to 0 at the start of each batch.
-    pub terminate_hints_in_last_batch: u32,
-    /// Total number of results in the most recent capability batch (denominator
-    /// for "all results said terminate").
-    pub last_batch_total: u32,
-    /// Count of completed results in the most recent capability batch whose
-    /// typed progress signal said no evidence/state changed.
-    #[serde(default)]
-    pub no_progress_results_in_last_batch: u32,
     /// Consecutive turns where a model reply was rejected before transcript
     /// finalization.
     #[serde(default)]

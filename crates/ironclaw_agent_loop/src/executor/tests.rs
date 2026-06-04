@@ -14,7 +14,8 @@ use ironclaw_turns::{
 
 use crate::state::{CheckpointKind, IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
 use crate::strategies::{
-    CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome, StopKind, TurnSummary,
+    CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
+    StopKind, TurnSummary,
 };
 
 use super::{
@@ -1215,7 +1216,14 @@ async fn capability_stage_returns_after_batch_summary() {
             assert_eq!(state.result_refs, vec![result_ref.clone()]);
             assert_eq!(
                 summary,
-                TurnSummary::after_capability_batch(vec![result_ref])
+                TurnSummary::after_capability_batch(
+                    vec![result_ref],
+                    CapabilityBatchTurnSummary {
+                        invocation_count: 1,
+                        terminate_hint_count: 0,
+                        no_progress_count: 0,
+                    },
+                )
             );
         }
         TurnCompletedStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
@@ -1358,9 +1366,7 @@ async fn stop_stage_preserves_ack_and_returns_stop_kind() {
         planner: family.planner(),
         host: &host,
     };
-    let mut state = LoopExecutionState::initial_for_run(host.run_context());
-    state.stop_state.last_batch_total = 1;
-    state.stop_state.terminate_hints_in_last_batch = 1;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
     let mut pending_input_ack = PendingInputAck::default();
     pending_input_ack
         .replace(vec![
@@ -1373,9 +1379,14 @@ async fn stop_stage_preserves_ack_and_returns_stop_kind() {
             ctx,
             StopInput {
                 state,
-                summary: TurnSummary::after_capability_batch(vec![
-                    LoopResultRef::new("result:done").expect("valid"),
-                ]),
+                summary: TurnSummary::after_capability_batch(
+                    vec![LoopResultRef::new("result:done").expect("valid")],
+                    CapabilityBatchTurnSummary {
+                        invocation_count: 1,
+                        terminate_hint_count: 1,
+                        no_progress_count: 0,
+                    },
+                ),
                 pending_input_ack,
             },
         )
@@ -1893,15 +1904,10 @@ async fn stale_surface_capability_call_is_policy_denied_before_host_invocation()
             .iter()
             .any(|kind| *kind == LoopFailureKind::PolicyDenied)
     }));
-    assert!(
-        staged_states
-            .iter()
-            .any(|state| state.stop_state.last_batch_total == 0)
-    );
 }
 
 #[tokio::test]
-async fn last_batch_total_counts_only_visible_invoked_calls() {
+async fn terminate_hint_counts_only_visible_invoked_calls() {
     let host = MockHost::new(vec![mixed_surface_calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
