@@ -19,6 +19,9 @@ export function ProviderCard({
   onUse,
   onConfigure,
   onDelete,
+  onNearaiLogin,
+  onCodexLogin,
+  loginBusy,
 }) {
   const t = useT();
   const isActive = provider.id === activeProviderId;
@@ -63,18 +66,45 @@ export function ProviderCard({
         </div>
 
         <div className="flex shrink-0 flex-wrap gap-2">
-          ${!isActive &&
-          html`
-            <${Button}
-              type="button"
-              variant=${configured ? "primary" : "secondary"}
-              size="sm"
-              disabled=${isBusy}
-              onClick=${() => (configured ? onUse(provider) : onConfigure(provider))}
-            >
-              ${configured ? t("llm.use") : t("llm.configure")}
-            <//>
-          `}
+          ${/* NEAR AI + Codex authenticate via login flows (session / OAuth),
+                not an API-key dialog. When not active, offer the login action
+                (plus a plain "Use" when a session already exists). */
+          !isActive && provider.id === "nearai"
+            ? html`
+                ${configured &&
+                html`<${Button} type="button" variant="primary" size="sm" disabled=${isBusy} onClick=${() => onUse(provider)}>
+                  ${t("llm.use")}
+                <//>`}
+                <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${() => onNearaiLogin("github")}>
+                  GitHub
+                <//>
+                <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${() => onNearaiLogin("google")}>
+                  Google
+                <//>
+              `
+            : !isActive && provider.id === "openai_codex"
+              ? html`
+                  ${configured &&
+                  html`<${Button} type="button" variant="primary" size="sm" disabled=${isBusy} onClick=${() => onUse(provider)}>
+                    ${t("llm.use")}
+                  <//>`}
+                  <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${onCodexLogin}>
+                    ${t("onboarding.codexSignIn")}
+                  <//>
+                `
+              : !isActive
+                ? html`
+                    <${Button}
+                      type="button"
+                      variant=${configured ? "primary" : "secondary"}
+                      size="sm"
+                      disabled=${isBusy}
+                      onClick=${() => (configured ? onUse(provider) : onConfigure(provider))}
+                    >
+                      ${configured ? t("llm.use") : t("llm.configure")}
+                    <//>
+                  `
+                : null}
           ${/* Secondary configure/edit button — only when the primary button
                 isn't already the "Configure" action (i.e. active or already
                 configured), otherwise an unconfigured provider shows two

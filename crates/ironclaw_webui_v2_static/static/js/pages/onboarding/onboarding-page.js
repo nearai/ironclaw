@@ -6,13 +6,10 @@ import { Badge } from "../../design-system/badge.js";
 import { Button } from "../../design-system/button.js";
 import { Card } from "../../design-system/card.js";
 import { ProviderDialog } from "../settings/components/provider-dialog.js";
+import { ProviderLoginStatus } from "../settings/components/provider-login-status.js";
 import { useProviderManagementActions } from "../settings/hooks/useProviderManagementActions.js";
-import {
-  fetchLlmProviders,
-  setActiveLlm,
-  startCodexLogin,
-  startNearaiLogin,
-} from "../settings/lib/settings-api.js";
+import { useProviderLogin } from "../settings/hooks/useProviderLogin.js";
+import { setActiveLlm } from "../settings/lib/settings-api.js";
 
 // First-run "choose your provider" screen. Curated providers are surfaced first,
 // in this order; everything else stays reachable via Settings → Inference. The
@@ -36,77 +33,11 @@ export function OnboardingPage() {
     state.providers.find((provider) => provider.id === id)
   ).filter(Boolean);
 
-  const [nearaiBusy, setNearaiBusy] = React.useState(false);
-  const [nearaiError, setNearaiError] = React.useState("");
-
-  // NEAR AI browser login: open the returned auth URL, then poll the snapshot
-  // until NEAR AI becomes active (the backend stores the token + reloads), then
-  // head to chat.
-  const handleNearaiLogin = React.useCallback(
-    async (provider) => {
-      setNearaiError("");
-      setNearaiBusy(true);
-      try {
-        const { auth_url: authUrl } = await startNearaiLogin({
-          provider,
-          origin: window.location.origin,
-        });
-        window.open(authUrl, "_blank", "noopener");
-        const deadline = Date.now() + 300_000;
-        // eslint-disable-next-line no-constant-condition
-        while (Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          const snapshot = await fetchLlmProviders().catch(() => null);
-          if (snapshot?.active?.provider_id === "nearai") {
-            await queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
-            navigate("/chat");
-            return;
-          }
-        }
-        setNearaiError(t("onboarding.nearaiTimeout"));
-      } catch (_err) {
-        setNearaiError(t("onboarding.nearaiFailed"));
-      } finally {
-        setNearaiBusy(false);
-      }
-    },
-    [navigate, queryClient, t]
-  );
-
-  const [codexBusy, setCodexBusy] = React.useState(false);
-  const [codexError, setCodexError] = React.useState("");
-  const [codexCode, setCodexCode] = React.useState(null);
-
-  // Codex device-code login: ask the backend for a user code, show it + open the
-  // verification URL, then poll the snapshot until Codex becomes active (the
-  // backend completes the device flow and reloads in the background).
-  const handleCodexLogin = React.useCallback(async () => {
-    setCodexError("");
-    setCodexCode(null);
-    setCodexBusy(true);
-    try {
-      const { user_code: userCode, verification_uri: verificationUri } =
-        await startCodexLogin();
-      setCodexCode({ userCode, verificationUri });
-      window.open(verificationUri, "_blank", "noopener");
-      // Device codes typically expire after ~15 minutes.
-      const deadline = Date.now() + 900_000;
-      while (Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-        const snapshot = await fetchLlmProviders().catch(() => null);
-        if (snapshot?.active?.provider_id === "openai_codex") {
-          await queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
-          navigate("/chat");
-          return;
-        }
-      }
-      setCodexError(t("onboarding.codexTimeout"));
-    } catch (_err) {
-      setCodexError(t("onboarding.codexFailed"));
-    } finally {
-      setCodexBusy(false);
-    }
-  }, [navigate, queryClient, t]);
+  // NEAR AI + Codex login share the same backend flows as the Inference tab; on
+  // success here we head straight to chat (the snapshot refresh swaps in the
+  // now-active provider).
+  const navigateToChat = React.useCallback(() => navigate("/chat"), [navigate]);
+  const login = useProviderLogin({ onSuccess: navigateToChat });
 
   const handleOnboardingSave = React.useCallback(
     async ({ form, apiKey, provider }) => {
@@ -168,8 +99,8 @@ export function OnboardingPage() {
                           type="button"
                           size="sm"
                           variant="secondary"
-                          disabled=${nearaiBusy}
-                          onClick=${() => handleNearaiLogin("github")}
+                          disabled=${login.nearaiBusy}
+                          onClick=${() => login.startNearai("github")}
                         >
                           GitHub
                         <//>
@@ -177,8 +108,8 @@ export function OnboardingPage() {
                           type="button"
                           size="sm"
                           variant="secondary"
-                          disabled=${nearaiBusy}
-                          onClick=${() => handleNearaiLogin("google")}
+                          disabled=${login.nearaiBusy}
+                          onClick=${() => login.startNearai("google")}
                         >
                           Google
                         <//>
@@ -190,8 +121,8 @@ export function OnboardingPage() {
                           type="button"
                           size="sm"
                           variant="secondary"
-                          disabled=${codexBusy}
-                          onClick=${handleCodexLogin}
+                          disabled=${login.codexBusy}
+                          onClick=${login.startCodex}
                         >
                           ${t("onboarding.codexSignIn")}
                         <//>
@@ -212,38 +143,7 @@ export function OnboardingPage() {
           )}
         </div>
 
-        ${nearaiBusy &&
-        html`<div className="text-center text-xs text-[var(--v2-text-muted)]">
-          ${t("onboarding.nearaiWaiting")}
-        </div>`}
-        ${nearaiError &&
-        html`<div className="text-center text-xs text-red-300">${nearaiError}</div>`}
-
-        ${codexCode &&
-        html`<div
-          className="mx-auto max-w-md rounded-lg border border-[var(--v2-border)] bg-[var(--v2-surface-raised)] p-4 text-center"
-        >
-          <div className="text-xs text-[var(--v2-text-muted)]">
-            ${t("onboarding.codexEnterCode")}
-          </div>
-          <div className="mt-2 font-mono text-2xl font-semibold tracking-[0.3em] text-[var(--v2-text-strong)]">
-            ${codexCode.userCode}
-          </div>
-          <a
-            className="mt-2 inline-block text-xs underline hover:text-[var(--v2-text-strong)]"
-            href=${codexCode.verificationUri}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            ${codexCode.verificationUri}
-          </a>
-        </div>`}
-        ${codexBusy &&
-        html`<div className="text-center text-xs text-[var(--v2-text-muted)]">
-          ${t("onboarding.codexWaiting")}
-        </div>`}
-        ${codexError &&
-        html`<div className="text-center text-xs text-red-300">${codexError}</div>`}
+        <${ProviderLoginStatus} login=${login} />
 
         <div className="text-center text-xs text-[var(--v2-text-muted)]">
           ${t("onboarding.moreInSettings")}${" "}
