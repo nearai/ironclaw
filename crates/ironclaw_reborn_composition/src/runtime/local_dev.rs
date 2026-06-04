@@ -211,11 +211,6 @@ struct DurableCapabilityDisplayPreviewSink {
     thread_scope: ThreadScope,
 }
 
-enum DurableDisplayPreviewAppend {
-    Attached(ThreadMessageId),
-    NotAttached,
-}
-
 impl Default for LocalDevCapabilityIo {
     fn default() -> Self {
         Self::new(Arc::new(CapabilityDisplayPreviewStore::default()))
@@ -263,9 +258,9 @@ impl LocalDevCapabilityIo {
         run_context: &LoopRunContext,
         invocation_id: InvocationId,
         capability_id: &CapabilityId,
-    ) -> Result<DurableDisplayPreviewAppend, AgentLoopHostError> {
+    ) -> Option<ThreadMessageId> {
         let Some(durable_previews) = &self.durable_previews else {
-            return Ok(DurableDisplayPreviewAppend::NotAttached);
+            return None;
         };
         let Some(record) = self.display_previews.record_for_invocation(invocation_id) else {
             tracing::debug!(
@@ -273,7 +268,7 @@ impl LocalDevCapabilityIo {
                 capability_id = capability_id.as_str(),
                 "capability display preview record missing after result staging"
             );
-            return Ok(DurableDisplayPreviewAppend::NotAttached);
+            return None;
         };
         let preview =
             match CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
@@ -299,7 +294,7 @@ impl LocalDevCapabilityIo {
                         error,
                         "capability display preview envelope validation failed"
                     );
-                    return Err(capability_io_error());
+                    return None;
                 }
             };
         let message = match durable_previews
@@ -320,10 +315,10 @@ impl LocalDevCapabilityIo {
                     error = %error,
                     "capability display preview durable append failed; continuing with staged capability result"
                 );
-                return Ok(DurableDisplayPreviewAppend::NotAttached);
+                return None;
             }
         };
-        Ok(DurableDisplayPreviewAppend::Attached(message.message_id))
+        Some(message.message_id)
     }
 }
 
@@ -508,9 +503,9 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             },
             display_preview.as_ref(),
         );
-        if let DurableDisplayPreviewAppend::Attached(message_id) = self
+        if let Some(message_id) = self
             .try_append_durable_display_preview(run_context, invocation_id, capability_id)
-            .await?
+            .await
         {
             self.display_previews
                 .attach_timeline_message_id(invocation_id, message_id);
