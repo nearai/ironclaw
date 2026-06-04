@@ -37,6 +37,7 @@ function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
   let pendingGate = null;
   let isProcessing = false;
   let activeRun = null;
+  const activeRunRef = { current: null };
   const completedRuns = [];
   const context = {
     Date,
@@ -69,7 +70,9 @@ function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
     },
     setActiveRun: (updater) => {
       activeRun = typeof updater === "function" ? updater(activeRun) : updater;
+      activeRunRef.current = activeRun;
     },
+    activeRunRef,
     onRunCompleted: (runId) => completedRuns.push(runId),
   });
 
@@ -86,6 +89,10 @@ function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
     },
     get activeRun() {
       return activeRun;
+    },
+    setCurrentActiveRun(run) {
+      activeRun = run;
+      activeRunRef.current = run;
     },
     get completedRuns() {
       return completedRuns;
@@ -299,6 +306,67 @@ test("useChatEvents: stale terminal run status does not clear newer run", () => 
     runId: "run-2",
     threadId: "thread-1",
     status: "running",
+  });
+});
+
+test("useChatEvents: stale terminal status before newer projection does not clear newer run", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.setCurrentActiveRun({
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "queued",
+    source: "local",
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "cancelled" } }],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "queued",
+    source: "local",
+  });
+});
+
+test("useChatEvents: stale running status before newer projection does not replace newer run", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.setCurrentActiveRun({
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "queued",
+    source: "local",
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "queued",
+    source: "local",
   });
 });
 

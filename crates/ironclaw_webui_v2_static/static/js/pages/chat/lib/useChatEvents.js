@@ -35,6 +35,7 @@ export function useChatEvents({
   setIsProcessing,
   setPendingGate,
   setActiveRun,
+  activeRunRef,
   onRunCompleted,
 }) {
   // Track which runIds we've already announced completion for so that
@@ -166,6 +167,7 @@ export function useChatEvents({
             completedRunsRef,
             latestRunIdRef,
             promptRunIdRef,
+            activeRunRef,
           });
           return;
         }
@@ -181,6 +183,7 @@ export function useChatEvents({
       setIsProcessing,
       setPendingGate,
       setActiveRun,
+      activeRunRef,
       onRunCompleted,
     ],
   );
@@ -233,6 +236,7 @@ function applyProjectionItems({
   completedRunsRef,
   latestRunIdRef,
   promptRunIdRef,
+  activeRunRef,
 }) {
   // Snapshot the run_id surfaced by the most recent `run_status` item
   // we've seen — either earlier in this same items batch, or carried
@@ -253,14 +257,19 @@ function applyProjectionItems({
         failure_summary: failureSummary,
       } = item.run_status;
       const isTerminalStatus = TERMINAL_RUN_STATUSES.has(status);
-      const currentRunId = activeRunId ?? latestRunIdRef?.current ?? null;
+      const locallyPinnedRunId =
+        activeRunRef?.current?.source === "local" ? activeRunRef.current.runId : null;
+      const isStaleLocalRunStatus = Boolean(
+        runId && locallyPinnedRunId && locallyPinnedRunId !== runId,
+      );
+      const streamActiveRunId = activeRunId ?? latestRunIdRef?.current ?? null;
       const isStaleTerminalStatus = Boolean(
         isTerminalStatus &&
           runId &&
-          currentRunId &&
-          currentRunId !== runId,
+          streamActiveRunId &&
+          streamActiveRunId !== runId,
       );
-      if (isStaleTerminalStatus) {
+      if (isStaleLocalRunStatus || isStaleTerminalStatus) {
         continue;
       }
       if (runId) {

@@ -64,7 +64,11 @@ export function Chat({
   const composerStatusText =
     cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined;
   const canCancelRun = Boolean(
-    activeThreadId && activeRun?.runId && activeRun.threadId === activeThreadId
+    activeThreadId &&
+      activeRun?.runId &&
+      activeRun.threadId === activeThreadId &&
+      isProcessing &&
+      !pendingGate
   );
 
   const handleSend = React.useCallback(

@@ -26,13 +26,23 @@ function findComponent(node, component) {
   if (!Array.isArray(node.values)) return null;
   const componentIndex = node.values.indexOf(component);
   if (componentIndex >= 0) {
-    return { values: node.values.slice(componentIndex) };
+    return node;
   }
   for (const value of node.values) {
     const found = findComponent(value, component);
     if (found) return found;
   }
   return null;
+}
+
+function componentProps(node, component) {
+  const props = {};
+  const start = node.values.indexOf(component);
+  for (let index = start + 1; index < node.values.length; index += 1) {
+    const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
+    if (name) props[name] = node.values[index];
+  }
+  return props;
 }
 
 function renderChat({ hookState, activeThreadId = "thread-1" }) {
@@ -62,7 +72,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     buildRuntimeContext: () => ({}),
     clearThreadState: () => {},
     globalThis: {},
-    html: (_strings, ...values) => ({ values }),
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     setThreadState: () => {},
     useChat: () => hookState,
   };
@@ -104,8 +114,9 @@ test("Chat cancel button routes through active thread run cancellation", async (
   });
 
   const chatInput = findComponent(tree, components.ChatInput);
-  assert.equal(chatInput.values[7], true);
-  await chatInput.values[8]();
+  const props = componentProps(chatInput, components.ChatInput);
+  assert.equal(props.canCancel, true);
+  await props.onCancel();
   assert.deepEqual(cancelReasons, ["user_requested"]);
 });
 
@@ -134,7 +145,44 @@ test("Chat cancel button ignores active runs from another thread", () => {
   });
 
   const chatInput = findComponent(tree, components.ChatInput);
-  assert.equal(chatInput.values[7], false);
+  const props = componentProps(chatInput, components.ChatInput);
+  assert.equal(props.canCancel, false);
+});
+
+test("Chat keeps composer cancel disabled while a gate owns the run decision", () => {
+  const pendingGate = {
+    kind: "gate",
+    requestId: "request-1",
+    toolName: "tool",
+    description: "",
+    parameters: "",
+  };
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: false,
+      pendingGate,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "blocked" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  assert.equal(props.canCancel, false);
 });
 
 test("Chat deny gate callback routes through approve compatibility path", () => {
@@ -170,6 +218,7 @@ test("Chat deny gate callback routes through approve compatibility path", () => 
   });
 
   const approvalCard = findComponent(tree, components.ApprovalCard);
-  approvalCard.values[3]();
+  const props = componentProps(approvalCard, components.ApprovalCard);
+  props.onDeny();
   assert.deepEqual(approveCalls, [["request-1", "deny", "gate"]]);
 });

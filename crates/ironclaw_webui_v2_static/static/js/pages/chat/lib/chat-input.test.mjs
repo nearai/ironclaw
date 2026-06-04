@@ -29,13 +29,23 @@ function findComponent(node, component) {
   if (!Array.isArray(node.values)) return null;
   const componentIndex = node.values.indexOf(component);
   if (componentIndex >= 0) {
-    return { values: node.values.slice(componentIndex) };
+    return node;
   }
   for (const value of node.values) {
     const found = findComponent(value, component);
     if (found) return found;
   }
   return null;
+}
+
+function componentProps(node, component) {
+  const props = {};
+  const start = node.values.indexOf(component);
+  for (let index = start + 1; index < node.values.length; index += 1) {
+    const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
+    if (name) props[name] = node.values[index];
+  }
+  return props;
 }
 
 function renderChatInput({ onCancel, setCalls = [] } = {}) {
@@ -66,7 +76,7 @@ function renderChatInput({ onCancel, setCalls = [] } = {}) {
     clearAttachments: () => {},
     formatSize: (size) => String(size),
     globalThis: {},
-    html: (_strings, ...values) => ({ values }),
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     removeAttachment: () => {},
     removeImage: () => {},
     useComposerAttachments: () => ({
@@ -105,7 +115,8 @@ test("ChatInput cancel button invokes onCancel and resets cancelling state", asy
   });
 
   const cancelButton = findComponent(tree, components.Button);
-  const cancelPromise = cancelButton.values[1]();
+  const props = componentProps(cancelButton, components.Button);
+  const cancelPromise = props.onClick();
 
   assert.equal(cancelCalls, 1);
   assert.deepEqual(setCalls.slice(0, 1), [{ index: 2, value: true }]);
@@ -126,7 +137,8 @@ test("ChatInput cancel button resets cancelling state after rejection", async ()
   });
 
   const cancelButton = findComponent(tree, components.Button);
-  await assert.rejects(cancelButton.values[1](), /cancel failed/);
+  const props = componentProps(cancelButton, components.Button);
+  await assert.rejects(props.onClick(), /cancel failed/);
 
   assert.deepEqual(setCalls, [
     { index: 2, value: true },
