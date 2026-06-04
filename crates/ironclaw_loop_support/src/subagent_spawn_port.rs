@@ -26,8 +26,8 @@ use ironclaw_turns::{
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, ConcurrencyHint, LoopCapabilityPort,
         LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        sanitize_model_visible_text,
+        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -353,8 +353,16 @@ pub struct SubagentSpawnCapabilityPort {
     spawn_id: CapabilityId,
     limits: SubagentSpawnLimits,
     deps: Arc<SubagentSpawnDeps>,
-    auth_input_refs: Mutex<HashMap<CapabilityInputRef, CapabilityInputRef>>,
+    auth_input_refs: Mutex<HashMap<CapabilityInputRef, SpawnAuthorizationInput>>,
     spawned_this_turn: AtomicU32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SpawnAuthorizationInput {
+    // Retained for inner-backed spawn authorization paths exercised by tests.
+    #[allow(dead_code)]
+    Inner(CapabilityInputRef),
+    LocalProviderRegistration,
 }
 
 struct SpawnContext {
@@ -610,7 +618,7 @@ impl SubagentSpawnCapabilityPort {
         &self,
         invocation: &CapabilityInvocation,
     ) -> Result<Option<CapabilityOutcome>, AgentLoopHostError> {
-        let auth_input_ref = {
+        let auth_input = {
             let auth_input_refs = self.auth_input_refs.lock().map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Unavailable,
@@ -619,8 +627,12 @@ impl SubagentSpawnCapabilityPort {
             })?;
             auth_input_refs.get(&invocation.input_ref).cloned()
         };
-        let Some(auth_input_ref) = auth_input_ref else {
+        let Some(auth_input) = auth_input else {
             return Ok(Some(spawn_rejected("spawn_requires_provider_registration")));
+        };
+        let SpawnAuthorizationInput::Inner(auth_input_ref) = auth_input else {
+            self.remove_auth_input_ref(&invocation.input_ref)?;
+            return Ok(None);
         };
         let mut auth_invocation = invocation.clone();
         auth_invocation.input_ref = auth_input_ref;
@@ -902,15 +914,17 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         if self.is_spawn_provider_tool_name(&tool_call.name) {
-            self.inner
+            let surface = self
+                .inner
                 .visible_capabilities(VisibleCapabilityRequest)
                 .await?;
-        }
-        let inner_candidate = self
-            .inner
-            .register_provider_tool_call(tool_call.clone())
-            .await?;
-        if inner_candidate.capability_id == self.spawn_id {
+            self.validate_spawn_provider_tool_call(&tool_call)?;
+            let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "provider tool call is missing a provider turn id",
+                )
+            })?;
             let input_ref = self
                 .deps
                 .spawn_input_codec
@@ -924,12 +938,29 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                         "subagent spawn authorization input store is unavailable",
                     )
                 })?
-                .insert(input_ref.clone(), inner_candidate.input_ref);
+                .insert(
+                    input_ref.clone(),
+                    SpawnAuthorizationInput::LocalProviderRegistration,
+                );
             return Ok(CapabilityCallCandidate {
+                surface_version: surface.version,
+                capability_id: self.spawn_id.clone(),
+                effective_capability_ids: vec![self.spawn_id.clone()],
                 input_ref,
-                ..inner_candidate
+                provider_replay: Some(ProviderToolCallReplay {
+                    provider_id: tool_call.provider_id,
+                    provider_model_id: tool_call.provider_model_id,
+                    provider_turn_id,
+                    provider_call_id: tool_call.id,
+                    provider_tool_name: tool_call.name,
+                    arguments: tool_call.arguments,
+                    response_reasoning: tool_call.response_reasoning,
+                    reasoning: tool_call.reasoning,
+                    signature: tool_call.signature,
+                }),
             });
         }
+        let inner_candidate = self.inner.register_provider_tool_call(tool_call).await?;
         Ok(inner_candidate)
     }
 

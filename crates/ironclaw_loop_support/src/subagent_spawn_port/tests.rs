@@ -55,6 +55,12 @@ struct SurfacePrimedSpawnAuthPort {
 }
 
 #[derive(Default)]
+struct StrictSpawnAuthPort {
+    visible_calls: std::sync::Mutex<u32>,
+    register_calls: std::sync::Mutex<Vec<ProviderToolCall>>,
+}
+
+#[derive(Default)]
 struct RecordingBatchPort {
     batches: std::sync::Mutex<Vec<CapabilityBatchInvocation>>,
 }
@@ -212,7 +218,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
                 provider: None,
                 runtime: RuntimeKind::FirstParty,
                 safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
-                safe_description: "Spawn a subagent child run".to_string(),
+                safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
                 concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: spawn_subagent_parameters_schema(),
             }],
@@ -228,6 +234,70 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
             safe_summary: "authorized".to_string(),
             terminate_hint: false,
         }))
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        let mut outcomes = Vec::with_capacity(request.invocations.len());
+        for invocation in request.invocations {
+            outcomes.push(self.invoke_capability(invocation).await?);
+        }
+        Ok(CapabilityBatchOutcome {
+            outcomes,
+            stopped_on_suspension: false,
+        })
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPort for StrictSpawnAuthPort {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        if *self.visible_calls.lock().unwrap() == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(vec![spawn_tool_definition()])
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        self.register_calls.lock().unwrap().push(tool_call);
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "strict inner does not accept spawn provider tool names",
+        ))
+    }
+
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        *self.visible_calls.lock().unwrap() += 1;
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            descriptors: vec![CapabilityDescriptorView {
+                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+                provider: None,
+                runtime: RuntimeKind::FirstParty,
+                safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
+                safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+                concurrency_hint: ConcurrencyHint::Exclusive,
+                parameters_schema: spawn_subagent_parameters_schema(),
+            }],
+        })
+    }
+
+    async fn invoke_capability(
+        &self,
+        _request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "strict inner should not authorize synthetic spawn provider calls",
+        ))
     }
 
     async fn invoke_capability_batch(
@@ -757,6 +827,10 @@ fn input_ref() -> CapabilityInputRef {
     CapabilityInputRef::new("input:spawn").unwrap()
 }
 
+fn inner_auth_ref(value: &str) -> SpawnAuthorizationInput {
+    SpawnAuthorizationInput::Inner(CapabilityInputRef::new(value).unwrap())
+}
+
 fn provider_tool_call(name: &str) -> ProviderToolCall {
     ProviderToolCall {
         provider_id: "test-provider".to_string(),
@@ -909,7 +983,7 @@ async fn spawn_test_port(
     port.auth_input_refs
         .lock()
         .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+        .insert(input_ref(), inner_auth_ref("input:auth"));
     port
 }
 
@@ -985,7 +1059,7 @@ fn spawn_test_port_with_codec_and_recorders(
     port.auth_input_refs
         .lock()
         .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+        .insert(input_ref(), inner_auth_ref("input:auth"));
     SpawnPortWithRecorders {
         port,
         child_runs,
@@ -1231,6 +1305,36 @@ async fn spawn_provider_tool_call_validation_rejects_invalid_spawn_args() {
 }
 
 #[tokio::test]
+async fn spawn_provider_tool_call_validation_rejects_missing_or_malformed_flavor_id() {
+    let context = test_run_context("spawn-validate-flavor").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(AuthPassPort),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+
+    for arguments in [
+        json!({
+            "task": "investigate"
+        }),
+        json!({
+            "flavor_id": 42,
+            "task": "investigate"
+        }),
+    ] {
+        let mut call = spawn_provider_tool_call();
+        call.arguments = arguments;
+
+        let error = port
+            .validate_provider_tool_call(&call)
+            .expect_err("invalid spawn provider tool call rejects");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.safe_summary.contains("invalid spawn_subagent input"));
+    }
+}
+
+#[tokio::test]
 async fn spawn_provider_tool_call_is_registered_for_spawn_dispatch() {
     let context = test_run_context("spawn-register").await;
     let inner = Arc::new(SurfacePrimedSpawnAuthPort::default());
@@ -1252,12 +1356,82 @@ async fn spawn_provider_tool_call_is_registered_for_spawn_dispatch() {
             .lock()
             .unwrap()
             .get(&candidate.input_ref)
-            .expect("inner auth input ref")
-            .as_str(),
-        "input:auth"
+            .expect("spawn auth input ref"),
+        &SpawnAuthorizationInput::LocalProviderRegistration
     );
     assert_eq!(*inner.visible_calls.lock().unwrap(), 1);
-    assert_eq!(inner.register_calls.lock().unwrap().len(), 1);
+    assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_registration_does_not_require_inner_spawn_name() {
+    let context = test_run_context_with_agent_actor("spawn-register-strict").await;
+    let inner = Arc::new(StrictSpawnAuthPort::default());
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let port = SubagentSpawnCapabilityPort::new(
+        inner.clone(),
+        context.clone(),
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        Arc::new(SubagentSpawnDeps {
+            coordinator: Arc::new(StaticCoordinator),
+            child_runs: child_runs.clone(),
+            turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0)))),
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
+            goal_store: Arc::new(NoopGoalStore),
+            gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+            definition_resolver: Arc::new(StaticDefinitionResolver {
+                resolved: Some(subagent_definition(false)),
+                parent: None,
+            }),
+            spawn_input_codec: Arc::new(RegisteringSpawnInputCodec),
+            result_writer: Arc::new(NoopResultWriter),
+        }),
+    );
+
+    let candidate = port
+        .register_provider_tool_call(spawn_provider_tool_call())
+        .await
+        .expect("provider tool call registration");
+
+    assert_eq!(
+        candidate.capability_id.as_str(),
+        DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
+    );
+    assert_eq!(candidate.input_ref.as_str(), "input:spawn-provider");
+    assert_eq!(
+        candidate
+            .provider_replay
+            .as_ref()
+            .expect("provider replay")
+            .provider_tool_name
+            .as_str(),
+        SPAWN_SUBAGENT_PROVIDER_TOOL_NAME
+    );
+    assert!(matches!(
+        port.auth_input_refs
+            .lock()
+            .unwrap()
+            .get(&candidate.input_ref),
+        Some(SpawnAuthorizationInput::LocalProviderRegistration)
+    ));
+    assert_eq!(*inner.visible_calls.lock().unwrap(), 1);
+    assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
+
+    let outcome = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: candidate.surface_version.clone(),
+            capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            input_ref: candidate.input_ref.clone(),
+        })
+        .await
+        .expect("registered spawn invocation");
+
+    assert!(matches!(
+        outcome,
+        CapabilityOutcome::AwaitDependentRun { .. }
+    ));
+    assert_eq!(child_runs.requests().len(), 1);
 }
 
 #[test]
@@ -1433,7 +1607,7 @@ async fn invoke_spawn_submits_child_run_through_spawn_tree_port() {
     port.auth_input_refs
         .lock()
         .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+        .insert(input_ref(), inner_auth_ref("input:auth"));
 
     let outcome = invoke_spawn(&port).await;
 
@@ -1513,7 +1687,7 @@ async fn invoke_capability_batch_handles_mixed_spawn_and_non_spawn_invocations()
     port.auth_input_refs
         .lock()
         .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+        .insert(input_ref(), inner_auth_ref("input:auth"));
 
     let outcome = port
         .invoke_capability_batch(CapabilityBatchInvocation {
@@ -1576,7 +1750,7 @@ async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested(
     port.auth_input_refs
         .lock()
         .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+        .insert(input_ref(), inner_auth_ref("input:auth"));
 
     let outcome = port
         .invoke_capability_batch(CapabilityBatchInvocation {
@@ -1627,7 +1801,7 @@ async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
     port.auth_input_refs
         .lock()
         .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+        .insert(input_ref(), inner_auth_ref("input:auth"));
 
     let error = port
         .invoke_capability(CapabilityInvocation {
@@ -2009,14 +2183,8 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
     let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
     {
         let mut refs = port.auth_input_refs.lock().unwrap();
-        refs.insert(
-            input_ref_a.clone(),
-            CapabilityInputRef::new("input:auth-a").unwrap(),
-        );
-        refs.insert(
-            input_ref_b.clone(),
-            CapabilityInputRef::new("input:auth-b").unwrap(),
-        );
+        refs.insert(input_ref_a.clone(), inner_auth_ref("input:auth-a"));
+        refs.insert(input_ref_b.clone(), inner_auth_ref("input:auth-b"));
     }
 
     let make_invocation = |input_ref: CapabilityInputRef| CapabilityInvocation {
@@ -2100,14 +2268,8 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
     let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
     {
         let mut refs = port.auth_input_refs.lock().unwrap();
-        refs.insert(
-            input_ref_a.clone(),
-            CapabilityInputRef::new("input:auth-a").unwrap(),
-        );
-        refs.insert(
-            input_ref_b.clone(),
-            CapabilityInputRef::new("input:auth-b").unwrap(),
-        );
+        refs.insert(input_ref_a.clone(), inner_auth_ref("input:auth-a"));
+        refs.insert(input_ref_b.clone(), inner_auth_ref("input:auth-b"));
     }
 
     let spawn_id = CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap();
@@ -2203,7 +2365,7 @@ async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
     port.auth_input_refs
         .lock()
         .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+        .insert(input_ref(), inner_auth_ref("input:auth"));
 
     let batch_outcome = port
         .invoke_capability_batch(CapabilityBatchInvocation {
