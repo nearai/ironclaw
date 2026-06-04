@@ -248,12 +248,10 @@ async fn create_trigger(
             .remove_trigger(record.tenant_id.clone(), record.trigger_id)
             .await
         {
-            tracing::warn!(
-                trigger_id = %record.trigger_id,
-                %remove_error,
-                error_kind = "trigger_create_rollback_failed",
-                "failed to remove trigger after create hook failure"
-            );
+            return Err(trigger_create_rollback_error(
+                "remove_trigger",
+                remove_error,
+            ));
         }
         return Err(hook_error);
     }
@@ -379,6 +377,23 @@ fn trigger_create_hook_error(
         "trigger management capability create hook failed"
     );
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+}
+
+fn trigger_create_rollback_error(
+    repository_operation: &'static str,
+    error: TriggerError,
+) -> FirstPartyCapabilityError {
+    tracing::warn!(
+        runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::Backend,
+        repository_operation,
+        trigger_error_kind = trigger_error_kind(&error),
+        error_kind = "trigger_create_rollback_failed",
+        "trigger management capability create hook rollback failed"
+    );
+    FirstPartyCapabilityError::with_safe_summary(
+        RuntimeDispatchErrorKind::Backend,
+        "trigger create rollback failed after hook error",
+    )
 }
 
 fn trigger_error_kind(error: &TriggerError) -> &'static str {

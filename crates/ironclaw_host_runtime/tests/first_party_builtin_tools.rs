@@ -29,14 +29,15 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
-    TenantSandboxProcessPort, TriggerCreateHook, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
+    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
+    TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TenantSandboxProcessPort, TriggerCreateHook,
+    VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
+    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
+    builtin_first_party_package,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -392,7 +393,7 @@ async fn builtin_trigger_create_maps_create_hook_error_to_backend_and_rolls_back
 }
 
 #[tokio::test]
-async fn builtin_trigger_create_preserves_hook_error_when_rollback_fails() {
+async fn builtin_trigger_create_surfaces_rollback_error_when_cleanup_fails() {
     let repository = Arc::new(RemoveFailingTriggerRepository::default());
     let runtime = runtime_with_trigger_repository_and_create_hook(
         repository.clone(),
@@ -400,20 +401,23 @@ async fn builtin_trigger_create_preserves_hook_error_when_rollback_fails() {
     );
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
 
-    let error = invoke_with_context(
+    let failure = invoke_failure_with_context(
         &runtime,
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Rollback failure",
-            "prompt": "Keep the hook failure as the user-visible cause",
+            "prompt": "Surface the rollback failure as the user-visible cause",
             "cron": "0 8 * * *"
         }),
         context.clone(),
     )
-    .await
-    .unwrap_err();
+    .await;
 
-    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+    assert_eq!(
+        failure.safe_summary().as_deref(),
+        Some("trigger create rollback failed after hook error")
+    );
     assert_eq!(repository.remove_attempts(), 1);
     assert_eq!(
         repository
@@ -5237,6 +5241,28 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
     match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
         RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
+        other => panic!("unexpected capability outcome: {other:?}"),
+    }
+}
+
+async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
+    runtime: &R,
+    capability: &str,
+    input: Value,
+    context: ExecutionContext,
+) -> RuntimeCapabilityFailure {
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            capability_id(capability),
+            ResourceEstimate::default(),
+            input,
+            trust_decision(),
+        ))
+        .await
+        .unwrap();
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => failure,
         other => panic!("unexpected capability outcome: {other:?}"),
     }
 }
