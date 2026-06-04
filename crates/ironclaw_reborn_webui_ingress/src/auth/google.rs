@@ -25,18 +25,18 @@ use super::config::GoogleOAuthConfig;
 use super::error::{OAuthError, ProviderInitError};
 use super::profile::OAuthUserProfile;
 use super::provider::OAuthProvider;
-use super::provider_http::sanitize_error_code;
+use super::provider_http::{describe_transport_error, read_capped_body, sanitize_error_code};
 use super::provider_name::OAuthProviderName;
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_ISSUER: &str = "https://accounts.google.com";
-/// Per-request timeout on the Google token endpoint. The default
+/// Per-request DEFAULT timeout on the Google token endpoint. The default
 /// `reqwest::Client` has no timeout, which would let a hung Google
-/// response pin the callback handler indefinitely. 10s comfortably
-/// covers the worst-case TLS handshake + token exchange while
-/// failing loud on a real outage.
-const GOOGLE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// response pin the callback handler indefinitely. Operators on a slow /
+/// cross-border path can override it via `GoogleOAuthConfig::http_timeout`
+/// (the reborn CLI exposes `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS`).
+const GOOGLE_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Google OIDC provider.
 pub struct GoogleProvider {
@@ -92,7 +92,7 @@ impl GoogleProvider {
         token_endpoint: impl Into<String>,
     ) -> Result<Self, ProviderInitError> {
         let http = reqwest::Client::builder()
-            .timeout(GOOGLE_HTTP_TIMEOUT)
+            .timeout(config.http_timeout.unwrap_or(GOOGLE_HTTP_TIMEOUT))
             .build()
             .map_err(|err| ProviderInitError(err.to_string()))?;
         Ok(Self {
@@ -169,12 +169,16 @@ impl OAuthProvider for GoogleProvider {
             ])
             .send()
             .await
-            .map_err(|err| OAuthError::CodeExchange(err.to_string()))?;
+            .map_err(|err| OAuthError::CodeExchange(describe_transport_error(&err)))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            let error_code = serde_json::from_str::<GoogleTokenErrorResponse>(&body)
+            // Read through the shared size cap (same hardened path the
+            // GitHub provider uses) so a misconfigured / overridden token
+            // endpoint cannot force an unbounded allocation in the callback
+            // task. `reqwest` applies no body cap of its own.
+            let body = read_capped_body(resp).await.unwrap_or_default();
+            let error_code = serde_json::from_slice::<GoogleTokenErrorResponse>(&body)
                 .ok()
                 .and_then(|error| error.error);
             if let Some(error_code) = error_code {
@@ -189,7 +193,7 @@ impl OAuthProvider for GoogleProvider {
             }
             tracing::debug!(
                 %status,
-                body = %body,
+                body = %String::from_utf8_lossy(&body),
                 "google token endpoint returned non-success response"
             );
             return Err(OAuthError::CodeExchange(format!(
@@ -197,9 +201,10 @@ impl OAuthProvider for GoogleProvider {
             )));
         }
 
-        let tokens: GoogleTokenResponse = resp
-            .json()
+        let body = read_capped_body(resp)
             .await
+            .map_err(OAuthError::CodeExchange)?;
+        let tokens: GoogleTokenResponse = serde_json::from_slice(&body)
             .map_err(|err| OAuthError::CodeExchange(err.to_string()))?;
         let id_token = tokens.id_token.ok_or_else(|| {
             OAuthError::CodeExchange("Google did not return an id_token".to_string())
@@ -249,10 +254,19 @@ impl OAuthProvider for GoogleProvider {
             }
         }
 
+        let email = claims.email;
+        let email_verified = claims.email_verified.unwrap_or(false);
+        // Google's ID token carries a single email; surface it as a verified
+        // address only when the `email_verified` claim is true.
+        let verified_emails = match (&email, email_verified) {
+            (Some(addr), true) => vec![addr.clone()],
+            _ => Vec::new(),
+        };
         Ok(OAuthUserProfile {
             provider_user_id: claims.sub,
-            email: claims.email,
-            email_verified: claims.email_verified.unwrap_or(false),
+            email,
+            email_verified,
+            verified_emails,
             display_name: claims.name,
         })
     }
@@ -272,6 +286,7 @@ mod tests {
             client_id: "client-id-123".to_string(),
             client_secret: SecretString::from("client-secret-xyz".to_string()),
             allowed_hd: hd.map(str::to_string),
+            http_timeout: None,
         }
     }
 

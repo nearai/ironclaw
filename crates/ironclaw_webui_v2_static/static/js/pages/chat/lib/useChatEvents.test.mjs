@@ -32,10 +32,9 @@ function useChatEventsSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { useChatEvents };`;
 }
 
-test("useChatEvents: projection activity preserves reasoning/tool chronology", () => {
-  const threadId = "thread-1";
+function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
   let messages = [];
-
+  let pendingGate = null;
   const context = {
     Date,
     React: {
@@ -43,7 +42,7 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
       useRef: (value) => ({ current: value }),
     },
     failureMessageForRunStatus: () => "run failed",
-    gateFromEvent: () => null,
+    gateFromEvent,
     globalThis: {},
     isTerminalToolStatus,
     toolCardFromActivity,
@@ -53,17 +52,38 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
   vm.runInNewContext(useChatEventsSourceForTest(), context);
 
   const handleEvent = context.globalThis.__testExports.useChatEvents({
-    threadId,
+    threadId: "thread-1",
     setMessages: (updater) => {
       messages = typeof updater === "function" ? updater(messages) : updater;
     },
     setIsProcessing: () => {},
-    setPendingGate: () => {},
+    setPendingGate: (updater) => {
+      pendingGate =
+        typeof updater === "function" ? updater(pendingGate) : updater;
+    },
     setActiveRun: () => {},
     onRunCompleted: () => {},
   });
 
-  handleEvent({
+  return {
+    handleEvent,
+    get messages() {
+      return messages;
+    },
+    get pendingGate() {
+      return pendingGate;
+    },
+  };
+}
+
+function plain(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+test("useChatEvents: projection activity preserves reasoning/tool chronology", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
     type: "projection_update",
     frame: {
       state: {
@@ -74,7 +94,7 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
             capability_activity: {
               invocation_id: "invocation-1",
               turn_run_id: "run-1",
-              thread_id: threadId,
+              thread_id: "thread-1",
               capability_id: "builtin.http",
               status: "started",
               provider: null,
@@ -92,17 +112,144 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
   });
 
   assert.deepEqual(
-    Array.from(messages, (message) => message.id),
+    Array.from(harness.messages, (message) => message.id),
     ["thinking-run-1:1", "tool-invocation-1", "thinking-run-1:2"],
   );
   assert.deepEqual(
-    Array.from(messages, (message) => message.role),
+    Array.from(harness.messages, (message) => message.role),
     ["thinking", "tool_activity", "thinking"],
   );
-  assert.equal(messages[1].toolName, "builtin.http");
-  assert.equal(messages[1].toolStatus, "running");
+  assert.equal(harness.messages[1].toolName, "builtin.http");
+  assert.equal(harness.messages[1].toolStatus, "running");
   assert.deepEqual(
-    Array.from(messages, (message) => message.turnRunId),
+    Array.from(harness.messages, (message) => message.turnRunId),
     ["run-1", "run-1", "run-1"],
   );
+});
+
+test("useChatEvents: auth gate stays visible through progress events", () => {
+  const runId = "run-auth-1";
+  const authGate = {
+    kind: "auth_required",
+    challengeKind: "manual_token",
+    runId,
+    gateRef: "gate:auth",
+  };
+  const harness = createUseChatEventsHarness({ gateFromEvent: () => authGate });
+
+  harness.handleEvent({
+    type: "auth_required",
+    frame: {
+      prompt: {
+        turn_run_id: runId,
+        auth_request_ref: "gate:auth",
+      },
+    },
+  });
+  assert.deepEqual(harness.pendingGate, authGate);
+
+  harness.handleEvent({
+    type: "capability_progress",
+    frame: {
+      progress: {
+        turn_run_id: runId,
+        kind: "tool_running",
+      },
+    },
+  });
+
+  assert.deepEqual(harness.pendingGate, authGate);
+});
+
+test("useChatEvents: progress clears non-auth gates for the resumed run", () => {
+  const runId = "run-approval-1";
+  const approvalGate = {
+    kind: "gate",
+    runId,
+    gateRef: "gate:approval",
+  };
+  const harness = createUseChatEventsHarness({
+    gateFromEvent: () => approvalGate,
+  });
+
+  harness.handleEvent({
+    type: "gate",
+    frame: {
+      prompt: {
+        turn_run_id: runId,
+        gate_ref: "gate:approval",
+      },
+    },
+  });
+  assert.deepEqual(harness.pendingGate, approvalGate);
+
+  harness.handleEvent({
+    type: "running",
+    frame: {
+      progress: {
+        turn_run_id: runId,
+        kind: "typing",
+      },
+    },
+  });
+
+  assert.equal(harness.pendingGate, null);
+});
+
+test("useChatEvents: cleared non-auth gates are not restored by later projections", () => {
+  const runId = "run-resource-1";
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: runId, status: "blocked_resource" } },
+          {
+            gate: {
+              gate_ref: "gate:resource",
+              headline: "Resource unavailable",
+            },
+          },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(plain(harness.pendingGate), {
+    kind: "gate",
+    runId,
+    gateRef: "gate:resource",
+    headline: "Resource unavailable",
+    body: "",
+  });
+
+  harness.handleEvent({
+    type: "running",
+    frame: {
+      progress: {
+        turn_run_id: runId,
+        kind: "typing",
+      },
+    },
+  });
+  assert.equal(harness.pendingGate, null);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            gate: {
+              gate_ref: "gate:resource",
+              headline: "Resource unavailable",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.pendingGate, null);
 });

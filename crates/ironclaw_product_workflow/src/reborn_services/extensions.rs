@@ -213,7 +213,7 @@ fn extension_info(installed: LifecycleInstalledExtensionSummary) -> RebornExtens
             LifecyclePhase::Active | LifecyclePhase::Activating | LifecyclePhase::Configured
         ),
         active: phase == LifecyclePhase::Active,
-        tools: summary.visible_read_only_capability_ids,
+        tools: summary.visible_capability_ids,
         needs_setup: matches!(
             phase,
             LifecyclePhase::Installed | LifecyclePhase::Configured | LifecyclePhase::Failed
@@ -404,6 +404,7 @@ mod tests {
             description: "test extension".to_string(),
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
+            visible_capability_ids: Vec::new(),
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: vec![LifecycleExtensionCredentialRequirement {
                 name: "fixture_token".to_string(),

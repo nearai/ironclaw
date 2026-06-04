@@ -15,8 +15,14 @@ pub(crate) mod run;
 pub(crate) mod serve;
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve_slack;
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) mod serve_sso;
 pub(crate) mod skills;
 pub(crate) mod traces;
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) mod user_directory;
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) mod webui_auth;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {

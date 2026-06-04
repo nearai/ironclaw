@@ -408,6 +408,7 @@ mod tests {
         );
         let milestone = LoopHostMilestone {
             scope,
+            actor: None,
             turn_id: TurnId::new(),
             run_id,
             loop_driver_id: LoopDriverId::new("hook-projection-driver").unwrap(),

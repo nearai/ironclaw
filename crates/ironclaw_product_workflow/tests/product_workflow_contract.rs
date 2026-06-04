@@ -1723,6 +1723,7 @@ async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
     .with_preconfigured_actor_binding(
         ExternalActorRef::new("test", "different-user", None::<String>).expect("actor"),
         UserId::new("user:alice").expect("user"),
+        actor_pairings,
     );
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
@@ -1731,8 +1732,7 @@ async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
         ),
         scope,
     )]);
-    let binding = ProductConversationBindingService::new(conversation_port, resolver)
-        .with_actor_pairings(actor_pairings);
+    let binding = ProductConversationBindingService::new(conversation_port, resolver);
     let workflow = DefaultProductWorkflow::new(
         Arc::new(DefaultInboundTurnService::new(
             binding.clone(),
@@ -1838,7 +1838,6 @@ async fn actor_user_resolver_propagates_resolver_error_without_turn_submission()
     let binding = product_binding_service_with_actor_user_resolver_arc(
         conversations,
         Arc::new(FailingProductActorUserResolver),
-        true,
     );
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
     let workflow = DefaultProductWorkflow::new(
@@ -1855,37 +1854,6 @@ async fn actor_user_resolver_propagates_resolver_error_without_turn_submission()
         .accept_inbound(sample_envelope("resolver-error"))
         .await
         .expect_err("resolver error should fail the workflow");
-
-    assert!(coordinator.submissions().is_empty());
-    assert!(matches!(err, ProductAdapterError::Internal { .. }));
-}
-
-#[tokio::test]
-async fn actor_user_resolver_without_actor_pairings_errors_before_turn_submission() {
-    let conversations = Arc::new(InMemoryConversationServices::default());
-    let binding = product_binding_service_with_actor_user_resolver_arc(
-        conversations,
-        Arc::new(RecordingProductActorUserResolver::new([(
-            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
-            UserId::new("user:resolved-slack").expect("user"),
-        )])),
-        false,
-    );
-    let coordinator = Arc::new(RecordingTurnCoordinator::default());
-    let workflow = DefaultProductWorkflow::new(
-        Arc::new(DefaultInboundTurnService::new(
-            binding.clone(),
-            InMemorySessionThreadService::default(),
-            coordinator.clone(),
-        )),
-        Arc::new(InMemoryIdempotencyLedger::new()),
-        Arc::new(binding),
-    );
-
-    let err = workflow
-        .accept_inbound(sample_envelope("resolver-missing-pairings"))
-        .await
-        .expect_err("missing actor pairings should fail the workflow");
 
     assert!(coordinator.submissions().is_empty());
     assert!(matches!(err, ProductAdapterError::Internal { .. }));
@@ -2901,6 +2869,7 @@ fn product_binding_service_with_preconfigured_actor(
     .with_preconfigured_actor_binding(
         ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
         UserId::new(user_id).expect("user"),
+        actor_pairings,
     );
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
@@ -2910,7 +2879,6 @@ fn product_binding_service_with_preconfigured_actor(
         scope,
     )]);
     ProductConversationBindingService::new(conversation_port, resolver)
-        .with_actor_pairings(actor_pairings)
 }
 
 fn product_binding_service_with_actor_user_resolver(
@@ -2921,32 +2889,25 @@ fn product_binding_service_with_actor_user_resolver(
     Arc<RecordingProductActorUserResolver>,
 ) {
     let actor_resolver = Arc::new(RecordingProductActorUserResolver::new(bindings));
-    let binding = product_binding_service_with_actor_user_resolver_arc(
-        conversations,
-        actor_resolver.clone(),
-        true,
-    );
+    let binding =
+        product_binding_service_with_actor_user_resolver_arc(conversations, actor_resolver.clone());
     (binding, actor_resolver)
 }
 
 fn product_binding_service_with_actor_user_resolver_arc(
     conversations: Arc<InMemoryConversationServices>,
     actor_resolver: Arc<dyn ProductActorUserResolver>,
-    with_actor_pairings: bool,
 ) -> ProductConversationBindingService {
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations.clone();
-    let actor_pairings = if with_actor_pairings {
-        Some(conversations as Arc<dyn ironclaw_conversations::ConversationActorPairingService>)
-    } else {
-        None
-    };
+    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
+        conversations;
     let scope = ProductInstallationScope::with_default_scope(
         TenantId::new("tenant:alpha").expect("tenant"),
         AgentId::new("agent:alpha").expect("agent"),
         Some(ProjectId::new("project:alpha").expect("project")),
     )
-    .with_actor_user_resolver(actor_resolver.clone());
+    .with_actor_user_resolver(actor_resolver.clone(), actor_pairings);
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
             ProductAdapterId::new("test_adapter").expect("adapter"),
@@ -2954,12 +2915,7 @@ fn product_binding_service_with_actor_user_resolver_arc(
         ),
         scope,
     )]);
-    let binding = ProductConversationBindingService::new(conversation_port, resolver);
-    if let Some(actor_pairings) = actor_pairings {
-        binding.with_actor_pairings(actor_pairings)
-    } else {
-        binding
-    }
+    ProductConversationBindingService::new(conversation_port, resolver)
 }
 
 #[derive(Debug)]

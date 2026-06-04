@@ -8,6 +8,8 @@
 //! never reads env vars directly so a binary that uses a different
 //! config source can still wire it.
 
+use std::time::Duration;
+
 use secrecy::SecretString;
 
 /// Google OAuth (OIDC) configuration. Mirrors the v1 gateway's
@@ -25,6 +27,10 @@ pub struct GoogleOAuthConfig {
     /// the account picker and the callback rejects any ID token
     /// whose `hd` claim does not match.
     pub allowed_hd: Option<String>,
+    /// Optional per-call HTTP timeout for the token/userinfo requests.
+    /// `None` uses the provider default. Operators on a slow or
+    /// cross-border path to the provider can raise it.
+    pub http_timeout: Option<Duration>,
 }
 
 /// GitHub OAuth configuration. Mirrors the v1 gateway's
@@ -42,4 +48,8 @@ pub struct GitHubOAuthConfig {
     /// OAuth App client secret. Wrapped in [`SecretString`] so the
     /// `Debug` impl is redacted.
     pub client_secret: SecretString,
+    /// Optional per-call HTTP timeout for the token/user/emails requests.
+    /// `None` uses the provider default. Operators on a slow or
+    /// cross-border path to `github.com` can raise it.
+    pub http_timeout: Option<Duration>,
 }

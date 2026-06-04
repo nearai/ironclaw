@@ -613,8 +613,10 @@ impl StaticSlackInstallationResolver {
         body: &[u8],
         error: SlackPayloadParseError,
     ) -> Result<ResolvedSlackIngress, SlackIngressError> {
-        self.ensure_candidate_budget(self.installations.len())?;
-        self.verify_candidates(self.installations.iter(), headers, body)?;
+        let Some(installation) = self.installations.first() else {
+            return Err(SlackIngressError::InstallationNotFound);
+        };
+        self.verify_candidates(std::iter::once(installation), headers, body)?;
         Err(error.into())
     }
 
@@ -820,6 +822,7 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::http::HeaderMap;
     use ironclaw_product_adapters::auth::mark_request_signature_verified;
@@ -831,12 +834,48 @@ mod tests {
         subject: &'static str,
     }
 
+    struct CountingVerifiedDispatcher {
+        subject: &'static str,
+        calls: Arc<AtomicUsize>,
+    }
+
     impl SlackEventsWebhookDispatcher for AlwaysVerifiedDispatcher {
         fn verify_webhook_auth(
             &self,
             _headers: &HeaderMap,
             _body: &[u8],
         ) -> Result<ProtocolAuthEvidence, RunnerError> {
+            Ok(mark_request_signature_verified(
+                "X-Slack-Signature",
+                Some("X-Slack-Request-Timestamp".to_string()),
+                self.subject,
+            ))
+        }
+
+        fn process_verified_webhook_immediate_ack<'a>(
+            &'a self,
+            _body: &'a [u8],
+            _evidence: &'a ProtocolAuthEvidence,
+            _observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
+        ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(WebhookProcessOutcome::AcceptedForAsyncDispatch) })
+        }
+
+        fn drain_immediate_ack_tasks<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {})
+        }
+    }
+
+    impl SlackEventsWebhookDispatcher for CountingVerifiedDispatcher {
+        fn verify_webhook_auth(
+            &self,
+            _headers: &HeaderMap,
+            _body: &[u8],
+        ) -> Result<ProtocolAuthEvidence, RunnerError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(mark_request_signature_verified(
                 "X-Slack-Signature",
                 Some("X-Slack-Request-Timestamp".to_string()),
@@ -871,6 +910,13 @@ mod tests {
 
     fn dispatcher(subject: &'static str) -> Arc<dyn SlackEventsWebhookDispatcher> {
         Arc::new(AlwaysVerifiedDispatcher { subject })
+    }
+
+    fn counting_dispatcher(
+        subject: &'static str,
+        calls: Arc<AtomicUsize>,
+    ) -> Arc<dyn SlackEventsWebhookDispatcher> {
+        Arc::new(CountingVerifiedDispatcher { subject, calls })
     }
 
     #[test]
@@ -997,5 +1043,39 @@ mod tests {
         assert_eq!(installation.adapter_installation_id().as_str(), "install-b");
         assert_eq!(metadata.install_user_id.as_deref(), Some("U-install-b"));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn static_resolver_verifies_one_candidate_for_unparseable_payload() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver = StaticSlackInstallationResolver::new(vec![
+            SlackInstallationRecord::new(
+                tenant_id("tenant-a"),
+                installation_id("install-a"),
+                SlackInstallationSelector::team("T-A"),
+                counting_dispatcher("install-a", calls.clone()),
+            ),
+            SlackInstallationRecord::new(
+                tenant_id("tenant-b"),
+                installation_id("install-b"),
+                SlackInstallationSelector::team("T-B"),
+                counting_dispatcher("install-b", calls.clone()),
+            ),
+        ]);
+
+        let error = resolver
+            .resolve_ingress(&HeaderMap::new(), br#"{"type":"event_callback""#)
+            .await
+            .expect_err("malformed JSON should stay a parse error after auth");
+
+        assert!(
+            matches!(error, SlackIngressError::Envelope(_)),
+            "error: {error}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "malformed payloads should not HMAC every configured installation"
+        );
     }
 }
