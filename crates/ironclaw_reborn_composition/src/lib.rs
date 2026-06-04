@@ -85,6 +85,8 @@ mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_connectable_channel;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_delivery;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_egress;
@@ -205,6 +207,8 @@ pub use slack_actor_identity::{
     RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
     slack_user_identity_provider_user_id,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_connectable_channel::build_webui_services_with_slack_host_beta_mounts;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,

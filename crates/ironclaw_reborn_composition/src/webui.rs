@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
-    RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind,
+    ConnectableChannelsProductFacade, RebornServices as ProductRebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
 };
 
 use crate::{
@@ -47,6 +47,14 @@ impl std::fmt::Debug for RebornWebuiBundle {
 pub fn build_webui_services(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
+) -> Result<RebornWebuiBundle, RebornBuildError> {
+    build_webui_services_with_connectable_channels(runtime, event_stream, None)
+}
+
+pub(crate) fn build_webui_services_with_connectable_channels(
+    runtime: &RebornRuntime,
+    event_stream: Option<Arc<dyn ProjectionStream>>,
+    connectable_channels: Option<Arc<dyn ConnectableChannelsProductFacade>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
     let automation_facade = services
@@ -110,6 +118,9 @@ pub fn build_webui_services(
     }
     if let Some(automation_facade) = automation_facade {
         api = api.with_automation_product_facade(automation_facade);
+    }
+    if let Some(connectable_channels) = connectable_channels {
+        api = api.with_connectable_channels_facade(connectable_channels);
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
 

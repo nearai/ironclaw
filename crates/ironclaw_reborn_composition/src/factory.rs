@@ -303,11 +303,13 @@ pub struct RebornServices {
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
+    #[cfg(feature = "root-llm-provider")]
     pub(crate) secret_store: Arc<dyn SecretStore>,
 }
 
 impl RebornServices {
     /// The shared scoped secret store backing this composition.
+    #[cfg(feature = "root-llm-provider")]
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
     }
@@ -363,7 +365,10 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) memory_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[cfg(all(
+        any(feature = "libsql", feature = "postgres"),
+        feature = "slack-v2-host-beta"
+    ))]
     pub(crate) host_state_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -406,6 +411,7 @@ impl RebornServices {
             product_auth: None,
             readiness: RebornReadiness::disabled(),
             local_runtime: None,
+            #[cfg(feature = "root-llm-provider")]
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
         }
     }
@@ -771,6 +777,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         product_auth: Some(product_auth),
         readiness: readiness_for(profile, true, true, true),
         local_runtime: Some(store_graph.local_runtime),
+        #[cfg(feature = "root-llm-provider")]
         secret_store,
     })
 }
@@ -850,6 +857,7 @@ fn build_local_dev_store_graph(
         memory_mounts,
         skill_filesystem,
         workspace_filesystem,
+        #[cfg(feature = "slack-v2-host-beta")]
         host_state_filesystem: Arc::clone(&scoped_filesystem),
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         workspace_mounts,
@@ -937,7 +945,7 @@ fn build_local_dev_store_graph(
         memory_mounts,
         skill_filesystem,
         workspace_filesystem,
-        #[cfg(feature = "postgres")]
+        #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
         host_state_filesystem: Arc::clone(&subagent_goal_filesystem),
         #[cfg(feature = "postgres")]
         subagent_goal_filesystem,
@@ -2175,6 +2183,7 @@ where
         readiness: readiness_for(profile, true, true, product_auth_ready),
         product_auth: Some(product_auth_services),
         local_runtime: None,
+        #[cfg(feature = "root-llm-provider")]
         secret_store,
     })
 }

@@ -124,6 +124,33 @@ mod tests {
     }
 
     #[test]
+    fn chat_connect_action_assets_render_shared_slack_pairing_card() {
+        let chat = asset_text("js/pages/chat/chat.js");
+        assert!(chat.contains("ChannelConnectCard"));
+        assert!(chat.contains("channelConnectAction"));
+        assert!(chat.contains("dismissChannelConnectAction"));
+
+        let card = asset_text("js/pages/chat/components/channel-connect-card.js");
+        assert!(card.contains("SlackPairingSection"));
+        assert!(card.contains("connectAction.strategy === \"inbound_proof_code\""));
+        assert!(card.contains("action=${connectAction.action}"));
+
+        let section = asset_text("js/components/slack-pairing-section.js");
+        assert!(section.contains("redeemSlackPairingCode(code)"));
+        assert!(section.contains("queryKey: [\"connectable-channels\"]"));
+
+        let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
+        assert!(channels_tab.contains("slackStatusLabel"));
+        assert!(channels_tab.contains("slackConnectAction &&"));
+        assert!(channels_tab.contains("copy=${slackConnectAction.action}"));
+
+        let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
+        assert!(regression.contains("channel connect requests return an action"));
+        assert!(regression.contains("without submitting a prompt"));
+        assert!(regression.contains("unmatched channel connect requests submit the prompt"));
+    }
+
+    #[test]
     fn automations_panel_assets_are_embedded() {
         let app = asset_text("js/app/app.js");
         assert!(app.contains("AutomationsPage"));

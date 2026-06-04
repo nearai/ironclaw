@@ -14,7 +14,11 @@ const SLACK_PAIRING_I18N_KEYS = {
   empty: "pairing.none",
 };
 
-const SLACK_PAIRING_QUERY_KEYS = [["extensions"], ["pairing", "slack"]];
+const SLACK_PAIRING_QUERY_KEYS = [
+  ["extensions"],
+  ["pairing", "slack"],
+  ["connectable-channels"],
+];
 
 function packageId(item) {
   return item.package_ref?.id || "";
@@ -29,6 +33,7 @@ export function isSlackChannelEnabled(enabledChannels) {
 export function ChannelsTab({
   status,
   channels,
+  connectableChannels,
   channelRegistry,
   onActivate,
   onConfigure,
@@ -38,6 +43,9 @@ export function ChannelsTab({
 }) {
   const enabledChannels = status.enabled_channels || [];
   const slackEnabled = isSlackChannelEnabled(enabledChannels);
+  const slackConnectAction = connectableChannels?.find((channel) => channel.channel === "slack");
+  const slackStatusLabel = slackEnabled ? "on" : slackConnectAction ? "connect" : "off";
+  const slackStatusTone = slackEnabled ? "success" : slackConnectAction ? "info" : "muted";
 
   return html`
     <div className="space-y-5">
@@ -66,17 +74,19 @@ export function ChannelsTab({
           name="Slack"
           description="Tenant app channel for DMs and app mentions"
           enabled=${slackEnabled}
-          statusLabel=${slackEnabled ? "on" : "connect"}
-          statusTone=${slackEnabled ? "success" : "info"}
+          statusLabel=${slackStatusLabel}
+          statusTone=${slackStatusTone}
           detail="Tenant Slack app install"
         >
-          <${PairingSection}
+          ${slackConnectAction &&
+          html`<${PairingSection}
             channel="slack"
             redeemFn=${redeemPairingCode}
             i18nKeys=${SLACK_PAIRING_I18N_KEYS}
+            copy=${slackConnectAction.action}
             queryKeys=${SLACK_PAIRING_QUERY_KEYS}
             showPendingRequests=${false}
-          />
+          />`}
         <//>
         <${BuiltinRow}
           name="CLI"
