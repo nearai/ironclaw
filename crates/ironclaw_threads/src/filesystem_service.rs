@@ -1309,6 +1309,17 @@ where
         scope: &ThreadScope,
         thread_id: &ThreadId,
     ) -> Result<(), SessionThreadError> {
+        let record = self
+            .read_thread(ThreadHistoryRequest {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await?;
+        if record.scope != *scope {
+            return Err(SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            });
+        }
         match self
             .filesystem
             .delete(&scope.to_resource_scope(), &thread_root(scope, thread_id)?)

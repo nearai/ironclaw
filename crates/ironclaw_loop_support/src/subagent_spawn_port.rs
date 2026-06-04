@@ -1086,6 +1086,8 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 let suspended = outcome.is_suspension();
                 outcomes.push(outcome);
                 if suspended && request.stop_on_first_suspension && !batch_await_dependent {
+                    // Suspension is a partial-success boundary, not a failed
+                    // batch; prior successful spawns remain committed.
                     return Ok(CapabilityBatchOutcome {
                         outcomes,
                         stopped_on_suspension: true,
@@ -1119,6 +1121,8 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
             let stopped = inner.stopped_on_suspension;
             outcomes.extend(inner.outcomes);
             if stopped && request.stop_on_first_suspension {
+                // Propagate the inner partial-success stop without rolling back
+                // earlier successful spawns from this outer batch.
                 return Ok(CapabilityBatchOutcome {
                     outcomes,
                     stopped_on_suspension: true,

@@ -31,6 +31,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
+
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_conversations::InMemoryConversationServices;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -545,6 +547,8 @@ impl RebornRuntime {
     /// local runtime service slot populated by build_reborn_runtime.
     #[cfg(all(test, feature = "slack-v2-host-beta"))]
     #[allow(dead_code)]
+    /// Test-only mutator for the local runtime HTTP egress binding used by
+    /// production capability policy wiring during runtime construction.
     pub(crate) fn set_local_runtime_http_egress_for_test(
         &mut self,
         runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
@@ -1122,7 +1126,22 @@ impl RebornRuntime {
         idempotency_suffix: &str,
     ) -> Result<(), RebornRuntimeError> {
         let mut stack = self.turn_tree_store.children_of(scope, run_id).await?;
+        let mut visited = HashSet::new();
+        let mut visited_count = 0_usize;
         while let Some(child) = stack.pop() {
+            if !visited.insert(child.run_id) {
+                continue;
+            }
+            visited_count += 1;
+            if visited_count > MAX_DESCENDANT_CANCEL_NODES {
+                tracing::warn!(
+                    scope = ?scope,
+                    run_id = %run_id,
+                    max_nodes = MAX_DESCENDANT_CANCEL_NODES,
+                    "stopped descendant cancellation traversal after node budget was reached"
+                );
+                break;
+            }
             let grandchildren = self
                 .turn_tree_store
                 .children_of(&child.scope, child.run_id)
