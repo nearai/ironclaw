@@ -34,6 +34,7 @@
 mod approved_tx_hash;
 mod canonical;
 mod decoded_tx;
+mod error;
 mod fields;
 mod rendered;
 
@@ -47,6 +48,7 @@ pub use decoded_tx::{
     SolanaAddressTableLookup, SolanaCompiledInstruction, SolanaMessageHeader, SolanaMessageVersion,
     SolanaTransaction,
 };
+pub use error::AttestationError;
 pub use rendered::{RenderedField, RenderedTx, render};
 
 /// Test-only re-export of the low-level component hasher.

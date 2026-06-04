@@ -9,11 +9,11 @@
 //! separation prevents cross-chain collisions.
 
 use ironclaw_attestation::{
-    Bytes32, DecodedTransaction, EvmAccessListEntry, EvmAddress, EvmTransaction, NearAccessKey,
-    NearAccessKeyPermission, NearAction, NearPublicKey, NearTransaction, RenderingSchemaVersion,
-    SolanaAddressTableLookup, SolanaCompiledInstruction, SolanaMessageHeader, SolanaMessageVersion,
-    SolanaTransaction, approved_tx_hash_for, canonical_signing_bytes, compute_approved_tx_hash,
-    render,
+    AttestationError, Bytes32, DecodedTransaction, EvmAccessListEntry, EvmAddress, EvmTransaction,
+    NearAccessKey, NearAccessKeyPermission, NearAction, NearPublicKey, NearTransaction,
+    RenderingSchemaVersion, SolanaAddressTableLookup, SolanaCompiledInstruction,
+    SolanaMessageHeader, SolanaMessageVersion, SolanaTransaction, approved_tx_hash_for,
+    canonical_signing_bytes, compute_approved_tx_hash, render,
 };
 
 const SV: RenderingSchemaVersion = RenderingSchemaVersion::CURRENT;
@@ -22,7 +22,23 @@ const SIGNER: &str = "0x1111111111111111111111111111111111111111";
 /// Full hash via the SAFE public API (derives render + canonical from the same
 /// tx and binds the explicit signer).
 fn hash_of(tx: &DecodedTransaction, schema: RenderingSchemaVersion) -> [u8; 32] {
-    *approved_tx_hash_for(tx, SIGNER, schema).as_bytes()
+    *approved_tx_hash_for(tx, SIGNER, schema)
+        .expect("hash")
+        .as_bytes()
+}
+
+/// Canonical signing bytes for a well-formed sample (panics on overflow, which
+/// the dedicated fail-closed tests cover explicitly).
+fn canon(tx: &DecodedTransaction, schema: RenderingSchemaVersion) -> Vec<u8> {
+    canonical_signing_bytes(tx, schema).expect("canonical bytes")
+}
+
+/// Render a well-formed sample (panics on overflow).
+fn render_ok(
+    tx: &DecodedTransaction,
+    schema: RenderingSchemaVersion,
+) -> ironclaw_attestation::RenderedTx {
+    render(tx, schema).expect("render")
 }
 
 fn sample_evm() -> EvmTransaction {
@@ -96,10 +112,7 @@ fn sample_near() -> NearTransaction {
 #[test]
 fn canonical_bytes_are_deterministic_across_calls() {
     let tx = DecodedTransaction::Evm(sample_evm());
-    assert_eq!(
-        canonical_signing_bytes(&tx, SV),
-        canonical_signing_bytes(&tx, SV)
-    );
+    assert_eq!(canon(&tx, SV), canon(&tx, SV));
     assert_eq!(hash_of(&tx, SV), hash_of(&tx, SV));
 }
 
@@ -113,10 +126,7 @@ fn canonical_bytes_survive_serde_round_trip() {
         let json = serde_json::to_string(&tx).expect("serialize");
         let back: DecodedTransaction = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, tx);
-        assert_eq!(
-            canonical_signing_bytes(&tx, SV),
-            canonical_signing_bytes(&back, SV)
-        );
+        assert_eq!(canon(&tx, SV), canon(&back, SV));
         assert_eq!(hash_of(&tx, SV), hash_of(&back, SV));
     }
 }
@@ -129,10 +139,12 @@ fn changing_signer_account_changes_hash_with_fixed_to() {
     // The hash MUST change — the approval commits to *who signs*, not to a
     // heuristic recovered from the tx body.
     let tx = DecodedTransaction::Evm(sample_evm());
-    let h_a =
-        *approved_tx_hash_for(&tx, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SV).as_bytes();
-    let h_b =
-        *approved_tx_hash_for(&tx, "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", SV).as_bytes();
+    let h_a = *approved_tx_hash_for(&tx, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SV)
+        .expect("hash a")
+        .as_bytes();
+    let h_b = *approved_tx_hash_for(&tx, "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", SV)
+        .expect("hash b")
+        .as_bytes();
     assert_ne!(h_a, h_b, "changing the bound signer must change the hash");
 
     // Sanity: `to` is identical across both hashes (same tx), proving the
@@ -145,8 +157,8 @@ fn changing_signer_account_changes_hash_with_fixed_to() {
 #[test]
 fn safe_api_matches_manual_component_assembly() {
     let tx = DecodedTransaction::Evm(sample_evm());
-    let rendered = render(&tx, SV);
-    let canonical = canonical_signing_bytes(&tx, SV);
+    let rendered = render_ok(&tx, SV);
+    let canonical = canon(&tx, SV);
     let manual = compute_approved_tx_hash(
         &rendered,
         &canonical,
@@ -155,7 +167,7 @@ fn safe_api_matches_manual_component_assembly() {
         &tx.tx_type_label(),
         SV,
     );
-    assert_eq!(approved_tx_hash_for(&tx, SIGNER, SV), manual);
+    assert_eq!(approved_tx_hash_for(&tx, SIGNER, SV).expect("hash"), manual);
 }
 
 // ---- Anti-field-smuggling: every component changes the hash -------------
@@ -170,7 +182,7 @@ fn changing_schema_version_changes_hash() {
 fn changing_any_evm_field_changes_canonical_bytes_and_hash() {
     let base = sample_evm();
     let baseline = DecodedTransaction::Evm(base.clone());
-    let baseline_bytes = canonical_signing_bytes(&baseline, SV);
+    let baseline_bytes = canon(&baseline, SV);
     let baseline_hash = hash_of(&baseline, SV);
 
     type Mutator = Box<dyn Fn(&mut EvmTransaction)>;
@@ -210,7 +222,7 @@ fn changing_any_evm_field_changes_canonical_bytes_and_hash() {
         f(&mut m);
         let tx = DecodedTransaction::Evm(m);
         assert_ne!(
-            canonical_signing_bytes(&tx, SV),
+            canon(&tx, SV),
             baseline_bytes,
             "mutating `{name}` must change canonical bytes"
         );
@@ -225,8 +237,8 @@ fn changing_any_evm_field_changes_canonical_bytes_and_hash() {
 #[test]
 fn changing_chain_network_or_tx_type_component_changes_hash() {
     let tx = DecodedTransaction::Evm(sample_evm());
-    let rendered = render(&tx, SV);
-    let canonical = canonical_signing_bytes(&tx, SV);
+    let rendered = render_ok(&tx, SV);
+    let canonical = canon(&tx, SV);
     let base = compute_approved_tx_hash(
         &rendered,
         &canonical,
@@ -261,8 +273,8 @@ fn same_render_different_canonical_bytes_changes_hash() {
     // If an attacker could keep the displayed render fixed while swapping the
     // signed bytes (approve-A / sign-B), the hash MUST still change.
     let tx = DecodedTransaction::Evm(sample_evm());
-    let rendered = render(&tx, SV);
-    let canonical_a = canonical_signing_bytes(&tx, SV);
+    let rendered = render_ok(&tx, SV);
+    let canonical_a = canon(&tx, SV);
     let mut canonical_b = canonical_a.clone();
     *canonical_b.last_mut().expect("non-empty") ^= 0xff;
     assert_ne!(canonical_a, canonical_b);
@@ -292,8 +304,8 @@ fn same_render_different_canonical_bytes_changes_hash() {
 #[test]
 fn changing_render_component_changes_hash() {
     let tx = DecodedTransaction::Evm(sample_evm());
-    let canonical = canonical_signing_bytes(&tx, SV);
-    let r1 = render(&tx, SV);
+    let canonical = canon(&tx, SV);
+    let r1 = render_ok(&tx, SV);
     let mut r2 = r1.clone();
     r2.fields[0].value = "tampered".to_string();
     let h1 = compute_approved_tx_hash(
@@ -398,7 +410,7 @@ fn near_nested_structs_reject_unknown_fields() {
 fn solana_distinct_messages_hash_differently() {
     let base = DecodedTransaction::Solana(sample_solana());
     let baseline = hash_of(&base, SV);
-    let baseline_bytes = canonical_signing_bytes(&base, SV);
+    let baseline_bytes = canon(&base, SV);
 
     type Mutator = Box<dyn Fn(&mut SolanaTransaction)>;
     let mutate: Vec<(&str, Mutator)> = vec![
@@ -457,7 +469,7 @@ fn solana_distinct_messages_hash_differently() {
         f(&mut m);
         let tx = DecodedTransaction::Solana(m);
         assert_ne!(
-            canonical_signing_bytes(&tx, SV),
+            canon(&tx, SV),
             baseline_bytes,
             "mutating Solana `{name}` must change canonical bytes"
         );
@@ -480,8 +492,8 @@ fn solana_legacy_and_v0_with_same_contents_differ() {
     v0.version = SolanaMessageVersion::V0;
 
     assert_ne!(
-        canonical_signing_bytes(&DecodedTransaction::Solana(legacy.clone()), SV),
-        canonical_signing_bytes(&DecodedTransaction::Solana(v0.clone()), SV)
+        canon(&DecodedTransaction::Solana(legacy.clone()), SV),
+        canon(&DecodedTransaction::Solana(v0.clone()), SV)
     );
     assert_ne!(
         hash_of(&DecodedTransaction::Solana(legacy), SV),
@@ -510,7 +522,7 @@ fn solana_message_bytes_match_known_layout() {
         }],
         address_table_lookups: vec![],
     };
-    let bytes = canonical_signing_bytes(&DecodedTransaction::Solana(tx), SV);
+    let bytes = canon(&DecodedTransaction::Solana(tx), SV);
     // The canonical bytes embed the message; assert the message slice appears.
     // Expected message = header(1,0,1) ∥ shortvec(2) ∥ key0 ∥ key1 ∥ blockhash
     //                    ∥ shortvec(1) ∥ [1, shortvec(1), 0, shortvec(2), de ad]
@@ -571,6 +583,7 @@ fn near_distinct_actions_hash_differently() {
         NearAction::Delegate {
             sender_id: "s.near".to_string(),
             receiver_id: "r.near".to_string(),
+            actions: vec![],
             nonce: 2,
             max_block_height: 100,
             public_key: ed25519_pk(0x44),
@@ -581,7 +594,7 @@ fn near_distinct_actions_hash_differently() {
     for action in variants {
         let tx = near_with_action(action);
         assert!(
-            byte_sets.insert(canonical_signing_bytes(&tx, SV)),
+            byte_sets.insert(canon(&tx, SV)),
             "each NEAR action variant must produce unique canonical bytes"
         );
         assert!(
@@ -666,7 +679,7 @@ fn near_public_key_binds() {
 // ---- Render coverage: render touches every consumed field ---------------
 
 fn assert_render_covers(tx: &DecodedTransaction, expected_labels: &[&str]) {
-    let rendered = render(tx, SV);
+    let rendered = render_ok(tx, SV);
     for label in expected_labels {
         assert!(
             rendered.has_label(label),
@@ -675,7 +688,7 @@ fn assert_render_covers(tx: &DecodedTransaction, expected_labels: &[&str]) {
             rendered.fields.iter().map(|f| &f.label).collect::<Vec<_>>()
         );
     }
-    assert!(!canonical_signing_bytes(tx, SV).is_empty());
+    assert!(!canon(tx, SV).is_empty());
     assert!(rendered.fields.len() >= expected_labels.len());
 }
 
@@ -750,8 +763,8 @@ fn render_field_count_matches_canonical_field_count() {
         DecodedTransaction::Solana(sample_solana()),
         DecodedTransaction::Near(sample_near()),
     ] {
-        let rendered = render(&tx, SV);
-        let bytes = canonical_signing_bytes(&tx, SV);
+        let rendered = render_ok(&tx, SV);
+        let bytes = canon(&tx, SV);
         let count = parse_canonical_field_count(&bytes);
         assert_eq!(
             count,
@@ -813,10 +826,7 @@ fn evm_and_solana_with_similar_bytes_hash_differently() {
         instructions: vec![],
         address_table_lookups: vec![],
     });
-    assert_ne!(
-        canonical_signing_bytes(&evm, SV),
-        canonical_signing_bytes(&sol, SV)
-    );
+    assert_ne!(canon(&evm, SV), canon(&sol, SV));
     assert_ne!(hash_of(&evm, SV), hash_of(&sol, SV));
 }
 
@@ -830,4 +840,218 @@ fn same_tx_on_different_evm_networks_hash_differently() {
         hash_of(&DecodedTransaction::Evm(a), SV),
         hash_of(&DecodedTransaction::Evm(b), SV)
     );
+}
+
+// ---- Fail-closed wire encoding (henrypark133 Critical/High findings) -----
+//
+// These drive the SAFE public API (`approved_tx_hash_for` /
+// `canonical_signing_bytes`) — not the private wire helpers — so they regress
+// the actual call site a signing flow uses. An input that cannot be reproduced
+// byte-for-byte as the signed payload must be REJECTED, never truncated: a
+// truncated length prefix would let trailing bytes be reinterpreted as extra
+// instructions/accounts (Solana) or desync the borsh stream (NEAR), smuggling
+// fields past the what-you-see-is-what-you-sign binding.
+
+#[test]
+fn solana_oversized_instruction_data_is_rejected() {
+    // Instruction data longer than the compact-u16 maximum cannot be
+    // length-prefixed faithfully. The canonical/hash path must fail closed
+    // rather than truncate the shortvec prefix.
+    let mut sol = sample_solana();
+    sol.instructions[0].data = vec![0u8; u16::MAX as usize + 1];
+    let tx = DecodedTransaction::Solana(sol);
+    assert_eq!(
+        canonical_signing_bytes(&tx, SV),
+        Err(AttestationError::SolanaShortVecOverflow {
+            what: "instruction.data",
+            len: u16::MAX as usize + 1,
+            max: u16::MAX as usize,
+        })
+    );
+    assert!(approved_tx_hash_for(&tx, SIGNER, SV).is_err());
+    assert!(render(&tx, SV).is_err());
+}
+
+#[test]
+fn solana_max_instruction_data_still_encodes() {
+    // Exactly u16::MAX is representable and must succeed (boundary).
+    let mut sol = sample_solana();
+    sol.instructions[0].data = vec![0u8; u16::MAX as usize];
+    let tx = DecodedTransaction::Solana(sol);
+    assert!(canonical_signing_bytes(&tx, SV).is_ok());
+    assert!(approved_tx_hash_for(&tx, SIGNER, SV).is_ok());
+}
+
+#[test]
+fn near_oversized_deposit_is_rejected() {
+    // A deposit carrying more than 16 big-endian bytes does not fit a borsh
+    // u128. Wrapping it (as the old `wrapping_shl` did) would make the SIGNED
+    // amount differ from the human-RENDERED amount — an approve-vs-sign
+    // divergence — so canonicalization must fail closed.
+    let mut near = sample_near();
+    near.actions = vec![NearAction::Transfer {
+        deposit: vec![0x01; 17],
+    }];
+    let tx = DecodedTransaction::Near(near);
+    assert_eq!(
+        canonical_signing_bytes(&tx, SV),
+        Err(AttestationError::NearU128Overflow {
+            what: "transfer.deposit",
+            len: 17
+        })
+    );
+    assert!(approved_tx_hash_for(&tx, SIGNER, SV).is_err());
+}
+
+#[test]
+fn near_max_width_deposit_still_encodes() {
+    // A full 16-byte (u128::MAX) deposit is representable and must succeed.
+    let mut near = sample_near();
+    near.actions = vec![NearAction::Transfer {
+        deposit: vec![0xff; 16],
+    }];
+    let tx = DecodedTransaction::Near(near);
+    assert!(canonical_signing_bytes(&tx, SV).is_ok());
+    assert!(approved_tx_hash_for(&tx, SIGNER, SV).is_ok());
+}
+
+#[test]
+fn near_delegate_action_serializes_empty_inner_actions_vector() {
+    // NEP-366 DelegateAction places a `Vec<Action>` between `receiver_id` and
+    // `nonce`. A delegate with no inner actions serializes an explicit empty
+    // actions vector (borsh `0u32`) in the correct position; assert that exact
+    // slice appears in the canonical bytes.
+    let mut near = sample_near();
+    near.actions = vec![NearAction::Delegate {
+        sender_id: "s.near".to_string(),
+        receiver_id: "r.near".to_string(),
+        actions: vec![],
+        nonce: 0x0102_0304_0506_0708,
+        max_block_height: 100,
+        public_key: ed25519_pk(0x44),
+    }];
+    let tx = DecodedTransaction::Near(near);
+    let bytes = canon(&tx, SV);
+
+    // Expected wire fragment for the Delegate action body:
+    //   discriminant(8) ∥ borsh("s.near") ∥ borsh("r.near") ∥
+    //   actions_len(0u32 le) ∥ nonce(u64 le) ∥ ...
+    let mut expected = vec![8u8]; // Delegate discriminant
+    expected.extend_from_slice(&6u32.to_le_bytes());
+    expected.extend_from_slice(b"s.near");
+    expected.extend_from_slice(&6u32.to_le_bytes());
+    expected.extend_from_slice(b"r.near");
+    expected.extend_from_slice(&0u32.to_le_bytes()); // empty inner actions vec
+    expected.extend_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes()); // nonce
+    assert!(
+        bytes.windows(expected.len()).any(|w| w == expected),
+        "Delegate action must serialize an explicit empty actions vector before the nonce"
+    );
+
+    // Distinct delegate transactions must still hash distinctly.
+    let mut other = sample_near();
+    other.actions = vec![NearAction::Delegate {
+        sender_id: "s.near".to_string(),
+        receiver_id: "r.near".to_string(),
+        actions: vec![],
+        nonce: 0x0102_0304_0506_0709, // differs by one
+        max_block_height: 100,
+        public_key: ed25519_pk(0x44),
+    }];
+    assert_ne!(
+        hash_of(&tx, SV),
+        hash_of(&DecodedTransaction::Near(other), SV)
+    );
+}
+
+#[test]
+fn near_delegate_inner_actions_are_injective() {
+    // NEP-366 DelegateAction carries an inner `Vec<Action>`. Two delegates that
+    // differ ONLY in their inner actions must NOT collapse to the same canonical
+    // bytes / hash, or an attestation signed for delegate-with-actions-A would
+    // also validate for delegate-with-actions-B (approve-A / sign-B confusion).
+    let delegate = |inner: Vec<NearAction>| {
+        let mut near = sample_near();
+        near.actions = vec![NearAction::Delegate {
+            sender_id: "s.near".to_string(),
+            receiver_id: "r.near".to_string(),
+            actions: inner,
+            nonce: 7,
+            max_block_height: 100,
+            public_key: ed25519_pk(0x44),
+        }];
+        DecodedTransaction::Near(near)
+    };
+
+    let a = delegate(vec![NearAction::Transfer {
+        deposit: vec![0x01],
+    }]);
+    let b = delegate(vec![NearAction::Transfer {
+        deposit: vec![0x02], // same shape, different amount
+    }]);
+    let c = delegate(vec![]); // no inner actions at all
+    let d = delegate(vec![
+        NearAction::Transfer {
+            deposit: vec![0x01],
+        },
+        NearAction::Transfer {
+            deposit: vec![0x01],
+        },
+    ]); // same first action, but a second one appended
+
+    // All four must be pairwise distinct in both canonical bytes and hash.
+    let txs = [&a, &b, &c, &d];
+    let mut byte_sets = std::collections::HashSet::new();
+    let mut hashes = std::collections::HashSet::new();
+    for tx in txs {
+        assert!(
+            byte_sets.insert(canon(tx, SV)),
+            "delegates differing only in inner actions must have distinct canonical bytes"
+        );
+        assert!(
+            hashes.insert(hash_of(tx, SV)),
+            "delegates differing only in inner actions must have distinct hashes"
+        );
+    }
+
+    // The inner action's serialized body must actually appear in the canonical
+    // bytes (proving it is carried, not dropped): a Transfer of 0x02.
+    let bytes = canon(&b, SV);
+    let inner_fragment = vec![3u8, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    assert!(
+        bytes
+            .windows(inner_fragment.len())
+            .any(|w| w == inner_fragment),
+        "inner Transfer action body must be serialized into the delegate wire bytes"
+    );
+}
+
+#[test]
+fn near_delegate_nested_delegate_is_rejected() {
+    // NEP-366 inner actions are `NonDelegateAction`: a delegate may not nest a
+    // delegate. An inner Delegate cannot be represented faithfully on-chain, so
+    // canonicalization must fail closed rather than emit ambiguous bytes.
+    let mut near = sample_near();
+    near.actions = vec![NearAction::Delegate {
+        sender_id: "s.near".to_string(),
+        receiver_id: "r.near".to_string(),
+        actions: vec![NearAction::Delegate {
+            sender_id: "inner.near".to_string(),
+            receiver_id: "innerr.near".to_string(),
+            actions: vec![],
+            nonce: 1,
+            max_block_height: 1,
+            public_key: ed25519_pk(0x55),
+        }],
+        nonce: 7,
+        max_block_height: 100,
+        public_key: ed25519_pk(0x44),
+    }];
+    let tx = DecodedTransaction::Near(near);
+    assert_eq!(
+        canonical_signing_bytes(&tx, SV),
+        Err(AttestationError::NearNestedDelegate)
+    );
+    assert!(approved_tx_hash_for(&tx, SIGNER, SV).is_err());
+    assert!(render(&tx, SV).is_err());
 }
