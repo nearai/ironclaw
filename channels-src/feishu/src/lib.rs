@@ -59,10 +59,13 @@ const TOKEN_EXPIRY_PATH: &str = "token_expiry";
 const CONNECTION_MODE_PATH: &str = "connection_mode";
 const WEBSOCKET_EVENT_QUEUE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBHOOK_EVENT_QUEUE_PATH: &str = "state/webhook_event_queue";
+const RECENT_EVENT_IDS_PATH: &str = "state/recent_event_ids";
 const WEBHOOK_POLL_INTERVAL_MS: u32 = 30_000;
 const INBOUND_IMAGE_DOWNLOAD_TIMEOUT_MS: u32 = 10_000;
 const MAX_INBOUND_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_OUTBOUND_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_RECENT_EVENT_IDS: usize = 512;
+const MAX_RECENT_EVENT_ID_AGE_MS: u64 = 24 * 60 * 60 * 1_000;
 
 // ============================================================================
 // Feishu API Types
@@ -117,6 +120,12 @@ struct FeishuEventHeader {
     /// Verification token for v2 event payloads.
     #[serde(default)]
     token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RecentEventIdEntry {
+    id: String,
+    seen_at_ms: u64,
 }
 
 /// Message receive event payload (im.message.receive_v1).
@@ -515,6 +524,7 @@ fn process_websocket_event_queue() {
             let _ = channel_host::workspace_write(WEBSOCKET_EVENT_QUEUE_PATH, queue_json);
         },
         |frame| process_feishu_event_payload(frame, false),
+        None,
         channel_host::log,
     );
 }
@@ -535,6 +545,7 @@ fn process_webhook_event_queue() {
             let _ = channel_host::workspace_write(WEBHOOK_EVENT_QUEUE_PATH, queue_json);
         },
         process_verified_feishu_event_payload,
+        Some(1),
         channel_host::log,
     );
 }
@@ -571,6 +582,7 @@ fn process_websocket_event_queue_with(
     mut read_queue: impl FnMut() -> String,
     mut write_queue: impl FnMut(&str),
     mut process_payload: impl FnMut(&str),
+    max_frames: Option<usize>,
     mut log: impl FnMut(channel_host::LogLevel, &str),
 ) {
     let queue_json = read_queue();
@@ -578,7 +590,7 @@ fn process_websocket_event_queue_with(
         return;
     }
 
-    let frames: Vec<String> = match serde_json::from_str(&queue_json) {
+    let mut frames: Vec<String> = match serde_json::from_str(&queue_json) {
         Ok(frames) => frames,
         Err(error) => {
             log(
@@ -594,7 +606,12 @@ fn process_websocket_event_queue_with(
         return;
     }
 
-    write_queue("[]");
+    let remaining = max_frames
+        .and_then(|max| (frames.len() > max).then(|| frames.split_off(max)))
+        .unwrap_or_default();
+    let remaining_json =
+        serde_json::to_string(&remaining).unwrap_or_else(|_| "[]".to_string());
+    write_queue(&remaining_json);
     for frame in frames {
         process_payload(&frame);
     }
@@ -605,6 +622,8 @@ fn process_feishu_event_payload(body_str: &str, require_webhook_auth: bool) {
         body_str,
         require_webhook_auth,
         channel_host::workspace_read,
+        channel_host::workspace_write,
+        channel_host::now_millis,
         handle_message_event,
         channel_host::log,
     );
@@ -615,6 +634,8 @@ fn process_verified_feishu_event_payload(body_str: &str) {
         body_str,
         FeishuEventAuthMode::AlreadyVerified,
         channel_host::workspace_read,
+        channel_host::workspace_write,
+        channel_host::now_millis,
         handle_message_event,
         channel_host::log,
     );
@@ -631,6 +652,8 @@ fn process_feishu_event_payload_with_workspace(
     body_str: &str,
     require_webhook_auth: bool,
     mut workspace_read: impl FnMut(&str) -> Option<String>,
+    mut workspace_write: impl FnMut(&str, &str) -> Result<(), String>,
+    mut now_ms: impl FnMut() -> u64,
     mut handle_message: impl FnMut(&serde_json::Value),
     mut log: impl FnMut(channel_host::LogLevel, &str),
 ) -> bool {
@@ -643,6 +666,8 @@ fn process_feishu_event_payload_with_workspace(
         body_str,
         auth_mode,
         &mut workspace_read,
+        &mut workspace_write,
+        &mut now_ms,
         &mut handle_message,
         &mut log,
     )
@@ -652,6 +677,8 @@ fn process_feishu_event_payload_with_workspace_auth(
     body_str: &str,
     auth_mode: FeishuEventAuthMode,
     mut workspace_read: impl FnMut(&str) -> Option<String>,
+    mut workspace_write: impl FnMut(&str, &str) -> Result<(), String>,
+    mut now_ms: impl FnMut() -> u64,
     mut handle_message: impl FnMut(&serde_json::Value),
     mut log: impl FnMut(channel_host::LogLevel, &str),
 ) -> bool {
@@ -708,6 +735,15 @@ fn process_feishu_event_payload_with_workspace_auth(
     if let Some(header) = &event.header {
         match header.event_type.as_str() {
             "im.message.receive_v1" => {
+                if !should_process_event_id(
+                    &header.event_id,
+                    &mut workspace_read,
+                    &mut workspace_write,
+                    &mut now_ms,
+                    &mut log,
+                ) {
+                    return false;
+                }
                 if let Some(event_data) = &event.event {
                     handle_message(event_data);
                     return true;
@@ -722,6 +758,85 @@ fn process_feishu_event_payload_with_workspace_auth(
         }
     }
     false
+}
+
+fn update_recent_event_ids(
+    existing_json: Option<&str>,
+    event_id: &str,
+    max_ids: usize,
+    now_ms: u64,
+    ttl_ms: u64,
+) -> Result<(bool, String), String> {
+    let mut ids: Vec<RecentEventIdEntry> = match existing_json.filter(|s| !s.trim().is_empty()) {
+        Some(raw) => serde_json::from_str::<Vec<RecentEventIdEntry>>(raw).or_else(|_| {
+            serde_json::from_str::<Vec<String>>(raw).map(|legacy| {
+                legacy
+                    .into_iter()
+                    .map(|id| RecentEventIdEntry {
+                        id,
+                        seen_at_ms: now_ms,
+                    })
+                    .collect()
+            })
+        })
+        .map_err(|e| format!("Failed to parse recent Feishu event ids: {e}"))?,
+        None => Vec::new(),
+    };
+
+    ids.retain(|entry| now_ms.saturating_sub(entry.seen_at_ms) <= ttl_ms);
+
+    if ids.iter().any(|existing| existing.id == event_id) {
+        let json = serde_json::to_string(&ids)
+            .map_err(|e| format!("Failed to serialize recent Feishu event ids: {e}"))?;
+        return Ok((false, json));
+    }
+
+    ids.push(RecentEventIdEntry {
+        id: event_id.to_string(),
+        seen_at_ms: now_ms,
+    });
+    if ids.len() > max_ids {
+        let to_drop = ids.len() - max_ids;
+        ids.drain(0..to_drop);
+    }
+
+    let json = serde_json::to_string(&ids)
+        .map_err(|e| format!("Failed to serialize recent Feishu event ids: {e}"))?;
+    Ok((true, json))
+}
+
+fn should_process_event_id(
+    event_id: &str,
+    mut workspace_read: impl FnMut(&str) -> Option<String>,
+    mut workspace_write: impl FnMut(&str, &str) -> Result<(), String>,
+    mut now_ms: impl FnMut() -> u64,
+    mut log: impl FnMut(channel_host::LogLevel, &str),
+) -> bool {
+    match update_recent_event_ids(
+        workspace_read(RECENT_EVENT_IDS_PATH).as_deref(),
+        event_id,
+        MAX_RECENT_EVENT_IDS,
+        now_ms(),
+        MAX_RECENT_EVENT_ID_AGE_MS,
+    ) {
+        Ok((true, json)) => {
+            if let Err(error) = workspace_write(RECENT_EVENT_IDS_PATH, &json) {
+                log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Failed to persist Feishu event dedupe state: {error}"),
+                );
+            }
+            true
+        }
+        Ok((false, _)) => false,
+        Err(error) => {
+            log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to update Feishu event dedupe state: {error}"),
+            );
+            true
+        }
+    }
 }
 
 /// Handle an im.message.receive_v1 event.
@@ -1440,15 +1555,22 @@ fn send_response_images_then_text_with_upload(
         append_attachment_errors_to_text(&response.content, &errors)
     };
     if !content.is_empty() {
-        send_part(FeishuResponsePart::Text(content))?;
-        sent_any = true;
+        match send_part(FeishuResponsePart::Text(content)) {
+            Ok(()) => sent_any = true,
+            Err(error) if sent_any => {
+                errors.push(format!(
+                    "Feishu text delivery failed after attachment delivery: {error}"
+                ));
+            }
+            Err(error) => return Err(error),
+        }
     }
 
     if !errors.is_empty() {
         let joined = errors.join("; ");
         channel_host::log(
             channel_host::LogLevel::Warn,
-            &format!("Feishu image attachment delivery had errors: {joined}"),
+            &format!("Feishu response delivery had errors: {joined}"),
         );
         if !sent_any {
             return Err(joined);
@@ -1760,6 +1882,8 @@ mod tests {
             &body,
             false,
             |_path| None,
+            |_path, _content| Ok(()),
+            || 1_000,
             |_event| {
                 *handled.borrow_mut() = true;
             },
@@ -1963,6 +2087,42 @@ mod tests {
     }
 
     #[test]
+    fn send_reply_response_does_not_error_after_image_part_is_sent() {
+        let response = AgentResponse {
+            message_id: "agent-msg-1".to_string(),
+            content: "generated".to_string(),
+            thread_id: None,
+            metadata_json: "{}".to_string(),
+            attachments: vec![Attachment {
+                filename: "result.png".to_string(),
+                mime_type: "image/png".to_string(),
+                data: b"png-bytes".to_vec(),
+            }],
+        };
+        let sent = std::cell::RefCell::new(Vec::<String>::new());
+
+        send_reply_response_with_upload(
+            "om_123",
+            &response,
+            |_attachment| Ok("img_v2_uploaded".to_string()),
+            |_message_id, msg_type, _content| {
+                sent.borrow_mut().push(msg_type.to_string());
+                if msg_type == "text" {
+                    Err("text send failed".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect("partial image delivery should not trigger fallback resend");
+
+        assert_eq!(
+            sent.borrow().as_slice(),
+            &["image".to_string(), "text".to_string()]
+        );
+    }
+
+    #[test]
     fn append_attachment_errors_to_text_preserves_existing_text() {
         assert_eq!(
             append_attachment_errors_to_text("done", &["upload failed".to_string()]),
@@ -1985,6 +2145,7 @@ mod tests {
                 *queue.borrow_mut() = queue_json.to_string();
             },
             |frame| processed.borrow_mut().push(frame.to_string()),
+            None,
             |_level, _message| {},
         );
 
@@ -2003,6 +2164,7 @@ mod tests {
                 *queue.borrow_mut() = queue_json.to_string();
             },
             |frame| processed.borrow_mut().push(frame.to_string()),
+            None,
             |_level, _message| {},
         );
 
@@ -2023,6 +2185,7 @@ mod tests {
             || original_queue.clone(),
             |_queue_json| write_count.set(write_count.get() + 1),
             |frame| processed.borrow_mut().push(frame.to_string()),
+            None,
             |_level, _message| {},
         );
 
@@ -2050,6 +2213,105 @@ mod tests {
     }
 
     #[test]
+    fn process_websocket_event_queue_can_leave_unprocessed_frames() {
+        let queue =
+            std::cell::RefCell::new(serde_json::json!(["first", "second", "third"]).to_string());
+        let processed = std::cell::RefCell::new(Vec::<String>::new());
+
+        process_websocket_event_queue_with(
+            || queue.borrow().clone(),
+            |queue_json| {
+                *queue.borrow_mut() = queue_json.to_string();
+            },
+            |frame| processed.borrow_mut().push(frame.to_string()),
+            Some(1),
+            |_level, _message| {},
+        );
+
+        assert_eq!(processed.borrow().as_slice(), &["first".to_string()]);
+        let remaining: Vec<String> = serde_json::from_str(&queue.borrow()).unwrap();
+        assert_eq!(remaining, vec!["second".to_string(), "third".to_string()]);
+    }
+
+    #[test]
+    fn update_recent_event_ids_rejects_duplicate_event_id() {
+        let (is_new, json) =
+            update_recent_event_ids(None, "evt_1", MAX_RECENT_EVENT_IDS, 1_000, 10_000)
+                .expect("first dedupe update");
+        assert!(is_new);
+
+        let (is_new, _json) = update_recent_event_ids(
+            Some(&json),
+            "evt_1",
+            MAX_RECENT_EVENT_IDS,
+            1_001,
+            10_000,
+        )
+        .expect("duplicate dedupe update");
+        assert!(!is_new);
+    }
+
+    #[test]
+    fn process_feishu_event_payload_drops_duplicate_event_id() {
+        let body = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt_duplicate",
+                "event_type": "im.message.receive_v1"
+            },
+            "event": {}
+        })
+        .to_string();
+        let dedupe_state = std::cell::RefCell::new(None::<String>);
+        let handled = std::cell::Cell::new(0usize);
+
+        let first = process_feishu_event_payload_with_workspace_auth(
+            &body,
+            FeishuEventAuthMode::AlreadyVerified,
+            |path| {
+                if path == RECENT_EVENT_IDS_PATH {
+                    dedupe_state.borrow().clone()
+                } else {
+                    None
+                }
+            },
+            |path, content| {
+                if path == RECENT_EVENT_IDS_PATH {
+                    *dedupe_state.borrow_mut() = Some(content.to_string());
+                }
+                Ok(())
+            },
+            || 1_000,
+            |_event| handled.set(handled.get() + 1),
+            |_level, _message| {},
+        );
+        let second = process_feishu_event_payload_with_workspace_auth(
+            &body,
+            FeishuEventAuthMode::AlreadyVerified,
+            |path| {
+                if path == RECENT_EVENT_IDS_PATH {
+                    dedupe_state.borrow().clone()
+                } else {
+                    None
+                }
+            },
+            |path, content| {
+                if path == RECENT_EVENT_IDS_PATH {
+                    *dedupe_state.borrow_mut() = Some(content.to_string());
+                }
+                Ok(())
+            },
+            || 1_001,
+            |_event| handled.set(handled.get() + 1),
+            |_level, _message| {},
+        );
+
+        assert!(first);
+        assert!(!second);
+        assert_eq!(handled.get(), 1);
+    }
+
+    #[test]
     fn queued_webhook_event_is_processed_as_already_verified() {
         let body = serde_json::json!({
             "schema": "2.0",
@@ -2073,12 +2335,15 @@ mod tests {
                     frame,
                     FeishuEventAuthMode::AlreadyVerified,
                     |path| (path == VERIFICATION_TOKEN_PATH).then(|| "expected".to_string()),
+                    |_path, _content| Ok(()),
+                    || 1_000,
                     |_event| {
                         *handled.borrow_mut() = true;
                     },
                     |_level, _message| {},
                 );
             },
+            None,
             |_level, _message| {},
         );
 
@@ -2104,6 +2369,8 @@ mod tests {
             &body,
             false,
             |path| (path == VERIFICATION_TOKEN_PATH).then(|| "expected".to_string()),
+            |_path, _content| Ok(()),
+            || 1_000,
             |_event| {
                 *handled.borrow_mut() = true;
             },

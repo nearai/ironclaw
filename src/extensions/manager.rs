@@ -7422,6 +7422,54 @@ impl ExtensionManager {
             .await
     }
 
+    fn setup_field_visibility_value(
+        condition: &crate::tools::wasm::SetupVisibilityCondition,
+        submitted_fields: &HashMap<String, String>,
+        saved_fields: &HashMap<String, String>,
+        field_defs: &HashMap<String, crate::tools::wasm::ToolFieldSetupSchema>,
+    ) -> Option<String> {
+        submitted_fields
+            .get(&condition.name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                saved_fields
+                    .get(&condition.name)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .or_else(|| {
+                field_defs
+                    .get(&condition.name)
+                    .and_then(|field| field.default.as_deref())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            })
+    }
+
+    fn channel_secret_required_for_configure(
+        secret: &crate::channels::wasm::SecretSetupSchema,
+        submitted_fields: &HashMap<String, String>,
+        saved_fields: &HashMap<String, String>,
+        field_defs: &HashMap<String, crate::tools::wasm::ToolFieldSetupSchema>,
+    ) -> bool {
+        if !secret.optional {
+            return true;
+        }
+
+        if !secret.required_when_visible {
+            return false;
+        }
+
+        let Some(condition) = &secret.visible_when else {
+            return false;
+        };
+
+        Self::setup_field_visibility_value(condition, submitted_fields, saved_fields, field_defs)
+            .is_some_and(|value| value == condition.value)
+    }
+
     /// Per-user variant. Used by `check_tool_auth_status` so the field's
     /// "provided" check reads settings under the requesting user instead
     /// of the manager owner.
@@ -8264,7 +8312,12 @@ impl ExtensionManager {
             }
 
             for secret_def in &channel_secret_defs {
-                if secret_def.optional {
+                if !Self::channel_secret_required_for_configure(
+                    secret_def,
+                    fields,
+                    &stored_fields,
+                    &setup_field_defs,
+                ) {
                     continue;
                 }
                 let submitted = secrets
@@ -10873,6 +10926,62 @@ mod tests {
                 .as_ref()
                 .map(|condition| (condition.name.as_str(), condition.value.as_str())),
             Some(("connection_mode", "webhook"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_rejects_missing_required_when_visible_channel_secret() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "feishu",
+            r#"{
+                "version": "0.1.0",
+                "wit_version": "0.3.0",
+                "type": "channel",
+                "name": "feishu",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "feishu_verification_token",
+                            "prompt": "Verification token",
+                            "optional": true,
+                            "visible_when": { "name": "connection_mode", "value": "webhook" },
+                            "required_when_visible": true
+                        }
+                    ],
+                    "required_fields": [
+                        {
+                            "name": "connection_mode",
+                            "prompt": "Message receiving mode",
+                            "optional": true,
+                            "input_type": "select",
+                            "default": "websocket",
+                            "options": [
+                                { "value": "websocket" },
+                                { "value": "webhook" }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let tools_dir = dir.path().join("tools");
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let fields = std::collections::HashMap::from([(
+            "connection_mode".to_string(),
+            "webhook".to_string(),
+        )]);
+
+        let result = mgr
+            .configure("feishu", &std::collections::HashMap::new(), &fields, "test")
+            .await;
+
+        assert!(
+            matches!(result, Err(ExtensionError::ValidationFailed(ref message)) if message.contains("feishu_verification_token")),
+            "webhook mode should require the visible verification token: {result:?}"
         );
     }
 
