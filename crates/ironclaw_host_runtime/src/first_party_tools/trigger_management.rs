@@ -238,14 +238,25 @@ async fn create_trigger(
         created_at: now,
     };
     record.validate().map_err(trigger_input_error)?;
-    create_hook
-        .before_trigger_persisted(&record)
-        .await
-        .map_err(|error| trigger_create_hook_error("before_trigger_persisted", error))?;
     repository
         .upsert_trigger(record.clone())
         .await
         .map_err(|error| trigger_repository_error("upsert_trigger", error))?;
+    if let Err(error) = create_hook.before_trigger_persisted(&record).await {
+        let hook_error = trigger_create_hook_error("before_trigger_persisted", error);
+        if let Err(remove_error) = repository
+            .remove_trigger(record.tenant_id.clone(), record.trigger_id)
+            .await
+        {
+            tracing::warn!(
+                trigger_id = %record.trigger_id,
+                error_kind = "trigger_create_rollback_failed",
+                "failed to remove trigger after create hook failure"
+            );
+            return Err(trigger_repository_error("remove_trigger", remove_error));
+        }
+        return Err(hook_error);
+    }
     Ok(json!({
         "trigger": trigger_output(&record),
     }))

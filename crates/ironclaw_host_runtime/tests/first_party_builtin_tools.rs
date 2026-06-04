@@ -318,9 +318,9 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
 }
 
 #[tokio::test]
-async fn builtin_trigger_create_runs_create_hook_before_persistence() {
+async fn builtin_trigger_create_runs_create_hook_after_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
-    let hook = Arc::new(RecordingTriggerCreateHook::default());
+    let hook = Arc::new(PersistedRecordTriggerCreateHook::new(repository.clone()));
     let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
 
@@ -360,7 +360,7 @@ async fn builtin_trigger_create_runs_create_hook_before_persistence() {
 }
 
 #[tokio::test]
-async fn builtin_trigger_create_maps_create_hook_error_to_backend_before_persistence() {
+async fn builtin_trigger_create_maps_create_hook_error_to_backend_and_rolls_back_record() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository_and_create_hook(
         repository.clone(),
@@ -5315,20 +5315,36 @@ where
     .host_runtime_for_local_testing()
 }
 
-#[derive(Debug, Default)]
-struct RecordingTriggerCreateHook {
+struct PersistedRecordTriggerCreateHook {
+    repository: Arc<InMemoryTriggerRepository>,
     records: std::sync::Mutex<Vec<TriggerRecord>>,
 }
 
-impl RecordingTriggerCreateHook {
+impl PersistedRecordTriggerCreateHook {
+    fn new(repository: Arc<InMemoryTriggerRepository>) -> Self {
+        Self {
+            repository,
+            records: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
     fn records(&self) -> Vec<TriggerRecord> {
         self.records.lock().unwrap().clone()
     }
 }
 
 #[async_trait]
-impl TriggerCreateHook for RecordingTriggerCreateHook {
+impl TriggerCreateHook for PersistedRecordTriggerCreateHook {
     async fn before_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+        let persisted = self
+            .repository
+            .get_trigger(record.tenant_id.clone(), record.trigger_id)
+            .await
+            .expect("trigger lookup succeeds");
+        assert_eq!(
+            persisted.as_ref().map(|record| record.trigger_id),
+            Some(record.trigger_id)
+        );
         self.records.lock().unwrap().push(record.clone());
         Ok(())
     }
