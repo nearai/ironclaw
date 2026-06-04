@@ -14,12 +14,14 @@ use ironclaw_product_workflow::RebornServicesApi;
 
 use crate::descriptors::{
     WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_CANCEL_RUN,
-    WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_GET_TIMELINE,
+    WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER,
+    WEBUI_V2_PATTERN_GET_LLM_CONFIG, WEBUI_V2_PATTERN_GET_TIMELINE,
     WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
     WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
-    WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
-    WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SETUP_EXTENSION,
-    WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
+    WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_REMOVE_EXTENSION,
+    WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
+    WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_STREAM_EVENTS,
+    WEBUI_V2_PATTERN_STREAM_EVENTS_WS, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
 };
 use crate::handlers;
 use crate::sse_capacity::{DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, SseCapacity};
@@ -116,6 +118,28 @@ pub fn webui_v2_router(state: WebUiV2State) -> Router {
         .route(
             WEBUI_V2_PATTERN_SETUP_EXTENSION,
             get(handlers::get_extension_setup).post(handlers::setup_extension),
+        )
+        // `WEBUI_V2_PATTERN_GET_LLM_CONFIG == WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER`
+        // (`/llm/providers`); mount GET + POST in one `.route()`.
+        .route(
+            WEBUI_V2_PATTERN_GET_LLM_CONFIG,
+            get(handlers::get_llm_config).post(handlers::upsert_llm_provider),
+        )
+        .route(
+            WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER,
+            post(handlers::delete_llm_provider),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
+            post(handlers::set_active_llm),
+        )
+        .route(
+            WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
+            post(handlers::test_llm_connection),
+        )
+        .route(
+            WEBUI_V2_PATTERN_LIST_LLM_MODELS,
+            post(handlers::list_llm_models),
         )
         .with_state(state)
 }
