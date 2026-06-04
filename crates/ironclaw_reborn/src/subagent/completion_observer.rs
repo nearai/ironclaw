@@ -100,7 +100,7 @@ where
             .subagent_kind_for_child(event.run_id)
             .map_err(map_host_error)?
             .is_some();
-        let child_record = if !has_gate_record || event.owner_user_id.is_none() {
+        let child_record = if !has_gate_record {
             self.turn_state_store
                 .get_run_record(&event.scope, event.run_id)
                 .await?
@@ -113,9 +113,11 @@ where
         if !has_gate_record && !is_subagent_child {
             return Ok(());
         }
-        let event = self
-            .terminal_event_with_recovered_owner(event, child_record.as_ref())
-            .await?;
+        let event = if event.owner_user_id.is_some() {
+            event.clone()
+        } else {
+            self.terminal_event_with_recovered_owner(event).await?
+        };
         self.gate_store
             .record_child_terminal(event.run_id, terminal_event_from_lifecycle(&event))
             .map_err(map_host_error)?;
@@ -142,8 +144,8 @@ where
         states: Vec<AwaitedChildState>,
     ) -> Result<(), TurnError> {
         let mut parent_resume_gates = HashSet::new();
-        let mut parent_resumes = Vec::new();
-        let mut blocking_deliveries = Vec::new();
+        let mut blocking_resumes = Vec::new();
+        let mut background_deliveries = Vec::new();
         for state in states {
             let terminal_event =
                 state
@@ -157,12 +159,12 @@ where
                 SpawnSubagentMode::Blocking => {
                     self.write_terminal_result(&state, &terminal_event).await?;
                     if parent_resume_gates.insert(state.record.gate_ref.clone()) {
-                        parent_resumes.push((state.record.clone(), terminal_event.clone()));
+                        blocking_resumes.push((state.record.clone(), terminal_event));
                     }
-                    blocking_deliveries.push(state.record.clone());
                 }
                 SpawnSubagentMode::Background => {
                     self.write_terminal_result(&state, &terminal_event).await?;
+                    background_deliveries.push(state.record.clone());
                 }
             }
             self.release_descendant_reservation(&state.record).await?;
@@ -170,14 +172,12 @@ where
                 .delete_goal(&state.record.child_scope, state.record.child_run_id)
                 .await
                 .map_err(map_host_error)?;
-            if state.record.mode == SpawnSubagentMode::Background {
-                self.mark_child_delivered(&state.record).await?;
-            }
         }
-        for (record, terminal_event) in parent_resumes {
+        for (record, terminal_event) in blocking_resumes {
             self.resume_parent(&terminal_event, &record).await?;
+            self.mark_child_delivered(&record).await?;
         }
-        for record in blocking_deliveries {
+        for record in background_deliveries {
             self.mark_child_delivered(&record).await?;
         }
         Ok(())
@@ -186,23 +186,22 @@ where
     async fn terminal_event_with_recovered_owner(
         &self,
         event: &TurnLifecycleEvent,
-        child_record: Option<&TurnRunRecord>,
     ) -> Result<TurnLifecycleEvent, TurnError> {
         if event.owner_user_id.is_some() {
             return Ok(event.clone());
         }
-        let owner_user_id = self.recover_owner_user_id(event, child_record).await?;
+        let owner_user_id = self.recover_owner_user_id(event).await?;
         let mut recovered = event.clone();
         recovered.owner_user_id = Some(owner_user_id);
         Ok(recovered)
     }
 
-    async fn recover_owner_user_id(
-        &self,
-        event: &TurnLifecycleEvent,
-        child_record: Option<&TurnRunRecord>,
-    ) -> Result<UserId, TurnError> {
-        let Some(child_record) = child_record else {
+    async fn recover_owner_user_id(&self, event: &TurnLifecycleEvent) -> Result<UserId, TurnError> {
+        let Some(child_record) = self
+            .turn_state_store
+            .get_run_record(&event.scope, event.run_id)
+            .await?
+        else {
             return Err(TurnError::Unavailable {
                 reason: format!(
                     "subagent terminal event {} missing owner user id and run record",
@@ -228,6 +227,14 @@ where
                     event.run_id
                 ),
             })?;
+        if thread_scope.tenant_id != child_record.scope.tenant_id {
+            return Err(TurnError::Unavailable {
+                reason: format!(
+                    "subagent terminal event {} owner user id recovery resolved thread tenant {} that did not match child record tenant {}",
+                    event.run_id, thread_scope.tenant_id, child_record.scope.tenant_id
+                ),
+            });
+        }
         thread_scope
             .owner_user_id
             .ok_or_else(|| TurnError::Unavailable {
@@ -583,7 +590,7 @@ fn background_completion_payload(
     let terminal_reason = event
         .sanitized_reason
         .as_deref()
-        .map(|text| wrap_untrusted_subagent_text(sanitize_tool_result_summary(text.to_string())));
+        .map(sanitize_untrusted_terminal_reason);
     let payload = SpawnedChildRunPayload {
         child_run_id: record.child_run_id,
         child_thread_id: record.child_thread_id.clone(),
@@ -654,6 +661,24 @@ fn wrap_untrusted_subagent_text(value: String) -> String {
     // the wrapper would be silently erased by the final re-sanitization
     // step in `parent_result_summary`.
     format!("|||{}|||", value)
+}
+
+fn sanitize_untrusted_terminal_reason(value: &str) -> String {
+    let mut safe = sanitize_model_visible_text(value.to_string())
+        .chars()
+        .map(|character| match character {
+            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\' => ' ',
+            character if character == '\0' || character.is_control() => ' ',
+            character => character,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if safe.len() > 512 {
+        truncate_to_char_boundary(&mut safe, 512);
+    }
+    wrap_untrusted_subagent_text(safe)
 }
 
 fn sanitize_tool_result_summary(value: String) -> String {
@@ -788,20 +813,42 @@ fn parse_optional_subagent_thread_metadata(
     let Some(raw) = raw else {
         return Ok(None);
     };
-    match parse_subagent_thread_metadata(raw) {
-        Ok(metadata) => Ok(metadata),
+    match peek_subagent_thread_kind(raw) {
+        Ok(Some(SubagentThreadKind::Subagent)) => {}
+        Ok(_) => return Ok(None),
         Err(error) => {
-            let mut raw_preview = sanitize_model_visible_text(raw.to_string());
-            truncate_to_char_boundary(&mut raw_preview, 256);
             tracing::warn!(
                 child_run_id = %child_run_id,
                 error = %error,
-                raw_metadata = %raw_preview,
+                "subagent completion recovery ignored malformed thread metadata"
+            );
+            return Ok(None);
+        }
+    }
+    match parse_subagent_thread_metadata(raw) {
+        Ok(metadata) => Ok(metadata),
+        Err(error) => {
+            tracing::warn!(
+                child_run_id = %child_run_id,
+                error = %error,
                 "subagent completion recovery ignored malformed thread metadata"
             );
             Ok(None)
         }
     }
+}
+
+fn peek_subagent_thread_kind(raw: &str) -> Result<Option<SubagentThreadKind>, serde_json::Error> {
+    #[derive(serde::Deserialize)]
+    struct ThreadMetadataKindProbe {
+        kind: Option<String>,
+    }
+
+    let probe = serde_json::from_str::<ThreadMetadataKindProbe>(raw)?;
+    Ok(match probe.kind.as_deref() {
+        Some("subagent") => Some(SubagentThreadKind::Subagent),
+        _ => None,
+    })
 }
 
 fn parse_subagent_thread_metadata(
@@ -908,8 +955,8 @@ mod tests {
         AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
         GetRunStateRequest, LoopResultRef, ReplyTargetBindingRef, ResumeTurnResponse, RunProfileId,
         RunProfileVersion, SourceBindingRef, SpawnTreeReservation, SubmitTurnRequest,
-        SubmitTurnResponse, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope,
-        TurnStateStore, events::TurnLifecycleEvent,
+        SubmitTurnResponse, TurnEventKind, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState,
+        TurnScope, TurnStateStore, events::TurnLifecycleEvent,
     };
 
     use crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
@@ -974,9 +1021,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_subagent_thread_metadata_filters_invalid_and_wrong_kind_metadata() {
+    fn parse_subagent_thread_metadata_rejects_invalid_json() {
         assert!(parse_subagent_thread_metadata("{not json").is_err());
-        assert!(parse_subagent_thread_metadata(r#"{"kind":"parent"}"#).is_err());
 
         let metadata = SubagentThreadMetadata {
             kind: SubagentThreadKind::Subagent,
@@ -995,6 +1041,32 @@ mod tests {
             parse_subagent_thread_metadata(&raw).unwrap(),
             Some(metadata)
         );
+    }
+
+    #[test]
+    fn parse_optional_subagent_thread_metadata_ignores_wrong_kind_metadata() {
+        let raw = r#"{"kind":"parent","parent_run_id":"run:parent"}"#;
+
+        assert_eq!(
+            parse_optional_subagent_thread_metadata(Some(raw), TurnRunId::new()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_optional_subagent_thread_metadata_warns_on_invalid_json_without_raw_preview() {
+        let raw = "{not json";
+        let logs = capture_logs(|| {
+            assert_eq!(
+                parse_optional_subagent_thread_metadata(Some(raw), TurnRunId::new()).unwrap(),
+                None
+            );
+        });
+
+        assert!(logs.iter().any(|line| {
+            line.contains("subagent completion recovery ignored malformed thread metadata")
+        }));
+        assert!(!logs.iter().any(|line| line.contains(raw)));
     }
 
     struct RecordingResultWriter {
@@ -1086,6 +1158,180 @@ mod tests {
             }
             self.writes.lock().unwrap().push(output);
             Ok(())
+        }
+    }
+
+    struct NoResolveThreadService;
+
+    #[async_trait]
+    impl SessionThreadService for NoResolveThreadService {
+        async fn ensure_thread(
+            &self,
+            _request: EnsureThreadRequest,
+        ) -> Result<ironclaw_threads::SessionThreadRecord, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn accept_inbound_message(
+            &self,
+            _request: ironclaw_threads::AcceptInboundMessageRequest,
+        ) -> Result<ironclaw_threads::AcceptedInboundMessage, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn replay_accepted_inbound_message(
+            &self,
+            _request: ironclaw_threads::ReplayAcceptedInboundMessageRequest,
+        ) -> Result<
+            Option<ironclaw_threads::AcceptedInboundMessageReplay>,
+            ironclaw_threads::SessionThreadError,
+        > {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn mark_message_submitted(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ThreadId,
+            _message_id: ironclaw_threads::ThreadMessageId,
+            _turn_id: String,
+            _turn_run_id: String,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn mark_message_deferred_busy(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ThreadId,
+            _message_id: ironclaw_threads::ThreadMessageId,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn append_assistant_draft(
+            &self,
+            _request: AppendAssistantDraftRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn append_tool_result_reference(
+            &self,
+            _request: AppendToolResultReferenceRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn append_capability_display_preview(
+            &self,
+            _request: ironclaw_threads::AppendCapabilityDisplayPreviewRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn update_tool_result_reference(
+            &self,
+            _request: UpdateToolResultReferenceRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn update_assistant_draft(
+            &self,
+            _request: ironclaw_threads::UpdateAssistantDraftRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn finalize_assistant_message(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ThreadId,
+            _message_id: ironclaw_threads::ThreadMessageId,
+            _content: MessageContent,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn redact_message(
+            &self,
+            _request: ironclaw_threads::RedactMessageRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn load_context_window(
+            &self,
+            _request: ironclaw_threads::LoadContextWindowRequest,
+        ) -> Result<ironclaw_threads::ContextWindow, ironclaw_threads::SessionThreadError> {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn load_context_messages(
+            &self,
+            _request: ironclaw_threads::LoadContextMessagesRequest,
+        ) -> Result<ironclaw_threads::ContextMessages, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn list_thread_history(
+            &self,
+            _request: ThreadHistoryRequest,
+        ) -> Result<ironclaw_threads::ThreadHistory, ironclaw_threads::SessionThreadError> {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn create_summary_artifact(
+            &self,
+            _request: ironclaw_threads::CreateSummaryArtifactRequest,
+        ) -> Result<ironclaw_threads::SummaryArtifact, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
         }
     }
 
@@ -1221,6 +1467,90 @@ mod tests {
         )
     }
 
+    fn observer_with_thread_service(
+        thread_service: Arc<InMemorySessionThreadService>,
+    ) -> (
+        SubagentCompletionObserver<InMemorySessionThreadService>,
+        Arc<RecordingTurnStateStore>,
+    ) {
+        let turn_state_store = Arc::new(RecordingTurnStateStore::default());
+        (
+            SubagentCompletionObserver::new_unbound(
+                Arc::new(BoundedSubagentGateResolutionStore::new()),
+                Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+                turn_state_store.clone(),
+                Arc::new(RecordingResultWriter::new(
+                    LoopResultRef::new("result:test").unwrap(),
+                )),
+                thread_service,
+            ),
+            turn_state_store,
+        )
+    }
+
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<String>>>);
+
+    impl LogCapture {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl tracing::Subscriber for LogCapture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _attrs: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Visitor {
+                fields: Vec<String>,
+            }
+
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.fields
+                        .push(format!("{}={value:?}", field.name(), value = value));
+                }
+            }
+
+            let mut visitor = Visitor { fields: Vec::new() };
+            event.record(&mut visitor);
+            self.0.lock().unwrap().push(format!(
+                "{} {} {}",
+                event.metadata().level(),
+                event.metadata().target(),
+                visitor.fields.join(" ")
+            ));
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn capture_logs<F>(f: F) -> Vec<String>
+    where
+        F: FnOnce(),
+    {
+        let capture = LogCapture::default();
+        let dispatch = tracing::Dispatch::new(capture.clone());
+        tracing::dispatcher::with_default(&dispatch, f);
+        capture.lines()
+    }
+
     fn test_state(status: TurnStatus) -> TurnRunState {
         TurnRunState {
             scope: TurnScope::new(
@@ -1287,6 +1617,58 @@ mod tests {
         }
     }
 
+    fn test_turn_profile() -> TurnRunProfile {
+        serde_json::from_value(serde_json::json!({
+            "id": "default",
+            "version": 1,
+            "allow_steering": false,
+            "auto_queue_followups": false,
+        }))
+        .unwrap()
+    }
+
+    fn test_turn_record(scope: TurnScope, run_id: TurnRunId) -> TurnRunRecord {
+        TurnRunRecord {
+            run_id,
+            turn_id: ironclaw_turns::TurnId::new(),
+            scope,
+            accepted_message_ref: AcceptedMessageRef::new("message-test").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-test").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-test").unwrap(),
+            status: TurnStatus::Queued,
+            profile: test_turn_profile(),
+            resolved_model_route: None,
+            checkpoint_id: None,
+            gate_ref: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor(1),
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count: 0,
+            received_at: chrono::Utc::now(),
+            parent_run_id: None,
+            subagent_depth: 1,
+            spawn_tree_root_run_id: None,
+        }
+    }
+
+    fn test_terminal_event(scope: TurnScope, run_id: TurnRunId) -> TurnLifecycleEvent {
+        TurnLifecycleEvent {
+            cursor: EventCursor(1),
+            scope,
+            occurred_at: Some(chrono::Utc::now().into()),
+            owner_user_id: None,
+            run_id,
+            status: TurnStatus::Completed,
+            kind: TurnEventKind::Completed,
+            blocked_gate: None,
+            sanitized_reason: None,
+        }
+    }
+
     #[tokio::test]
     async fn bind_coordinator_rejects_double_bind() {
         let observer = empty_observer();
@@ -1300,6 +1682,136 @@ mod tests {
 
         assert!(
             matches!(error, TurnError::InvalidRequest { reason } if reason.contains("already bound"))
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_owner_user_id_rejects_missing_run_record() {
+        let observer = empty_observer();
+        let event = test_terminal_event(
+            TurnScope::new(
+                TenantId::new("tenant1").unwrap(),
+                Some(AgentId::new("agent1").unwrap()),
+                None,
+                ThreadId::new("thread-missing").unwrap(),
+            ),
+            TurnRunId::new(),
+        );
+
+        let error = observer.recover_owner_user_id(&event).await.unwrap_err();
+
+        assert!(
+            matches!(error, TurnError::Unavailable { reason } if reason.contains("missing owner user id and run record"))
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_owner_user_id_rejects_tenant_mismatch() {
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let (observer, turn_state_store) = observer_with_thread_service(thread_service.clone());
+        let run_id = TurnRunId::new();
+        let thread_id = ThreadId::new("thread-recovery").unwrap();
+        let child_scope = TurnScope::new(
+            TenantId::new("tenant-a").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            None,
+            thread_id.clone(),
+        );
+        turn_state_store.add_record(test_turn_record(child_scope.clone(), run_id));
+
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: ThreadScope {
+                    tenant_id: TenantId::new("tenant-b").unwrap(),
+                    agent_id: AgentId::new("agent1").unwrap(),
+                    project_id: None,
+                    owner_user_id: Some(UserId::new("owner-b").unwrap()),
+                    mission_id: None,
+                },
+                thread_id: Some(thread_id),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        let event = test_terminal_event(child_scope, run_id);
+        let error = observer.recover_owner_user_id(&event).await.unwrap_err();
+
+        assert!(
+            matches!(error, TurnError::Unavailable { reason } if reason.contains("did not match child record tenant"))
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_owner_user_id_rejects_thread_service_without_scope_resolution() {
+        let turn_state_store = Arc::new(RecordingTurnStateStore::default());
+        let observer = SubagentCompletionObserver::new_unbound(
+            Arc::new(BoundedSubagentGateResolutionStore::new()),
+            Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+            turn_state_store.clone(),
+            Arc::new(RecordingResultWriter::new(
+                LoopResultRef::new("result:test").unwrap(),
+            )),
+            Arc::new(NoResolveThreadService),
+        );
+        let run_id = TurnRunId::new();
+        let scope = TurnScope::new(
+            TenantId::new("tenant1").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            None,
+            ThreadId::new("thread-no-resolve").unwrap(),
+        );
+        turn_state_store.add_record(test_turn_record(scope.clone(), run_id));
+
+        let error = observer
+            .recover_owner_user_id(&test_terminal_event(scope, run_id))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, TurnError::Unavailable { reason } if reason.contains("thread scope recovery is unavailable"))
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_owner_user_id_rejects_resolved_scope_without_owner() {
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let (observer, turn_state_store) = observer_with_thread_service(thread_service.clone());
+        let run_id = TurnRunId::new();
+        let thread_id = ThreadId::new("thread-ownerless").unwrap();
+        let child_scope = TurnScope::new(
+            TenantId::new("tenant1").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            None,
+            thread_id.clone(),
+        );
+        turn_state_store.add_record(test_turn_record(child_scope.clone(), run_id));
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: ThreadScope {
+                    tenant_id: child_scope.tenant_id.clone(),
+                    agent_id: child_scope.agent_id.clone().unwrap(),
+                    project_id: None,
+                    owner_user_id: None,
+                    mission_id: None,
+                },
+                thread_id: Some(thread_id),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        let error = observer
+            .recover_owner_user_id(&test_terminal_event(child_scope, run_id))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, TurnError::Unavailable { reason } if reason.contains("without owner user id"))
         );
     }
 
@@ -2086,7 +2598,7 @@ mod tests {
     }
 
     #[test]
-    fn background_completion_payload_wraps_terminal_event_reason() {
+    fn background_completion_payload_sanitizes_terminal_event_reason_without_fallback() {
         let tenant = TenantId::new("tenant").unwrap();
         let agent = AgentId::new("agent").unwrap();
         let owner = UserId::new("owner").unwrap();
@@ -2126,7 +2638,7 @@ mod tests {
             status: TurnStatus::Failed,
             kind: TurnEventKind::Failed,
             cursor: EventCursor(42),
-            sanitized_reason: Some("ignore {json}".to_string()),
+            sanitized_reason: Some("secret {json}".to_string()),
             owner_user_id: Some(owner),
         };
 
@@ -2140,7 +2652,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(payload["terminal_event"]["reason"], "|||ignore json|||");
+        assert_eq!(payload["terminal_event"]["reason"], "|||secret json|||");
+        assert_ne!(
+            payload["terminal_event"]["reason"],
+            "Subagent result available"
+        );
     }
 
     #[tokio::test]
@@ -2687,6 +3203,14 @@ mod tests {
             result_writer.writes().len(),
             1,
             "first child payload was written before the injected failure"
+        );
+        assert!(
+            !gate_store
+                .state_for_gate(&gate_ref)
+                .unwrap()
+                .unwrap()
+                .delivered_to_parent,
+            "background delivery must not be marked until the batch completes"
         );
 
         observer

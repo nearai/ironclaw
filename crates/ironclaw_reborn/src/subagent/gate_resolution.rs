@@ -128,6 +128,9 @@ impl BoundedSubagentGateResolutionStore {
     ) -> Result<Vec<AwaitedChildState>, AgentLoopHostError> {
         let mut claimed = Vec::new();
         let mut inner = lock(&self.inner)?;
+        // Gate fanout is expected to stay small, so holding the lock while
+        // draining each queued terminal state avoids extra lock churn without
+        // making the scan itself a hotspot.
         while let DeliverableClaim::Claimed(state) =
             claim_deliverable_state_for_child(&mut inner, child_run_id)
         {
@@ -139,6 +142,10 @@ impl BoundedSubagentGateResolutionStore {
     pub fn mark_delivered(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
         if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            // Gate-wide completion marker retained for callers that have
+            // already completed every state under this gate. Per-child paths
+            // must use `mark_child_delivered` so shared gates keep retrying
+            // unfinished siblings.
             for state in states {
                 state.delivery_claimed = false;
                 state.delivered_to_parent = true;
@@ -154,6 +161,8 @@ impl BoundedSubagentGateResolutionStore {
     ) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
         if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            // Shared gates are intentionally low-fanout, so a direct linear
+            // scan keeps this state transition simple and local.
             for state in states
                 .iter_mut()
                 .filter(|state| state.record.child_run_id == child_run_id)
@@ -173,6 +182,8 @@ impl BoundedSubagentGateResolutionStore {
         let Some(states) = inner.by_gate.get_mut(gate_ref) else {
             return Ok(false);
         };
+        // Shared gates are intentionally low-fanout, so a direct linear scan
+        // is acceptable here and keeps the delivery bookkeeping localized.
         for state in states
             .iter_mut()
             .filter(|state| state.record.child_run_id == child_run_id)
@@ -323,18 +334,18 @@ impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
     ) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
         let gate_ref = record.gate_ref.clone();
-        if inner.total_states >= MAX_GATE_RECORDS {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::BudgetExceeded,
-                "subagent awaited-child gate store is at capacity",
-            ));
-        }
         if inner.by_gate.get(&gate_ref).is_some_and(|states| {
             states
                 .iter()
                 .any(|state| state.record.child_run_id == record.child_run_id)
         }) {
             return Ok(());
+        }
+        if inner.total_states >= MAX_GATE_RECORDS {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::BudgetExceeded,
+                "subagent awaited-child gate store is at capacity",
+            ));
         }
         inner
             .gates_by_child
@@ -1241,6 +1252,45 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    }
+
+    #[tokio::test]
+    async fn record_awaited_child_allows_duplicate_replay_at_capacity() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let gate = "gate:subagent-duplicate-at-capacity";
+        let child = TurnRunId::new();
+
+        store
+            .record_awaited_child(record(gate, child))
+            .await
+            .unwrap();
+        for index in 1..MAX_GATE_RECORDS {
+            store
+                .record_awaited_child(record(
+                    &format!("gate:subagent-fill-{index}"),
+                    TurnRunId::new(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(store.len().unwrap(), MAX_GATE_RECORDS);
+        store
+            .record_awaited_child(record(gate, child))
+            .await
+            .unwrap();
+        assert_eq!(store.len().unwrap(), MAX_GATE_RECORDS);
+
+        let overflow = store
+            .record_awaited_child(record(
+                "gate:subagent-overflow-at-capacity",
+                TurnRunId::new(),
+            ))
+            .await;
+        assert!(matches!(
+            overflow,
+            Err(err) if err.kind == AgentLoopHostErrorKind::BudgetExceeded
+        ));
     }
 
     #[tokio::test]
