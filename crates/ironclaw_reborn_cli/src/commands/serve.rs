@@ -141,6 +141,12 @@ impl ServeCommand {
         // identity source) and every turn fails with `UnknownThread`.
         let runtime_owner = resolve_webui_runtime_owner(identity_section, &user_id_raw)?;
         let mut runtime_input = runtime_input.with_owner_id(runtime_owner);
+        // Carry the boot config so the WebUI facade can compose the operator
+        // LLM-config settings service over `providers.json` / `config.toml`.
+        #[cfg(feature = "root-llm-provider")]
+        {
+            runtime_input = runtime_input.with_boot_config(boot_config.clone());
+        }
         let default_agent_raw =
             resolve_webui_default_agent(identity_section, &runtime_input.identity);
         let default_agent_id =

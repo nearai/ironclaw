@@ -300,6 +300,17 @@ pub struct RebornServices {
     pub product_auth: Option<Arc<RebornProductAuthServices>>,
     pub readiness: RebornReadiness,
     pub(crate) local_runtime: Option<Arc<RebornLocalRuntimeServices>>,
+    /// Shared scoped secret store. Exposed so runtime-level features (e.g.
+    /// operator LLM-key storage) can reuse the same instance product-auth uses
+    /// rather than standing up a second authority.
+    pub(crate) secret_store: Arc<dyn SecretStore>,
+}
+
+impl RebornServices {
+    /// The shared scoped secret store backing this composition.
+    pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
+        Arc::clone(&self.secret_store)
+    }
 }
 
 pub(crate) struct RebornLocalRuntimeServices {
@@ -393,6 +404,7 @@ impl RebornServices {
             product_auth: None,
             readiness: RebornReadiness::disabled(),
             local_runtime: None,
+            secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
         }
     }
 }
@@ -757,6 +769,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         product_auth: Some(product_auth),
         readiness: readiness_for(profile, true, true, true),
         local_runtime: Some(store_graph.local_runtime),
+        secret_store,
     })
 }
 
@@ -2157,6 +2170,7 @@ where
         readiness: readiness_for(profile, true, true, product_auth_ready),
         product_auth: Some(product_auth_services),
         local_runtime: None,
+        secret_store,
     })
 }
 
