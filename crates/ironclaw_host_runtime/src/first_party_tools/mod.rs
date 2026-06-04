@@ -7,6 +7,7 @@
 
 mod echo;
 mod http;
+mod http_output;
 mod json;
 mod memory;
 mod model_visible_output;
