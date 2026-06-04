@@ -1610,6 +1610,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             agent.tools().clone(),
             agent.safety().clone(),
             agent.hooks().clone(),
+            agent.deps.store.clone(),
         )
         .with_global_auto_approve(agent.config().auto_approve_tools),
     );
@@ -7335,6 +7336,7 @@ pub(crate) mod test_support {
                 },
             )),
             Arc::new(crate::hooks::HookRegistry::default()),
+            None,
         ));
 
         let tm = Arc::new(ThreadManager::new(
@@ -9537,6 +9539,7 @@ mod tests {
                 },
             )),
             Arc::new(crate::hooks::HookRegistry::default()),
+            None,
         ));
 
         let tm = Arc::new(ThreadManager::new(
@@ -9703,6 +9706,7 @@ mod tests {
                 },
             )),
             Arc::new(crate::hooks::HookRegistry::default()),
+            None,
         ));
 
         let tm = Arc::new(ThreadManager::new(
@@ -11467,6 +11471,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::new()),
+            None,
         ));
         let thread_manager = Arc::new(ThreadManager::new(
             Arc::new(NoopLlm),

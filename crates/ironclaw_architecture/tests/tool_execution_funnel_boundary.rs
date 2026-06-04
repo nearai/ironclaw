@@ -60,6 +60,13 @@ enum AllowKind {
     /// Legitimate terminal executor — stays allowlisted permanently.
     Executor,
     /// Un-migrated bypass tracked by #4019. Delete when migrated.
+    ///
+    /// As of the #4019 follow-up the category is EMPTY (no entry constructs
+    /// this variant), and the test asserts it stays empty. The variant is
+    /// retained so a future migration in flight can temporarily re-add a
+    /// `Bypass` entry (and have the empty-category assertion catch it) without
+    /// reintroducing the enum.
+    #[allow(dead_code)]
     Bypass,
 }
 
@@ -142,16 +149,19 @@ const ALLOWLIST: &[AllowedSite] = &[
     //     tool-under-construction as internal build machinery, not as a
     //     user/agent dispatch, so an audit record would be noise.
     //
-    // The only remaining bypass is the engine v2 effect bridge, deferred
-    // because it has no `Arc<dyn Database>` handle (it holds an engine-v2
-    // DocType `Store`, a different abstraction) and its sandbox-interception
-    // branch bypasses `execute_tool_with_safety` entirely — migrating it
-    // cleanly needs dedicated store plumbing and an interception-path audit
-    // decision. Tracked as #4019 follow-up.
-    AllowedSite {
-        file: "src/bridge/effect_adapter.rs",
-        kind: AllowKind::Bypass,
-    },
+    // #4019 follow-up resolved the FINAL bypass: the engine-v2 effect bridge
+    // (`src/bridge/effect_adapter.rs`) was threaded with an `Arc<dyn Database>`
+    // and both of its execution branches now produce an `ActionRecord`:
+    //   * the host (non-intercepted) branch routes through
+    //     `execute_tool_audited`;
+    //   * the sandbox/mount-intercepted branch persists the same audit shape
+    //     via the shared `persist_tool_audit` helper from the
+    //     already-produced intercepted result (the tool ran in the backend,
+    //     not via a local `Tool::execute`).
+    // The Bypass category is therefore EMPTY — every remaining allowlisted
+    // site is a justified terminal `Executor`. The assertion in the test
+    // below enforces that the category stays empty: every tool-execution call
+    // site in the codebase is now either audited or a justified executor.
 ];
 
 /// Directories where a bare `.execute(` reliably denotes `Tool::execute`
@@ -218,6 +228,29 @@ fn tool_execution_flows_through_audited_dispatch_funnel() {
          been migrated through `ToolDispatcher::dispatch`. Delete them from the allowlist \
          in this test so it stays an accurate migration checklist:\n{}",
         stale
+            .iter()
+            .map(|file| format!("  - {file}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // #4019 is complete: the migration checklist (the `Bypass` category) must
+    // be EMPTY. Every tool-execution call site in the codebase is now either
+    // routed through the audited funnel or a justified terminal `Executor`.
+    // If a NEW `Bypass` entry is ever added here, this fails — forcing the new
+    // site to be migrated through `dispatch`/`execute_tool_audited` rather than
+    // re-opening the audit gap.
+    let remaining_bypasses: Vec<&str> = ALLOWLIST
+        .iter()
+        .filter(|site| matches!(site.kind, AllowKind::Bypass))
+        .map(|site| site.file)
+        .collect();
+    assert!(
+        remaining_bypasses.is_empty(),
+        "The #4019 `Bypass` migration checklist must be empty — every tool-execution \
+         site is now audited or a justified executor. Migrate the following through the \
+         audited funnel instead of allowlisting them as bypasses:\n{}",
+        remaining_bypasses
             .iter()
             .map(|file| format!("  - {file}"))
             .collect::<Vec<_>>()

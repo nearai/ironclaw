@@ -32,6 +32,7 @@ use crate::bridge::router::synthetic_action_call_id;
 use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
 use crate::bridge::tool_permissions::{ToolPermissionResolution, ToolPermissionSnapshot};
 use crate::context::JobContext;
+use crate::db::Database;
 use crate::extensions::InstalledExtension;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
 use crate::tools::ToolRegistry;
@@ -83,6 +84,15 @@ pub struct EffectBridgeAdapter {
     /// capabilities like `missions` are registered here in `router.rs` and
     /// would otherwise be invisible to the LLM despite having active leases.
     capability_registry: RwLock<Option<Arc<CapabilityRegistry>>>,
+    /// Persistence backend for the audited tool-execution funnel. This is the
+    /// v1 relational `Database` (NOT the engine-v2 DocType `Store` above —
+    /// they are distinct abstractions held side by side). When set, every
+    /// host- and sandbox-dispatched tool call persists an `ActionRecord` via
+    /// `execute_tool_audited` / `persist_tool_audit`, giving engine-v2 tool
+    /// calls the same audit trail as chat/scheduler/routine dispatch. When
+    /// `None` (test/embed setups without a database) execution is unchanged
+    /// and no audit row is written.
+    store: Option<Arc<dyn Database>>,
 }
 
 struct ToolApprovalContext<'a> {
@@ -110,6 +120,7 @@ impl EffectBridgeAdapter {
         tools: Arc<ToolRegistry>,
         safety: Arc<SafetyLayer>,
         hooks: Arc<HookRegistry>,
+        store: Option<Arc<dyn Database>>,
     ) -> Self {
         Self {
             tools,
@@ -126,6 +137,7 @@ impl EffectBridgeAdapter {
             skill_registry: RwLock::new(None),
             workspace_mounts: RwLock::new(None),
             capability_registry: RwLock::new(None),
+            store,
         }
     }
 
@@ -1461,7 +1473,7 @@ impl EffectBridgeAdapter {
 
         let hook_event = HookEvent::ToolCall {
             tool_name: lookup_name.to_string(),
-            parameters: redacted_params,
+            parameters: redacted_params.clone(),
             user_id: context.user_id.clone(),
             context: format!("engine_v2:{}", context.thread_id),
         };
@@ -1562,15 +1574,64 @@ impl EffectBridgeAdapter {
             None
         };
 
+        // Both execution branches converge on `result: Result<String, Error>`
+        // and persist the SAME audit shape (redacted input + sanitized output)
+        // through the shared funnel helpers, so engine-v2 tool calls — whether
+        // run on the host or inside the sandbox/mount backend — produce the
+        // same `ActionRecord` as chat/scheduler/routine dispatch.
+        //
+        // `existing_job_id = None`: the bridge carries an in-memory
+        // `JobContext` (no backing `agent_jobs` row), so the funnel mints a
+        // fresh system job for the audit FK — identical to the chat path.
+        // Attribute the audit to the thread's real originating channel
+        // (`gateway`/`slack`/...) when present, matching the chat/restart
+        // audited paths. `engine_v2` is only the fallback for channel-less
+        // system threads (background missions, schedulers) that have no real
+        // actor channel to record.
+        let audit_source = crate::tools::dispatch::DispatchSource::Channel(
+            context
+                .source_channel
+                .clone()
+                .unwrap_or_else(|| "engine_v2".into()),
+        );
         let result = if let Some(intercepted) = sandbox_result {
+            // Sandbox-intercepted: the tool ran in the mount/container backend,
+            // NOT via a local `Tool::execute`, so we cannot route through
+            // `execute_tool_audited` (which executes the tool itself). Instead
+            // we persist the audit from the already-produced intercepted
+            // result, reusing the funnel's redaction (`redacted_params`,
+            // computed identically above for the hook event) and the funnel's
+            // sanitization (inside `persist_tool_audit`). No redaction logic is
+            // duplicated here.
+            if let Some(store) = self.store.as_ref() {
+                crate::tools::execute::persist_tool_audit(
+                    store,
+                    &self.safety,
+                    &context.user_id,
+                    &lookup_name,
+                    redacted_params,
+                    &intercepted,
+                    start.elapsed(),
+                    audit_source,
+                    None,
+                )
+                .await;
+            }
             intercepted
         } else {
-            crate::tools::execute::execute_tool_with_safety(
+            // Host execution: route through the audited funnel, which runs the
+            // shared safety pipeline AND persists the `ActionRecord`. When the
+            // store is `None` this is a pure pass-through to
+            // `execute_tool_with_safety` (unchanged behavior).
+            crate::tools::execute::execute_tool_audited(
                 &self.tools,
                 &self.safety,
+                self.store.as_ref(),
                 &lookup_name,
                 parameters.clone(),
                 &job_ctx,
+                audit_source,
+                None,
             )
             .await
         };
@@ -2731,6 +2792,7 @@ mod tests {
             Arc::new(ToolRegistry::new()),
             Arc::new(SafetyLayer::new(&config)),
             Arc::new(HookRegistry::default()),
+            None,
         )
     }
 
@@ -2787,6 +2849,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         )
         .with_global_auto_approve(true);
 
@@ -2820,6 +2883,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         )
         .with_global_auto_approve(true);
 
@@ -3037,6 +3101,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         )
     }
 
@@ -3073,6 +3138,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         )
     }
 
@@ -3109,6 +3175,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         )
     }
 
@@ -3123,6 +3190,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         )
     }
 
@@ -3138,6 +3206,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         )
     }
 
@@ -3176,6 +3245,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         )
     }
 
@@ -3901,6 +3971,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         );
 
         let thread_id = ironclaw_engine::ThreadId::new();
@@ -3938,6 +4009,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         );
 
         let thread_id = ironclaw_engine::ThreadId::new();
@@ -4010,6 +4082,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         );
 
         let thread_id = ironclaw_engine::ThreadId::new();
@@ -4080,6 +4153,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         );
 
         let thread_id = ironclaw_engine::ThreadId::new();
@@ -4184,6 +4258,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         )
         .with_global_auto_approve(true);
 
@@ -4278,6 +4353,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         )
         .with_global_auto_approve(true);
 
@@ -5341,6 +5417,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         );
 
         // Set auth manager
@@ -5467,6 +5544,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         )
         .with_global_auto_approve(true);
 
@@ -5571,6 +5649,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         );
         adapter
             .set_auth_manager(Arc::new(AuthManager::new(
@@ -5642,6 +5721,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         );
         adapter
             .set_auth_manager(Arc::new(AuthManager::new(
@@ -5751,6 +5831,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         );
         adapter
             .set_auth_manager(Arc::new(AuthManager::new(
@@ -5874,6 +5955,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         );
         adapter
             .set_auth_manager(Arc::new(AuthManager::new(
@@ -6083,6 +6165,7 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         );
         adapter
             .set_auth_manager(Arc::new(AuthManager::new(
@@ -6189,6 +6272,7 @@ Use this skill to set up a Pika meeting.
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         )
         .with_global_auto_approve(true);
         let store: Arc<dyn Store> = Arc::new(crate::bridge::store_adapter::HybridStore::new(None));
@@ -6878,6 +6962,7 @@ Use this skill to set up a Pika meeting.
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         );
         adapter.set_mission_manager(Arc::new(mgr)).await;
         (adapter, concrete_store, store)
@@ -8098,6 +8183,7 @@ Use this skill to set up a Pika meeting.
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
+            None,
         );
 
         let mut registry = CapabilityRegistry::new();

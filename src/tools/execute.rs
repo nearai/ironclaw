@@ -327,16 +327,96 @@ pub async fn execute_tool_audited(
     let result = execute_tool_with_safety(tools, safety, tool_name, params, base_ctx).await;
     let elapsed = start.elapsed();
 
-    // The sequence is allocated below. A freshly minted system job (the
-    // `existing_job_id = None` branch above) has no actions and no concurrent
-    // writers, so sequence 0 is safe and persisted directly. An *existing* job
-    // (e.g. a scheduler parent running several tool subtasks) may already hold
-    // ActionRecords and may be written concurrently, so its sequence is
-    // allocated by `save_action_with_sequence_retry` (read max+1 → insert →
-    // retry on unique-violation). The placeholder 0 here is overwritten before
-    // the insert on the existing-job path.
-    let action = ActionRecord::new(0, &audit_name, redacted_input);
-    let action = match &result {
+    // Build + persist the audit record through the shared shape used by both
+    // this host path and the engine-v2 sandbox-intercepted path (which calls
+    // `persist_tool_audit` from the effect adapter with an out-of-band result).
+    // The audit anchor was already resolved fail-closed above, so the record
+    // always correlates to `job_id`; passing `audit_name` keeps the canonical
+    // resolved tool name in the audit trail.
+    persist_tool_audit(
+        store,
+        safety,
+        &base_ctx.user_id,
+        &audit_name,
+        redacted_input,
+        &result,
+        elapsed,
+        source,
+        Some(job_id),
+    )
+    .await;
+
+    result
+}
+
+/// Persist an `ActionRecord` for a tool call whose `Result<String, Error>` has
+/// **already been produced** — either by [`execute_tool_with_safety`] (the
+/// host execution path, via [`execute_tool_audited`]) or by an out-of-band
+/// executor such as the engine-v2 sandbox/mount backend, where the tool ran
+/// inside a container and the funnel never called `Tool::execute` locally.
+///
+/// Both call shapes converge here so host- and sandbox-dispatched calls
+/// produce the **same audit shape**: redacted input params + sanitized output
+/// (or the error string; structured JSON output is preserved when the result
+/// parses as JSON), correlated to either the caller's resolved `agent_jobs`
+/// row (`existing_job_id = Some` — the host funnel resolves its anchor
+/// fail-closed *before* execution) or a freshly-minted system job (`None`,
+/// the sandbox-intercepted path, where the tool already ran out-of-band and
+/// anchor failure can only be logged). Redaction is the caller's
+/// responsibility — `redacted_input` MUST already be redacted (via
+/// [`redact_params`]) so this helper never re-derives it and the two paths
+/// share one redaction implementation.
+///
+/// Sequence numbers are allocated by [`save_action_with_sequence_retry`]
+/// (max+1, retrying on `UNIQUE(job_id, sequence_num)` violations), so
+/// concurrent subtasks correlated to one shared job each keep their row.
+///
+/// Store-optional / best-effort persistence: failures after execution are
+/// logged at `debug!` (never `warn!`/`info!`, which corrupt the REPL/TUI —
+/// see CLAUDE.md) and swallowed; the tool result itself is owned by the
+/// caller and unaffected.
+#[allow(clippy::too_many_arguments)]
+pub async fn persist_tool_audit(
+    store: &Arc<dyn Database>,
+    safety: &SafetyLayer,
+    user_id: &str,
+    tool_name: &str,
+    redacted_input: serde_json::Value,
+    result: &Result<String, Error>,
+    elapsed: std::time::Duration,
+    source: DispatchSource,
+    existing_job_id: Option<Uuid>,
+) {
+    // Resolve the audit FK job. When the caller already resolved a real
+    // `agent_jobs` row (host funnel fail-closed anchor, scheduler job),
+    // correlate the ActionRecord to it. Otherwise mint a fresh system job
+    // best-effort: on this path the tool already ran out-of-band, so an
+    // anchor failure can only be logged, not used to abort.
+    let audit_job_id = match existing_job_id {
+        Some(job_id) => Some(job_id),
+        None => {
+            let source_label = source.to_string();
+            match store.create_system_job(user_id, &source_label).await {
+                Ok(job_id) => Some(job_id),
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        tool = %tool_name,
+                        "failed to create system job for tool audit record"
+                    );
+                    None
+                }
+            }
+        }
+    };
+    let Some(job_id) = audit_job_id else {
+        return;
+    };
+
+    // Sequence 0 is a placeholder: `save_action_with_sequence_retry` derives
+    // max+1 (0 on a fresh job) before the insert.
+    let action = ActionRecord::new(0, tool_name, redacted_input);
+    let action = match result {
         Ok(output) => {
             // `output` is the pretty-printed tool result string. Sanitize it for
             // the audit payload (mirrors dispatch). Persist the *structured*
@@ -351,17 +431,12 @@ pub async fn execute_tool_audited(
         Err(e) => action.fail(e.to_string(), elapsed),
     };
 
-    // Persisting the record is non-fatal (mirrors dispatch): the audit anchor
-    // already exists and the tool has already run, so a transient save error
-    // must not turn an executed call into a failure. `debug!` not `warn!`: this
-    // path is reachable from the interactive REPL/TUI where higher log levels
-    // corrupt the terminal UI (CLAUDE.md → Code Style → logging).
-    let persist = if existing_job_id.is_some() {
-        save_action_with_sequence_retry(store, job_id, action).await
-    } else {
-        store.save_action(job_id, &action).await
-    };
-    if let Err(e) = persist {
+    // Persisting the record is non-fatal (mirrors dispatch): the anchor exists
+    // and the tool has already run, so a transient save error must not turn an
+    // executed call into a failure. `debug!` not `warn!`: this path is
+    // reachable from the interactive REPL/TUI where higher log levels corrupt
+    // the terminal UI (CLAUDE.md -> Code Style -> logging).
+    if let Err(e) = save_action_with_sequence_retry(store, job_id, action).await {
         tracing::debug!(
             error = %e,
             tool = %tool_name,
@@ -369,8 +444,6 @@ pub async fn execute_tool_audited(
             "failed to persist tool ActionRecord"
         );
     }
-
-    result
 }
 
 /// Process a tool result into a `ChatMessage::tool_result` with safety sanitization.
