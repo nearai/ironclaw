@@ -330,12 +330,13 @@ async fn build_trigger_poller_services(
     }
 }
 
+/// Validate the temporary trigger-poller authorizer shape after the caller has
+/// already decided to enable the poller.
 fn validate_trigger_poller_authorization(
     trigger_poller: &TriggerPollerSettings,
 ) -> Result<(), RebornRuntimeError> {
-    if trigger_poller.enabled
-        && !trigger_poller.allow_tenant_scoped_authorizer_without_creator_membership
-    {
+    debug_assert!(trigger_poller.enabled);
+    if !trigger_poller.allow_tenant_scoped_authorizer_without_creator_membership {
         return Err(RebornRuntimeError::InvalidArgument {
             reason: "trigger poller cannot be enabled until fire-time creator authorization is backed by the real agent/project membership source of truth".to_string(),
         });

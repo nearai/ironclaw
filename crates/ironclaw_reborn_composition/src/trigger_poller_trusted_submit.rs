@@ -293,9 +293,12 @@ fn trigger_authorization_error(error: TriggerFireAuthError) -> TriggerError {
                 reason: "trusted trigger fire authorization denied".to_string(),
             }
         }
-        TriggerFireAuthError::Retryable { reason } => TriggerError::Backend {
-            reason: format!("trusted trigger fire authorization retryable failure: {reason}"),
-        },
+        TriggerFireAuthError::Retryable { reason } => {
+            tracing::debug!(%reason, "trusted trigger fire authorization retryable failure");
+            TriggerError::Backend {
+                reason: "trusted trigger fire authorization retryable failure".to_string(),
+            }
+        }
     }
 }
 
@@ -1554,7 +1557,7 @@ mod tests {
             );
 
         assert!(
-            matches!(error, TriggerError::Backend { reason } if reason.contains("creator authorization backend unavailable"))
+            matches!(error, TriggerError::Backend { reason } if reason == "trusted trigger fire authorization retryable failure")
         );
         assert_eq!(fixture.authorizer.requests(), vec![fixture.auth_request]);
         assert_no_prompt_threads(&fixture.thread_service, fixture.thread_scope).await;
