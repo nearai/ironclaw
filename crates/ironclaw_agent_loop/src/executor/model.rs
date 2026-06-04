@@ -123,6 +123,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             kind: error.kind,
                             safe_summary: LoopSafeSummary::new(error.safe_summary)
                                 .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
+                            reason_kind: error.reason_kind,
                             diagnostic_ref: error.diagnostic_ref,
                         });
                     };

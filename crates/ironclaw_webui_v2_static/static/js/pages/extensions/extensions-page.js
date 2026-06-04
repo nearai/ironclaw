@@ -21,6 +21,7 @@ export function ExtensionsPage() {
     channelRegistry,
     mcpRegistry,
     toolRegistry,
+    connectableChannels,
     isLoading,
     isBusy,
     actionResult,
@@ -79,6 +80,7 @@ export function ExtensionsPage() {
     channels: html`<${ChannelsTab}
       status=${status}
       channels=${channels}
+      connectableChannels=${connectableChannels}
       channelRegistry=${channelRegistry}
       onActivate=${activate}
       onConfigure=${handleConfigure}

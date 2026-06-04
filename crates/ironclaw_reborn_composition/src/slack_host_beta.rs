@@ -484,7 +484,7 @@ mod tests {
 
     use super::*;
     use crate::slack_personal_binding_pairing_serve::{
-        SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
+        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
     };
     use crate::{
         RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, SLACK_EVENTS_PATH,
@@ -674,7 +674,7 @@ mod tests {
                 .descriptors
                 .iter()
                 .any(|descriptor| descriptor.route_pattern().as_str()
-                    == SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH)
+                    == WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
         );
 
         runtime.shutdown().await.expect("runtime shuts down");
@@ -698,13 +698,13 @@ mod tests {
 
         let pairing_mount =
             slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
-        let redeem_body = format!(r#"{{"code":"{pairing_code}"}}"#);
+        let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
         let redeem_response = pairing_mount
             .protected
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH)
+                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
                     .header("content-type", "application/json")
                     .extension(WebUiAuthenticatedCaller {
                         tenant_id: TenantId::new(TENANT).expect("tenant"),

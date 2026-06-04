@@ -16,14 +16,41 @@ export function updateSetting(_key, _value) {
 export function importSettings(_payload) {
   return Promise.resolve({ success: false, message: "TODO: requires v2 settings endpoint" });
 }
+// LLM provider configuration — v2 native endpoints. The snapshot is the single
+// source of truth: a unified provider list (built-in + operator-defined) plus
+// the active selection. API-key values are write-only; the snapshot only ever
+// reports `api_key_set`.
 export function fetchLlmProviders() {
-  return Promise.resolve({ providers: [], custom_providers: [], builtin_overrides: {}, todo: true });
+  return apiFetch("/api/webchat/v2/llm/providers");
 }
-export function testLlmProviderConnection(_payload) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 LLM endpoint" });
+export function upsertLlmProvider(payload) {
+  return apiFetch("/api/webchat/v2/llm/providers", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
-export function listLlmProviderModels(_payload) {
-  return Promise.resolve({ models: [], todo: true });
+export function deleteLlmProvider(providerId) {
+  return apiFetch(`/api/webchat/v2/llm/providers/${encodeURIComponent(providerId)}/delete`, {
+    method: "POST",
+  });
+}
+export function setActiveLlm(payload) {
+  return apiFetch("/api/webchat/v2/llm/active", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+export function testLlmProviderConnection(payload) {
+  return apiFetch("/api/webchat/v2/llm/test-connection", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+export function listLlmProviderModels(payload) {
+  return apiFetch("/api/webchat/v2/llm/list-models", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 export function fetchTools() {
   return Promise.resolve({ tools: [], todo: true });

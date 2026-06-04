@@ -22,6 +22,7 @@ pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_CANCEL_RUN: &str = "webui.v2.cancel_run";
 pub const WEBUI_V2_ROUTE_RESOLVE_GATE: &str = "webui.v2.resolve_gate";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
+pub const WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS: &str = "webui.v2.list_connectable_channels";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
 pub const WEBUI_V2_ROUTE_INSTALL_EXTENSION: &str = "webui.v2.install_extension";
@@ -29,6 +30,12 @@ pub const WEBUI_V2_ROUTE_ACTIVATE_EXTENSION: &str = "webui.v2.activate_extension
 pub const WEBUI_V2_ROUTE_REMOVE_EXTENSION: &str = "webui.v2.remove_extension";
 pub const WEBUI_V2_ROUTE_GET_EXTENSION_SETUP: &str = "webui.v2.get_extension_setup";
 pub const WEBUI_V2_ROUTE_SETUP_EXTENSION: &str = "webui.v2.setup_extension";
+pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
+pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
+pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
+pub const WEBUI_V2_ROUTE_SET_ACTIVE_LLM: &str = "webui.v2.set_active_llm";
+pub const WEBUI_V2_ROUTE_TEST_LLM_CONNECTION: &str = "webui.v2.test_llm_connection";
+pub const WEBUI_V2_ROUTE_LIST_LLM_MODELS: &str = "webui.v2.list_llm_models";
 
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
@@ -41,6 +48,7 @@ pub const WEBUI_V2_PATTERN_CANCEL_RUN: &str =
 pub const WEBUI_V2_PATTERN_RESOLVE_GATE: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
+pub const WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS: &str = "/api/webchat/v2/channels/connectable";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
 pub const WEBUI_V2_PATTERN_INSTALL_EXTENSION: &str = "/api/webchat/v2/extensions/install";
@@ -49,6 +57,13 @@ pub const WEBUI_V2_PATTERN_ACTIVATE_EXTENSION: &str =
 pub const WEBUI_V2_PATTERN_REMOVE_EXTENSION: &str =
     "/api/webchat/v2/extensions/{package_id}/remove";
 pub const WEBUI_V2_PATTERN_SETUP_EXTENSION: &str = "/api/webchat/v2/extensions/{package_id}/setup";
+pub const WEBUI_V2_PATTERN_GET_LLM_CONFIG: &str = "/api/webchat/v2/llm/providers";
+pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/providers";
+pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
+    "/api/webchat/v2/llm/providers/{provider_id}/delete";
+pub const WEBUI_V2_PATTERN_SET_ACTIVE_LLM: &str = "/api/webchat/v2/llm/active";
+pub const WEBUI_V2_PATTERN_TEST_LLM_CONNECTION: &str = "/api/webchat/v2/llm/test-connection";
+pub const WEBUI_V2_PATTERN_LIST_LLM_MODELS: &str = "/api/webchat/v2/llm/list-models";
 
 /// Return the canonical [`IngressRouteDescriptor`] set for the WebChat v2
 /// beta route surface.
@@ -67,6 +82,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
         list_automations_descriptor(),
+        list_connectable_channels_descriptor(),
         list_extensions_descriptor(),
         list_extension_registry_descriptor(),
         install_extension_descriptor(),
@@ -74,7 +90,29 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         remove_extension_descriptor(),
         get_extension_setup_descriptor(),
         setup_extension_descriptor(),
+        get_llm_config_descriptor(),
+        upsert_llm_provider_descriptor(),
+        delete_llm_provider_descriptor(),
+        set_active_llm_descriptor(),
+        test_llm_connection_descriptor(),
+        list_llm_models_descriptor(),
     ]
+}
+
+/// Returns whether a route id belongs to the operator-wide LLM config surface.
+/// Host composition uses this to keep route mounting and descriptor policy
+/// filtering in sync when non-operator authenticators leave those routes
+/// unmounted.
+pub fn is_webui_v2_llm_config_route_id(route_id: &str) -> bool {
+    matches!(
+        route_id,
+        WEBUI_V2_ROUTE_GET_LLM_CONFIG
+            | WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER
+            | WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER
+            | WEBUI_V2_ROUTE_SET_ACTIVE_LLM
+            | WEBUI_V2_ROUTE_TEST_LLM_CONNECTION
+            | WEBUI_V2_ROUTE_LIST_LLM_MODELS
+    )
 }
 
 fn create_thread_descriptor() -> IngressRouteDescriptor {
@@ -204,6 +242,20 @@ fn list_automations_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn list_connectable_channels_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
 fn list_extensions_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_LIST_EXTENSIONS,
@@ -293,6 +345,90 @@ fn setup_extension_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_SETUP_EXTENSION,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_SETUP_EXTENSION,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn get_llm_config_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_LLM_CONFIG,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_GET_LLM_CONFIG,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn upsert_llm_provider_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn delete_llm_provider_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn set_active_llm_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_ACTIVE_LLM,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn test_llm_connection_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_TEST_LLM_CONNECTION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn list_llm_models_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_LLM_MODELS,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_LIST_LLM_MODELS,
         mutation_policy(
             body_limit_kib(16),
             mutation_rate_limit(),

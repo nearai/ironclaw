@@ -41,6 +41,12 @@ mod input;
 mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
+#[cfg(feature = "root-llm-provider")]
+mod llm_config_service;
+#[cfg(feature = "root-llm-provider")]
+mod llm_key_store;
+#[cfg(feature = "root-llm-provider")]
+mod llm_reload;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
@@ -68,12 +74,16 @@ pub use projection::{AuthChallengeProvider, AuthChallengeView};
 mod provider_admin;
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin_product_command;
+#[cfg(feature = "root-llm-provider")]
+mod provider_repo;
 mod readiness;
 mod runtime;
 mod runtime_input;
 mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_connectable_channel;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_delivery;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -145,6 +155,10 @@ pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
     resolve_reborn_runtime_llm,
 };
+#[cfg(feature = "root-llm-provider")]
+pub use llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
+#[cfg(feature = "root-llm-provider")]
+pub use llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use local_runtime_profile::{
     RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions, local_dev_runtime_policy,
     local_dev_yolo_runtime_policy, local_runtime_build_input,
@@ -167,6 +181,8 @@ pub use provider_admin::{
 };
 #[cfg(feature = "root-llm-provider")]
 pub use provider_admin_product_command::RebornProviderAdminProductCommandService;
+#[cfg(feature = "root-llm-provider")]
+pub use provider_repo::{ProviderRepo, ProviderRepoError};
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessState, RebornWorkerReadiness,
 };
@@ -187,6 +203,8 @@ pub use slack_actor_identity::{
     RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
     slack_user_identity_provider_user_id,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_connectable_channel::build_webui_services_with_slack_host_beta_mounts;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
@@ -220,8 +238,8 @@ pub use slack_personal_binding_pairing::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding_pairing_serve::{
-    SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH, SlackPersonalBindingPairingRedeemResponse,
-    SlackPersonalBindingPairingRouteConfig,
+    SlackPersonalBindingPairingRedeemResponse, SlackPersonalBindingPairingRouteConfig,
+    WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding_serve::{

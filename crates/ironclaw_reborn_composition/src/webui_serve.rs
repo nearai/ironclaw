@@ -47,7 +47,10 @@ use axum::{
 use ironclaw_auth::GoogleOAuthRouteConfig;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
+use ironclaw_webui_v2::{
+    WebUiV2RouteOptions, WebUiV2State, is_webui_v2_llm_config_route_id,
+    webui_v2_router_with_options,
+};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -96,6 +99,14 @@ pub(crate) const DEFAULT_WEBUI_CSP: &str =
 #[async_trait::async_trait]
 pub trait WebuiAuthenticator: Send + Sync + 'static {
     async fn authenticate(&self, token: &str) -> Option<UserId>;
+
+    /// Whether bearer tokens accepted by this authenticator represent a
+    /// single trusted operator. Operator-wide LLM config routes mutate shared
+    /// provider catalog, secret, and active model state, so host composition
+    /// only mounts them for authenticators that explicitly opt in.
+    fn allows_operator_llm_config(&self) -> bool {
+        false
+    }
 }
 
 /// Host-installation composition the Reborn HTTP gateway needs in
@@ -280,7 +291,8 @@ impl WebuiServeConfig {
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
-    pub fn with_slack_personal_binding(mut self, config: SlackPersonalBindingRouteConfig) -> Self {
+    #[rustfmt::skip]
+    pub fn with_slack_personal_binding(mut self, config: SlackPersonalBindingRouteConfig) -> Self { // pub-api-exempt: host OAuth hook
         self.slack_personal_binding = Some(config);
         self
     }
@@ -506,7 +518,12 @@ pub fn webui_v2_app_with_lifecycle(
             .filter_map(|mount| mount.drain.clone())
             .collect(),
     );
+    let mount_llm_config_routes = config.authenticator.allows_operator_llm_config();
     let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
+    if !mount_llm_config_routes {
+        descriptors
+            .retain(|descriptor| !is_webui_v2_llm_config_route_id(descriptor.route_id().as_str()));
+    }
     if let Some(mount) = &product_auth_mount {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
@@ -532,8 +549,14 @@ pub fn webui_v2_app_with_lifecycle(
     // Inner: the v2 route surface, retagged to `Router<()>` so it can
     // merge into the outer stateless router. `webui_v2_router` has
     // already baked its own `WebUiV2State` into every handler.
+    let route_options = if mount_llm_config_routes {
+        WebUiV2RouteOptions::all()
+    } else {
+        WebUiV2RouteOptions::without_llm_config_routes()
+    };
     let v2_inner: Router<()> =
-        webui_v2_router(WebUiV2State::new(bundle.api.clone())).with_state(());
+        webui_v2_router_with_options(WebUiV2State::new(bundle.api.clone()), route_options)
+            .with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
     let mut public_inner: Option<Router> = None;
