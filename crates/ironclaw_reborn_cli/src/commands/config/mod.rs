@@ -117,7 +117,7 @@ impl ConfigGetCommand {
 fn build_config_list_dto(context: &RebornCliContext) -> anyhow::Result<ConfigListDto> {
     let config_path = context.boot_config().home().config_file_path();
     let config = load_config_file(context)?;
-    let entries = flatten_config(&config);
+    let entries = flatten_config(&config)?;
     Ok(ConfigListDto {
         config_file: config_path,
         entries,
@@ -126,7 +126,7 @@ fn build_config_list_dto(context: &RebornCliContext) -> anyhow::Result<ConfigLis
 
 fn build_config_get_dto(context: &RebornCliContext, key: &str) -> anyhow::Result<ConfigGetDto> {
     let config = load_config_file(context)?;
-    let entries = flatten_config(&config);
+    let entries = flatten_config(&config)?;
     let value = entries
         .into_iter()
         .find(|e| e.key == key)
@@ -149,7 +149,9 @@ fn load_config_file(
     Ok(ironclaw_reborn_config::RebornConfigFile::load(&config_path)?.unwrap_or_default())
 }
 
-fn flatten_config(config: &ironclaw_reborn_config::RebornConfigFile) -> Vec<ConfigEntry> {
+fn flatten_config(
+    config: &ironclaw_reborn_config::RebornConfigFile,
+) -> anyhow::Result<Vec<ConfigEntry>> {
     use ironclaw_reborn_config::RebornConfigFile;
 
     // Expand all None sections to Some(Default) so every leaf key appears
@@ -175,11 +177,10 @@ fn flatten_config(config: &ironclaw_reborn_config::RebornConfigFile) -> Vec<Conf
         trigger_poller: Some(config.trigger_poller.clone().unwrap_or_default()),
     };
 
-    // safety: RebornConfigFile and all section structs derive Serialize — serialization to Value cannot fail.
-    let value = serde_json::to_value(&expanded).expect("RebornConfigFile implements Serialize");
+    let value = serde_json::to_value(&expanded)?;
     let mut entries = Vec::new();
     collect_leaf_entries(&value, String::new(), &mut entries);
-    entries
+    Ok(entries)
 }
 
 fn collect_leaf_entries(value: &serde_json::Value, prefix: String, entries: &mut Vec<ConfigEntry>) {
@@ -240,7 +241,7 @@ mod tests {
     #[test]
     fn flatten_empty_config_has_all_keys() {
         let config = RebornConfigFile::default();
-        let entries = flatten_config(&config);
+        let entries = flatten_config(&config).expect("flatten");
         assert!(entries.iter().any(|e| e.key == "api_version"));
         assert!(entries.iter().any(|e| e.key == "boot.profile"));
         assert!(entries.iter().any(|e| e.key == "identity.tenant"));
@@ -285,7 +286,7 @@ user_daily_usd = 5.0
 "#;
         let config = RebornConfigFile::parse_text(toml, std::path::Path::new("/test/config.toml"))
             .expect("must parse");
-        let entries = flatten_config(&config);
+        let entries = flatten_config(&config).expect("flatten");
 
         let find = |key: &str| entries.iter().find(|e| e.key == key).expect(key);
 
@@ -319,7 +320,7 @@ user_daily_usd = 5.0
     #[test]
     fn config_get_unknown_key_errors() {
         let config = RebornConfigFile::default();
-        let entries = flatten_config(&config);
+        let entries = flatten_config(&config).expect("flatten");
         let result = entries.iter().find(|e| e.key == "nonexistent.key");
         assert!(result.is_none());
     }
@@ -336,7 +337,7 @@ model = "claude-3-5-sonnet-latest"
 "#;
         let config = RebornConfigFile::parse_text(toml, std::path::Path::new("/test/config.toml"))
             .expect("must parse");
-        let entries = flatten_config(&config);
+        let entries = flatten_config(&config).expect("flatten");
 
         let find = |key: &str| entries.iter().find(|e| e.key == key).expect(key);
         assert!(matches!(
@@ -362,7 +363,7 @@ model = "claude-3-5-sonnet-latest"
 "#;
         let config = RebornConfigFile::parse_text(toml, std::path::Path::new("/test/config.toml"))
             .expect("must parse");
-        let entries = flatten_config(&config);
+        let entries = flatten_config(&config).expect("flatten");
 
         let find = |key: &str| entries.iter().find(|e| e.key == key);
 
