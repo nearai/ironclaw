@@ -4890,6 +4890,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "deadpool-postgres",
+ "fs4",
  "futures",
  "hmac 0.12.1",
  "http 1.4.1",
