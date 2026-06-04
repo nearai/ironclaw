@@ -28,7 +28,9 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     LifecyclePackageRef, LifecyclePhase, RebornAutomationInfo, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornConnectableChannelListResponse, RebornCreateThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
     RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse,
@@ -75,6 +77,7 @@ struct StubServices {
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
+    list_connectable_channels_calls: Mutex<usize>,
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
@@ -326,6 +329,29 @@ impl RebornServicesApi for StubServices {
         *self.list_extensions_calls.lock().expect("lock") += 1;
         Ok(RebornExtensionListResponse {
             extensions: Vec::new(),
+        })
+    }
+
+    async fn list_connectable_channels(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
+        *self.list_connectable_channels_calls.lock().expect("lock") += 1;
+        Ok(RebornConnectableChannelListResponse {
+            channels: vec![RebornConnectableChannelInfo {
+                channel: "slack".to_string(),
+                display_name: "Slack".to_string(),
+                strategy: RebornChannelConnectStrategy::InboundProofCode,
+                action: RebornChannelConnectAction {
+                    title: "Slack account connection".to_string(),
+                    instructions: "Message the Slack app, then enter the code here.".to_string(),
+                    code_placeholder: "Enter Slack pairing code...".to_string(),
+                    submit_label: "Connect".to_string(),
+                    success_message: "Slack account connected.".to_string(),
+                    error_message: "Invalid or expired Slack pairing code.".to_string(),
+                },
+                command_aliases: vec!["slack".to_string()],
+            }],
         })
     }
 
@@ -841,6 +867,39 @@ async fn list_automations_error_maps_to_http_status() {
     assert_eq!(body["error"], "forbidden");
     assert_eq!(body["kind"], "participant_denied");
     assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn list_connectable_channels_dispatches_through_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/channels/connectable")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["channels"][0]["channel"], "slack");
+    assert_eq!(body["channels"][0]["strategy"], "inbound_proof_code");
+    assert_eq!(
+        body["channels"][0]["action"]["instructions"],
+        "Message the Slack app, then enter the code here."
+    );
+    assert_eq!(
+        *services
+            .list_connectable_channels_calls
+            .lock()
+            .expect("lock"),
+        1
+    );
 }
 
 #[tokio::test]

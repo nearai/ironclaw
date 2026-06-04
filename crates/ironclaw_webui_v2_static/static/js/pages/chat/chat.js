@@ -8,6 +8,7 @@ import { ApprovalCard } from "./components/approval-card.js";
 import { AuthGenericCard } from "./components/auth-generic-card.js";
 import { AuthOauthCard } from "./components/auth-oauth-card.js";
 import { AuthTokenCard } from "./components/auth-token-card.js";
+import { ChannelConnectCard } from "./components/channel-connect-card.js";
 import { ChatInput } from "./components/chat-input.js";
 import { ConnectionStatus } from "./components/connection-status.js";
 import { EmptyState } from "./components/empty-state.js";
@@ -32,6 +33,7 @@ export function Chat({
     messages,
     isProcessing,
     pendingGate,
+    channelConnectAction,
     suggestions,
     sseStatus,
     historyLoading,
@@ -45,6 +47,7 @@ export function Chat({
     loadMore,
     setSuggestions,
     submitAuthToken,
+    dismissChannelConnectAction,
   } = useChat(activeThreadId);
 
   const activeThread = React.useMemo(
@@ -56,7 +59,7 @@ export function Chat({
     [gatewayStatus, activeThread]
   );
   const hasMessages =
-    messages.length > 0 || isProcessing || Boolean(pendingGate);
+    messages.length > 0 || isProcessing || Boolean(pendingGate) || Boolean(channelConnectAction);
   const showLanding = !historyLoading && !hasMessages;
   const composerDisabled = (isProcessing && !pendingGate) || cooldownSeconds > 0;
   const composerStatusText =
@@ -172,6 +175,13 @@ export function Chat({
               />
             `}
             ${isProcessing && !pendingGate && html`<${TypingIndicator} />`}
+            ${channelConnectAction &&
+            html`
+              <${ChannelConnectCard}
+                connectAction=${channelConnectAction}
+                onDismiss=${dismissChannelConnectAction}
+              />
+            `}
             ${pendingGate &&
             (pendingGate.kind === "auth_required"
               ? (pendingGate.challengeKind === "oauth_url"

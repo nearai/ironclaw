@@ -5,6 +5,10 @@ import vm from "node:vm";
 
 import { messagesFromTimeline } from "./history-messages.js";
 import {
+  looksLikeChannelConnectCommand,
+  resolveChannelConnectCommand,
+} from "../../../lib/channel-connect.js";
+import {
   addPending,
   recordAcceptedMessageRef,
   removePending,
@@ -67,9 +71,14 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
       throw new Error("thread should already exist");
     },
     globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
     queryClient: { invalidateQueries: () => {} },
     recordAcceptedMessageRef,
     removePending,
+    resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async () => ({
       accepted_message_ref: "msg:message-1",
@@ -132,4 +141,73 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
     renderedMessages.map((message) => message.id),
     ["msg-message-1"],
   );
+});
+
+test("useChat.send: channel connect requests return an action without submitting a prompt", async () => {
+  let createThreadCalled = false;
+  let sendMessageCalled = false;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      createThreadCalled = true;
+      throw new Error("connect action should not create a thread");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => ({
+      channels: [
+        {
+          channel: "slack",
+          display_name: "Slack",
+          strategy: "inbound_proof_code",
+          command_aliases: ["slack", "slack account"],
+          action: {
+            title: "Slack account connection",
+            instructions: "Message the Slack app, then enter the code here.",
+          },
+        },
+      ],
+    }),
+    looksLikeChannelConnectCommand,
+    queryClient: { invalidateQueries: () => {} },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      sendMessageCalled = true;
+      throw new Error("connect action should not submit a model prompt");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(null);
+  const response = await chat.send("connect my Slack account");
+
+  assert.equal(createThreadCalled, false);
+  assert.equal(sendMessageCalled, false);
+  assert.equal(response.channel_connect_action.channel, "slack");
+  assert.equal(response.channel_connect_action.strategy, "inbound_proof_code");
 });

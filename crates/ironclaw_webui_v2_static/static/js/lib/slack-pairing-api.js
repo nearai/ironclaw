@@ -1,4 +1,4 @@
-import { apiFetch } from "../../../lib/api.js";
+import { apiFetch } from "./api.js";
 
 export const SLACK_PAIRING_REDEEM_PATH =
   "/api/reborn/slack/personal-binding/pairing/redeem";

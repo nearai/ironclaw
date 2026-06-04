@@ -1,8 +1,8 @@
 import { StatusPill } from "../../../design-system/primitives.js";
+import { SlackPairingSection } from "../../../components/slack-pairing-section.js";
 import { html } from "../../../lib/html.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 import { PairingSection } from "./pairing-section.js";
-import { SlackPairingSection } from "./slack-pairing-section.js";
 
 function packageId(item) {
   return item.package_ref?.id || "";
@@ -11,6 +11,7 @@ function packageId(item) {
 export function ChannelsTab({
   status,
   channels,
+  connectableChannels,
   channelRegistry,
   onActivate,
   onConfigure,
@@ -20,6 +21,7 @@ export function ChannelsTab({
 }) {
   const enabledChannels = status.enabled_channels || [];
   const slackEnabled = enabledChannels.includes("slack") || enabledChannels.includes("slack_v2");
+  const slackConnectAction = connectableChannels?.find((channel) => channel.channel === "slack");
 
   return html`
     <div className="space-y-5">
@@ -52,7 +54,7 @@ export function ChannelsTab({
           statusTone=${slackEnabled ? "success" : "info"}
           detail="Tenant Slack app install"
         >
-          <${SlackPairingSection} />
+          <${SlackPairingSection} action=${slackConnectAction?.action} />
         <//>
         <${BuiltinRow}
           name="CLI"

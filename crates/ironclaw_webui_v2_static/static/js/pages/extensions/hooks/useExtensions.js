@@ -1,6 +1,7 @@
 import { React } from "../../../lib/html.js";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { gatewayStatus } from "../../../lib/api.js";
+import { listConnectableChannels } from "../../../lib/channel-connect.js";
 import {
   fetchExtensions,
   fetchExtensionRegistry,
@@ -36,10 +37,16 @@ export function useExtensions() {
     queryFn: fetchExtensionRegistry,
   });
 
+  const connectableChannelsQuery = useQuery({
+    queryKey: ["connectable-channels"],
+    queryFn: listConnectableChannels,
+  });
+
   const invalidate = React.useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["extensions"] });
     queryClient.invalidateQueries({ queryKey: ["extension-registry"] });
     queryClient.invalidateQueries({ queryKey: ["gateway-status-extensions"] });
+    queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });
   }, [queryClient]);
 
   const [actionResult, setActionResult] = React.useState(null);
@@ -118,6 +125,7 @@ export function useExtensions() {
   const status = statusQuery.data || {};
   const extensions = extensionsQuery.data?.extensions || [];
   const registry = registryQuery.data?.entries || [];
+  const connectableChannels = connectableChannelsQuery.data?.channels || [];
 
   const channels = extensions.filter((e) => e.kind === "wasm_channel");
   const mcpServers = extensions.filter((e) => e.kind === "mcp_server");
@@ -146,6 +154,7 @@ export function useExtensions() {
     mcpRegistry,
     toolRegistry,
     registry,
+    connectableChannels,
     isLoading,
     isBusy,
     actionResult,

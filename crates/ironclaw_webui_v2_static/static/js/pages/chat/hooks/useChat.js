@@ -5,6 +5,11 @@ import {
   sendMessage,
   submitManualToken,
 } from "../../../lib/api.js";
+import {
+  listConnectableChannels,
+  looksLikeChannelConnectCommand,
+  resolveChannelConnectCommand,
+} from "../../../lib/channel-connect.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
@@ -80,6 +85,12 @@ function parseOAuthCallbackStoragePayload(value) {
   }
 }
 
+async function resolveConnectAction(content) {
+  if (!looksLikeChannelConnectCommand(content)) return null;
+  const channels = (await listConnectableChannels())?.channels || [];
+  return resolveChannelConnectCommand(content, channels);
+}
+
 // v2 chat hook. Differences from the fork's v1 hook:
 // - No image / attachment plumbing — v2 SendMessage carries `content` only.
 // - No /api/chat/approval — approvals fold into gate/resolve in v2.
@@ -92,6 +103,7 @@ export function useChat(threadId) {
   const [cooldownUntil, setCooldownUntil] = React.useState(0);
   const [now, setNow] = React.useState(Date.now());
   const [activeRun, setActiveRun] = React.useState(null);
+  const [channelConnectAction, setChannelConnectAction] = React.useState(null);
 
   const getPendingMessages = React.useCallback(
     () => pendingMessagesRef.current.get(threadId || "__new__") || [],
@@ -137,6 +149,7 @@ export function useChat(threadId) {
     setIsProcessing(false);
     setPendingGate(null);
     setActiveRun(null);
+    setChannelConnectAction(null);
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -241,6 +254,13 @@ export function useChat(threadId) {
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
     async (content, opts = {}) => {
+      const connectable = await resolveConnectAction(content);
+      if (connectable) {
+        setChannelConnectAction(connectable);
+        return { channel_connect_action: connectable };
+      }
+      setChannelConnectAction(null);
+
       const { threadId: targetThreadId } = opts;
       let sendThreadId = targetThreadId || threadId;
 
@@ -503,6 +523,7 @@ export function useChat(threadId) {
     messages,
     isProcessing,
     pendingGate,
+    channelConnectAction,
     activeRun,
     sseStatus,
     historyLoading,
@@ -513,6 +534,7 @@ export function useChat(threadId) {
     submitAuthToken,
     cancelRun,
     loadMore,
+    dismissChannelConnectAction: () => setChannelConnectAction(null),
     // fork-shape compatibility — see comments above
     suggestions: [],
     setSuggestions: noop,
