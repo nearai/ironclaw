@@ -47,6 +47,16 @@
 //! bug, do NOT silently update the oracle to match a regressed backend); do NOT
 //! loosen the assertion to make it pass.
 
+// SQLITE_MISUSE serialization caveat (f-tests-3 on #3937): the tests in this
+// file run concurrently under the default libtest harness, and each libSQL leg
+// builds a fresh in-process `Database` handle. Cap-heavy scripts that push
+// thousands of rows through such a handle while sibling tests do the same can
+// intermittently trip `SQLITE_MISUSE` ("bad parameter or other API misuse").
+// The process-global serialization mutex lives in `support.rs` (see
+// `libsql_serial_guard` and the comment above its lock site); any FUTURE cap-fill
+// or otherwise statement-heavy parity script MUST route its libSQL leg through
+// that guard rather than constructing an unguarded handle.
+//
 // `#[path]` keeps these submodules in the `parity_matrix/` subdirectory: files
 // directly under `tests/` are each compiled as their own integration-test
 // binary, but files in a subdirectory are not — so the shared support/scenario/
