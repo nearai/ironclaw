@@ -37,7 +37,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::secrets_guard::{InlineSecretError, reject_inline_secret};
@@ -52,7 +52,7 @@ pub const REBORN_CONFIG_API_VERSION: &str = "ironclaw.runtime/v1";
 /// Every section is optional so an operator can ship a sparse file that
 /// overrides only the fields they care about; the rest stays at the
 /// CLI-shaped defaults baked into composition.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RebornConfigFile {
     /// API version. When set, must be parseable as `ironclaw.runtime/vN.M`
@@ -92,7 +92,7 @@ pub struct RebornConfigFile {
     pub trigger_poller: Option<TriggerPollerConfigSection>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BootSection {
     /// Composition profile name. Stringly typed; composition validates
@@ -101,7 +101,7 @@ pub struct BootSection {
     pub profile: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentitySection {
     pub tenant: Option<String>,
@@ -110,7 +110,7 @@ pub struct IdentitySection {
     pub default_project: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicySection {
     /// One of `local_single_user`, `hosted_multi_tenant`,
@@ -124,7 +124,7 @@ pub struct PolicySection {
     pub default_approval_policy: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DriversSection {
     /// Default driver name. Composition matches against
@@ -135,7 +135,7 @@ pub struct DriversSection {
     pub additional: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessSection {
     /// Active harness id. Composition logs the value at boot; takes
@@ -143,14 +143,14 @@ pub struct HarnessSection {
     pub id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillsSection {
     /// When false, regex activation criteria no longer auto-load full skill context.
@@ -169,7 +169,7 @@ pub struct SkillsSection {
 /// environment variable, never a token value. The `secrets_guard`
 /// inline-secret check fires at parse time if an operator pastes a
 /// token-shaped string into either field documented as a name.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebuiSection {
     /// IP address the WebChat v2 listener binds. Default `127.0.0.1`
@@ -228,7 +228,7 @@ pub struct WebuiSection {
 /// `/webhooks/slack/events`; the route is never enabled by ambient Slack
 /// environment variables alone. Signing secret and bot token values stay
 /// env-only: `signing_secret_env` and `bot_token_env` are variable names.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlackSection {
     /// Explicit host-beta enablement gate. Omitted/false means the Slack route
@@ -256,7 +256,7 @@ pub struct SlackSection {
 ///
 /// Composition uses these as defaults when first seeding a user/project
 /// account. Runtime tools can install per-account overrides at any time.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetSection {
     /// Per-user daily ceiling. Default in composition is `5.00`.
@@ -292,7 +292,7 @@ pub struct BudgetSection {
 /// All fields are optional so a sparse or absent section is valid; the
 /// composition root applies its own compiled defaults for any field not set
 /// here. Env vars (`IRONCLAW_TRIGGER_POLLER_*`) override this section.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TriggerPollerConfigSection {
     /// Enable or disable the trigger poller. Default `false` (off) in
@@ -326,7 +326,7 @@ pub struct TriggerPollerConfigSection {
 /// References a provider by `provider_id` (resolved against the merged
 /// `ProviderRegistry` in the composition root) and optionally overrides
 /// the provider's `default_model` and `api_key_env`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LlmSlotSelection {
     /// Provider id from `providers.json` (built-in or user catalog).

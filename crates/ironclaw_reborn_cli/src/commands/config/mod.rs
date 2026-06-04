@@ -150,254 +150,83 @@ fn load_config_file(
 }
 
 fn flatten_config(config: &ironclaw_reborn_config::RebornConfigFile) -> Vec<ConfigEntry> {
+    use ironclaw_reborn_config::RebornConfigFile;
+
+    // Expand all None sections to Some(Default) so every leaf key appears
+    // even when unset. The struct literal means a new field added to
+    // RebornConfigFile will fail to compile here until handled — that is
+    // the drift prevention the manual approach lacked.
+    let mut llm = config.llm.clone().unwrap_or_default();
+    llm.entry("default".to_string()).or_default();
+
+    let expanded = RebornConfigFile {
+        api_version: config.api_version.clone(),
+        boot: Some(config.boot.clone().unwrap_or_default()),
+        identity: Some(config.identity.clone().unwrap_or_default()),
+        policy: Some(config.policy.clone().unwrap_or_default()),
+        drivers: Some(config.drivers.clone().unwrap_or_default()),
+        harness: Some(config.harness.clone().unwrap_or_default()),
+        runner: Some(config.runner.clone().unwrap_or_default()),
+        skills: Some(config.skills.clone().unwrap_or_default()),
+        llm: Some(llm),
+        webui: Some(config.webui.clone().unwrap_or_default()),
+        slack: Some(config.slack.clone().unwrap_or_default()),
+        budget: Some(config.budget.clone().unwrap_or_default()),
+        trigger_poller: Some(config.trigger_poller.clone().unwrap_or_default()),
+    };
+
+    let value = serde_json::to_value(&expanded).expect("RebornConfigFile implements Serialize");
     let mut entries = Vec::new();
-
-    entries.push(entry(
-        "api_version",
-        config.api_version.as_deref().map(ConfigValue::from_str),
-    ));
-
-    // boot
-    let boot = config.boot.as_ref();
-    entries.push(entry(
-        "boot.profile",
-        boot.and_then(|b| b.profile.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-
-    // identity
-    let identity = config.identity.as_ref();
-    entries.push(entry(
-        "identity.tenant",
-        identity
-            .and_then(|i| i.tenant.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-    entries.push(entry(
-        "identity.default_agent",
-        identity
-            .and_then(|i| i.default_agent.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-    entries.push(entry(
-        "identity.default_owner",
-        identity
-            .and_then(|i| i.default_owner.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-    entries.push(entry(
-        "identity.default_project",
-        identity
-            .and_then(|i| i.default_project.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-
-    // policy
-    let policy = config.policy.as_ref();
-    entries.push(entry(
-        "policy.deployment_mode",
-        policy
-            .and_then(|p| p.deployment_mode.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-    entries.push(entry(
-        "policy.default_profile",
-        policy
-            .and_then(|p| p.default_profile.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-    entries.push(entry(
-        "policy.default_approval_policy",
-        policy
-            .and_then(|p| p.default_approval_policy.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-
-    // drivers
-    let drivers = config.drivers.as_ref();
-    entries.push(entry(
-        "drivers.default",
-        drivers
-            .and_then(|d| d.default.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-    entries.push(entry(
-        "drivers.additional",
-        drivers.and_then(|d| d.additional.as_ref().map(|v| ConfigValue::List(v.clone()))),
-    ));
-
-    // harness
-    entries.push(entry(
-        "harness.id",
-        config
-            .harness
-            .as_ref()
-            .and_then(|h| h.id.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-
-    // runner
-    let runner = config.runner.as_ref();
-    entries.push(entry(
-        "runner.heartbeat_interval_secs",
-        runner.and_then(|r| r.heartbeat_interval_secs.map(ConfigValue::Integer)),
-    ));
-    entries.push(entry(
-        "runner.poll_interval_ms",
-        runner.and_then(|r| r.poll_interval_ms.map(ConfigValue::Integer)),
-    ));
-
-    // skills
-    entries.push(entry(
-        "skills.regex_activation_enabled",
-        config
-            .skills
-            .as_ref()
-            .and_then(|s| s.regex_activation_enabled.map(ConfigValue::Bool)),
-    ));
-
-    // llm slots
-    if let Some(llm) = &config.llm {
-        for (slot, selection) in llm {
-            entries.push(entry(
-                &format!("llm.{slot}.provider_id"),
-                selection.provider_id.as_deref().map(ConfigValue::from_str),
-            ));
-            entries.push(entry(
-                &format!("llm.{slot}.model"),
-                selection.model.as_deref().map(ConfigValue::from_str),
-            ));
-            entries.push(entry(
-                &format!("llm.{slot}.api_key_env"),
-                selection.api_key_env.as_deref().map(ConfigValue::from_str),
-            ));
-            entries.push(entry(
-                &format!("llm.{slot}.base_url"),
-                selection.base_url.as_deref().map(ConfigValue::from_str),
-            ));
-        }
-        if !llm.contains_key("default") {
-            for field in ["provider_id", "model", "api_key_env", "base_url"] {
-                entries.push(entry(&format!("llm.default.{field}"), None));
-            }
-        }
-    } else {
-        for field in ["provider_id", "model", "api_key_env", "base_url"] {
-            entries.push(entry(&format!("llm.default.{field}"), None));
-        }
-    }
-
-    // webui
-    let webui = config.webui.as_ref();
-    entries.push(entry(
-        "webui.listen_host",
-        webui
-            .and_then(|w| w.listen_host.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-    entries.push(entry(
-        "webui.listen_port",
-        webui.and_then(|w| w.listen_port.map(|p| ConfigValue::Integer(u64::from(p)))),
-    ));
-    entries.push(entry(
-        "webui.env_token_var",
-        webui
-            .and_then(|w| w.env_token_var.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-    entries.push(entry(
-        "webui.env_user_id_var",
-        webui
-            .and_then(|w| w.env_user_id_var.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-    entries.push(entry(
-        "webui.allowed_origins",
-        webui.and_then(|w| {
-            w.allowed_origins
-                .as_ref()
-                .map(|v| ConfigValue::List(v.clone()))
-        }),
-    ));
-    entries.push(entry(
-        "webui.csp_header_override",
-        webui
-            .and_then(|w| w.csp_header_override.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-    entries.push(entry(
-        "webui.max_body_bytes_fallback",
-        webui.and_then(|w| w.max_body_bytes_fallback.map(ConfigValue::Integer)),
-    ));
-    entries.push(entry(
-        "webui.canonical_host",
-        webui
-            .and_then(|w| w.canonical_host.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-
-    // budget
-    let budget = config.budget.as_ref();
-    entries.push(entry(
-        "budget.user_daily_usd",
-        budget.and_then(|b| b.user_daily_usd.map(ConfigValue::Float)),
-    ));
-    entries.push(entry(
-        "budget.project_daily_usd",
-        budget.and_then(|b| b.project_daily_usd.map(ConfigValue::Float)),
-    ));
-    entries.push(entry(
-        "budget.mission_per_tick_usd",
-        budget.and_then(|b| b.mission_per_tick_usd.map(ConfigValue::Float)),
-    ));
-    entries.push(entry(
-        "budget.heartbeat_per_tick_usd",
-        budget.and_then(|b| b.heartbeat_per_tick_usd.map(ConfigValue::Float)),
-    ));
-    entries.push(entry(
-        "budget.routine_lightweight_usd",
-        budget.and_then(|b| b.routine_lightweight_usd.map(ConfigValue::Float)),
-    ));
-    entries.push(entry(
-        "budget.routine_standard_usd",
-        budget.and_then(|b| b.routine_standard_usd.map(ConfigValue::Float)),
-    ));
-    entries.push(entry(
-        "budget.background_job_default_usd",
-        budget.and_then(|b| b.background_job_default_usd.map(ConfigValue::Float)),
-    ));
-    entries.push(entry(
-        "budget.default_tz",
-        budget
-            .and_then(|b| b.default_tz.as_deref())
-            .map(ConfigValue::from_str),
-    ));
-    entries.push(entry(
-        "budget.warn_at",
-        budget.and_then(|b| b.warn_at.map(ConfigValue::Float)),
-    ));
-    entries.push(entry(
-        "budget.pause_at",
-        budget.and_then(|b| b.pause_at.map(ConfigValue::Float)),
-    ));
-    entries.push(entry(
-        "budget.overestimate_factor",
-        budget.and_then(|b| b.overestimate_factor.map(ConfigValue::Float)),
-    ));
-
+    collect_leaf_entries(&value, String::new(), &mut entries);
     entries
 }
 
-fn entry(key: &str, value: Option<ConfigValue>) -> ConfigEntry {
-    ConfigEntry {
-        key: key.to_string(),
-        value,
+fn collect_leaf_entries(value: &serde_json::Value, prefix: String, entries: &mut Vec<ConfigEntry>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map {
+                let full_key = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                collect_leaf_entries(val, full_key, entries);
+            }
+        }
+        serde_json::Value::Null => {
+            entries.push(ConfigEntry {
+                key: prefix,
+                value: None,
+            });
+        }
+        other => {
+            entries.push(ConfigEntry {
+                key: prefix,
+                value: Some(json_to_config_value(other)),
+            });
+        }
     }
 }
 
-impl ConfigValue {
-    fn from_str(s: &str) -> Self {
-        Self::String(s.to_string())
+fn json_to_config_value(value: &serde_json::Value) -> ConfigValue {
+    match value {
+        serde_json::Value::String(s) => ConfigValue::String(s.clone()),
+        serde_json::Value::Bool(b) => ConfigValue::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                ConfigValue::Integer(u)
+            } else if let Some(f) = n.as_f64() {
+                ConfigValue::Float(f)
+            } else {
+                ConfigValue::String(n.to_string())
+            }
+        }
+        serde_json::Value::Array(arr) => ConfigValue::List(
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+        ),
+        other => ConfigValue::String(other.to_string()),
     }
 }
 
@@ -417,6 +246,14 @@ mod tests {
         assert!(entries.iter().any(|e| e.key == "llm.default.provider_id"));
         assert!(entries.iter().any(|e| e.key == "webui.listen_port"));
         assert!(entries.iter().any(|e| e.key == "budget.user_daily_usd"));
+        assert!(entries.iter().any(|e| e.key == "slack.enabled"));
+        assert!(entries.iter().any(|e| e.key == "slack.team_id"));
+        assert!(entries.iter().any(|e| e.key == "trigger_poller.enabled"));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == "trigger_poller.poll_interval_secs"),
+        );
         for entry in &entries {
             assert!(entry.value.is_none(), "key {} should be unset", entry.key);
         }
