@@ -361,7 +361,7 @@ fn slack_protocol_egress(
             token_handle.clone(),
             config.bot_token.expose_secret().to_string(),
         )),
-        EgressPolicy::new(slack_declared_egress_targets(token_handle)),
+        EgressPolicy::new(slack_declared_egress_targets(token_handle)?),
         slack_egress_scope(config),
     )))
 }
@@ -380,11 +380,10 @@ fn slack_egress_scope(config: &SlackHostBetaConfig) -> ResourceScope {
 
 fn slack_declared_egress_targets(
     token_handle: EgressCredentialHandle,
-) -> Vec<DeclaredEgressTarget> {
-    vec![DeclaredEgressTarget::new(
-        DeclaredEgressHost::new(SLACK_API_HOST).expect("static Slack host valid"),
-        Some(token_handle),
-    )]
+) -> Result<Vec<DeclaredEgressTarget>, SlackHostBetaBuildError> {
+    let host = DeclaredEgressHost::new(SLACK_API_HOST)
+        .map_err(|reason| invalid_config("slack_api_host", reason.to_string()))?;
+    Ok(vec![DeclaredEgressTarget::new(host, Some(token_handle))])
 }
 
 #[derive(Clone)]
@@ -475,7 +474,9 @@ mod tests {
         HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
         HostManagedModelResponse,
     };
-    use ironclaw_product_workflow::{ProductActorUserResolutionRequest, ProductWorkflowError};
+    use ironclaw_product_workflow::{
+        ProductActorUserResolutionRequest, ProductWorkflowError, WebUiAuthenticatedCaller,
+    };
     use ironclaw_threads::{ListThreadsForScopeRequest, ThreadHistoryRequest, ThreadScope};
     use ironclaw_turns::run_profile::LoopCapabilityPort;
     use secrecy::ExposeSecret;
@@ -680,6 +681,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_slack_host_beta_mounts_pairs_unknown_slack_actor_then_routes_bound_event() {
+        let (mut runtime, _root) = runtime().await;
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        runtime.set_local_runtime_http_egress_for_test(Some(egress.clone()));
+        let mounts =
+            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+
+        let first_body =
+            dm_event_body_with("Ev-host-beta-pairing-first", "pair me", "1710000000.000020");
+        post_signed_slack_event(&mounts.events, &first_body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+        let pairing_code = wait_for_pairing_code(&egress).await;
+
+        let pairing_mount =
+            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
+        let redeem_body = format!(r#"{{"code":"{pairing_code}"}}"#);
+        let redeem_response = pairing_mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH)
+                    .header("content-type", "application/json")
+                    .extension(WebUiAuthenticatedCaller {
+                        tenant_id: TenantId::new(TENANT).expect("tenant"),
+                        user_id: UserId::new(USER).expect("user"),
+                        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                        project_id: Some(ProjectId::new(PROJECT).expect("project")),
+                    })
+                    .body(Body::from(redeem_body))
+                    .expect("redeem request builds"),
+            )
+            .await
+            .expect("redeem route responds");
+
+        assert_eq!(redeem_response.status(), StatusCode::OK);
+
+        let second_body = dm_event_body_with(
+            "Ev-host-beta-pairing-second",
+            "after pairing",
+            "1710000000.000030",
+        );
+        post_signed_slack_event(&mounts.events, &second_body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+
+        let history = wait_for_slack_thread_history(&runtime).await;
+        assert_eq!(history.messages.len(), 1);
+        assert_eq!(
+            history.messages[0].content.as_deref(),
+            Some("after pairing")
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
     async fn build_slack_host_beta_mounts_rejects_team_only_selector_for_pairing() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
@@ -794,6 +855,42 @@ mod tests {
         .expect("valid config")
     }
 
+    fn config_without_legacy_actor() -> SlackHostBetaConfig {
+        SlackHostBetaConfig::new(SlackHostBetaConfigInput {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            installation_id: INSTALLATION.to_string(),
+            team_id: TEAM.to_string(),
+            api_app_id: Some(API_APP.to_string()),
+            slack_user_id: None,
+            user_id: UserId::new(USER).expect("user"),
+            signing_secret: SecretString::from(SECRET),
+            bot_token: SecretString::from("xoxb-host-token"),
+        })
+        .expect("valid config")
+    }
+
+    async fn post_signed_slack_event(mount: &PublicRouteMount, body: &str) {
+        let timestamp = current_unix_timestamp();
+        let response = mount
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(SLACK_EVENTS_PATH)
+                    .header(SLACK_TIMESTAMP_HEADER, timestamp.to_string())
+                    .header(SLACK_SIGNATURE_HEADER, slack_signature(timestamp, body))
+                    .body(Body::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     async fn runtime() -> (RebornRuntime, tempfile::TempDir) {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
@@ -883,6 +980,24 @@ mod tests {
         }"#
     }
 
+    fn dm_event_body_with(event_id: &str, text: &str, ts: &str) -> String {
+        serde_json::json!({
+            "type": "event_callback",
+            "team_id": TEAM,
+            "api_app_id": API_APP,
+            "event_id": event_id,
+            "event": {
+                "type": "message",
+                "channel_type": "im",
+                "user": SLACK_USER,
+                "channel": "D-HOST",
+                "text": text,
+                "ts": ts
+            }
+        })
+        .to_string()
+    }
+
     async fn wait_for_resolver_calls(
         resolver: &RecordingProductActorUserResolver,
         expected_len: usize,
@@ -895,6 +1010,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         resolver.calls()
+    }
+
+    async fn wait_for_pairing_code(egress: &RecordingRuntimeHttpEgress) -> String {
+        for _ in 0..40 {
+            if let Some(code) = egress.pairing_code() {
+                return code;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("Slack pairing notifier did not post a pairing code");
     }
 
     #[derive(Debug)]
@@ -980,6 +1105,11 @@ mod tests {
             &self,
             request: RuntimeHttpEgressRequest,
         ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+            let response = if request.url.contains("/api/conversations.open") {
+                br#"{"ok":true,"channel":{"id":"D-HOST"}}"#.to_vec()
+            } else {
+                br#"{"ok":true}"#.to_vec()
+            };
             self.requests
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -987,12 +1117,32 @@ mod tests {
             Ok(RuntimeHttpEgressResponse {
                 status: 200,
                 headers: Vec::new(),
-                body: br#"{"ok":true}"#.to_vec(),
+                body: response,
                 saved_body: None,
                 request_bytes: 0,
                 response_bytes: 0,
                 redaction_applied: false,
             })
+        }
+    }
+
+    impl RecordingRuntimeHttpEgress {
+        fn pairing_code(&self) -> Option<String> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .filter(|request| request.url.contains("/api/chat.postMessage"))
+                .filter_map(|request| {
+                    serde_json::from_slice::<serde_json::Value>(&request.body).ok()
+                })
+                .filter_map(|body| body["text"].as_str().map(str::to_string))
+                .find_map(|text| {
+                    text.split(" code ")
+                        .nth(1)
+                        .and_then(|suffix| suffix.split(" in WebChat").next())
+                        .map(str::to_string)
+                })
         }
     }
 }

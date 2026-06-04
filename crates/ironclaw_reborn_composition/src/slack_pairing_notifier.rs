@@ -97,13 +97,10 @@ impl SlackPairingChallengeHttpNotifier {
         path: &'static str,
         body: Vec<u8>,
     ) -> Result<ironclaw_product_adapters::EgressResponse, SlackPersonalBindingPairingError> {
+        let request = slack_api_request(path, body, self.credential_handle.clone())?;
         let response = self
             .egress
-            .send(slack_api_request(
-                path,
-                body,
-                self.credential_handle.clone(),
-            ))
+            .send(request)
             .await
             .map_err(|error| SlackPersonalBindingPairingError::Backend(error.to_string()))?;
         if !(200..300).contains(&response.status()) {
@@ -150,16 +147,18 @@ fn slack_api_request(
     path: &'static str,
     body: Vec<u8>,
     credential_handle: EgressCredentialHandle,
-) -> EgressRequest {
-    let host = DeclaredEgressHost::new(SLACK_API_HOST).expect("static Slack host valid");
+) -> Result<EgressRequest, SlackPersonalBindingPairingError> {
+    let host = DeclaredEgressHost::new(SLACK_API_HOST)
+        .map_err(|error| SlackPersonalBindingPairingError::Backend(error.to_string()))?;
     let method = EgressMethod::post();
-    let path = EgressPath::new(path).expect("static Slack API path valid");
+    let path = EgressPath::new(path)
+        .map_err(|error| SlackPersonalBindingPairingError::Backend(error.to_string()))?;
     let content_type = EgressHeader::new("content-type", "application/json")
-        .expect("static content-type header valid");
-    EgressRequest::new(host, method, path)
+        .map_err(|error| SlackPersonalBindingPairingError::Backend(error.to_string()))?;
+    Ok(EgressRequest::new(host, method, path)
         .with_header(content_type)
         .with_body(body)
-        .with_credential_handle(Some(credential_handle))
+        .with_credential_handle(Some(credential_handle)))
 }
 
 fn slack_json_response<T>(
@@ -256,6 +255,51 @@ mod tests {
         );
         assert!(matches!(
             rejected_post.send_pairing_challenge(notification()).await,
+            Err(SlackPersonalBindingPairingError::Backend(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn slack_pairing_notifier_rejects_open_response_without_channel_id() {
+        for body in [
+            br#"{"ok":true}"#.to_vec(),
+            br#"{"ok":true,"channel":{"id":""}}"#.to_vec(),
+        ] {
+            let notifier = SlackPairingChallengeHttpNotifier::new(
+                Arc::new(ScriptedEgress::new([EgressResponse::new(200, body)])),
+                EgressCredentialHandle::new("slack_bot_token").unwrap(),
+            );
+
+            assert!(matches!(
+                notifier.send_pairing_challenge(notification()).await,
+                Err(SlackPersonalBindingPairingError::Backend(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn slack_pairing_notifier_rejects_invalid_and_oversized_slack_responses() {
+        let invalid_json = SlackPairingChallengeHttpNotifier::new(
+            Arc::new(ScriptedEgress::new([EgressResponse::new(
+                200,
+                b"not json".to_vec(),
+            )])),
+            EgressCredentialHandle::new("slack_bot_token").unwrap(),
+        );
+        assert!(matches!(
+            invalid_json.send_pairing_challenge(notification()).await,
+            Err(SlackPersonalBindingPairingError::Backend(_))
+        ));
+
+        let oversized = SlackPairingChallengeHttpNotifier::new(
+            Arc::new(ScriptedEgress::new([EgressResponse::new(
+                200,
+                vec![b'{'; SLACK_API_RESPONSE_LIMIT + 1],
+            )])),
+            EgressCredentialHandle::new("slack_bot_token").unwrap(),
+        );
+        assert!(matches!(
+            oversized.send_pairing_challenge(notification()).await,
             Err(SlackPersonalBindingPairingError::Backend(_))
         ));
     }
