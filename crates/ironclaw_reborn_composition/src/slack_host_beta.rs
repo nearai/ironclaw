@@ -12,17 +12,18 @@ use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_outbound::{InMemoryOutboundStateStore, OutboundStateStore};
 use ironclaw_product_adapters::{
-    AdapterInstallationId, DeliveryStatus, EgressCredentialHandle, ExternalActorRef,
-    OutboundDeliverySink, ProductAdapter, ProductAdapterId,
+    AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus,
+    EgressCredentialHandle, ExternalActorRef, OutboundDeliverySink, ProductAdapter,
+    ProductAdapterId, ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InMemoryIdempotencyLedger,
     ProductActorUserResolver, ProductConversationBindingService, ProductInstallationKey,
-    ProductInstallationScope, StaticProductActorUserResolver, StaticProductInstallationResolver,
+    ProductInstallationScope, StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
-    SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackV2Adapter, SlackV2AdapterConfig,
-    slack_request_signature_auth_requirement,
+    SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackV2Adapter,
+    SlackV2AdapterConfig, slack_request_signature_auth_requirement,
 };
 use ironclaw_wasm_product_adapters::{
     EgressPolicy, HmacWebhookAuth, NativeProductAdapterRunner, NativeProductAdapterRunnerConfig,
@@ -37,6 +38,16 @@ use crate::slack_delivery::{
     SlackFinalReplyDeliverySettings,
 };
 use crate::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
+use crate::slack_host_state::{FilesystemSlackHostState, SlackPairingChallengeHttpNotifier};
+use crate::slack_personal_binding::{
+    RebornUserIdentityBindingStore, SlackPersonalBindingInstallation,
+    SlackPersonalUserBindingService,
+};
+use crate::slack_personal_binding_pairing::{
+    SlackPairingActorResolver, SlackPersonalBindingPairingChallengeStore,
+    SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingService,
+};
+use crate::slack_personal_binding_pairing_serve::SlackPersonalBindingPairingRouteConfig;
 use crate::slack_serve::{
     SlackEventsRouteState, SlackInstallationRecord, SlackInstallationSelector,
     StaticSlackInstallationResolver, slack_events_route_mount,
@@ -64,10 +75,11 @@ pub struct SlackHostBetaConfig {
     pub project_id: Option<ProjectId>,
     pub installation_id: AdapterInstallationId,
     pub installation_selector: SlackInstallationSelector,
-    /// Slack actor used by the legacy static personal-binding builder.
-    pub slack_actor: ExternalActorRef,
-    /// Host user used by the legacy static personal-binding builder and as the
-    /// resource owner for Slack bot-token egress.
+    /// Optional Slack actor retained only for legacy static personal-binding
+    /// tests/config. Tenant app host-beta resolution uses durable personal
+    /// bindings and does not require a preselected Slack user.
+    pub slack_actor: Option<ExternalActorRef>,
+    /// Host user used as the resource owner for Slack bot-token egress.
     pub user_id: UserId,
     pub signing_secret: SecretString,
     pub bot_token: SecretString,
@@ -80,7 +92,7 @@ pub struct SlackHostBetaConfigInput {
     pub installation_id: String,
     pub team_id: String,
     pub api_app_id: Option<String>,
-    pub slack_user_id: String,
+    pub slack_user_id: Option<String>,
     pub user_id: UserId,
     pub signing_secret: SecretString,
     pub bot_token: SecretString,
@@ -94,9 +106,13 @@ impl SlackHostBetaConfig {
             Some(api_app_id) => SlackInstallationSelector::app_team(api_app_id, input.team_id),
             None => SlackInstallationSelector::team(input.team_id),
         };
-        let slack_actor =
-            ExternalActorRef::new(SLACK_USER_ACTOR_KIND, input.slack_user_id, None::<String>)
-                .map_err(|reason| invalid_config("slack_user_id", reason.to_string()))?;
+        let slack_actor = input
+            .slack_user_id
+            .map(|slack_user_id| {
+                ExternalActorRef::new(SLACK_USER_ACTOR_KIND, slack_user_id, None::<String>)
+                    .map_err(|reason| invalid_config("slack_user_id", reason.to_string()))
+            })
+            .transpose()?;
         Ok(Self {
             tenant_id: input.tenant_id,
             agent_id: input.agent_id,
@@ -132,19 +148,69 @@ impl std::fmt::Debug for SlackHostBetaConfig {
 pub enum SlackHostBetaBuildError {
     #[error("Slack host-beta requires local runtime HTTP egress")]
     RuntimeHttpEgressUnavailable,
+    #[error("Slack host-beta requires durable host state")]
+    DurableHostStateUnavailable,
     #[error("invalid Slack host-beta config field {field}: {reason}")]
     InvalidConfig { field: &'static str, reason: String },
+}
+
+pub struct SlackHostBetaMounts {
+    pub events: PublicRouteMount,
+    pub personal_binding_pairing: SlackPersonalBindingPairingRouteConfig,
 }
 
 pub fn build_slack_events_route_mount(
     runtime: &RebornRuntime,
     config: SlackHostBetaConfig,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
-    let actor_user_resolver = Arc::new(StaticProductActorUserResolver::new([(
-        config.slack_actor.clone(),
+    build_slack_host_beta_mounts(runtime, config).map(|mounts| mounts.events)
+}
+
+pub fn build_slack_host_beta_mounts(
+    runtime: &RebornRuntime,
+    config: SlackHostBetaConfig,
+) -> Result<SlackHostBetaMounts, SlackHostBetaBuildError> {
+    let local_runtime = runtime
+        .services()
+        .local_runtime
+        .as_ref()
+        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
+    let state = Arc::new(FilesystemSlackHostState::new(
+        Arc::clone(&local_runtime.host_state_filesystem),
+        config.tenant_id.clone(),
         config.user_id.clone(),
-    )]));
-    build_slack_events_route_mount_with_actor_user_resolver(runtime, config, actor_user_resolver)
+        config.agent_id.clone(),
+        config.project_id.clone(),
+    ));
+    let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
+    let binding_service = SlackPersonalUserBindingService::new(
+        [SlackPersonalBindingInstallation {
+            tenant_id: config.tenant_id.clone(),
+            installation_id: config.installation_id.clone(),
+            selector: config.installation_selector.clone(),
+        }],
+        binding_store,
+    );
+    let token_handle = slack_bot_token_handle()?;
+    let notifier: Arc<dyn SlackPersonalBindingPairingNotifier> =
+        Arc::new(SlackPairingChallengeHttpNotifier::new(
+            slack_protocol_egress(runtime, &config, token_handle.clone())?,
+            token_handle,
+        ));
+    let challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore> = state.clone();
+    let pairing =
+        SlackPersonalBindingPairingService::new(binding_service, challenge_store, notifier);
+    let actor_user_resolver = Arc::new(SlackPairingActorResolver::new(state, pairing.clone()));
+    let events = build_slack_events_route_mount_with_actor_user_resolver(
+        runtime,
+        config,
+        actor_user_resolver,
+    )?;
+
+    Ok(SlackHostBetaMounts {
+        events,
+        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
+    })
 }
 
 pub fn build_slack_events_route_mount_with_actor_user_resolver(
@@ -159,8 +225,7 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
     );
     let adapter_id = ProductAdapterId::new(SLACK_V2_ADAPTER_ID)
         .map_err(|reason| invalid_config("adapter_id", reason.to_string()))?;
-    let token_handle = EgressCredentialHandle::new(SLACK_BOT_TOKEN_HANDLE)
-        .map_err(|reason| invalid_config("bot_token_handle", reason.to_string()))?;
+    let token_handle = slack_bot_token_handle()?;
     let adapter: Arc<dyn ProductAdapter> = Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
         adapter_id: adapter_id.clone(),
         installation_id: config.installation_id.clone(),
@@ -220,28 +285,7 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
         ),
     ));
 
-    let local_runtime = runtime
-        .services()
-        .local_runtime
-        .as_ref()
-        .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
-    let runtime_http_egress = local_runtime
-        .runtime_http_egress
-        .clone()
-        .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
-    let egress = Arc::new(SlackProtocolHttpEgress::new(
-        runtime_http_egress,
-        Arc::new(StaticSlackEgressCredentialProvider::new(
-            token_handle,
-            config.bot_token.expose_secret().to_string(),
-        )),
-        EgressPolicy::new(adapter.declared_egress().to_vec()),
-        ResourceScope::local_default(
-            config.user_id.clone(),
-            ironclaw_host_api::InvocationId::new(),
-        )
-        .map_err(|reason| invalid_config("resource_scope", reason.to_string()))?,
-    ));
+    let egress = slack_protocol_egress(runtime, &config, token_handle)?;
     let outbound = Arc::new(InMemoryOutboundStateStore::default());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> = outbound;
@@ -271,6 +315,57 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
     Ok(slack_events_route_mount(
         SlackEventsRouteState::from_resolver(Arc::new(slack_resolver)),
     ))
+}
+
+fn slack_bot_token_handle() -> Result<EgressCredentialHandle, SlackHostBetaBuildError> {
+    EgressCredentialHandle::new(SLACK_BOT_TOKEN_HANDLE)
+        .map_err(|reason| invalid_config("bot_token_handle", reason.to_string()))
+}
+
+fn slack_protocol_egress(
+    runtime: &RebornRuntime,
+    config: &SlackHostBetaConfig,
+    token_handle: EgressCredentialHandle,
+) -> Result<Arc<dyn ProtocolHttpEgress>, SlackHostBetaBuildError> {
+    let local_runtime = runtime
+        .services()
+        .local_runtime
+        .as_ref()
+        .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
+    let runtime_http_egress = local_runtime
+        .runtime_http_egress
+        .clone()
+        .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
+    Ok(Arc::new(SlackProtocolHttpEgress::new(
+        runtime_http_egress,
+        Arc::new(StaticSlackEgressCredentialProvider::new(
+            token_handle.clone(),
+            config.bot_token.expose_secret().to_string(),
+        )),
+        EgressPolicy::new(slack_declared_egress_targets(token_handle)),
+        slack_egress_scope(config),
+    )))
+}
+
+fn slack_egress_scope(config: &SlackHostBetaConfig) -> ResourceScope {
+    ResourceScope {
+        tenant_id: config.tenant_id.clone(),
+        user_id: config.user_id.clone(),
+        agent_id: Some(config.agent_id.clone()),
+        project_id: config.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: ironclaw_host_api::InvocationId::new(),
+    }
+}
+
+fn slack_declared_egress_targets(
+    token_handle: EgressCredentialHandle,
+) -> Vec<DeclaredEgressTarget> {
+    vec![DeclaredEgressTarget::new(
+        DeclaredEgressHost::new(SLACK_API_HOST).expect("static Slack host valid"),
+        Some(token_handle),
+    )]
 }
 
 fn invalid_config(field: &'static str, reason: String) -> SlackHostBetaBuildError {
@@ -461,15 +556,31 @@ mod tests {
     }
 
     #[test]
-    fn slack_host_beta_config_binds_slack_actor_to_reborn_user() {
+    fn slack_host_beta_config_keeps_optional_legacy_slack_actor() {
         let config = config();
 
         assert_eq!(config.installation_id.as_str(), INSTALLATION);
-        assert_eq!(config.slack_actor.kind(), SLACK_USER_ACTOR_KIND);
-        assert_eq!(config.slack_actor.id(), SLACK_USER);
+        let slack_actor = config.slack_actor.as_ref().expect("legacy actor");
+        assert_eq!(slack_actor.kind(), SLACK_USER_ACTOR_KIND);
+        assert_eq!(slack_actor.id(), SLACK_USER);
         assert_eq!(config.user_id, UserId::new(USER).expect("user id"));
         assert_eq!(config.signing_secret.expose_secret(), SECRET);
         assert_eq!(config.bot_token.expose_secret(), "xoxb-host-token");
+    }
+
+    #[test]
+    fn slack_egress_scope_uses_configured_tenant_agent_and_project() {
+        let config = config();
+
+        let scope = slack_egress_scope(&config);
+
+        assert_eq!(scope.tenant_id, TenantId::new(TENANT).expect("tenant"));
+        assert_eq!(scope.user_id, UserId::new(USER).expect("user"));
+        assert_eq!(scope.agent_id, Some(AgentId::new(AGENT).expect("agent")));
+        assert_eq!(
+            scope.project_id,
+            Some(ProjectId::new(PROJECT).expect("project"))
+        );
     }
 
     fn config() -> SlackHostBetaConfig {
@@ -480,7 +591,7 @@ mod tests {
             installation_id: INSTALLATION.to_string(),
             team_id: TEAM.to_string(),
             api_app_id: Some(API_APP.to_string()),
-            slack_user_id: SLACK_USER.to_string(),
+            slack_user_id: Some(SLACK_USER.to_string()),
             user_id: UserId::new(USER).expect("user"),
             signing_secret: SecretString::from(SECRET),
             bot_token: SecretString::from("xoxb-host-token"),

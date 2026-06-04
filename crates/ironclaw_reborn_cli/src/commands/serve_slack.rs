@@ -68,8 +68,7 @@ pub(crate) fn resolve_slack_host_beta_config(
         required_slack_config_value("installation_id", &section.installation_id, config_path)?;
     let team_id = required_slack_config_value("team_id", &section.team_id, config_path)?;
     let api_app_id = optional_slack_config_value("api_app_id", &section.api_app_id)?;
-    let slack_user_id =
-        required_slack_config_value("slack_user_id", &section.slack_user_id, config_path)?;
+    let slack_user_id = optional_slack_config_value("slack_user_id", &section.slack_user_id)?;
     let mapped_user_id = match optional_slack_config_value("user_id", &section.user_id)? {
         Some(raw) => {
             let user_id = ironclaw_reborn_composition::host_api::UserId::new(&raw)
@@ -317,10 +316,49 @@ mod tests {
 
         assert_eq!(resolved.installation_id.as_str(), "install-alpha");
         assert!(format!("{:?}", resolved.installation_selector).contains("AppTeam"));
-        assert_eq!(resolved.slack_actor.id(), "U123");
+        assert_eq!(
+            resolved.slack_actor.as_ref().expect("legacy actor").id(),
+            "U123"
+        );
         assert_eq!(resolved.user_id, user_id("web-user"));
         assert_eq!(resolved.signing_secret.expose_secret(), "signing-secret");
         assert_eq!(resolved.bot_token.expose_secret(), "xoxb-token");
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_config_does_not_require_static_slack_user() {
+        let _lock = env_lock();
+        let _signing = EnvGuard::set(
+            "IRONCLAW_TEST_SLACK_SIGNING_SECRET_NO_STATIC_USER",
+            "signing-secret",
+        );
+        let _bot = EnvGuard::set("IRONCLAW_TEST_SLACK_BOT_TOKEN_NO_STATIC_USER", "xoxb-token");
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
+            signing_secret_env: Some(
+                "IRONCLAW_TEST_SLACK_SIGNING_SECRET_NO_STATIC_USER".to_string(),
+            ),
+            bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_NO_STATIC_USER".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_slack_host_beta_config(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect("Slack config should resolve")
+        .expect("Slack should be enabled");
+
+        assert!(resolved.slack_actor.is_none());
+        assert_eq!(resolved.user_id, user_id("web-user"));
     }
 
     #[cfg(feature = "slack-v2-host-beta")]

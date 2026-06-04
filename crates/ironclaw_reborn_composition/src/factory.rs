@@ -353,6 +353,8 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) host_state_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_mounts: MountView,
     pub(crate) local_dev_storage_root: PathBuf,
@@ -835,6 +837,7 @@ fn build_local_dev_store_graph(
         memory_mounts,
         skill_filesystem,
         workspace_filesystem,
+        host_state_filesystem: Arc::clone(&scoped_filesystem),
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         workspace_mounts,
         local_dev_storage_root,
@@ -921,6 +924,8 @@ fn build_local_dev_store_graph(
         memory_mounts,
         skill_filesystem,
         workspace_filesystem,
+        #[cfg(feature = "postgres")]
+        host_state_filesystem: Arc::clone(&subagent_goal_filesystem),
         #[cfg(feature = "postgres")]
         subagent_goal_filesystem,
         workspace_mounts,

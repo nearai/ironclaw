@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use clap::Args;
 #[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_reborn_composition::build_slack_events_route_mount;
+use ironclaw_reborn_composition::build_slack_host_beta_mounts;
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
     RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
@@ -388,9 +388,11 @@ impl ServeCommand {
             }
             #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_config) = slack_host_beta_config {
-                let slack_mount = build_slack_events_route_mount(&runtime, slack_config)
-                    .context("failed to compose Slack Events API host-beta route")?;
-                serve_config = serve_config.with_public_route_mount(slack_mount);
+                let slack_mounts = build_slack_host_beta_mounts(&runtime, slack_config)
+                    .context("failed to compose Slack host-beta routes")?;
+                serve_config = serve_config
+                    .with_public_route_mount(slack_mounts.events)
+                    .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing);
             }
             if let Some(mount) = public_mount {
                 serve_config = serve_config.with_public_route_mount(mount);
