@@ -192,7 +192,9 @@ pub use slack_host_beta::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{
-    RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+    RebornIdentityProvider, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, SlackBindingApiAppId,
+    SlackBindingEnterpriseId, SlackBindingTeamId, SlackBindingUserId,
     SlackPersonalBindingInstallation, SlackPersonalUserBindingError,
     SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
 };
