@@ -172,7 +172,7 @@ impl McpTransport for UnixMcpTransport {
 
         // On broken pipe, reconnect once and retry. This recovers from the
         // common case where the sidecar container was recycled (e.g. to pick
-        // up a new env var) while bastionclaw was already running. The caller
+        // up a new env var) while t3claw was already running. The caller
         // does not need to know a reconnect happened.
         if let Err(ref e) = result
             && is_broken_pipe(e)
