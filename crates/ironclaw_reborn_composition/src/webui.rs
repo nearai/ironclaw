@@ -113,6 +113,19 @@ pub fn build_webui_services(
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
 
+    // Compose the operator LLM-config settings service when the runtime was
+    // assembled with a boot config. The secret store stays private to this
+    // crate; the service is the only facade-shaped handle that leaves.
+    #[cfg(feature = "root-llm-provider")]
+    if let Some(boot) = runtime.webui_boot_config() {
+        let keys = crate::LlmKeyStore::new(runtime.services().secret_store());
+        let mut llm_config = crate::RebornLlmConfigService::new(boot.clone(), keys);
+        if let Some(reload) = runtime.webui_llm_reload_trigger() {
+            llm_config = llm_config.with_reload_trigger(reload);
+        }
+        api = api.with_llm_config_service(Arc::new(llm_config));
+    }
+
     Ok(RebornWebuiBundle {
         api: Arc::new(api),
         product_auth: services.product_auth.clone(),

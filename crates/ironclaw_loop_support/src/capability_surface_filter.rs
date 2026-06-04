@@ -1183,8 +1183,10 @@ mod tests {
         let filter =
             CapabilitySurfaceVisibleFilter::new(inner.clone(), [capability_id("demo.allowed")]);
 
+        let mut call = capability_info_call("demo.denied");
+        call.arguments["detail"] = serde_json::json!("schema");
         let error = filter
-            .register_provider_tool_call(capability_info_call("demo.denied"))
+            .register_provider_tool_call(call)
             .await
             .expect_err("denied capability_info target should fail before staging");
 

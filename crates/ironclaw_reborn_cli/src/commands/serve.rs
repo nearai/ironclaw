@@ -5,14 +5,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_reborn_composition::build_slack_host_beta_mounts;
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
     RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
     build_reborn_runtime, build_webui_services, webui_v2_app_with_lifecycle,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_reborn_composition::{
-    build_slack_events_route_mount_with_canonical_identity, open_reborn_identity_resolver,
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
@@ -143,6 +141,12 @@ impl ServeCommand {
         // identity source) and every turn fails with `UnknownThread`.
         let runtime_owner = resolve_webui_runtime_owner(identity_section, &user_id_raw)?;
         let mut runtime_input = runtime_input.with_owner_id(runtime_owner);
+        // Carry the boot config so the WebUI facade can compose the operator
+        // LLM-config settings service over `providers.json` / `config.toml`.
+        #[cfg(feature = "root-llm-provider")]
+        {
+            runtime_input = runtime_input.with_boot_config(boot_config.clone());
+        }
         let default_agent_raw =
             resolve_webui_default_agent(identity_section, &runtime_input.identity);
         let default_agent_id =
@@ -154,8 +158,7 @@ impl ServeCommand {
             .map(ironclaw_reborn_composition::host_api::ProjectId::new)
             .transpose()
             .map_err(|err| anyhow!("[identity].default_project is invalid: {err}"))?;
-        #[cfg(feature = "slack-v2-host-beta")]
-        let slack_host_beta_config = crate::commands::serve_slack::resolve_slack_host_beta_config(
+        let slack_host_beta_config = crate::commands::serve_slack::resolve_slack_config_for_serve(
             config_file.as_ref().and_then(|file| file.slack.as_ref()),
             &tenant_id,
             &default_agent_id,
@@ -164,9 +167,7 @@ impl ServeCommand {
             &boot_config.home().config_file_path(),
         )?;
         #[cfg(not(feature = "slack-v2-host-beta"))]
-        crate::commands::serve_slack::reject_enabled_slack_without_feature(
-            config_file.as_ref().and_then(|file| file.slack.as_ref()),
-        )?;
+        let _ = slack_host_beta_config;
 
         // Resolve listen address with explicit precedence:
         //   CLI flag (Some(...)) > config file > compile-time default.
@@ -393,19 +394,11 @@ impl ServeCommand {
             }
             #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_config) = slack_host_beta_config {
-                // Slack actors resolve through the canonical Reborn identity
-                // store (issue #4381), the same store WebUI OAuth login uses.
-                let identity_resolver = open_reborn_identity_resolver(&user_store_path)
-                    .await
-                    .context("failed to initialize the Reborn identity resolver for Slack")?;
-                let slack_mount = build_slack_events_route_mount_with_canonical_identity(
-                    &runtime,
-                    slack_config,
-                    identity_resolver,
-                )
-                .await
-                .context("failed to compose Slack Events API host-beta route")?;
-                serve_config = serve_config.with_public_route_mount(slack_mount);
+                let slack_mounts = build_slack_host_beta_mounts(&runtime, slack_config)
+                    .context("failed to compose Slack host-beta routes")?;
+                serve_config = serve_config
+                    .with_public_route_mount(slack_mounts.events)
+                    .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing);
             }
             if let Some(mount) = public_mount {
                 serve_config = serve_config.with_public_route_mount(mount);

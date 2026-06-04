@@ -15,6 +15,8 @@ mod adapter;
 mod payload;
 mod render;
 
+pub const SLACK_V2_ADAPTER_ID: &str = "slack_v2";
+
 pub use adapter::{
     SlackV2Adapter, SlackV2AdapterConfig, slack_declared_egress_hosts, slack_default_capabilities,
     slack_request_signature_auth_requirement,

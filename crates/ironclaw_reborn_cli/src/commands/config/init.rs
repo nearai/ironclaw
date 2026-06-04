@@ -206,7 +206,9 @@ api_key_env = "OPENAI_API_KEY"
 # enabled = false
 # installation_id = "install-alpha"
 # team_id = "T123"
+# # Required for tenant app-scoped personal-binding pairing.
 # api_app_id = "A123"
+# # Optional legacy static mapping. Omit for the pairing-code flow.
 # slack_user_id = "U123"
 # # Defaults to the WebUI authenticated user when omitted.
 # # user_id = "reborn-cli"

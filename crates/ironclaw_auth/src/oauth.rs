@@ -590,9 +590,6 @@ pub fn parse_google_callback_scopes(
     raw.split([' ', ','])
         .filter(|scope| !scope.is_empty())
         .map(|scope| {
-            if !is_allowed_google_scope(scope) {
-                return Err(AuthProductError::MalformedCallback);
-            }
             ProviderScope::new(scope.to_string()).map_err(|_| AuthProductError::MalformedCallback)
         })
         .collect::<Result<Vec<_>, _>>()
@@ -732,5 +729,24 @@ mod tests {
             assert!(is_allowed_google_scope(scope), "{scope} must be allowed");
             assert!(parse_google_requested_scopes(&[scope.to_string()]).is_ok());
         }
+    }
+
+    #[test]
+    fn google_callback_scope_parser_accepts_provider_returned_extras() {
+        let scopes = parse_google_callback_scopes(Some(&format!(
+            "openid email profile {GOOGLE_GMAIL_READONLY_SCOPE}"
+        )))
+        .expect("callback scopes")
+        .expect("present callback scopes");
+
+        assert_eq!(
+            scopes,
+            vec![
+                ProviderScope::new("openid").unwrap(),
+                ProviderScope::new("email").unwrap(),
+                ProviderScope::new("profile").unwrap(),
+                ProviderScope::new(GOOGLE_GMAIL_READONLY_SCOPE).unwrap(),
+            ]
+        );
     }
 }

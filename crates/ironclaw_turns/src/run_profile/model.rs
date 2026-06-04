@@ -7,8 +7,9 @@ use thiserror::Error;
 use crate::LoopDiagnosticRef;
 
 use super::host::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopModelPort, LoopModelRequest, LoopModelResponse,
-    LoopRunContext, LoopSafeSummary, ParentLoopOutput, sanitize_model_visible_text,
+    AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, LoopModelPort,
+    LoopModelRequest, LoopModelResponse, LoopRunContext, LoopSafeSummary, ParentLoopOutput,
+    sanitize_model_visible_text,
 };
 use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
 use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
@@ -106,6 +107,8 @@ pub struct LoopModelGatewayRequest {
 pub struct LoopModelGatewayError {
     pub kind: AgentLoopHostErrorKind,
     pub safe_summary: LoopSafeSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -117,8 +120,14 @@ impl LoopModelGatewayError {
         Ok(Self {
             kind,
             safe_summary: LoopSafeSummary::new(safe_summary)?,
+            reason_kind: None,
             diagnostic_ref: None,
         })
+    }
+
+    pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
+        self.reason_kind = Some(reason_kind);
+        self
     }
 
     pub fn with_diagnostic_ref(mut self, diagnostic_ref: LoopDiagnosticRef) -> Self {
@@ -128,6 +137,9 @@ impl LoopModelGatewayError {
 
     pub fn into_host_error(self) -> AgentLoopHostError {
         let mut error = AgentLoopHostError::new(self.kind, self.safe_summary.as_str().to_string());
+        if let Some(reason_kind) = self.reason_kind {
+            error = error.with_reason_kind(reason_kind);
+        }
         if let Some(diagnostic_ref) = self.diagnostic_ref {
             error = error.with_diagnostic_ref(diagnostic_ref);
         }

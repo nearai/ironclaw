@@ -120,6 +120,15 @@ export function listThreads({ limit, cursor } = {}) {
   return apiFetch(url.pathname + url.search);
 }
 
+// --- Automations ---
+
+export function listAutomations({ limit } = {}) {
+  const params = new URLSearchParams();
+  if (limit != null) params.set("limit", String(limit));
+  const query = params.toString();
+  return apiFetch(`${V2_BASE}/automations${query ? `?${query}` : ""}`);
+}
+
 // --- Messages ---
 
 export function sendMessage({ threadId, content, clientActionId: clientId }) {

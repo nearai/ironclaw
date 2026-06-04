@@ -263,11 +263,11 @@ export function useOauthSetup(packageRef) {
   });
 }
 
-export function usePairing(channel) {
+export function usePairing(channel, options = {}) {
   const query = useQuery({
     queryKey: ["pairing", channel],
     queryFn: () => fetchPairingRequests(channel),
-    enabled: Boolean(channel),
+    enabled: Boolean(channel) && options.enabled !== false,
     refetchInterval: 5000,
   });
 
@@ -286,5 +286,7 @@ export function usePairing(channel) {
     isLoading: query.isLoading,
     approve: approveMutation.mutate,
     isApproving: approveMutation.isPending,
+    result: approveMutation.isSuccess ? approveMutation.data : null,
+    error: approveMutation.isError ? approveMutation.error : null,
   };
 }

@@ -66,11 +66,22 @@ browser-reachable.
 | `webui.v2.remove_extension` | POST | `/api/webchat/v2/extensions/{package_id}/remove` | None | `ProductWorkflow` |
 | `webui.v2.get_extension_setup` | GET | `/api/webchat/v2/extensions/{package_id}/setup` | None | `ProjectionOnly` |
 | `webui.v2.setup_extension` | POST | `/api/webchat/v2/extensions/{package_id}/setup` | None | `ProductWorkflow` |
+| `webui.v2.get_llm_config` | GET | `/api/webchat/v2/llm/providers` | None | `ProjectionOnly` |
+| `webui.v2.upsert_llm_provider` | POST | `/api/webchat/v2/llm/providers` | None | `ProductWorkflow` |
+| `webui.v2.delete_llm_provider` | POST | `/api/webchat/v2/llm/providers/{provider_id}/delete` | None | `ProductWorkflow` |
+| `webui.v2.set_active_llm` | POST | `/api/webchat/v2/llm/active` | None | `ProductWorkflow` |
+| `webui.v2.test_llm_connection` | POST | `/api/webchat/v2/llm/test-connection` | None | `ProductWorkflow` |
+| `webui.v2.list_llm_models` | POST | `/api/webchat/v2/llm/list-models` | None | `ProductWorkflow` |
 
 All routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
 constructing the `WebUiAuthenticatedCaller` and injecting it as an
 axum `Extension` before the handler runs.
+
+The LLM configuration routes are operator-wide. Host composition must only
+mount them for authenticators that represent a single trusted operator; multi-
+user session/OIDC authenticators should leave those routes unmounted until an
+admin role boundary exists in `WebUiAuthenticatedCaller`.
 
 ### List-threads
 

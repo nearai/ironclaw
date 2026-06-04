@@ -238,10 +238,12 @@ pub struct SlackSection {
     pub installation_id: Option<String>,
     /// Slack team id used to select this installation from signed envelopes.
     pub team_id: Option<String>,
-    /// Optional Slack app id. When set, installation matching requires both
-    /// `api_app_id` and `team_id`.
+    /// Slack app id for tenant app-scoped pairing. Required by the
+    /// host-beta personal-binding pairing path.
     pub api_app_id: Option<String>,
-    /// Slack user id allowed to route through this beta installation.
+    /// Optional legacy static Slack user id to map directly to `user_id`.
+    /// Omit this for the pairing-code flow, where unknown Slack actors are
+    /// prompted to bind in WebUI.
     pub slack_user_id: Option<String>,
     /// Reborn user id the configured Slack user maps to. Defaults in the CLI
     /// to the same user as the WebUI env-bearer authenticator.

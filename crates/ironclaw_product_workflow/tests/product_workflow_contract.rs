@@ -24,17 +24,17 @@ use ironclaw_product_workflow::{
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionScope, AuthInteractionService, AuthInteractionStatus, AuthRequestRef,
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
-    DefaultInboundTurnService, DefaultProductWorkflow, FakeBeforeInboundPolicy,
-    FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService,
-    IdempotencyDecision, IdempotencyLedger, InMemoryIdempotencyLedger, InboundTurnOutcome,
-    InboundTurnService, InboundUserMessageDispatch, LinkedThreadActionId,
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+    FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
+    FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger, InMemoryIdempotencyLedger,
+    InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch, LinkedThreadActionId,
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
     PendingAuthInteractionView, ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductCommandName, ProductConversationBindingService, ProductInstallationKey,
     ProductInstallationScope, ProductWorkflowError, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, ResolvedBinding, SourceBindingKey,
+    ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding, SourceBindingKey,
     StaticProductInstallationResolver, approval_gate_ref,
 };
 use ironclaw_threads::InMemorySessionThreadService;
@@ -1857,6 +1857,90 @@ async fn actor_user_resolver_propagates_resolver_error_without_turn_submission()
 
     assert!(coordinator.submissions().is_empty());
     assert!(matches!(err, ProductAdapterError::Internal { .. }));
+}
+
+#[tokio::test]
+async fn lookup_binding_with_actor_user_resolver_rejects_unknown_actor() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let (binding, actor_resolver) = product_binding_service_with_actor_user_resolver(
+        conversations,
+        std::iter::empty::<(ExternalActorRef, UserId)>(),
+    );
+
+    let err = binding
+        .lookup_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
+            "lookup-resolver-missing-actor",
+        )))
+        .await
+        .expect_err("lookup must require a resolver-backed actor binding");
+
+    assert_eq!(actor_resolver.calls().len(), 1);
+    assert!(matches!(err, ProductWorkflowError::BindingRequired { .. }));
+}
+
+#[tokio::test]
+async fn lookup_binding_with_actor_user_resolver_propagates_resolver_error() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let binding = product_binding_service_with_actor_user_resolver_arc(
+        conversations,
+        Arc::new(FailingProductActorUserResolver),
+    );
+
+    let err = binding
+        .lookup_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
+            "lookup-resolver-error",
+        )))
+        .await
+        .expect_err("lookup must propagate resolver backend errors");
+
+    assert!(matches!(
+        err,
+        ProductWorkflowError::BindingResolutionFailed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn lookup_binding_with_actor_user_resolver_rejects_mismatched_pairing() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            TenantId::new("tenant:alpha").expect("tenant"),
+            ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+            ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:paired-bob").expect("user"),
+        )
+        .await;
+    let seed_binding = product_binding_service(
+        conversations.clone(),
+        vec![(
+            "test_adapter",
+            "install_alpha",
+            "tenant:alpha",
+            "agent:alpha",
+            Some("project:alpha"),
+        )],
+    );
+    let envelope = sample_envelope("lookup-resolver-mismatch");
+    seed_binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect("seed canonical conversation binding");
+    let (binding, actor_resolver) = product_binding_service_with_actor_user_resolver(
+        conversations,
+        [(
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+            UserId::new("user:resolved-alice").expect("user"),
+        )],
+    );
+
+    let err = binding
+        .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect_err("lookup must reject a pairing for a different resolved user");
+
+    assert_eq!(actor_resolver.calls().len(), 1);
+    assert!(matches!(err, ProductWorkflowError::BindingAccessDenied));
 }
 
 #[tokio::test]

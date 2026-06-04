@@ -1847,6 +1847,7 @@ async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
             stage: HostStage::Model,
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
+            reason_kind: None,
             diagnostic_ref: Some(LoopDiagnosticRef::new("diag:model-credentials").expect("valid")),
         }
     );

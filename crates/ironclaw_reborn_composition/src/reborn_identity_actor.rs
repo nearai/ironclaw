@@ -7,6 +7,11 @@
 //! actors resolve through the SAME store as WebUI OAuth login instead of a
 //! parallel one (issue #4381).
 //!
+//! Production `serve` currently routes Slack identity through
+//! `FilesystemSlackHostState` (the personal-binding host state); migrating
+//! that durable binding/lookup onto this canonical adapter is a follow-up.
+//! This adapter and its tests lock the canonical-backed seam in the meantime.
+//!
 //! Channel actors are `channel_actor`-surface external identities and are
 //! **link-only**: [`resolve_user_identity`](RebornUserIdentityLookup::resolve_user_identity)
 //! never mints (an unbound actor returns `None` and the caller fails
@@ -92,7 +97,7 @@ impl RebornUserIdentityBindingStore for CanonicalRebornUserIdentityStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slack_personal_binding::{RebornIdentityProvider, RebornIdentityProviderUserId};
+    use crate::slack_personal_binding::{RebornIdentityProviderId, RebornIdentityProviderUserId};
     use ironclaw_reborn_identity::RebornLibSqlIdentityStore;
 
     async fn store() -> CanonicalRebornUserIdentityStore {
@@ -114,7 +119,7 @@ mod tests {
 
     fn binding(provider_user_id: &str, user_id: &str) -> RebornUserIdentityBinding {
         RebornUserIdentityBinding {
-            provider: RebornIdentityProvider::new("slack").expect("provider"),
+            provider: RebornIdentityProviderId::new("slack").expect("provider"),
             provider_user_id: RebornIdentityProviderUserId::new(provider_user_id).expect("subject"),
             user_id: UserId::new(user_id).expect("user"),
         }

@@ -158,6 +158,55 @@ async fn reborn_trace_process_first_party_tools_parity() {
 }
 
 #[tokio::test]
+async fn reborn_trace_spawn_subagent_is_surface_text_and_structured_tool() {
+    let spawn_subagent =
+        CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id");
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::AssertProviderToolsThenResponse {
+            capability_ids: vec![spawn_subagent.clone()],
+            response: HostManagedModelResponse::assistant_reply("spawn surface parity complete"),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_host_runtime_process_capabilities(
+        "room-trace-spawn-subagent-surface-parity",
+        model_gateway,
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-trace-spawn-subagent-surface-parity",
+            "verify spawn subagent is surfaced",
+        )
+        .await
+        .expect("submit text");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("completed run");
+    harness
+        .assert_final_reply("spawn surface parity complete")
+        .await
+        .expect("final reply");
+
+    let requests = harness.model_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains(spawn_subagent.as_str())),
+        "spawn_subagent must be advertised in Reborn model-facing surface text"
+    );
+    harness.assert_model_exhausted();
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn reborn_trace_http_save_first_party_tool_parity() {
     let http_save = CapabilityId::new(HTTP_SAVE_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([

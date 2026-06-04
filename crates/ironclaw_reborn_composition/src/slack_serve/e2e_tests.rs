@@ -58,7 +58,7 @@ use crate::slack_delivery::{
     SlackFinalReplyDeliverySettings,
 };
 use crate::{
-    CanonicalRebornUserIdentityStore, RebornIdentityProvider, RebornIdentityProviderUserId,
+    CanonicalRebornUserIdentityStore, RebornIdentityProviderId, RebornIdentityProviderUserId,
     RebornUserIdentityBinding, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
     RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
 };
@@ -348,7 +348,7 @@ async fn canonical_identity_actor_user_resolver(
     if let Some(user) = bind_actor {
         store
             .bind_user_identity(RebornUserIdentityBinding {
-                provider: RebornIdentityProvider::new("slack").expect("provider"),
+                provider: RebornIdentityProviderId::new("slack").expect("provider"),
                 provider_user_id: RebornIdentityProviderUserId::new(format!(
                     "{INSTALLATION}:{SLACK_USER}"
                 ))

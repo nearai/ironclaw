@@ -91,6 +91,74 @@ async fn assert_failed_run_status_summary(
 }
 
 #[tokio::test]
+async fn webui_event_stream_projects_model_credit_exhaustion_failure_summary() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-credit-failed-thread").unwrap();
+    let turn_run = TurnRunId::new();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let actor = TurnActor::new(user_id.clone());
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::Failed,
+                kind: TurnEventKind::Failed,
+                blocked_gate: None,
+                sanitized_reason: Some("model_credits_exhausted".to_string()),
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1)),
+        }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| match event.payload() {
+        ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter().any(|item| {
+            matches!(
+                item,
+                ProductProjectionItem::RunStatus {
+                    run_id,
+                    status,
+                    failure_category: Some(category),
+                    failure_summary: Some(summary),
+                } if *run_id == turn_run
+                    && status == "failed"
+                    && category.category() == "model_credits_exhausted"
+                    && summary
+                        == "The AI provider account is out of credits. Add credits or switch providers and try again."
+            )
+        }),
+        _ => false,
+    }));
+}
+
+#[tokio::test]
 async fn webui_event_stream_uses_model_failure_explanation_when_available() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();

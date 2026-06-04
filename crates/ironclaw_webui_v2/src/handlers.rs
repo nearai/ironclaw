@@ -22,13 +22,14 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError, ProjectionCursor,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, ProductWorkflowError, ProjectionCursor, RebornCancelRunResponse,
+    RebornCreateThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
+    RebornExtensionRegistryResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
+    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest,
@@ -522,6 +523,74 @@ pub async fn setup_extension(
         .services()
         .setup_extension(caller, package_ref, body)
         .await?;
+    Ok(Json(response))
+}
+
+/// Path param carrying the LLM provider id.
+#[derive(Debug, Deserialize)]
+pub struct LlmProviderPath {
+    pub provider_id: String,
+}
+
+/// `GET /api/webchat/v2/llm/providers`
+pub async fn get_llm_config(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    let response = state.services().get_llm_config(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/providers`
+pub async fn upsert_llm_provider(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<UpsertLlmProviderRequest>,
+) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    let response = state.services().upsert_llm_provider(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/providers/{provider_id}/delete`
+pub async fn delete_llm_provider(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(LlmProviderPath { provider_id }): Path<LlmProviderPath>,
+) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .delete_llm_provider(caller, provider_id)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/active`
+pub async fn set_active_llm(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<SetActiveLlmRequest>,
+) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    let response = state.services().set_active_llm(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/test-connection`
+pub async fn test_llm_connection(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<LlmProbeRequest>,
+) -> Result<Json<LlmProbeResult>, WebUiV2HttpError> {
+    let response = state.services().test_llm_connection(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/list-models`
+pub async fn list_llm_models(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<LlmProbeRequest>,
+) -> Result<Json<LlmModelsResult>, WebUiV2HttpError> {
+    let response = state.services().list_llm_models(caller, body).await?;
     Ok(Json(response))
 }
 

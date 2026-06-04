@@ -11,25 +11,18 @@ use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
 use thiserror::Error;
 
-use crate::slack_actor_identity::slack_user_identity_provider_user_id;
-use crate::slack_serve::SlackInstallationSelector;
-
-const SLACK_IDENTITY_PROVIDER: &str = "slack";
+use crate::slack_actor_identity::{SLACK_IDENTITY_PROVIDER, slack_user_identity_provider_user_id};
+use crate::slack_serve::{
+    SlackApiAppId, SlackEnterpriseId, SlackInstallationSelector, SlackTeamId, SlackUserId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornUserIdentityBinding {
-    pub provider: RebornIdentityProvider,
-    pub provider_user_id: RebornIdentityProviderUserId,
-    pub user_id: UserId,
-}
+pub struct RebornIdentityProviderId(String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RebornIdentityProvider(String);
-
-impl RebornIdentityProvider {
+impl RebornIdentityProviderId {
     pub fn new(value: impl Into<String>) -> Result<Self, RebornUserIdentityBindingError> {
         let value = value.into();
-        validate_binding_id("identity provider", &value)?;
+        validate_identity_value("provider", &value)?;
         Ok(Self(value))
     }
 
@@ -38,19 +31,19 @@ impl RebornIdentityProvider {
     }
 }
 
-impl std::fmt::Display for RebornIdentityProvider {
+impl std::fmt::Display for RebornIdentityProviderId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornIdentityProviderUserId(String);
 
 impl RebornIdentityProviderUserId {
     pub fn new(value: impl Into<String>) -> Result<Self, RebornUserIdentityBindingError> {
         let value = value.into();
-        validate_binding_id("identity provider user", &value)?;
+        validate_identity_value("provider_user_id", &value)?;
         Ok(Self(value))
     }
 
@@ -65,12 +58,19 @@ impl std::fmt::Display for RebornIdentityProviderUserId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornUserIdentityBinding {
+    pub provider: RebornIdentityProviderId,
+    pub provider_user_id: RebornIdentityProviderUserId,
+    pub user_id: UserId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RebornUserIdentityBindingError {
     #[error("reborn user identity binding backend unavailable: {0}")]
     Backend(String),
-    #[error("invalid {field} id: {reason}")]
-    InvalidIdentityId {
+    #[error("invalid reborn user identity {field}: {reason}")]
+    InvalidIdentityField {
         field: &'static str,
         reason: &'static str,
     },
@@ -92,44 +92,19 @@ pub struct SlackPersonalBindingInstallation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlackPersonalUserBindingRequest {
+pub struct SlackPersonalBindingPrincipal {
     pub tenant_id: TenantId,
+    pub user_id: UserId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlackPersonalUserBindingRequest {
     pub installation_id: AdapterInstallationId,
-    pub slack_user_id: SlackBindingUserId,
-    pub team_id: SlackBindingTeamId,
-    pub enterprise_id: Option<SlackBindingEnterpriseId>,
-    pub api_app_id: Option<SlackBindingApiAppId>,
+    pub slack_user_id: SlackUserId,
+    pub team_id: SlackTeamId,
+    pub enterprise_id: Option<SlackEnterpriseId>,
+    pub api_app_id: SlackApiAppId,
 }
-
-macro_rules! slack_binding_id_type {
-    ($name:ident, $field:literal) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, SlackPersonalUserBindingError> {
-                let value = value.into();
-                validate_slack_id($field, &value)?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl std::fmt::Display for $name {
-            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str(self.as_str())
-            }
-        }
-    };
-}
-
-slack_binding_id_type!(SlackBindingUserId, "slack user");
-slack_binding_id_type!(SlackBindingTeamId, "slack team");
-slack_binding_id_type!(SlackBindingEnterpriseId, "slack enterprise");
-slack_binding_id_type!(SlackBindingApiAppId, "slack app");
 
 #[derive(Clone)]
 pub struct SlackPersonalUserBindingService {
@@ -150,39 +125,100 @@ impl SlackPersonalUserBindingService {
 
     pub async fn bind_personal_user(
         &self,
-        authenticated_user_id: UserId,
+        principal: SlackPersonalBindingPrincipal,
         request: SlackPersonalUserBindingRequest,
     ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
+        validate_slack_id("slack user", request.slack_user_id.as_str())?;
+        validate_slack_id("slack team", request.team_id.as_str())?;
+        validate_optional_slack_id(
+            "slack enterprise",
+            request
+                .enterprise_id
+                .as_ref()
+                .map(SlackEnterpriseId::as_str),
+        )?;
+        validate_slack_id("slack app", request.api_app_id.as_str())?;
+
         let installation = self
             .installations
             .iter()
             .find(|installation| {
-                installation.tenant_id == request.tenant_id
+                installation.tenant_id == principal.tenant_id
                     && installation.installation_id == request.installation_id
             })
             .ok_or_else(|| SlackPersonalUserBindingError::UnknownInstallation {
-                tenant_id: request.tenant_id.clone(),
+                tenant_id: principal.tenant_id.clone(),
                 installation_id: request.installation_id.clone(),
             })?;
 
-        if !tenant_app_selector_matches_request(&installation.selector, &request)? {
+        if !tenant_app_selector_matches_request(&installation.selector, &principal, &request)? {
             return Err(
                 SlackPersonalUserBindingError::SlackInstallationContextMismatch {
-                    tenant_id: request.tenant_id.clone(),
+                    tenant_id: principal.tenant_id.clone(),
                     installation_id: request.installation_id.clone(),
                 },
             );
         }
 
+        self.bind_validated_actor(
+            request.installation_id,
+            request.slack_user_id,
+            principal.user_id,
+        )
+        .await
+    }
+
+    pub async fn bind_installation_actor(
+        &self,
+        principal: SlackPersonalBindingPrincipal,
+        installation_id: AdapterInstallationId,
+        slack_user_id: SlackUserId,
+    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
+        self.validate_installation_actor(&principal, &installation_id, &slack_user_id)?;
+        self.bind_validated_actor(installation_id, slack_user_id, principal.user_id)
+            .await
+    }
+
+    pub(crate) fn validate_installation_actor(
+        &self,
+        principal: &SlackPersonalBindingPrincipal,
+        installation_id: &AdapterInstallationId,
+        slack_user_id: &SlackUserId,
+    ) -> Result<(), SlackPersonalUserBindingError> {
+        validate_slack_id("slack user", slack_user_id.as_str())?;
+        let installation = self.installation_for_principal(principal, installation_id)?;
+        ensure_tenant_app_scoped(&installation.selector, principal, installation_id)
+    }
+
+    fn installation_for_principal(
+        &self,
+        principal: &SlackPersonalBindingPrincipal,
+        installation_id: &AdapterInstallationId,
+    ) -> Result<&SlackPersonalBindingInstallation, SlackPersonalUserBindingError> {
+        self.installations
+            .iter()
+            .find(|installation| {
+                installation.tenant_id == principal.tenant_id
+                    && installation.installation_id == *installation_id
+            })
+            .ok_or_else(|| SlackPersonalUserBindingError::UnknownInstallation {
+                tenant_id: principal.tenant_id.clone(),
+                installation_id: installation_id.clone(),
+            })
+    }
+
+    async fn bind_validated_actor(
+        &self,
+        installation_id: AdapterInstallationId,
+        slack_user_id: SlackUserId,
+        user_id: UserId,
+    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
         let binding = RebornUserIdentityBinding {
-            provider: RebornIdentityProvider::new(SLACK_IDENTITY_PROVIDER)?,
+            provider: RebornIdentityProviderId::new(SLACK_IDENTITY_PROVIDER)?,
             provider_user_id: RebornIdentityProviderUserId::new(
-                slack_user_identity_provider_user_id(
-                    &request.installation_id,
-                    request.slack_user_id.as_str(),
-                ),
+                slack_user_identity_provider_user_id(&installation_id, slack_user_id.as_str()),
             )?,
-            user_id: authenticated_user_id,
+            user_id,
         };
         self.store
             .bind_user_identity(binding.clone())
@@ -218,13 +254,6 @@ pub enum SlackPersonalUserBindingError {
         tenant_id: TenantId,
         installation_id: AdapterInstallationId,
     },
-    #[error(
-        "slack installation {installation_id} for tenant {tenant_id} has no app-scoped Slack context"
-    )]
-    InstallationNotAppScoped {
-        tenant_id: TenantId,
-        installation_id: AdapterInstallationId,
-    },
     #[error("slack proof does not match installation {installation_id} for tenant {tenant_id}")]
     SlackInstallationContextMismatch {
         tenant_id: TenantId,
@@ -239,18 +268,18 @@ pub enum SlackPersonalUserBindingError {
     BindingStore(#[from] RebornUserIdentityBindingError),
 }
 
-fn validate_binding_id(
+fn validate_identity_value(
     field: &'static str,
     value: &str,
 ) -> Result<(), RebornUserIdentityBindingError> {
     if value.is_empty() {
-        return Err(RebornUserIdentityBindingError::InvalidIdentityId {
+        return Err(RebornUserIdentityBindingError::InvalidIdentityField {
             field,
             reason: "must not be empty",
         });
     }
     if value.chars().any(|character| character.is_control()) {
-        return Err(RebornUserIdentityBindingError::InvalidIdentityId {
+        return Err(RebornUserIdentityBindingError::InvalidIdentityField {
             field,
             reason: "must not contain control characters",
         });
@@ -277,35 +306,42 @@ fn validate_slack_id(
     Ok(())
 }
 
+fn validate_optional_slack_id(
+    field: &'static str,
+    value: Option<&str>,
+) -> Result<(), SlackPersonalUserBindingError> {
+    match value {
+        Some(value) => validate_slack_id(field, value),
+        None => Ok(()),
+    }
+}
+
 fn tenant_app_selector_matches_request(
     selector: &SlackInstallationSelector,
+    principal: &SlackPersonalBindingPrincipal,
     request: &SlackPersonalUserBindingRequest,
 ) -> Result<bool, SlackPersonalUserBindingError> {
+    ensure_tenant_app_scoped(selector, principal, &request.installation_id)?;
     match selector {
-        SlackInstallationSelector::Team { .. }
-        | SlackInstallationSelector::EnterpriseTeam { .. } => {
-            Err(SlackPersonalUserBindingError::InstallationNotAppScoped {
-                tenant_id: request.tenant_id.clone(),
-                installation_id: request.installation_id.clone(),
-            })
-        }
         SlackInstallationSelector::AppTeam {
             api_app_id,
             team_id,
-        } => Ok(team_id.as_str() == request.team_id.as_str()
-            && request
-                .api_app_id
-                .as_ref()
-                .map(SlackBindingApiAppId::as_str)
-                == Some(api_app_id.as_str())),
-        SlackInstallationSelector::InstallUser { .. }
-        | SlackInstallationSelector::EnterpriseInstallUser { .. }
-        | SlackInstallationSelector::AppInstallUser { .. } => {
-            Err(SlackPersonalUserBindingError::InstallationNotTenantScoped {
-                tenant_id: request.tenant_id.clone(),
-                installation_id: request.installation_id.clone(),
-            })
-        }
+        } => Ok(team_id == &request.team_id && api_app_id == &request.api_app_id),
+        _ => unreachable!("ensure_tenant_app_scoped rejects non-AppTeam selectors"),
+    }
+}
+
+fn ensure_tenant_app_scoped(
+    selector: &SlackInstallationSelector,
+    principal: &SlackPersonalBindingPrincipal,
+    installation_id: &AdapterInstallationId,
+) -> Result<(), SlackPersonalUserBindingError> {
+    match selector {
+        SlackInstallationSelector::AppTeam { .. } => Ok(()),
+        _ => Err(SlackPersonalUserBindingError::InstallationNotTenantScoped {
+            tenant_id: principal.tenant_id.clone(),
+            installation_id: installation_id.clone(),
+        }),
     }
 }
 
@@ -325,8 +361,8 @@ mod tests {
 
         let binding = service
             .bind_personal_user(
-                user("user:alice"),
-                request("tenant-alpha", "install-alpha").with_app(),
+                principal("tenant-alpha", "user:alice"),
+                request("install-alpha"),
             )
             .await
             .expect("binding succeeds");
@@ -352,8 +388,8 @@ mod tests {
 
         let error = service
             .bind_personal_user(
-                user("user:alice"),
-                request("tenant-beta", "install-alpha").with_app(),
+                principal("tenant-beta", "user:alice"),
+                request("install-alpha"),
             )
             .await
             .expect_err("wrong tenant is rejected");
@@ -375,8 +411,8 @@ mod tests {
 
         let error = service
             .bind_personal_user(
-                user("user:alice"),
-                request("tenant-alpha", "install-beta").with_app(),
+                principal("tenant-alpha", "user:alice"),
+                request("install-beta"),
             )
             .await
             .expect_err("wrong installation is rejected");
@@ -395,9 +431,11 @@ mod tests {
             SlackInstallationSelector::app_team("A-app", "T-team"),
             store.clone(),
         );
+        let mut request = request("install-alpha");
+        request.api_app_id = SlackApiAppId::new("A-other");
 
         let error = service
-            .bind_personal_user(user("user:alice"), request("tenant-alpha", "install-alpha"))
+            .bind_personal_user(principal("tenant-alpha", "user:alice"), request)
             .await
             .expect_err("wrong app is rejected");
 
@@ -415,11 +453,11 @@ mod tests {
             SlackInstallationSelector::app_team("A-app", "T-team"),
             store.clone(),
         );
-        let mut request = request("tenant-alpha", "install-alpha").with_app();
-        request.team_id = slack_team_id("T-other");
+        let mut request = request("install-alpha");
+        request.team_id = SlackTeamId::new("T-other");
 
         let error = service
-            .bind_personal_user(user("user:alice"), request)
+            .bind_personal_user(principal("tenant-alpha", "user:alice"), request)
             .await
             .expect_err("wrong team is rejected");
 
@@ -431,44 +469,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_personal_user_rejects_unscoped_team_selector_without_write() {
+    async fn bind_personal_user_rejects_non_app_scoped_installation_without_write() {
         let store = Arc::new(RecordingBindingStore::default());
         let service = service(SlackInstallationSelector::team("T-team"), store.clone());
 
         let error = service
             .bind_personal_user(
-                user("user:alice"),
-                request("tenant-alpha", "install-alpha").with_app(),
+                principal("tenant-alpha", "user:alice"),
+                request("install-alpha"),
             )
             .await
-            .expect_err("team-only selector is rejected");
+            .expect_err("team-scoped app is rejected");
 
         assert!(matches!(
             error,
-            SlackPersonalUserBindingError::InstallationNotAppScoped { .. }
-        ));
-        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
-    }
-
-    #[tokio::test]
-    async fn bind_personal_user_rejects_enterprise_team_selector_without_write() {
-        let store = Arc::new(RecordingBindingStore::default());
-        let service = service(
-            SlackInstallationSelector::enterprise_team("E-enterprise", "T-team"),
-            store.clone(),
-        );
-        let request = request("tenant-alpha", "install-alpha")
-            .with_app()
-            .with_enterprise();
-
-        let error = service
-            .bind_personal_user(user("user:alice"), request)
-            .await
-            .expect_err("enterprise/team selector without app context is rejected");
-
-        assert!(matches!(
-            error,
-            SlackPersonalUserBindingError::InstallationNotAppScoped { .. }
+            SlackPersonalUserBindingError::InstallationNotTenantScoped { .. }
         ));
         assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
     }
@@ -482,7 +497,10 @@ mod tests {
         );
 
         let error = service
-            .bind_personal_user(user("user:alice"), request("tenant-alpha", "install-alpha"))
+            .bind_personal_user(
+                principal("tenant-alpha", "user:alice"),
+                request("install-alpha"),
+            )
             .await
             .expect_err("install-user scoped app is rejected");
 
@@ -490,51 +508,6 @@ mod tests {
             error,
             SlackPersonalUserBindingError::InstallationNotTenantScoped { .. }
         ));
-        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
-    }
-
-    #[tokio::test]
-    async fn bind_personal_user_rejects_invalid_slack_user_without_write() {
-        let store = Arc::new(RecordingBindingStore::default());
-
-        let error = SlackBindingUserId::new("").expect_err("invalid slack user is rejected");
-
-        assert_eq!(
-            error,
-            SlackPersonalUserBindingError::InvalidSlackId {
-                field: "slack user",
-                reason: "must not be empty",
-            }
-        );
-        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
-    }
-
-    #[tokio::test]
-    async fn bind_personal_user_rejects_invalid_context_ids_without_write() {
-        let store = Arc::new(RecordingBindingStore::default());
-
-        assert_eq!(
-            SlackBindingTeamId::new("").expect_err("empty team id is rejected"),
-            SlackPersonalUserBindingError::InvalidSlackId {
-                field: "slack team",
-                reason: "must not be empty",
-            }
-        );
-        assert_eq!(
-            SlackBindingEnterpriseId::new("E-enterprise\n")
-                .expect_err("control character enterprise id is rejected"),
-            SlackPersonalUserBindingError::InvalidSlackId {
-                field: "slack enterprise",
-                reason: "must not contain control characters",
-            }
-        );
-        assert_eq!(
-            SlackBindingApiAppId::new("A-app\t").expect_err("control character app id is rejected"),
-            SlackPersonalUserBindingError::InvalidSlackId {
-                field: "slack app",
-                reason: "must not contain control characters",
-            }
-        );
         assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
     }
 
@@ -550,8 +523,136 @@ mod tests {
 
         let error = service
             .bind_personal_user(
-                user("user:alice"),
-                request("tenant-alpha", "install-alpha").with_app(),
+                principal("tenant-alpha", "user:alice"),
+                request("install-alpha"),
+            )
+            .await
+            .expect_err("store error is propagated");
+
+        assert_eq!(
+            error,
+            SlackPersonalUserBindingError::BindingStore(RebornUserIdentityBindingError::Backend(
+                "store down".into()
+            ))
+        );
+        assert_eq!(
+            store.bindings(),
+            vec![RebornUserIdentityBinding {
+                provider: provider("slack"),
+                provider_user_id: provider_user_id("install-alpha:U123"),
+                user_id: user("user:alice"),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_installation_actor_rejects_wrong_tenant_without_write() {
+        let store = Arc::new(RecordingBindingStore::default());
+        let service = service(
+            SlackInstallationSelector::app_team("A-app", "T-team"),
+            store.clone(),
+        );
+
+        let error = service
+            .bind_installation_actor(
+                principal("tenant-beta", "user:alice"),
+                installation("install-alpha"),
+                SlackUserId::new("U123"),
+            )
+            .await
+            .expect_err("wrong tenant is rejected");
+
+        assert!(matches!(
+            error,
+            SlackPersonalUserBindingError::UnknownInstallation { .. }
+        ));
+        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
+    }
+
+    #[tokio::test]
+    async fn bind_installation_actor_rejects_unknown_installation_without_write() {
+        let store = Arc::new(RecordingBindingStore::default());
+        let service = service(
+            SlackInstallationSelector::app_team("A-app", "T-team"),
+            store.clone(),
+        );
+
+        let error = service
+            .bind_installation_actor(
+                principal("tenant-alpha", "user:alice"),
+                installation("install-beta"),
+                SlackUserId::new("U123"),
+            )
+            .await
+            .expect_err("unknown installation is rejected");
+
+        assert!(matches!(
+            error,
+            SlackPersonalUserBindingError::UnknownInstallation { .. }
+        ));
+        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
+    }
+
+    #[tokio::test]
+    async fn bind_installation_actor_rejects_non_app_scoped_installation_without_write() {
+        let store = Arc::new(RecordingBindingStore::default());
+        let service = service(SlackInstallationSelector::team("T-team"), store.clone());
+
+        let error = service
+            .bind_installation_actor(
+                principal("tenant-alpha", "user:alice"),
+                installation("install-alpha"),
+                SlackUserId::new("U123"),
+            )
+            .await
+            .expect_err("team-scoped app is rejected");
+
+        assert!(matches!(
+            error,
+            SlackPersonalUserBindingError::InstallationNotTenantScoped { .. }
+        ));
+        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
+    }
+
+    #[tokio::test]
+    async fn bind_installation_actor_rejects_invalid_slack_user_without_write() {
+        let store = Arc::new(RecordingBindingStore::default());
+        let service = service(
+            SlackInstallationSelector::app_team("A-app", "T-team"),
+            store.clone(),
+        );
+
+        let error = service
+            .bind_installation_actor(
+                principal("tenant-alpha", "user:alice"),
+                installation("install-alpha"),
+                SlackUserId::new("bad\nuser"),
+            )
+            .await
+            .expect_err("invalid slack user is rejected");
+
+        assert!(matches!(
+            error,
+            SlackPersonalUserBindingError::InvalidSlackId { .. }
+        ));
+        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
+    }
+
+    #[tokio::test]
+    async fn bind_installation_actor_propagates_store_error() {
+        let store = Arc::new(RecordingBindingStore::with_error(
+            RebornUserIdentityBindingError::Backend("store down".into()),
+        ));
+        let service = service(
+            SlackInstallationSelector::app_team("A-app", "T-team"),
+            store.clone(),
+        );
+
+        let error = service
+            .bind_installation_actor(
+                principal("tenant-alpha", "user:alice"),
+                installation("install-alpha"),
+                SlackUserId::new("U123"),
             )
             .await
             .expect_err("store error is propagated");
@@ -586,31 +687,20 @@ mod tests {
         )
     }
 
-    fn request(tenant_id: &str, installation_id: &str) -> SlackPersonalUserBindingRequest {
-        SlackPersonalUserBindingRequest {
+    fn principal(tenant_id: &str, user_id: &str) -> SlackPersonalBindingPrincipal {
+        SlackPersonalBindingPrincipal {
             tenant_id: tenant(tenant_id),
+            user_id: user(user_id),
+        }
+    }
+
+    fn request(installation_id: &str) -> SlackPersonalUserBindingRequest {
+        SlackPersonalUserBindingRequest {
             installation_id: installation(installation_id),
-            slack_user_id: slack_user_id("U123"),
-            team_id: slack_team_id("T-team"),
+            slack_user_id: SlackUserId::new("U123"),
+            team_id: SlackTeamId::new("T-team"),
             enterprise_id: None,
-            api_app_id: None,
-        }
-    }
-
-    trait RequestExt {
-        fn with_app(self) -> Self;
-        fn with_enterprise(self) -> Self;
-    }
-
-    impl RequestExt for SlackPersonalUserBindingRequest {
-        fn with_app(mut self) -> Self {
-            self.api_app_id = Some(slack_api_app_id("A-app"));
-            self
-        }
-
-        fn with_enterprise(mut self) -> Self {
-            self.enterprise_id = Some(slack_enterprise_id("E-enterprise"));
-            self
+            api_app_id: SlackApiAppId::new("A-app"),
         }
     }
 
@@ -626,28 +716,12 @@ mod tests {
         AdapterInstallationId::new(value).expect("valid installation id")
     }
 
-    fn provider(value: &str) -> RebornIdentityProvider {
-        RebornIdentityProvider::new(value).expect("valid identity provider")
+    fn provider(value: &str) -> RebornIdentityProviderId {
+        RebornIdentityProviderId::new(value).expect("valid provider")
     }
 
     fn provider_user_id(value: &str) -> RebornIdentityProviderUserId {
         RebornIdentityProviderUserId::new(value).expect("valid provider user id")
-    }
-
-    fn slack_user_id(value: &str) -> SlackBindingUserId {
-        SlackBindingUserId::new(value).expect("valid slack user id")
-    }
-
-    fn slack_team_id(value: &str) -> SlackBindingTeamId {
-        SlackBindingTeamId::new(value).expect("valid slack team id")
-    }
-
-    fn slack_enterprise_id(value: &str) -> SlackBindingEnterpriseId {
-        SlackBindingEnterpriseId::new(value).expect("valid slack enterprise id")
-    }
-
-    fn slack_api_app_id(value: &str) -> SlackBindingApiAppId {
-        SlackBindingApiAppId::new(value).expect("valid slack app id")
     }
 
     #[derive(Default)]
