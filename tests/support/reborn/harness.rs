@@ -2673,6 +2673,7 @@ impl RecordingTestCapabilityPort {
             result_ref: ironclaw_turns::LoopResultRef::new(format!("result:test-echo-{ordinal}"))
                 .expect("valid result ref"),
             safe_summary: "echo: hi".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
         })
     }

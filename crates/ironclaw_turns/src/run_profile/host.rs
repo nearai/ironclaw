@@ -1442,11 +1442,34 @@ impl CapabilityOutcome {
 pub struct CapabilityResultMessage {
     pub result_ref: LoopResultRef,
     pub safe_summary: String,
+    /// Typed host signal describing whether this result advanced the loop's
+    /// evidence/state. This lets the loop distinguish deterministic
+    /// no-change outcomes from productive calls without inferring progress
+    /// from prose summaries or token counts.
+    #[serde(default)]
+    pub progress: CapabilityProgress,
     /// Host hint that this completed capability result should end the loop
     /// naturally after the current batch. Defaults to false for compatibility
     /// with older hosts.
     #[serde(default)]
     pub terminate_hint: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityProgress {
+    /// Older hosts, or hosts that cannot classify progress yet.
+    #[default]
+    Unknown,
+    /// The capability produced new evidence or changed host/runtime state.
+    MadeProgress,
+    /// The capability ran successfully but observed the same state/evidence as
+    /// before.
+    NoChange,
+    /// The capability reached a deterministic non-suspending blocker.
+    Blocked,
+    /// The capability completed the requested objective.
+    Complete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

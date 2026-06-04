@@ -591,6 +591,7 @@ async fn cancellation_after_capability_batch_preserves_completed_result() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
                 safe_summary: "completed before cancellation".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
             })],
             stopped_on_suspension: false,

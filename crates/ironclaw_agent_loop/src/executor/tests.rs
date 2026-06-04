@@ -939,6 +939,7 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
                 safe_summary: "done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
             })],
             stopped_on_suspension: false,
@@ -1007,6 +1008,7 @@ async fn reply_admission_rendered_flag_stays_false_when_context_suppresses_contr
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
                 safe_summary: "done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
             })],
             stopped_on_suspension: false,
@@ -1174,6 +1176,7 @@ async fn capability_stage_returns_after_batch_summary() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
                 safe_summary: "done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
             })],
             stopped_on_suspension: false,
@@ -1321,6 +1324,7 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
                 safe_summary: "stopped batch completed".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
             })],
             stopped_on_suspension: true,
@@ -1403,6 +1407,7 @@ async fn terminate_hint_after_batch_completes_without_extra_model_call() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: LoopResultRef::new("result:done").expect("valid"),
                 safe_summary: "done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
             })],
             stopped_on_suspension: false,
@@ -1612,6 +1617,7 @@ async fn parallel_batch_records_completed_results_before_blocking_on_suspension(
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: completed_ref.clone(),
                     safe_summary: "parallel call completed".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                 }),
             ],
@@ -1669,11 +1675,13 @@ async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:first").expect("valid"),
                     safe_summary: "first".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                 }),
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:second").expect("valid"),
                     safe_summary: "second".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                 }),
             ],
@@ -1899,6 +1907,7 @@ async fn last_batch_total_counts_only_visible_invoked_calls() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: LoopResultRef::new("result:visible").expect("valid"),
                 safe_summary: "visible call completed".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
             })],
             stopped_on_suspension: false,
@@ -1986,6 +1995,7 @@ async fn retry_uses_single_call_invocation() {
                 CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:retry").expect("valid"),
                     safe_summary: "retry completed".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: true,
                 },
             )]);
@@ -2019,6 +2029,7 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
             CapabilityResultMessage {
                 result_ref: LoopResultRef::new("result:policy-retry").expect("valid"), // safety: test-only fixture
                 safe_summary: "policy retry completed".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
             },
         )]);
@@ -2139,6 +2150,7 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
                 safe_summary: "provider call completed".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
             })],
             stopped_on_suspension: false,
@@ -2183,6 +2195,7 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: result_ref.clone(),
                     safe_summary: "provider call completed".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: true,
                 }),
                 CapabilityOutcome::Denied(ironclaw_turns::run_profile::CapabilityDenied {

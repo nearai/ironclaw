@@ -256,10 +256,18 @@ pub struct StopStrategyState {
     /// Total number of results in the most recent capability batch (denominator
     /// for "all results said terminate").
     pub last_batch_total: u32,
+    /// Count of completed results in the most recent capability batch whose
+    /// typed progress signal said no evidence/state changed.
+    #[serde(default)]
+    pub no_progress_results_in_last_batch: u32,
     /// Consecutive turns where a model reply was rejected before transcript
     /// finalization.
     #[serde(default)]
     pub trailing_rejected_replies: u32,
+    /// Consecutive completed capability-batch turns whose typed result
+    /// progress reported no new evidence/state.
+    #[serde(default)]
+    pub trailing_no_progress_results: u32,
 }
 
 /// Persistent state owned by `GateHandlingStrategy`.

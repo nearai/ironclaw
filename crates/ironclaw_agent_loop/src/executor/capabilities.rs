@@ -56,6 +56,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         let calls = input.calls;
         state.stop_state.last_batch_total = 0;
         state.stop_state.terminate_hints_in_last_batch = 0;
+        state.stop_state.no_progress_results_in_last_batch = 0;
 
         let mut visible_calls = Vec::new();
         let mut denied_calls = Vec::new();
@@ -214,6 +215,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         let result = CapabilityResultMessage {
                             result_ref,
                             safe_summary,
+                            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                             terminate_hint: false,
                         };
                         append_capability_result_ref(ctx.host, &call, &result).await?;
@@ -419,6 +421,7 @@ impl CapabilityStage {
                 let resolved_result = CapabilityResultMessage {
                     result_ref,
                     safe_summary,
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                 };
                 AwaitDependentRunGateStage
@@ -640,6 +643,7 @@ async fn append_spawned_child_result(
     let result = CapabilityResultMessage {
         result_ref,
         safe_summary,
+        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
         terminate_hint: false,
     };
     append_capability_result_ref(host, call, &result).await?;
@@ -716,6 +720,7 @@ mod tests {
         CapabilityOutcome::Completed(CapabilityResultMessage {
             result_ref: LoopResultRef::new(format!("result:{result}")).unwrap(),
             safe_summary: "summary".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
         })
     }
