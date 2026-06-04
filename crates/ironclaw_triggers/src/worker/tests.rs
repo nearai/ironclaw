@@ -13,9 +13,11 @@ use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
-    TriggerCompletionPolicy, TriggerError, TriggerFire, TriggerId, TriggerInboundContentRef,
-    TriggerMaterializedPrompt, TriggerPromptMaterializer, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerSourceProvider, TriggerState,
+    TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerError, TriggerFire,
+    TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPromptMaterializer,
+    TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind,
+    TriggerSourceProvider, TriggerState,
 };
 
 fn ts(seconds: i64) -> Timestamp {
@@ -250,12 +252,18 @@ async fn tick_processes_one_due_trigger_happy_path() {
     assert_eq!(fire.agent_id, record.agent_id);
     assert_eq!(fire.project_id, record.project_id);
     assert_eq!(content_ref.as_str(), "content:trigger-fire");
-    assert_eq!(trusted_inbound_binding.adapter_kind(), "trigger");
+    assert_eq!(
+        trusted_inbound_binding.adapter_kind(),
+        TRIGGER_TRUSTED_ADAPTER_KIND
+    );
     assert_eq!(
         trusted_inbound_binding.adapter_installation_id(),
-        "reborn-trigger-poller"
+        TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID
     );
-    assert_eq!(trusted_inbound_binding.external_actor_namespace(), "user");
+    assert_eq!(
+        trusted_inbound_binding.external_actor_namespace(),
+        TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE
+    );
     assert_eq!(
         trusted_inbound_binding.external_actor_id(),
         record.creator_user_id.as_str()
