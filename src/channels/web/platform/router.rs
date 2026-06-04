@@ -79,8 +79,8 @@ use crate::channels::web::platform::static_files::{
 // backward-compat re-export shim waiting on stage 6 deletion.
 use crate::channels::web::features::chat::{
     chat_approval_handler, chat_auth_cancel_handler, chat_auth_token_handler, chat_events_handler,
-    chat_gate_resolve_handler, chat_history_handler, chat_new_thread_handler, chat_send_handler,
-    chat_threads_handler, chat_ws_handler,
+    chat_gate_resolve_handler, chat_history_handler, chat_interrupt_handler,
+    chat_new_thread_handler, chat_send_handler, chat_threads_handler, chat_ws_handler,
 };
 use crate::channels::web::features::extensions::{
     extensions_activate_handler, extensions_install_handler, extensions_list_handler,
@@ -182,6 +182,7 @@ pub async fn start_server(
         .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
         .route("/api/chat/auth-token", post(chat_auth_token_handler))
         .route("/api/chat/auth-cancel", post(chat_auth_cancel_handler))
+        .route("/api/chat/interrupt", post(chat_interrupt_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
         .route("/api/chat/events", get(chat_events_handler))
         .route("/api/chat/ws", get(chat_ws_handler))

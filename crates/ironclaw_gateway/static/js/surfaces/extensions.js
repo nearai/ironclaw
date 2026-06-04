@@ -1243,7 +1243,9 @@ function cancelAuthFromConfigureModal(overlay) {
   overlay.remove();
   if (!document.querySelector('.configure-overlay') && !document.querySelector('.auth-card')) {
     setAuthFlowPending(false);
-    enableChatInput();
+    cancelCurrentRun(threadId || currentThreadId).catch(function(err) {
+      console.warn('[chat] failed to interrupt after configure cancellation:', err);
+    });
   }
 }
 

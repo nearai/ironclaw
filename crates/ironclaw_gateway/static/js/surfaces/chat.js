@@ -262,6 +262,27 @@ function enableChatInput() {
   if (btn) btn.disabled = false;
 }
 
+function cancelCurrentRun(threadId) {
+  const targetThreadId = threadId || currentThreadId;
+  if (targetThreadId) {
+    processingThreads.delete(targetThreadId);
+    activeWorkStore.clearThread(targetThreadId);
+  }
+  finalizeActivityGroup();
+  if (_doneWithoutResponseTimer) {
+    clearTimeout(_doneWithoutResponseTimer);
+    _doneWithoutResponseTimer = null;
+  }
+  enableChatInput();
+
+  return apiFetch('/api/chat/interrupt', {
+    method: 'POST',
+    body: {
+      thread_id: targetThreadId || undefined,
+    },
+  });
+}
+
 // --- Image Upload ---
 
 function renderImagePreviews() {
@@ -565,6 +586,11 @@ function sendApprovalAction(requestId, action, threadId) {
   }).catch((err) => {
     addMessage('system', 'Failed to send approval: ' + err.message);
   });
+  if (action === 'deny') {
+    cancelCurrentRun(targetThreadId).catch((err) => {
+      console.warn('[chat] failed to interrupt after approval denial:', err);
+    });
+  }
 
   // Disable buttons and show confirmation on the card
   if (card) {
