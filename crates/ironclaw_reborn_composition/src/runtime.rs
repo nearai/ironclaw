@@ -92,7 +92,9 @@ use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
-use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
+use crate::runtime_input::{
+    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings,
+};
 use crate::trigger_poller::{
     ConversationContentRefMaterializer, LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup,
     TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TenantScopedTrustedTriggerFireAuthorizer,
@@ -326,6 +328,19 @@ async fn build_trigger_poller_services(
             pairing_service,
         })
     }
+}
+
+fn validate_trigger_poller_authorization(
+    trigger_poller: &TriggerPollerSettings,
+) -> Result<(), RebornRuntimeError> {
+    if trigger_poller.enabled
+        && !trigger_poller.allow_tenant_scoped_authorizer_without_creator_membership
+    {
+        return Err(RebornRuntimeError::InvalidArgument {
+            reason: "trigger poller cannot be enabled until fire-time creator authorization is backed by the real agent/project membership source of truth".to_string(),
+        });
+    }
+    Ok(())
 }
 
 struct TriggerPollerServicesInner {
@@ -1554,6 +1569,7 @@ pub async fn build_reborn_runtime(
         Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     >;
     if trigger_poller.enabled {
+        validate_trigger_poller_authorization(&trigger_poller)?;
         let trigger_poller_services = build_trigger_poller_services(
             local_runtime,
             Arc::clone(&planned_turn_coordinator),
@@ -2573,7 +2589,9 @@ mod tests {
             source_binding_id: "runtime-trigger-readiness-source".to_string(),
             reply_target_binding_id: "runtime-trigger-readiness-reply".to_string(),
         })
-        .with_trigger_poller_settings(TriggerPollerSettings::enabled())
+        .with_trigger_poller_settings(
+            TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test(),
+        )
         .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
@@ -2582,6 +2600,46 @@ mod tests {
         assert!(runtime.services().readiness.workers.trigger_poller);
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_rejects_trigger_poller_without_creator_authorization() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "trigger auth required".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-trigger-auth-required-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trigger-auth-required-tenant".to_string(),
+            agent_id: "runtime-trigger-auth-required-agent".to_string(),
+            source_binding_id: "runtime-trigger-auth-required-source".to_string(),
+            reply_target_binding_id: "runtime-trigger-auth-required-reply".to_string(),
+        })
+        .with_trigger_poller_settings(TriggerPollerSettings::enabled())
+        .with_model_gateway_override(gateway);
+
+        let err = match build_reborn_runtime(input).await {
+            Ok(runtime) => {
+                runtime
+                    .shutdown()
+                    .await
+                    .expect("unexpected runtime shutdown");
+                panic!("tenant-scoped placeholder must not enable trigger poller");
+            }
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, super::RebornRuntimeError::InvalidArgument { reason } if reason.contains("fire-time creator authorization"))
+        );
     }
 
     #[tokio::test]
@@ -2629,7 +2687,8 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .with_tenant_scoped_authorizer_for_test();
 
         let input = RebornRuntimeInput::from_services(
             RebornBuildInput::local_dev(
@@ -2684,7 +2743,9 @@ mod tests {
             source_binding_id: "runtime-trigger-shutdown-source".to_string(),
             reply_target_binding_id: "runtime-trigger-shutdown-reply".to_string(),
         })
-        .with_trigger_poller_settings(TriggerPollerSettings::enabled())
+        .with_trigger_poller_settings(
+            TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test(),
+        )
         .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");

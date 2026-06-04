@@ -825,13 +825,13 @@ wiring. A Reborn ownership audit found no boundary breaches.
 
 Two gaps block shipping user-creatable cron jobs:
 
-1. **Poller is never enabled in any shipped binary.** `TriggerPollerSettings`
-   defaults `enabled: false` (`runtime_input.rs`), and the CLI runtime builder
-   (`ironclaw_reborn_cli/src/runtime.rs::build_runtime_input_with_options`)
-   never calls `.with_trigger_poller_settings(...)`. There is no config-file
-   section, no env var, and no `.env.example` entry. Cron triggers can only
-   fire from Rust test code today. This is the hard blocker between "backend
-   exists" and "cron actually fires."
+1. **Poller is not enabled in a shipped runtime without real fire-time creator
+   authorization.** `TriggerPollerSettings` defaults `enabled: false`
+   (`runtime_input.rs`). Even if config/env enables the poller, composition now
+   rejects runtime build unless the placeholder tenant-scope authorizer is
+   explicitly allowed by test-support code. Cron triggers can only fire from Rust
+   test code today. This is the hard blocker between "backend exists" and "cron
+   actually fires."
 2. **Some security hardening is deferred.** Trusted trigger submission is now
    type-sealed through `TrustedTriggerSubmitRequest` and converted inside
    `ironclaw_conversations`; product/adapter crates cannot mint host-trusted
@@ -928,7 +928,9 @@ Three independent tracks branch from the PR 18 baseline.
   (today the trait takes the whole `TriggerFire`).
 - Implement the port against the real agent/project access-control source of
   truth (today `TenantScopedTrustedTriggerFireAuthorizer` checks tenant-ID equality
-  only). If no real source exists, keep external delivery disabled.
+  only). If no real source exists, keep external delivery disabled; composition
+  must fail closed when a normal runtime tries to enable the poller with the
+  tenant-only placeholder.
 - Add a `TriggerFireAuthError::Retryable` variant for backend unavailability;
   `Denied`/revoked stays permanent (clear claim, advance slot); retryable does
   not mark the fire active and keeps `next_run_at` retryable.

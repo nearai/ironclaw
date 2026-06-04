@@ -153,15 +153,12 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     let runtime = build_runtime_with(
         &root,
         Arc::clone(&recording_gateway),
-        TriggerPollerSettings {
-            enabled: true,
-            worker: TriggerPollerWorkerConfig {
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
                 ..Default::default()
             },
-            startup_jitter_max: Duration::ZERO,
-            tick_jitter_max: Duration::ZERO,
-        },
+        ),
     )
     .await;
 
@@ -345,15 +342,12 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
     let runtime = build_runtime_with(
         &root,
         Arc::clone(&recording_gateway),
-        TriggerPollerSettings {
-            enabled: true,
-            worker: TriggerPollerWorkerConfig {
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
                 ..Default::default()
             },
-            startup_jitter_max: Duration::ZERO,
-            tick_jitter_max: Duration::ZERO,
-        },
+        ),
     )
     .await;
 
@@ -467,15 +461,12 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     let runtime = build_runtime_with(
         &root,
         Arc::clone(&recording_gateway),
-        TriggerPollerSettings {
-            enabled: true,
-            worker: TriggerPollerWorkerConfig {
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
                 ..Default::default()
             },
-            startup_jitter_max: Duration::ZERO,
-            tick_jitter_max: Duration::ZERO,
-        },
+        ),
     )
     .await;
 
@@ -563,15 +554,12 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
     let runtime = build_runtime_with(
         &root,
         Arc::clone(&recording_gateway),
-        TriggerPollerSettings {
-            enabled: true,
-            worker: TriggerPollerWorkerConfig {
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
                 ..Default::default()
             },
-            startup_jitter_max: Duration::ZERO,
-            tick_jitter_max: Duration::ZERO,
-        },
+        ),
     )
     .await;
 
