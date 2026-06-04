@@ -1,6 +1,6 @@
 use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind};
 
-const MAX_PROVIDER_NORMALIZATION_DEPTH: usize = 32;
+pub(super) const MAX_PROVIDER_NORMALIZATION_DEPTH: usize = 32;
 
 pub(super) fn prepare_provider_arguments(
     arguments: &serde_json::Value,
@@ -174,7 +174,7 @@ fn replace_ascii_case_insensitive(input: &str, needle: &str, replacement: &str) 
     replaced
 }
 
-fn schema_contains_external_ref(schema: &serde_json::Value, depth: usize) -> bool {
+pub(super) fn schema_contains_external_ref(schema: &serde_json::Value, depth: usize) -> bool {
     if depth > MAX_PROVIDER_NORMALIZATION_DEPTH {
         return true;
     }

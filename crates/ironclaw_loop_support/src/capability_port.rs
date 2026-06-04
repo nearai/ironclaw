@@ -34,7 +34,9 @@ mod provider_input;
 mod provider_validation;
 mod surface_snapshot;
 
-use self::provider_input::{normalize_provider_arguments, prepare_provider_arguments};
+use self::provider_input::{
+    normalize_provider_arguments, prepare_provider_arguments, schema_contains_external_ref,
+};
 use self::provider_validation::{
     PROVIDER_TOOL_NAME_MAX_BYTES, validate_provider_arguments, validate_provider_tool_call,
 };
@@ -1368,12 +1370,15 @@ fn provider_schema_is_usable(schema: &serde_json::Value) -> bool {
     let Some(object) = schema.as_object() else {
         return false;
     };
+    if schema_contains_external_ref(schema, 0) {
+        return false;
+    }
     if object
         .get("$ref")
         .and_then(serde_json::Value::as_str)
-        .is_some()
+        .is_some_and(|reference| reference.starts_with('#'))
     {
-        return false;
+        return true;
     }
     matches!(
         object.get("type").and_then(serde_json::Value::as_str),
@@ -2363,6 +2368,25 @@ mod tests {
         assert!(!provider_schema_is_usable(&serde_json::json!({
             "$ref": "schemas/builtin/write-file.input.v1.json"
         })));
+        assert!(provider_schema_is_usable(&serde_json::json!({
+            "$ref": "#/$defs/input",
+            "$defs": {
+                "input": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    }
+                }
+            }
+        })));
+        assert!(!provider_schema_is_usable(&serde_json::json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "$ref": "schemas/builtin/write-file.input.v1.json"
+                }
+            }
+        })));
         assert!(!provider_schema_is_usable(
             &serde_json::json!({"type":"string"})
         ));
@@ -2829,6 +2853,75 @@ mod tests {
         .expect_err("excessively deep schema ref scans should fail closed");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::StaleSurface);
+    }
+
+    #[test]
+    fn provider_argument_depth_limit_allows_exact_boundary() {
+        fn wrap_object_property(
+            name: String,
+            inner_schema: serde_json::Value,
+        ) -> serde_json::Value {
+            let mut properties = serde_json::Map::new();
+            properties.insert(name, inner_schema);
+            let mut schema = serde_json::Map::new();
+            schema.insert("type".to_string(), serde_json::json!("object"));
+            schema.insert(
+                "properties".to_string(),
+                serde_json::Value::Object(properties),
+            );
+            serde_json::Value::Object(schema)
+        }
+
+        fn wrap_object_value(name: String, inner_value: serde_json::Value) -> serde_json::Value {
+            let mut object = serde_json::Map::new();
+            object.insert(name, inner_value);
+            serde_json::Value::Object(object)
+        }
+
+        fn wrap_unknown_keyword(inner_schema: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({
+                "x-next": inner_schema
+            })
+        }
+
+        let mut schema = serde_json::json!({ "type": "integer" });
+        let mut value = serde_json::json!("1");
+        for depth in (0..provider_input::MAX_PROVIDER_NORMALIZATION_DEPTH).rev() {
+            let property = format!("level_{depth}");
+            schema = wrap_object_property(property.clone(), schema);
+            value = wrap_object_value(property, value);
+        }
+
+        let normalized = normalize_provider_arguments(&value, &schema, "provider arguments")
+            .expect("exact normalization depth boundary should pass");
+
+        assert_eq!(normalized, {
+            let mut expected = serde_json::json!(1);
+            for depth in (0..provider_input::MAX_PROVIDER_NORMALIZATION_DEPTH).rev() {
+                expected = wrap_object_value(format!("level_{depth}"), expected);
+            }
+            expected
+        });
+
+        let mut deep_annotation = serde_json::json!({ "type": "null" });
+        for _ in 2..provider_input::MAX_PROVIDER_NORMALIZATION_DEPTH {
+            deep_annotation = wrap_unknown_keyword(deep_annotation);
+        }
+        let ref_scan_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"],
+            "x-depth-boundary": deep_annotation
+        });
+
+        prepare_provider_arguments(
+            &serde_json::json!({ "message": "hello" }),
+            &ref_scan_schema,
+            "provider arguments",
+        )
+        .expect("exact schema ref-scan depth boundary should pass");
     }
 
     #[test]
