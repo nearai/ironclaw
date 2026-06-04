@@ -1999,7 +1999,7 @@ fn validate_thread_scope(
     // intentionally allow actor/subject divergence for shared Slack/team
     // routes, but the explicit subject must match the resolved thread owner.
     if run_context.scope.has_explicit_thread_owner() {
-        if run_context.scope.explicit_owner_user_id().cloned() != thread_scope.owner_user_id {
+        if run_context.scope.explicit_owner_user_id() != thread_scope.owner_user_id.as_ref() {
             return Err(RebornLoopDriverHostError::ScopeMismatch {
                 reason: "thread scope owner does not match the explicit loop run subject"
                     .to_string(),

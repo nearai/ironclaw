@@ -651,14 +651,18 @@ fn accepted_message_ref(
 fn binding_from_replay(
     replay: &AcceptedInboundMessageReplay,
 ) -> Result<ResolvedBinding, ProductWorkflowError> {
-    let actor_user_id = UserId::new(replay.actor_id.as_deref().ok_or_else(|| {
-        ProductWorkflowError::BindingResolutionFailed {
-            reason: "accepted replay missing actor user id".into(),
+    let actor_user_id = match replay.actor_id.as_deref() {
+        Some(actor_id) => {
+            UserId::new(actor_id).map_err(|e| ProductWorkflowError::BindingResolutionFailed {
+                reason: format!("invalid replay actor user id: {e}"),
+            })?
         }
-    })?)
-    .map_err(|e| ProductWorkflowError::BindingResolutionFailed {
-        reason: format!("invalid replay actor user id: {e}"),
-    })?;
+        None => replay.scope.owner_user_id.clone().ok_or_else(|| {
+            ProductWorkflowError::BindingResolutionFailed {
+                reason: "accepted replay missing actor user id and owner user id".into(),
+            }
+        })?,
+    };
     Ok(ResolvedBinding {
         tenant_id: replay.scope.tenant_id.clone(),
         actor_user_id,
@@ -838,6 +842,31 @@ mod tests {
         assert_eq!(submission.message_id, message_id);
         assert_eq!(submission.source_binding_id, "src:alpha");
         assert_eq!(submission.reply_target_binding_id, "reply:alpha");
+    }
+
+    #[test]
+    fn legacy_replay_without_actor_id_uses_owner_as_actor() {
+        let message_id = ThreadMessageId::new();
+        let mut replay = replay(
+            message_id,
+            MessageStatus::DeferredBusy,
+            Some("src:alpha"),
+            Some("reply:alpha"),
+            None,
+        );
+        replay.actor_id = None;
+
+        let handoff =
+            ProductInboundTurnHandoff::from_replay(replay, "turn-key".to_string(), received_at())
+                .expect("legacy replay handoff");
+
+        let ProductInboundTurnHandoff::NeedsSubmission(submission) = handoff else {
+            panic!("expected legacy replay to require a new turn submission")
+        };
+
+        assert_eq!(submission.binding.actor_user_id, user_id());
+        assert_eq!(submission.binding.subject_user_id, Some(user_id()));
+        assert_eq!(submission.message_id, message_id);
     }
 
     fn policy_request() -> BeforeInboundPolicyRequest {

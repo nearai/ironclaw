@@ -21,6 +21,7 @@ use crate::error::ProductWorkflowError;
 pub struct ResolvedBinding {
     pub tenant_id: TenantId,
     /// Real paired human actor who sent or authorized the external action.
+    #[serde(alias = "user_id")]
     pub actor_user_id: UserId,
     /// User scope whose agent/context/tools/memory execute the turn.
     ///
@@ -36,6 +37,30 @@ pub struct ResolvedBinding {
     /// user-scoped must be completed before entering `InboundTurnService`.
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_binding_accepts_legacy_user_id_actor_field() {
+        let binding: ResolvedBinding = serde_json::from_value(serde_json::json!({
+            "tenant_id": "tenant:legacy",
+            "user_id": "user:legacy-actor",
+            "subject_user_id": "user:legacy-subject",
+            "thread_id": "thread:legacy",
+            "agent_id": "agent:legacy",
+            "project_id": "project:legacy"
+        }))
+        .expect("legacy binding should deserialize");
+
+        assert_eq!(binding.actor_user_id.as_str(), "user:legacy-actor");
+        assert_eq!(
+            binding.subject_user_id.as_ref().map(UserId::as_str),
+            Some("user:legacy-subject")
+        );
+    }
 }
 
 /// Request to resolve external adapter refs into canonical Reborn bindings.
