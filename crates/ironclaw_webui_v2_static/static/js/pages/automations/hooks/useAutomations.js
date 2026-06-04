@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { React } from "../../../lib/html.js";
 
 import { fetchAutomations } from "../lib/automations-api.js";
 import {
@@ -14,11 +15,18 @@ export function useAutomations() {
     refetchIntervalInBackground: false,
   });
 
-  const automations = normalizeAutomations(query.data);
+  const automations = React.useMemo(
+    () => normalizeAutomations(query.data),
+    [query.data]
+  );
+  const summary = React.useMemo(
+    () => automationSummary(automations),
+    [automations]
+  );
 
   return {
     automations,
-    summary: automationSummary(automations),
+    summary,
     isLoading: query.isLoading,
     isRefreshing: query.isFetching,
     error: query.error || null,

@@ -8,6 +8,7 @@ export function AutomationsPage() {
   const t = useT();
   const [filter, setFilter] = React.useState("all");
   const automationsState = useAutomations();
+  const showErrorOnly = automationsState.error && !automationsState.isLoading;
 
   return html`
     <div className="flex h-full flex-col overflow-y-auto">
@@ -18,29 +19,36 @@ export function AutomationsPage() {
             <div
               className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
             >
-              ${automationsState.error.message || t("automations.error.loadFailed")}
+              ${t("automations.error.loadFailed")}
             </div>
           `}
 
-          <${AutomationsSummaryStrip} summary=${automationsState.summary} />
-
-          ${automationsState.isLoading
-            ? html`
-                <div className="space-y-4">
-                  ${[1, 2, 3].map(
-                    (index) =>
-                      html`<div key=${index} className="v2-skeleton h-28 rounded-[18px]" />`
-                  )}
-                </div>
-              `
+          ${showErrorOnly
+            ? null
             : html`
-                <${AutomationsList}
-                  automations=${automationsState.automations}
-                  filter=${filter}
-                  onFilterChange=${setFilter}
-                  onRefresh=${automationsState.refetch}
-                  isRefreshing=${automationsState.isRefreshing}
-                />
+                <${AutomationsSummaryStrip} summary=${automationsState.summary} />
+
+                ${automationsState.isLoading
+                  ? html`
+                      <div className="space-y-4">
+                        ${[1, 2, 3].map(
+                          (index) =>
+                            html`<div
+                              key=${index}
+                              className="v2-skeleton h-28 rounded-[18px]"
+                            />`
+                        )}
+                      </div>
+                    `
+                  : html`
+                      <${AutomationsList}
+                        automations=${automationsState.automations}
+                        filter=${filter}
+                        onFilterChange=${setFilter}
+                        onRefresh=${automationsState.refetch}
+                        isRefreshing=${automationsState.isRefreshing}
+                      />
+                    `}
               `}
         </div>
       </div>
