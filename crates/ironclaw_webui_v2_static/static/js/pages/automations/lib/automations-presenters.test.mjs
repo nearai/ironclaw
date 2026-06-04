@@ -73,6 +73,9 @@ test("scheduleLabel presents common recurring schedules in friendly language", (
   assert.equal(scheduleLabel("0 30 14 * * *"), "Every day at 2:30 PM");
   assert.equal(scheduleLabel("00 30 14 * * * *"), "Every day at 2:30 PM");
   assert.equal(scheduleLabel("0 8 * * 1"), "Mondays at 8:00 AM");
+  assert.equal(scheduleLabel("0 8 * * MON"), "Mondays at 8:00 AM");
+  assert.equal(scheduleLabel("0 8 * * 7"), "Sundays at 8:00 AM");
+  assert.equal(scheduleLabel("0 9 * * MON-FRI"), "Weekdays at 9:00 AM");
   assert.equal(scheduleLabel("0 17 1 * *"), "1st day of each month at 5:00 PM");
   assert.equal(scheduleLabel("0 0 9 1 1 * 2027"), "Jan 1, 2027 at 9:00 AM");
   assert.equal(scheduleLabel("*/5 * * * *"), "Custom schedule");
@@ -150,4 +153,21 @@ test("automationSummary ignores unparseable next_run_at values", () => {
     paused: 0,
     nextRun: "None",
   });
+});
+
+test("normalizeAutomations preserves explicit unknown state even when is_active is true", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "unknown-active",
+        name: "Unknown active",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "unknown",
+        is_active: true,
+      },
+    ],
+  });
+
+  assert.equal(automations[0].state_label, "Unknown");
+  assert.equal(automations[0].state_tone, "muted");
 });

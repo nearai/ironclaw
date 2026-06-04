@@ -29,6 +29,7 @@ const STATE_PRESENTATION = {
   disabled: { label: "Disabled", tone: "warning" },
   inactive: { label: "Inactive", tone: "warning" },
   completed: { label: "Completed", tone: "success" },
+  unknown: { label: "Unknown", tone: "muted" },
 };
 
 const LAST_STATUS_PRESENTATION = {
@@ -46,8 +47,8 @@ export function normalizeAutomations(response) {
       ...automation,
       display_name: automation.name || "Untitled automation",
       schedule_label: scheduleLabel(automation.source?.cron),
-      state_label: stateLabel(automation.state, automation.is_active),
-      state_tone: stateTone(automation.state, automation.is_active),
+      state_label: stateLabel(automation.state),
+      state_tone: stateTone(automation.state),
       next_run_timestamp: parseTimestamp(automation.next_run_at),
       next_run_label: formatAutomationDate(automation.next_run_at, "Not scheduled"),
       last_run_label: formatAutomationDate(automation.last_run_at, "No runs yet"),
@@ -102,16 +103,18 @@ export function scheduleLabel(cron) {
   if (year === "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
     return `Every day at ${time}`;
   }
-  if (year === "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "1-5") {
+  const normalizedDayOfWeek = normalizeDayOfWeek(dayOfWeek);
+
+  if (year === "*" && dayOfMonth === "*" && month === "*" && normalizedDayOfWeek === "1-5") {
     return `Weekdays at ${time}`;
   }
   if (
     year === "*" &&
     dayOfMonth === "*" &&
     month === "*" &&
-    isSingleNumber(dayOfWeek, 0, 6)
+    isSingleNumber(normalizedDayOfWeek, 0, 7)
   ) {
-    return `${WEEKDAYS[Number(dayOfWeek)]} at ${time}`;
+    return `${WEEKDAYS[Number(normalizedDayOfWeek) % 7]} at ${time}`;
   }
   if (
     year === "*" &&
@@ -146,12 +149,12 @@ export function formatAutomationDate(value, fallback = "Unknown") {
   });
 }
 
-export function stateLabel(state, isActive) {
-  return STATE_PRESENTATION[state]?.label || (isActive ? "Active" : "Unknown");
+export function stateLabel(state) {
+  return STATE_PRESENTATION[state]?.label || "Unknown";
 }
 
-export function stateTone(state, isActive) {
-  return STATE_PRESENTATION[state]?.tone || (isActive ? "signal" : "muted");
+export function stateTone(state) {
+  return STATE_PRESENTATION[state]?.tone || "muted";
 }
 
 export function lastStatusLabel(status) {
@@ -218,6 +221,21 @@ function isSingleNumber(value, min, max) {
   if (!/^\d+$/.test(value)) return false;
   const num = Number(value);
   return num >= min && num <= max;
+}
+
+function normalizeDayOfWeek(value) {
+  const upper = String(value || "").toUpperCase();
+  const aliases = {
+    SUN: "0",
+    MON: "1",
+    TUE: "2",
+    WED: "3",
+    THU: "4",
+    FRI: "5",
+    SAT: "6",
+    "MON-FRI": "1-5",
+  };
+  return aliases[upper] || value;
 }
 
 function ordinal(value) {
