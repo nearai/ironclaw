@@ -35,7 +35,7 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
     checks.push(DoctorCheck {
         name: "reborn_home".to_string(),
         category: CheckCategory::Core,
-        outcome: if report.home_path().exists() {
+        outcome: if report.home_path().is_dir() {
             CheckOutcome::Pass
         } else {
             CheckOutcome::Fail
