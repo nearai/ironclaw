@@ -613,6 +613,22 @@ impl EventTriggeredHookSubscription {
         // preserved from the caller's supplied filter (it is a strictly
         // narrower partition within the thread and the run scope does not own
         // it).
+        //
+        // PR #3931 M3: when the run carries no project_id (a legitimate
+        // tenant/agent-level run), the derived ReadScope.project_id is also
+        // None, so the subscription is not pinned on the project dimension —
+        // thread_id still pins it to a single thread. This is not fail-closed
+        // (project-less runs are legitimate), but make the unpinned dimension
+        // observable so it is auditable.
+        if run_scope.project_id.is_none() {
+            tracing::warn!(
+                tenant_id = run_scope.tenant_id.as_str(),
+                agent_id = ?run_scope.agent_id.as_ref().map(|a| a.as_str()),
+                thread_id = run_scope.thread_id.as_str(),
+                "event subscription read scope is not project-pinned (run has no \
+                 project_id); subscription remains pinned by thread_id only"
+            );
+        }
         Ok(ReadScope {
             project_id: run_scope.project_id.clone(),
             mission_id: thread_scope.mission_id.clone(),
@@ -624,8 +640,14 @@ impl EventTriggeredHookSubscription {
     /// Override the read scope on a freshly-cloned subscription. Used by the
     /// host build path to install the derived effective scope before the
     /// background task spawns. See [`Self::effective_read_scope`].
+    ///
+    /// Deliberately module-private (not `pub(crate)`): it has no cross-module
+    /// caller, and widening its visibility would let other `ironclaw_reborn`
+    /// code install an arbitrary `ReadScope` (e.g. `ReadScope::any()`) and
+    /// bypass `effective_read_scope`, reopening the cross-thread/project leak
+    /// PR #3931 Bug 1 closed.
     #[must_use]
-    pub(crate) fn with_read_scope(mut self, read_scope: ReadScope) -> Self {
+    fn with_read_scope(mut self, read_scope: ReadScope) -> Self {
         self.read_scope = read_scope;
         self
     }

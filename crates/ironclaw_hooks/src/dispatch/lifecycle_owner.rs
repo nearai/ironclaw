@@ -50,13 +50,36 @@ pub(crate) enum LifecycleOwnerLookup {
 
 /// Returns `true` for the hook-lifecycle event kinds whose owner must be
 /// resolved from the registry rather than the carried provider.
+///
+/// This is an exhaustive `match` with NO wildcard arm by design: every
+/// `RuntimeEventKind` variant is classified explicitly so that adding a new
+/// variant fails to compile until it is deliberately placed on the lifecycle
+/// or non-lifecycle side. A `matches!` (or a `_ => false` arm) would let a
+/// future lifecycle variant silently fall through into the non-lifecycle
+/// branch of [`resolve_event_owner`], which trusts the forgeable
+/// `event.provider` field — reopening PR #3931 Hole 2 with no compile-time
+/// signal.
 pub(crate) fn is_lifecycle_kind(kind: RuntimeEventKind) -> bool {
-    matches!(
-        kind,
+    match kind {
         RuntimeEventKind::HookDispatched
-            | RuntimeEventKind::HookDecisionEmitted
-            | RuntimeEventKind::HookFailed
-    )
+        | RuntimeEventKind::HookDecisionEmitted
+        | RuntimeEventKind::HookFailed => true,
+        RuntimeEventKind::DispatchRequested
+        | RuntimeEventKind::RuntimeSelected
+        | RuntimeEventKind::DispatchSucceeded
+        | RuntimeEventKind::DispatchFailed
+        | RuntimeEventKind::ModelStarted
+        | RuntimeEventKind::ModelCompleted
+        | RuntimeEventKind::ModelFailed
+        | RuntimeEventKind::AssistantReplyFinalized
+        | RuntimeEventKind::LoopCompleted
+        | RuntimeEventKind::LoopCancelled
+        | RuntimeEventKind::LoopFailed
+        | RuntimeEventKind::ProcessStarted
+        | RuntimeEventKind::ProcessCompleted
+        | RuntimeEventKind::ProcessFailed
+        | RuntimeEventKind::ProcessKilled => false,
+    }
 }
 
 /// Resolve the authoritative scope-provider for a runtime event.
@@ -194,6 +217,49 @@ mod tests {
     }
     fn probe_unreached(_: &str) -> LifecycleOwnerLookup {
         panic!("probe must not be consulted for this case");
+    }
+
+    #[test]
+    fn is_lifecycle_kind_classifies_every_variant() {
+        // Every `RuntimeEventKind` is listed here explicitly. If a variant is
+        // added to the enum, this test must be updated alongside the exhaustive
+        // `match` in `is_lifecycle_kind` — the goal is that a new lifecycle
+        // variant is never silently treated as non-lifecycle (which would trust
+        // the forgeable `event.provider`).
+        let lifecycle = [
+            RuntimeEventKind::HookDispatched,
+            RuntimeEventKind::HookDecisionEmitted,
+            RuntimeEventKind::HookFailed,
+        ];
+        let non_lifecycle = [
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+            RuntimeEventKind::DispatchFailed,
+            RuntimeEventKind::ModelStarted,
+            RuntimeEventKind::ModelCompleted,
+            RuntimeEventKind::ModelFailed,
+            RuntimeEventKind::AssistantReplyFinalized,
+            RuntimeEventKind::LoopCompleted,
+            RuntimeEventKind::LoopCancelled,
+            RuntimeEventKind::LoopFailed,
+            RuntimeEventKind::ProcessStarted,
+            RuntimeEventKind::ProcessCompleted,
+            RuntimeEventKind::ProcessFailed,
+            RuntimeEventKind::ProcessKilled,
+        ];
+        for kind in lifecycle {
+            assert!(
+                is_lifecycle_kind(kind),
+                "{kind:?} must be classified as a hook-lifecycle kind"
+            );
+        }
+        for kind in non_lifecycle {
+            assert!(
+                !is_lifecycle_kind(kind),
+                "{kind:?} must NOT be classified as a hook-lifecycle kind"
+            );
+        }
     }
 
     #[test]
