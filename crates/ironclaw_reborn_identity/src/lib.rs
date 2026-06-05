@@ -127,6 +127,13 @@ pub enum RebornIdentityError {
     /// backend inconsistency, surfaced rather than silently dropped.
     #[error("persisted user id is invalid: {0}")]
     InvalidUserId(String),
+    /// `resolve_or_create` was called for a `ChannelActor` identity. Channel
+    /// actors are never mint-capable — the resolver contract routes them
+    /// through [`lookup`](RebornIdentityResolver::lookup) /
+    /// [`bind`](RebornIdentityResolver::bind) so an unbound actor fails closed
+    /// instead of auto-provisioning a Reborn account.
+    #[error("channel-actor identities must resolve through lookup/bind, not resolve_or_create")]
+    ChannelActorNotMintable,
 }
 
 /// Resolve an external identity to a stable canonical [`UserId`], creating
@@ -140,7 +147,11 @@ pub trait RebornIdentityResolver: Send + Sync {
     /// Mint-capable resolution: resolve the identity to its user, link by
     /// verified email, or create a new user. Used by surfaces whose
     /// admission is established up front (WebUI OAuth, gated by the
-    /// email-domain allowlist).
+    /// email-domain allowlist). A [`ChannelActor`](SurfaceKind::ChannelActor)
+    /// identity is rejected with
+    /// [`ChannelActorNotMintable`](RebornIdentityError::ChannelActorNotMintable):
+    /// channel actors are never mint-capable and must resolve through
+    /// [`lookup`](Self::lookup) / [`bind`](Self::bind).
     async fn resolve_or_create(
         &self,
         identity: ResolveExternalIdentity,
