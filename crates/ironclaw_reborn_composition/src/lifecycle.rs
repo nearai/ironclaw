@@ -114,6 +114,22 @@ impl RebornLocalSkillManagementPort {
         let context = self.skill_context()?;
         Ok(remove_skill(&context, SkillRemoveRequest { name }).await?)
     }
+
+    pub(crate) async fn remove_if_installed(
+        &self,
+        name: &str,
+    ) -> Result<ironclaw_skills::SkillRemoveResult, RebornLocalSkillManagementError> {
+        let context = self.skill_context()?;
+        match remove_skill(&context, SkillRemoveRequest { name }).await {
+            Ok(result) => Ok(result),
+            Err(error) if error.kind() == SkillManagementErrorKind::NotFound => {
+                Ok(ironclaw_skills::SkillRemoveResult {
+                    name: name.to_string(),
+                })
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

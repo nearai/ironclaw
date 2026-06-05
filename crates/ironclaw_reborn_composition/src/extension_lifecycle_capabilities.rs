@@ -323,6 +323,11 @@ mod tests {
             install.parameters_schema["required"],
             serde_json::json!(["name"])
         );
+        assert_eq!(
+            install.parameters_schema["properties"].get("acknowledge_unverified"),
+            None,
+            "model-visible IronHub install must not self-acknowledge unverified community content"
+        );
         assert!(
             install.effects.contains(&EffectKind::Network),
             "IronHub install downloads signed catalog artifacts through runtime HTTP egress"

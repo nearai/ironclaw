@@ -7,12 +7,12 @@ use ironclaw_product_workflow::{LifecyclePackageId, LifecyclePackageKind, Lifecy
 use super::errors::{catalog_error, invalid_input, product_error};
 use super::model::{
     IronHubArtifact, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions, IronHubManifest,
-    IronHubProvenance, IronHubSkillEntry, IronHubToolEntry, MANIFEST_VERIFY_KEYS,
-    SignedManifestEnvelope,
+    IronHubProvenance, IronHubSkillEntry, IronHubToolEntry, SignedManifestEnvelope,
 };
 
+#[cfg(not(test))]
 pub(super) fn verify_signed_manifest(envelope_bytes: &[u8]) -> Result<Vec<u8>, String> {
-    verify_signed_manifest_with_keys(envelope_bytes, MANIFEST_VERIFY_KEYS)
+    verify_signed_manifest_with_keys(envelope_bytes, super::model::MANIFEST_VERIFY_KEYS)
 }
 
 pub(super) fn verify_signed_manifest_with_keys(

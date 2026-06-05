@@ -152,8 +152,8 @@ pub use ironclaw_skills::{
     skill_summary_json as reborn_skill_summary_json,
 };
 pub use ironhub::{
-    IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions, IronHubManifest,
-    IronHubProvenance, execute_reborn_ironhub_command, render_reborn_ironhub_response,
+    IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions,
+    execute_reborn_ironhub_command, render_reborn_ironhub_response,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{

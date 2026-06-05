@@ -87,6 +87,70 @@ fn ironhub_help_mentions_catalog_commands() {
 }
 
 #[test]
+fn ironhub_install_help_mentions_safety_and_replacement_flags() {
+    let output = Command::new(reborn_bin())
+        .args(["ironhub", "install", "--help"])
+        .output()
+        .expect("ironclaw-reborn ironhub install --help should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--kind"), "stdout: {stdout}");
+    assert!(stdout.contains("--force"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("--acknowledge-unverified"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("--expected-version"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("--expected-artifact-digest"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("--json"), "stdout: {stdout}");
+}
+
+#[test]
+fn ironhub_install_uses_reborn_home_without_touching_v1_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let v1_home = temp.path().join("v1-home");
+
+    let output = Command::new(reborn_bin())
+        .args(["ironhub", "install", "catalog-helper", "--kind", "skill"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_BASE_DIR", &v1_home)
+        .env(
+            "IRONHUB_MANIFEST_URL",
+            "http://hub.ironclaw.com/manifest.json",
+        )
+        .output()
+        .expect("ironclaw-reborn ironhub install should run");
+
+    assert!(
+        !output.status.success(),
+        "invalid manifest URL should fail before install"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("hub-manifest.manifest_url must use https"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        reborn_home.join("local-dev").exists(),
+        "ironhub install should initialize Reborn local-dev state"
+    );
+    assert!(
+        !v1_home.exists(),
+        "ironhub install must not create or read v1 state"
+    );
+}
+
+#[test]
 fn profile_list_shows_supported_profiles_without_reborn_home() {
     let output = Command::new(reborn_bin())
         .arg("profile")

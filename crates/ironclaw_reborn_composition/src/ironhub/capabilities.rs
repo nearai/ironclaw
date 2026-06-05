@@ -121,6 +121,8 @@ struct SearchInput {
 #[derive(Debug, Deserialize)]
 struct InfoInput {
     name: String,
+    #[serde(default)]
+    kind: Option<IronHubEntryKind>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,8 +132,6 @@ struct InstallInput {
     kind: Option<IronHubEntryKind>,
     #[serde(default)]
     force: bool,
-    #[serde(default)]
-    acknowledge_unverified: bool,
     #[serde(default)]
     expected_version: Option<String>,
     #[serde(default)]
@@ -163,7 +163,10 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
             }
             IRONHUB_INFO_CAPABILITY_ID => {
                 let input: InfoInput = parse_capability_input(request.input)?;
-                IronHubCommand::Info { name: input.name }
+                IronHubCommand::Info {
+                    name: input.name,
+                    kind: input.kind,
+                }
             }
             IRONHUB_INSTALL_CAPABILITY_ID => {
                 let input: InstallInput = parse_capability_input(request.input)?;
@@ -172,7 +175,7 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
                     options: IronHubInstallOptions {
                         kind: input.kind,
                         force: input.force,
-                        acknowledge_unverified: input.acknowledge_unverified,
+                        acknowledge_unverified: false,
                         expected_version: input.expected_version,
                         expected_artifact_digest: input.expected_artifact_digest,
                     },

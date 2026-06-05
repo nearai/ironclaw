@@ -56,6 +56,10 @@ struct IronHubInfoCommand {
     /// Tool or skill name.
     name: String,
 
+    /// Disambiguate when a name exists as both a tool and a skill.
+    #[arg(long, value_enum)]
+    kind: Option<IronHubKindArg>,
+
     /// Output the lifecycle response as JSON.
     #[arg(long)]
     json: bool,
@@ -116,7 +120,10 @@ impl IronHubCommand {
                 "list",
             ),
             IronHubSubcommand::Info(command) => (
-                RebornIronHubCommand::Info { name: command.name },
+                RebornIronHubCommand::Info {
+                    name: command.name,
+                    kind: command.kind.map(Into::into),
+                },
                 command.json,
                 "info",
             ),

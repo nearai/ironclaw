@@ -72,7 +72,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/{id}_tool.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{id}.invoke"
 description = "{description}"
 effects = ["dispatch_capability", "network"]

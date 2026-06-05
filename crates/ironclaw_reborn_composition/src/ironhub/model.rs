@@ -48,7 +48,7 @@ impl IronHubEntryKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum IronHubProvenance {
+pub(super) enum IronHubProvenance {
     #[serde(alias = "repo")]
     Official,
     Trusted,
@@ -59,7 +59,7 @@ pub enum IronHubProvenance {
 }
 
 impl IronHubProvenance {
-    pub fn as_wire(self) -> &'static str {
+    pub(super) fn as_wire(self) -> &'static str {
         match self {
             Self::Official => "official",
             Self::Trusted => "trusted",
@@ -68,7 +68,7 @@ impl IronHubProvenance {
         }
     }
 
-    pub fn is_community_unverified(self) -> bool {
+    pub(super) fn is_community_unverified(self) -> bool {
         matches!(self, Self::New)
     }
 
@@ -83,15 +83,15 @@ impl IronHubProvenance {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IronHubManifest {
-    pub version: String,
-    pub generated_at: String,
-    pub release_tag: String,
-    pub repo: String,
+pub(super) struct IronHubManifest {
+    pub(super) version: String,
+    pub(super) generated_at: String,
+    pub(super) release_tag: String,
+    pub(super) repo: String,
     #[serde(default)]
-    pub tools: Vec<IronHubToolEntry>,
+    pub(super) tools: Vec<IronHubToolEntry>,
     #[serde(default)]
-    pub skills: Vec<IronHubSkillEntry>,
+    pub(super) skills: Vec<IronHubSkillEntry>,
 }
 
 impl IronHubManifest {
@@ -105,37 +105,37 @@ impl IronHubManifest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IronHubToolEntry {
-    pub name: String,
-    pub crate_name: String,
-    pub version: String,
+pub(super) struct IronHubToolEntry {
+    pub(super) name: String,
+    pub(super) crate_name: String,
+    pub(super) version: String,
     #[serde(default)]
-    pub description: String,
+    pub(super) description: String,
     #[serde(default)]
-    pub provenance: IronHubProvenance,
-    pub wasm: IronHubArtifact,
-    pub capabilities: IronHubArtifact,
+    pub(super) provenance: IronHubProvenance,
+    pub(super) wasm: IronHubArtifact,
+    pub(super) capabilities: IronHubArtifact,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IronHubSkillEntry {
-    pub name: String,
+pub(super) struct IronHubSkillEntry {
+    pub(super) name: String,
     #[serde(default)]
-    pub trunk: String,
+    pub(super) trunk: String,
     #[serde(default)]
-    pub version: String,
+    pub(super) version: String,
     #[serde(default)]
-    pub description: String,
+    pub(super) description: String,
     #[serde(default)]
-    pub provenance: IronHubProvenance,
-    pub skill_md: IronHubArtifact,
+    pub(super) provenance: IronHubProvenance,
+    pub(super) skill_md: IronHubArtifact,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IronHubArtifact {
-    pub url: String,
-    pub size_bytes: u64,
-    pub sha256: String,
+pub(super) struct IronHubArtifact {
+    pub(super) url: String,
+    pub(super) size_bytes: u64,
+    pub(super) sha256: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -157,6 +157,7 @@ pub enum IronHubCommand {
     },
     Info {
         name: String,
+        kind: Option<IronHubEntryKind>,
     },
     Install {
         name: String,
