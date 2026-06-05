@@ -1506,10 +1506,18 @@ fn validate_thread_scope_for_run(
     // The thread store keys threads by `owner_user_id` (via the MountView in
     // `ThreadScope::to_resource_scope`), but that axis is absent from the
     // on-disk thread path, so a wrong owner silently reads an empty subtree
-    // and surfaces as `UnknownThread`. When the run carries an authenticated
-    // actor and the thread scope declares an owner, require them to agree so
-    // the divergence fails loud here rather than at the storage read.
-    if let (Some(thread_owner), Some(actor)) =
+    // and surfaces as `UnknownThread`. Explicit-owner runs intentionally allow
+    // actor/subject divergence for shared conversation routes, but the explicit
+    // owner must still match the resolved thread owner. Legacy actor-fallback
+    // runs continue to require owner=actor.
+    if run_context.scope.has_explicit_thread_owner() {
+        if run_context.scope.explicit_owner_user_id() != thread_scope.owner_user_id.as_ref() {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "thread scope owner does not match the explicit loop run subject",
+            ));
+        }
+    } else if let (Some(thread_owner), Some(actor)) =
         (thread_scope.owner_user_id.as_ref(), run_context.actor())
         && thread_owner != &actor.user_id
     {

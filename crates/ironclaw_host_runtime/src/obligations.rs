@@ -145,24 +145,6 @@ impl RuntimeSecretInjectionStore {
             .map(|entry| entry.material))
     }
 
-    pub(crate) fn get(
-        &self,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-        handle: &SecretHandle,
-    ) -> Result<Option<SecretMaterial>, RuntimeSecretInjectionStoreError> {
-        let now = Instant::now();
-        let mut secrets = self.lock()?;
-        prune_expired_entries(&mut secrets, now);
-        Ok(secrets
-            .get(&RuntimeSecretInjectionKey::new(
-                scope,
-                capability_id,
-                handle,
-            ))
-            .map(|entry| entry.material.clone()))
-    }
-
     /// Discard all staged secrets for a scoped capability before process ownership exists.
     ///
     /// Background process lifecycle cleanup is guarded by a single-active-handoff

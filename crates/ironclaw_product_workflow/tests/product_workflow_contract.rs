@@ -779,6 +779,82 @@ async fn auth_callback_and_denied_payloads_route_through_auth_interaction_servic
 }
 
 #[tokio::test]
+async fn auth_deny_from_threaded_direct_prompt_uses_base_direct_binding() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            TenantId::new("tenant:alpha").expect("tenant"),
+            ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+            ironclaw_conversations::AdapterInstallationId::new("install_alpha")
+                .expect("installation"),
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let binding = product_binding_service(
+        conversations,
+        vec![(
+            "test_adapter",
+            "install_alpha",
+            "tenant:alpha",
+            "agent:alpha",
+            Some("project:alpha"),
+        )],
+    );
+    let base_envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:seed-direct").expect("event"),
+        ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+        ExternalConversationRef::new(None, "conv1", None, None).expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("needs auth", vec![], ProductTriggerReason::DirectChat)
+                .expect("message"),
+        ),
+    );
+    let base_binding = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&base_envelope))
+        .await
+        .expect("seed base direct conversation binding");
+    let gate_ref = GateRef::new("gate:auth-direct-thread").expect("auth gate");
+    let auth_service = Arc::new(RecordingAuthInteractionService::new(
+        gate_ref.clone(),
+        TurnRunId::new(),
+    ));
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        Arc::new(binding),
+    )
+    .with_auth_interaction_service(auth_service.clone());
+    let threaded_deny = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:threaded-auth-deny").expect("event"),
+        ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+        ExternalConversationRef::new(None, "conv1", Some("prompt-thread-ts"), Some("reply-ts"))
+            .expect("conversation"),
+        ProductInboundPayload::AuthResolution(
+            AuthResolutionPayload::new(gate_ref.as_str(), AuthResolutionResult::Denied)
+                .expect("auth payload")
+                .with_source_trigger(ProductTriggerReason::DirectChat),
+        ),
+    );
+
+    let ack = workflow
+        .accept_inbound(threaded_deny)
+        .await
+        .expect("threaded direct auth deny should use base binding");
+
+    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
+    let resolutions = auth_service.resolutions();
+    assert_eq!(resolutions.len(), 1);
+    assert_eq!(resolutions[0].gate_ref, gate_ref);
+    assert_eq!(resolutions[0].decision, AuthInteractionDecision::Deny);
+    assert_eq!(resolutions[0].scope.thread_id, base_binding.thread_id);
+}
+
+#[tokio::test]
 async fn approval_resolution_idempotency_key_is_stable_for_same_external_event() {
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
     let build = || {
@@ -1522,8 +1598,39 @@ async fn noop_returns_noop_ack() {
 }
 
 #[tokio::test]
+async fn subscription_request_via_accept_inbound_rejects_before_mutating_ledger() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let envelope = sample_envelope_with_payload(
+        "projection-wrong-entrypoint",
+        ProductInboundPayload::SubscriptionRequest(
+            ProjectionSubscriptionPayload::new(None, None).expect("valid subscription"),
+        ),
+    );
+
+    let err = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("subscription requests use the projection resolver, not accept_inbound");
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            ..
+        }
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(binding_service.resolve_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
 async fn projection_subscription_resolves_through_binding_service() {
-    let (workflow, inbound, _ledger, binding_service) = build_workflow_with_binding();
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
     let binding = fake_binding();
     let cursor = ProjectionCursor::new("cursor:projection-1").expect("valid cursor");
     let envelope = sample_envelope_with_payload(
@@ -1551,6 +1658,9 @@ async fn projection_subscription_resolves_through_binding_service() {
     assert_eq!(subscription.after_cursor, Some(cursor));
     assert_eq!(binding_service.resolve_count(), 1);
     assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
 }
 
 #[tokio::test]

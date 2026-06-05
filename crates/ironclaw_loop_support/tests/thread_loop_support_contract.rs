@@ -127,6 +127,44 @@ async fn thread_context_port_rejects_run_actor_owner_mismatch() {
 }
 
 #[tokio::test]
+async fn thread_context_port_accepts_explicit_owner_with_distinct_actor() {
+    // Shared routes pin the transcript to an explicit subject while preserving
+    // the submitting actor for identity/policy decisions.
+    let fixture = ThreadFixture::new().await;
+    let explicit_scope = TurnScope::new_with_owner(
+        fixture.run_context.scope.tenant_id.clone(),
+        fixture.run_context.scope.agent_id.clone(),
+        fixture.run_context.scope.project_id.clone(),
+        fixture.thread_id.clone(),
+        fixture.thread_scope.owner_user_id.clone(),
+    );
+    let run_context = LoopRunContext::new(
+        explicit_scope,
+        fixture.run_context.turn_id,
+        fixture.run_context.run_id,
+        fixture.run_context.resolved_run_profile,
+    )
+    .with_actor(TurnActor::new(UserId::new("room-participant").unwrap()));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .expect("explicit owner should allow actor/owner divergence");
+
+    assert_eq!(bundle.messages.len(), 1);
+}
+
+#[tokio::test]
 async fn thread_context_port_accepts_matching_run_actor_owner() {
     // The same path must still succeed when the run actor owns the thread.
     let fixture = ThreadFixture::new().await;

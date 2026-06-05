@@ -146,6 +146,22 @@ struct TokenResponse {
     token_type: String,
 }
 
+/// A started device-code flow. Returned by
+/// [`OpenAiCodexSessionManager::initiate_device_code`]; the caller shows the
+/// `user_code` + `verification_uri` to the user, then passes this back to
+/// [`OpenAiCodexSessionManager::complete_device_code`] to poll for completion.
+/// Internal polling state (device id, interval, expiry) is opaque to callers.
+#[derive(Debug, Clone)]
+pub struct DeviceCodeStart {
+    device_auth_id: String,
+    /// Code the user enters at `verification_uri`.
+    pub user_code: String,
+    /// URL where the user enters the code.
+    pub verification_uri: String,
+    interval_secs: u64,
+    expires_secs: u64,
+}
+
 /// Manages OpenAI Codex OAuth sessions with persistence and auto-refresh.
 pub struct OpenAiCodexSessionManager {
     config: OpenAiCodexConfig,
@@ -272,21 +288,15 @@ impl OpenAiCodexSessionManager {
         }
     }
 
-    /// Run OpenAI's device code auth flow.
+    /// Step 1 of OpenAI's device code auth flow: request a user code.
     ///
-    /// Uses OpenAI's custom `/api/accounts/deviceauth/*` endpoints (not the standard
-    /// Auth0 `/oauth/device/code` which is behind Cloudflare managed challenge).
-    ///
-    /// Flow:
-    /// 1. POST `/api/accounts/deviceauth/usercode` → get device_auth_id + user_code
-    /// 2. Poll POST `/api/accounts/deviceauth/token` → get authorization_code + PKCE
-    /// 3. Exchange via POST `/oauth/token` → get access_token + refresh_token
-    pub async fn device_code_login(&self) -> Result<(), LlmError> {
-        let _guard = self.renewal_lock.lock().await;
-
+    /// Uses OpenAI's custom `/api/accounts/deviceauth/*` endpoints (not the
+    /// standard Auth0 `/oauth/device/code` which is behind Cloudflare managed
+    /// challenge). Returns the [`DeviceCodeStart`] the caller displays and then
+    /// hands to [`Self::complete_device_code`]. This does NOT block on
+    /// authorization, so a web flow can show the code immediately.
+    pub async fn initiate_device_code(&self) -> Result<DeviceCodeStart, LlmError> {
         let auth_base = format!("{}/api/accounts", self.config.auth_endpoint);
-
-        // Step 1: Request device code
         let usercode_url = format!("{}/deviceauth/usercode", auth_base);
         let resp = self
             .client
@@ -328,31 +338,31 @@ impl OpenAiCodexSessionManager {
                 ),
             })?;
 
-        // Step 2: Display code to user
-        println!();
-        println!("===========================================================");
-        println!("               OpenAI Codex Authentication                  ");
-        println!("===========================================================");
-        println!();
-        println!("  1. Open this URL in any browser:");
-        println!("     {}", device.verification_uri);
-        println!();
-        println!("  2. Enter this code:");
-        println!();
-        println!("              [  {}  ]", device.user_code);
-        println!();
+        let interval_secs = device.interval.max(5);
         let expires_secs = device.expires_in_secs();
-        println!(
-            "  Waiting for authorization... (expires in {} min)",
-            expires_secs / 60
-        );
-        println!("===========================================================");
-        println!();
+        Ok(DeviceCodeStart {
+            device_auth_id: device.device_auth_id,
+            user_code: device.user_code,
+            verification_uri: device.verification_uri,
+            interval_secs,
+            expires_secs,
+        })
+    }
+
+    /// Step 2-3 of the device code flow: poll for authorization, then exchange
+    /// the code for tokens and persist them. Blocks until the user authorizes
+    /// (or the code expires). Pass the [`DeviceCodeStart`] from
+    /// [`Self::initiate_device_code`].
+    pub async fn complete_device_code(&self, start: &DeviceCodeStart) -> Result<(), LlmError> {
+        let _guard = self.renewal_lock.lock().await;
+
+        let auth_base = format!("{}/api/accounts", self.config.auth_endpoint);
 
         // Step 3: Poll for authorization code
         let poll_url = format!("{}/deviceauth/token", auth_base);
-        let mut interval = std::time::Duration::from_secs(device.interval.max(5));
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(expires_secs);
+        let mut interval = std::time::Duration::from_secs(start.interval_secs.max(5));
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(start.expires_secs);
 
         let auth_code = loop {
             tokio::time::sleep(interval).await;
@@ -368,8 +378,8 @@ impl OpenAiCodexSessionManager {
                 .client
                 .post(&poll_url)
                 .json(&DeviceTokenPollRequest {
-                    device_auth_id: device.device_auth_id.clone(),
-                    user_code: device.user_code.clone(),
+                    device_auth_id: start.device_auth_id.clone(),
+                    user_code: start.user_code.clone(),
                 })
                 .send()
                 .await
@@ -471,6 +481,39 @@ impl OpenAiCodexSessionManager {
 
         self.save_session(&session).await?;
         self.set_session(session).await;
+
+        Ok(())
+    }
+
+    /// Run OpenAI's device code auth flow interactively (CLI).
+    ///
+    /// Convenience wrapper over [`Self::initiate_device_code`] +
+    /// [`Self::complete_device_code`] that prints the code to stdout and blocks
+    /// until the user authorizes. Web flows call the two halves directly so the
+    /// code can be rendered in the browser instead of the terminal.
+    pub async fn device_code_login(&self) -> Result<(), LlmError> {
+        let start = self.initiate_device_code().await?;
+
+        println!();
+        println!("===========================================================");
+        println!("               OpenAI Codex Authentication                  ");
+        println!("===========================================================");
+        println!();
+        println!("  1. Open this URL in any browser:");
+        println!("     {}", start.verification_uri);
+        println!();
+        println!("  2. Enter this code:");
+        println!();
+        println!("              [  {}  ]", start.user_code);
+        println!();
+        println!(
+            "  Waiting for authorization... (expires in {} min)",
+            start.expires_secs / 60
+        );
+        println!("===========================================================");
+        println!();
+
+        self.complete_device_code(&start).await?;
 
         println!();
         println!("Authentication successful!");

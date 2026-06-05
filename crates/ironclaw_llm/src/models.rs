@@ -142,10 +142,8 @@ pub(crate) async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(Str
 /// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
 pub(crate) async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
-        (
-            "gpt-5.3-codex".into(),
-            "GPT-5.3 Codex (latest flagship)".into(),
-        ),
+        ("gpt-5.5".into(), "GPT-5.5 (latest flagship)".into()),
+        ("gpt-5.3-codex".into(), "GPT-5.3 Codex".into()),
         ("gpt-5.2-codex".into(), "GPT-5.2 Codex".into()),
         ("gpt-5.2".into(), "GPT-5.2".into()),
         (
@@ -237,6 +235,7 @@ pub(crate) fn openai_model_priority(model_id: &str) -> usize {
     let id = model_id.to_ascii_lowercase();
 
     const EXACT_PRIORITY: &[&str] = &[
+        "gpt-5.5",
         "gpt-5.3-codex",
         "gpt-5.2-codex",
         "gpt-5.2",

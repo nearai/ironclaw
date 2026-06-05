@@ -64,6 +64,109 @@ pub trait LlmConfigService: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmModelsResult, LlmConfigServiceError>;
+
+    /// Begin a NEAR AI browser login (GitHub/Google SSO). Returns the provider
+    /// authorization URL for the frontend to open; NEAR AI redirects the browser
+    /// back to this server's public callback route, which stores the session
+    /// token, makes NEAR AI active, and hot-swaps the running provider. The
+    /// caller polls the snapshot until NEAR AI is active.
+    async fn start_nearai_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, LlmConfigServiceError>;
+
+    /// Complete a NEAR AI wallet (NEP-413) login. The frontend connects a NEAR
+    /// wallet, signs the fixed login message, and posts the signature here; this
+    /// exchanges it for a session token at NEAR AI's `/v1/auth/near`, stores the
+    /// token, makes NEAR AI active, and hot-swaps the running provider. Unlike
+    /// the SSO redirect, wallet signing must happen in the browser, so there is
+    /// no server-built auth URL.
+    async fn complete_nearai_wallet_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError>;
+
+    /// Begin an OpenAI Codex (ChatGPT subscription) device-code login. Returns
+    /// the user code + verification URL for the frontend to display; a
+    /// background task polls the device-auth endpoint, persists the tokens,
+    /// makes Codex the active provider, and hot-swaps the running provider. The
+    /// caller polls the snapshot until Codex is active.
+    async fn start_codex_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<CodexLoginStart, LlmConfigServiceError>;
+}
+
+/// OAuth identity provider for NEAR AI session login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NearAiAuthProvider {
+    Github,
+    Google,
+}
+
+impl NearAiAuthProvider {
+    /// Path segment used in the NEAR AI auth URL (`/v1/auth/<segment>`).
+    pub fn as_path(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Google => "google",
+        }
+    }
+}
+
+/// Start a NEAR AI login with the chosen identity provider.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearAiLoginRequest {
+    pub provider: NearAiAuthProvider,
+    /// The browser's own origin (`window.location.origin`), used to build the
+    /// NEAR AI `frontend_callback` back to this server's public callback route.
+    /// Validated server-side to a bare `scheme://host[:port]`.
+    pub origin: String,
+}
+
+/// The authorization URL the frontend opens to complete NEAR AI login.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearAiLoginStart {
+    pub auth_url: String,
+}
+
+/// A NEP-413 wallet signature plus the payload it covers, posted by the browser
+/// after it connects a NEAR wallet and signs the fixed login message. The server
+/// relays this to NEAR AI's `/v1/auth/near` to obtain a session token.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearAiWalletLoginRequest {
+    pub account_id: String,
+    pub public_key: String,
+    /// base64-standard encoding of the 64 raw ed25519 signature bytes.
+    pub signature: String,
+    /// The exact message string the wallet signed.
+    pub message: String,
+    /// The NEP-413 recipient the wallet signed.
+    pub recipient: String,
+    /// The 32-byte nonce the wallet signed (first 8 bytes are big-endian epoch
+    /// millis).
+    pub nonce: Vec<u8>,
+    #[serde(default)]
+    pub callback_url: Option<String>,
+}
+
+/// Result of a completed NEAR AI wallet login. `active` is true once NEAR AI is
+/// the live provider; the frontend can then proceed to chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearAiWalletLoginResult {
+    pub active: bool,
+}
+
+/// The device code + verification URL the frontend displays for Codex login.
+/// The user enters `user_code` at `verification_uri`; the backend polls for
+/// completion in the background.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexLoginStart {
+    pub user_code: String,
+    pub verification_uri: String,
 }
 
 /// Merged catalog plus the active selection. Keys are masked.
@@ -92,6 +195,9 @@ pub struct LlmProviderView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_model: Option<String>,
     pub api_key_required: bool,
+    /// Whether this provider supports API-key auth at all. This can be true
+    /// even when `api_key_required` is false for dual-auth providers.
+    pub accepts_api_key: bool,
     /// Whether an API-key value is stored for this provider (never the value).
     pub api_key_set: bool,
     pub can_list_models: bool,

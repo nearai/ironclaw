@@ -23,14 +23,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::ProjectId;
+use async_trait::async_trait;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
 use ironclaw_reborn_config::BudgetDefaults;
 #[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_config::RebornBootConfig;
-use ironclaw_triggers::TriggerPollerWorkerConfig;
+use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
 use crate::input::RebornBuildInput;
 
@@ -66,6 +67,59 @@ impl Default for RebornRuntimeIdentity {
 
 pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Fire-time access request for a persisted trigger.
+///
+/// This is the host/composition-facing access check shape. Checks are exact:
+/// `None` for `agent_id` or `project_id` means the trigger has no value for
+/// that scope dimension, not that the checker should treat it as a wildcard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerFireAccessCheck {
+    /// Tenant that owns the persisted trigger.
+    pub tenant_id: TenantId,
+    /// User that created the persisted trigger and whose access is evaluated
+    /// again at fire time.
+    pub creator_user_id: UserId,
+    /// Optional agent scope stored on the trigger.
+    pub agent_id: Option<AgentId>,
+    /// Optional project scope stored on the trigger.
+    pub project_id: Option<ProjectId>,
+    /// Trigger being fired. Included so production access checks can audit or
+    /// apply trigger-specific policy without changing this request shape.
+    pub trigger_id: TriggerId,
+    /// Deterministic fire slot being submitted. Included for audit and policy
+    /// decisions that depend on scheduled fire identity.
+    pub fire_slot: Timestamp,
+}
+
+/// Result of a fire-time trigger access check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerFireAccessDecision {
+    /// The trigger creator is still authorized for the exact trigger scope.
+    Allowed,
+    /// The trigger creator is not authorized for the exact trigger scope.
+    Denied { reason: String },
+}
+
+/// Error returned when the access backend cannot answer the request.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TriggerFireAccessError {
+    /// The backing access source was unavailable; trigger fire handling should
+    /// treat this as retryable rather than a permanent denial.
+    #[error("trigger fire access backend unavailable: {reason}")]
+    Unavailable { reason: String },
+}
+
+/// Fire-time trigger access checker supplied by the composition root.
+#[async_trait]
+pub trait TriggerFireAccessChecker: Send + Sync {
+    /// Check whether the persisted trigger creator may fire the trigger for
+    /// the exact stored tenant/agent/project scope.
+    async fn check_trigger_fire_access(
+        &self,
+        request: TriggerFireAccessCheck,
+    ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError>;
+}
 
 #[cfg(feature = "root-llm-provider")]
 #[derive(Debug, Clone)]
@@ -143,7 +197,7 @@ pub struct TriggerPollerSettings {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TriggerPollerAuthorizerConfig {
-    CreatorMembershipRequired,
+    CreatorAccessRequired,
     #[cfg(any(test, feature = "test-support"))]
     TenantScopedPlaceholderForTest,
 }
@@ -155,7 +209,7 @@ impl Default for TriggerPollerSettings {
             worker: TriggerPollerWorkerConfig::default(),
             startup_jitter_max: Duration::ZERO,
             tick_jitter_max: Duration::ZERO,
-            authorizer: TriggerPollerAuthorizerConfig::CreatorMembershipRequired,
+            authorizer: TriggerPollerAuthorizerConfig::CreatorAccessRequired,
         }
     }
 }
@@ -199,6 +253,7 @@ pub struct RebornRuntimeInput {
     pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
     pub trigger_poller: TriggerPollerSettings,
+    pub trigger_fire_access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
     /// Optional project scope for runtime-owned thread I/O. Channel adapters
@@ -248,6 +303,7 @@ impl RebornRuntimeInput {
             boot: None,
             runner: TurnRunnerSettings::default(),
             trigger_poller: TriggerPollerSettings::default(),
+            trigger_fire_access_checker: None,
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
             default_project_id: None,
@@ -307,6 +363,14 @@ impl RebornRuntimeInput {
 
     pub fn with_trigger_poller_settings(mut self, trigger_poller: TriggerPollerSettings) -> Self {
         self.trigger_poller = trigger_poller;
+        self
+    }
+
+    pub fn with_trigger_fire_access_checker(
+        mut self,
+        checker: Arc<dyn TriggerFireAccessChecker>,
+    ) -> Self {
+        self.trigger_fire_access_checker = Some(checker);
         self
     }
 

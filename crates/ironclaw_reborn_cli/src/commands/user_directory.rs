@@ -21,8 +21,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_reborn_composition::host_api::UserId;
-use ironclaw_reborn_composition::{RebornLibSqlUserStore, ResolveIdentity};
+use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_reborn_composition::{
+    LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
+    RebornLibSqlLocalTriggerAccessStore, RebornLibSqlUserStore, ResolveIdentity,
+};
 use ironclaw_reborn_webui_ingress::{
     OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError,
 };
@@ -31,6 +34,7 @@ use ironclaw_reborn_webui_ingress::{
 /// [`UserDirectory`] seam.
 pub(crate) struct WebuiUserDirectory {
     store: Arc<RebornLibSqlUserStore>,
+    local_trigger_access: Option<LocalTriggerAccessBootstrap>,
     /// Lowercased verified-email domains allowed to log in. Never empty
     /// in production — an empty list rejects every login (fail closed).
     allowed_email_domains: Vec<String>,
@@ -43,8 +47,17 @@ impl WebuiUserDirectory {
     ) -> Self {
         Self {
             store,
+            local_trigger_access: None,
             allowed_email_domains,
         }
+    }
+
+    pub(crate) fn with_local_trigger_access(
+        mut self,
+        local_trigger_access: LocalTriggerAccessBootstrap,
+    ) -> Self {
+        self.local_trigger_access = Some(local_trigger_access);
+        self
     }
 
     /// The verified email this profile is admitted on, if any: the first
@@ -81,6 +94,44 @@ impl WebuiUserDirectory {
     }
 }
 
+/// Local-dev trigger access seed configuration for users admitted through SSO.
+pub(crate) struct LocalTriggerAccessBootstrap {
+    store: Arc<RebornLibSqlLocalTriggerAccessStore>,
+    tenant_id: TenantId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+}
+
+impl LocalTriggerAccessBootstrap {
+    pub(crate) fn new(
+        store: Arc<RebornLibSqlLocalTriggerAccessStore>,
+        tenant_id: TenantId,
+        agent_id: AgentId,
+        project_id: Option<ProjectId>,
+    ) -> Self {
+        Self {
+            store,
+            tenant_id,
+            agent_id,
+            project_id,
+        }
+    }
+
+    async fn seed_for_user(&self, user_id: &UserId) -> Result<(), UserDirectoryError> {
+        self.store
+            .seed_local_access(LocalTriggerAccessSeed {
+                tenant_id: &self.tenant_id,
+                user_id,
+                agent_id: Some(&self.agent_id),
+                project_id: self.project_id.as_ref(),
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .map_err(|err| UserDirectoryError::Backend(err.to_string()))
+    }
+}
+
 #[async_trait]
 impl UserDirectory for WebuiUserDirectory {
     async fn resolve(
@@ -114,7 +165,8 @@ impl UserDirectory for WebuiUserDirectory {
             );
             return Err(UserDirectoryError::Unknown);
         };
-        self.store
+        let user_id = self
+            .store
             .resolve_or_create(ResolveIdentity {
                 provider: provider.as_str(),
                 provider_user_id: profile.provider_user_id.as_str(),
@@ -123,7 +175,11 @@ impl UserDirectory for WebuiUserDirectory {
                 display_name: profile.display_name.as_deref(),
             })
             .await
-            .map_err(|err| UserDirectoryError::Backend(err.to_string()))
+            .map_err(|err| UserDirectoryError::Backend(err.to_string()))?;
+        if let Some(local_trigger_access) = &self.local_trigger_access {
+            local_trigger_access.seed_for_user(&user_id).await?;
+        }
+        Ok(user_id)
     }
 }
 
@@ -251,5 +307,90 @@ mod tests {
             .await
             .expect_err("no verified email on the allowlist must be rejected");
         assert!(matches!(err, UserDirectoryError::Unknown));
+    }
+
+    #[tokio::test]
+    async fn sso_user_directory_seeds_local_trigger_access_for_admitted_user() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.keep().join("reborn-local-dev.db");
+        let user_store = ironclaw_reborn_composition::open_webui_user_store(&path)
+            .await
+            .expect("open user store");
+        let access_store = ironclaw_reborn_composition::open_local_trigger_access_store(&path)
+            .await
+            .expect("open access store");
+        let tenant_id = TenantId::new("sso-access-tenant").expect("tenant id");
+        let agent_id = AgentId::new("sso-access-agent").expect("agent id");
+        let project_id = ProjectId::new("sso-access-project").expect("project id");
+        let dir = WebuiUserDirectory::new(user_store, vec!["example.com".to_string()])
+            .with_local_trigger_access(LocalTriggerAccessBootstrap::new(
+                access_store.clone(),
+                tenant_id.clone(),
+                agent_id.clone(),
+                Some(project_id.clone()),
+            ));
+
+        let user_id = dir
+            .resolve(&google(), &profile(Some("alice@example.com"), true))
+            .await
+            .expect("admitted SSO profile resolves");
+
+        assert!(
+            access_store
+                .has_active_local_access(&tenant_id, &user_id, Some(&agent_id), Some(&project_id))
+                .await
+                .expect("check local access"),
+            "admitted SSO users get an exact local-dev trigger access row"
+        );
+    }
+
+    #[tokio::test]
+    async fn sso_user_directory_does_not_seed_local_trigger_access_for_unadmitted_user() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.keep().join("reborn-local-dev.db");
+        let user_store = ironclaw_reborn_composition::open_webui_user_store(&path)
+            .await
+            .expect("open user store");
+        let access_store = ironclaw_reborn_composition::open_local_trigger_access_store(&path)
+            .await
+            .expect("open access store");
+        let tenant_id = TenantId::new("sso-access-reject-tenant").expect("tenant id");
+        let agent_id = AgentId::new("sso-access-reject-agent").expect("agent id");
+        let project_id = ProjectId::new("sso-access-reject-project").expect("project id");
+        let dir = WebuiUserDirectory::new(user_store.clone(), vec!["example.com".to_string()])
+            .with_local_trigger_access(LocalTriggerAccessBootstrap::new(
+                access_store.clone(),
+                tenant_id.clone(),
+                agent_id.clone(),
+                Some(project_id.clone()),
+            ));
+
+        let err = dir
+            .resolve(&google(), &profile(Some("mallory@evil.test"), true))
+            .await
+            .expect_err("off-allowlist SSO profile must be rejected");
+        assert!(matches!(err, UserDirectoryError::Unknown));
+
+        let rejected_users = user_store
+            .list_active_users_by_allowed_email_domains(&["evil.test".to_string()])
+            .await
+            .expect("list rejected-domain users");
+        assert!(
+            rejected_users.is_empty(),
+            "rejected SSO profiles must fail before user resolution"
+        );
+        let sentinel_user_id = UserId::new("sso-access-reject-user").expect("user id");
+        assert!(
+            !access_store
+                .has_active_local_access(
+                    &tenant_id,
+                    &sentinel_user_id,
+                    Some(&agent_id),
+                    Some(&project_id)
+                )
+                .await
+                .expect("check local access"),
+            "rejected SSO profiles must not seed local trigger access"
+        );
     }
 }

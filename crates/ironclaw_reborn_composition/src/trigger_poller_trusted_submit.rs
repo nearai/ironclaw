@@ -43,11 +43,48 @@ impl TriggerFireAuthRequest {
     }
 }
 
-/// Fire-time host policy hook. The current production implementation is only a
-/// tenant-scope guard; real creator membership authorization remains a separate
-/// source-of-truth integration before external trigger delivery can launch
-/// (tracked by docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md,
-/// PR 18.5b).
+pub(crate) struct AccessCheckerTriggerFireAuthorizer {
+    checker: Arc<dyn crate::runtime_input::TriggerFireAccessChecker>,
+}
+
+impl AccessCheckerTriggerFireAuthorizer {
+    pub(crate) fn new(checker: Arc<dyn crate::runtime_input::TriggerFireAccessChecker>) -> Self {
+        Self { checker }
+    }
+}
+
+#[async_trait]
+impl TriggerFireAuthorizer for AccessCheckerTriggerFireAuthorizer {
+    async fn authorize_trigger_fire(
+        &self,
+        request: &TriggerFireAuthRequest,
+    ) -> Result<(), TriggerFireAuthError> {
+        let decision = self
+            .checker
+            .check_trigger_fire_access(crate::runtime_input::TriggerFireAccessCheck {
+                tenant_id: request.tenant_id.clone(),
+                creator_user_id: request.creator_user_id.clone(),
+                agent_id: request.agent_id.clone(),
+                project_id: request.project_id.clone(),
+                trigger_id: request.trigger_id,
+                fire_slot: request.fire_slot,
+            })
+            .await
+            .map_err(|error| TriggerFireAuthError::Retryable {
+                reason: error.to_string(),
+            })?;
+        match decision {
+            crate::runtime_input::TriggerFireAccessDecision::Allowed => Ok(()),
+            crate::runtime_input::TriggerFireAccessDecision::Denied { reason } => {
+                Err(TriggerFireAuthError::Denied { reason })
+            }
+        }
+    }
+}
+
+/// Fire-time host policy hook. The test-support implementation is only a
+/// tenant-scope guard; normal runtime wiring must use a creator access checker
+/// before external trigger delivery can launch.
 #[async_trait]
 pub(crate) trait TriggerFireAuthorizer: Send + Sync {
     async fn authorize_trigger_fire(
@@ -62,7 +99,7 @@ pub(crate) enum TriggerFireAuthError {
     #[allow(dead_code)]
     Denied { reason: String },
     // Part of the fire-time authorization contract now so backend
-    // unavailability has stable retry semantics before the real membership
+    // unavailability has stable retry semantics before the real access
     // authorizer is wired. The tenant-scope placeholder does not construct it.
     // arch-exempt: dead_code, Retryable is reserved for real fire-time auth backend failures, plan #4436
     #[allow(dead_code)]
@@ -376,6 +413,10 @@ fn conversation_id<T>(result: Result<T, InboundTurnError>) -> Result<T, TriggerE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_input::{
+        TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
+        TriggerFireAccessError,
+    };
     use chrono::Utc;
     use ironclaw_conversations::{
         MessageIdempotencyStatus, ThreadAccessDecision, trusted_trigger_fire_submitter,
@@ -708,6 +749,127 @@ mod tests {
             error,
             TriggerFireAuthError::Denied { reason }
                 if reason.contains("outside this trusted poller scope")
+        ));
+    }
+
+    struct RecordingAccessChecker {
+        decision: TriggerFireAccessDecision,
+        requests: Mutex<Vec<TriggerFireAccessCheck>>,
+    }
+
+    #[async_trait]
+    impl TriggerFireAccessChecker for RecordingAccessChecker {
+        async fn check_trigger_fire_access(
+            &self,
+            request: TriggerFireAccessCheck,
+        ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
+            self.requests.lock().expect("requests lock").push(request);
+            Ok(self.decision.clone())
+        }
+    }
+
+    struct FailingAccessChecker;
+
+    #[async_trait]
+    impl TriggerFireAccessChecker for FailingAccessChecker {
+        async fn check_trigger_fire_access(
+            &self,
+            _request: TriggerFireAccessCheck,
+        ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
+            Err(TriggerFireAccessError::Unavailable {
+                reason: "local access db busy".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn access_checker_authorizer_forwards_exact_fire_scope() {
+        let tenant_id = TenantId::new("trigger-access-tenant").expect("tenant id");
+        let creator_user_id = UserId::new("trigger-access-user").expect("user id");
+        let agent_id = AgentId::new("trigger-access-agent").expect("agent id");
+        let project_id = ProjectId::new("trigger-access-project").expect("project id");
+        let trigger_id = TriggerId::new();
+        let fire_slot = Utc::now();
+        let request = TriggerFireAuthRequest {
+            tenant_id: tenant_id.clone(),
+            creator_user_id: creator_user_id.clone(),
+            agent_id: Some(agent_id.clone()),
+            project_id: Some(project_id.clone()),
+            trigger_id,
+            fire_slot,
+        };
+        let checker = Arc::new(RecordingAccessChecker {
+            decision: TriggerFireAccessDecision::Allowed,
+            requests: Mutex::new(Vec::new()),
+        });
+
+        AccessCheckerTriggerFireAuthorizer::new(checker.clone())
+            .authorize_trigger_fire(&request)
+            .await
+            .expect("authorized");
+
+        assert_eq!(
+            checker.requests.lock().expect("requests lock").as_slice(),
+            [TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id,
+                agent_id: Some(agent_id),
+                project_id: Some(project_id),
+                trigger_id,
+                fire_slot,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn access_checker_authorizer_denies_when_checker_denies() {
+        let request = TriggerFireAuthRequest {
+            tenant_id: TenantId::new("trigger-access-denied-tenant").expect("tenant id"),
+            creator_user_id: UserId::new("trigger-access-denied-user").expect("user id"),
+            agent_id: None,
+            project_id: None,
+            trigger_id: TriggerId::new(),
+            fire_slot: Utc::now(),
+        };
+        let checker = Arc::new(RecordingAccessChecker {
+            decision: TriggerFireAccessDecision::Denied {
+                reason: "creator lost access".to_string(),
+            },
+            requests: Mutex::new(Vec::new()),
+        });
+
+        let error = AccessCheckerTriggerFireAuthorizer::new(checker)
+            .authorize_trigger_fire(&request)
+            .await
+            .expect_err("denied");
+
+        assert!(matches!(
+            error,
+            TriggerFireAuthError::Denied { reason } if reason == "creator lost access"
+        ));
+    }
+
+    #[tokio::test]
+    async fn access_checker_authorizer_returns_retryable_when_checker_unavailable() {
+        let request = TriggerFireAuthRequest {
+            tenant_id: TenantId::new("trigger-access-error-tenant").expect("tenant id"),
+            creator_user_id: UserId::new("trigger-access-error-user").expect("user id"),
+            agent_id: None,
+            project_id: None,
+            trigger_id: TriggerId::new(),
+            fire_slot: Utc::now(),
+        };
+
+        let error = AccessCheckerTriggerFireAuthorizer::new(Arc::new(FailingAccessChecker))
+            .authorize_trigger_fire(&request)
+            .await
+            .expect_err("retryable");
+
+        assert!(matches!(
+            error,
+            TriggerFireAuthError::Retryable { reason }
+                if reason.contains("trigger fire access backend unavailable")
+                    && reason.contains("local access db busy")
         ));
     }
 

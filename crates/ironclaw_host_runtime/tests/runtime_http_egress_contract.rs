@@ -2295,7 +2295,7 @@ async fn mcp_http_client_reuses_real_host_staged_network_policy_for_json_rpc_ses
 }
 
 #[tokio::test]
-async fn mcp_http_client_uses_one_shot_staged_credential_for_session() {
+async fn mcp_http_client_consumes_staged_credential_on_first_session_request() {
     let network = JsonRpcMcpNetwork::new();
     let network_recorder = network.requests.clone();
     let services = test_obligation_services();
@@ -2332,7 +2332,7 @@ async fn mcp_http_client_uses_one_shot_staged_credential_for_session() {
         }),
     );
 
-    let output = client
+    let error = client
         .call_tool(McpClientRequest {
             provider: ExtensionId::new("mcp").unwrap(),
             capability_id: capability_id.clone(),
@@ -2345,36 +2345,30 @@ async fn mcp_http_client_uses_one_shot_staged_credential_for_session() {
             max_output_bytes: 4096,
         })
         .await
-        .expect("one staged credential should cover the authenticated MCP tool call");
-
-    assert_eq!(
-        output.output,
-        json!({"content":[{"type":"text","text":"ok"}],"isError":false})
-    );
+        .expect_err("one-shot staged credential must not cover the whole MCP session");
+    assert_eq!(error.stable_reason(), "credential_unavailable");
     let requests = network_recorder.lock().unwrap();
     assert_eq!(
         requests.len(),
-        3,
-        "initialize, initialized notification, and tools/call should all reach transport"
+        1,
+        "initialize should consume the staged credential before initialized/tools-call retry"
     );
-    assert!(
-        requests.iter().all(|request| {
-            request
-                .headers
-                .iter()
-                .find(|(name, _)| name == "authorization")
-                == Some(&(
-                    "authorization".to_string(),
-                    "Bearer sk-staged-mcp-secret".to_string(),
-                ))
-        }),
-        "initialize, initialized, and tools/call must all receive the staged MCP credential"
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-staged-mcp-secret".to_string(),
+        )),
+        "initialize must receive the staged MCP credential"
     );
     drop(requests);
 }
 
 #[tokio::test]
-async fn mcp_http_client_uses_credential_account_staged_from_resolved_source_scope() {
+async fn mcp_http_client_consumes_product_auth_staged_credential_on_first_session_request() {
     let network = JsonRpcMcpNetwork::new();
     let network_recorder = network.requests.clone();
     let source_scope = sample_scope();
@@ -2442,7 +2436,7 @@ async fn mcp_http_client_uses_credential_account_staged_from_resolved_source_sco
         }),
     );
 
-    let output = client
+    let error = client
         .call_tool(McpClientRequest {
             provider: ExtensionId::new("mcp").unwrap(),
             capability_id: capability_id.clone(),
@@ -2455,30 +2449,24 @@ async fn mcp_http_client_uses_credential_account_staged_from_resolved_source_sco
             max_output_bytes: 4096,
         })
         .await
-        .expect("MCP tool call should use staged product-auth credential");
-
-    assert_eq!(
-        output.output,
-        json!({"content":[{"type":"text","text":"ok"}],"isError":false})
-    );
+        .expect_err("one-shot product-auth credential must not cover the whole MCP session");
+    assert_eq!(error.stable_reason(), "credential_unavailable");
     let requests = network_recorder.lock().unwrap();
     assert_eq!(
         requests.len(),
-        3,
-        "initialize, initialized notification, and tools/call should all reach transport"
+        1,
+        "initialize should consume the staged product-auth credential before initialized/tools-call retry"
     );
-    assert!(
-        requests.iter().all(|request| {
-            request
-                .headers
-                .iter()
-                .find(|(name, _)| name == "authorization")
-                == Some(&(
-                    "authorization".to_string(),
-                    "Bearer sk-account-scope-mcp-secret".to_string(),
-                ))
-        }),
-        "initialize, initialized, and tools/call must all receive the staged product-auth credential"
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-account-scope-mcp-secret".to_string(),
+        )),
+        "initialize must receive the staged product-auth credential"
     );
     drop(requests);
 }
@@ -4374,7 +4362,20 @@ fn credential_reason(error: &RuntimeHttpEgressError) -> &str {
     }
 }
 
-fn block_on_test<T>(future: impl std::future::Future<Output = T>) -> T {
+fn block_on_test<T, F>(future: F) -> T
+where
+    T: Send,
+    F: std::future::Future<Output = T> + Send,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return std::thread::scope(|scope| scope.spawn(|| block_on_test_runtime(future)).join())
+            .unwrap();
+    }
+
+    block_on_test_runtime(future)
+}
+
+fn block_on_test_runtime<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

@@ -7,6 +7,7 @@ import { useT } from "../../../lib/i18n.js";
 import {
   adapterLabel,
   isProviderConfigured,
+  providerAcceptsApiKey,
   providerDisplayModel,
   providerEffectiveBaseUrl,
   providerMissingReason,
@@ -21,6 +22,10 @@ export function ProviderCard({
   onUse,
   onConfigure,
   onDelete,
+  onNearaiLogin,
+  onNearaiWallet,
+  onCodexLogin,
+  loginBusy,
 }) {
   const t = useT();
   const isActive = provider.id === activeProviderId;
@@ -28,6 +33,7 @@ export function ProviderCard({
   const baseUrl = providerEffectiveBaseUrl(provider, builtinOverrides);
   const model = providerDisplayModel(provider, builtinOverrides, activeProviderId, selectedModel);
   const missing = providerMissingReason(provider, builtinOverrides);
+  const acceptsApiKey = providerAcceptsApiKey(provider);
   const missingLabel =
     missing === "api_key"
       ? t("llm.missingApiKey")
@@ -50,9 +56,53 @@ export function ProviderCard({
         ${adapterLabel(provider.adapter)} · ${model || provider.default_model || t("llm.none")}
       </span>`;
 
-  const primaryAction = isActive
-    ? null
-    : configured
+  const isLoginProvider = provider.id === "nearai" || provider.id === "openai_codex";
+  const hasApiKey = provider.api_key_set === true || provider.has_api_key === true;
+  const configureLabel = provider.builtin
+    ? provider.id === "nearai" && acceptsApiKey && !hasApiKey
+      ? t("llm.addApiKey")
+      : t("llm.configure")
+    : t("common.edit");
+  const apiKeyAction =
+    acceptsApiKey && provider.builtin
+      ? html`
+          <${Button}
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled=${isBusy}
+            onClick=${() => onConfigure(provider)}
+          >
+            ${configureLabel}
+          <//>
+        `
+      : null;
+  const loginActions =
+    !isActive && provider.id === "nearai"
+      ? html`
+          ${apiKeyAction}
+          <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${onNearaiWallet}>
+            ${t("onboarding.nearWallet")}
+          <//>
+          <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${() => onNearaiLogin("github")}>
+            GitHub
+          <//>
+          <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${() => onNearaiLogin("google")}>
+            Google
+          <//>
+        `
+      : !isActive && provider.id === "openai_codex"
+      ? html`
+          <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${onCodexLogin}>
+            ${t("onboarding.codexSignIn")}
+          <//>
+        `
+      : null;
+  const canUseProvider =
+    !isActive &&
+    configured &&
+    (!isLoginProvider || (provider.id === "nearai" && provider.has_api_key === true));
+  const useAction = canUseProvider
     ? html`
         <${Button}
           type="button"
@@ -64,7 +114,9 @@ export function ProviderCard({
           ${t("llm.use")}
         <//>
       `
-    : html`
+    : null;
+  const setupAction = !configured
+    ? html`
         <${Button}
           type="button"
           variant="secondary"
@@ -74,7 +126,14 @@ export function ProviderCard({
         >
           ${missing === "api_key" ? t("llm.addApiKey") : t("llm.configure")}
         <//>
-      `;
+      `
+    : null;
+  const primaryAction = isActive
+    ? null
+    : useAction || (isLoginProvider ? loginActions : setupAction);
+  const showConfigureAction =
+    (!isLoginProvider && ((provider.builtin && provider.id !== "bedrock") || !provider.builtin)) ||
+    (provider.id === "nearai" && acceptsApiKey);
 
   return html`
     <${Card}
@@ -120,7 +179,7 @@ export function ProviderCard({
           </span>
           <span className="hidden min-w-0 max-w-[280px] truncate sm:block">${inlineMeta}</span>
         </button>
-        <div className="flex shrink-0 items-center gap-2 py-3 pr-4 sm:pr-5">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 py-3 pr-4 sm:pr-5">
           ${primaryAction}
           <button
             type="button"
@@ -156,7 +215,7 @@ export function ProviderCard({
           </div>
 
           <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-[var(--v2-panel-border)] pt-3">
-            ${((provider.builtin && provider.id !== "bedrock") || !provider.builtin) &&
+            ${showConfigureAction &&
             html`
               <${Button}
                 type="button"
@@ -165,7 +224,7 @@ export function ProviderCard({
                 disabled=${isBusy}
                 onClick=${() => onConfigure(provider)}
               >
-                ${provider.builtin ? t("llm.configure") : t("common.edit")}
+                ${configureLabel}
               <//>
             `}
             ${!provider.builtin &&

@@ -84,8 +84,18 @@ build_manifest_set() {
 
 build_extension() {
     local manifest_path="$1"
+    local hidden
     local source_dir
     local crate_name
+
+    if ! hidden=$(jq -r '.hidden // false' "$manifest_path"); then
+        fail_build "$(basename "$manifest_path" .json)" "could not read hidden flag"
+        return 0
+    fi
+    if [ "$hidden" = "true" ]; then
+        echo "  SKIP $(basename "$manifest_path" .json) (hidden registry entry)"
+        return 0
+    fi
 
     if ! source_dir=$(jq -r '.source.dir' "$manifest_path"); then
         fail_build "$(basename "$manifest_path" .json)" "could not read source dir"
@@ -116,6 +126,7 @@ build_first_party_extension() {
     local extension_root
     local source_dir
     local module_path
+    local runtime_kind
     local target_root
     local artifact
     local candidate
@@ -124,6 +135,14 @@ build_first_party_extension() {
     extension_root=$(dirname "$manifest_path")
     source_dir="$extension_root/wasm-src"
     name="first-party/$(basename "$extension_root")"
+    if ! runtime_kind=$(awk -F'"' '/^[[:space:]]*kind[[:space:]]*=/{ print $2; exit }' "$manifest_path"); then
+        fail_build "$name" "could not read manifest"
+        return 0
+    fi
+    if [ "$runtime_kind" != "wasm" ]; then
+        echo "  SKIP $name (runtime kind $runtime_kind is host-native)"
+        return 0
+    fi
     if ! module_path=$(awk -F'"' '/^[[:space:]]*module[[:space:]]*=/{ print $2; exit }' "$manifest_path"); then
         fail_build "$name" "could not read manifest"
         return 0

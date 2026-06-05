@@ -355,7 +355,7 @@ async fn host_http_egress_helper_injects_staged_credentials_from_handoff_store()
 }
 
 #[tokio::test]
-async fn host_http_egress_helper_reuses_staged_credentials_during_same_dispatch() {
+async fn host_http_egress_helper_consumes_staged_credentials_after_first_egress() {
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
@@ -388,19 +388,23 @@ async fn host_http_egress_helper_reuses_staged_credentials_during_same_dispatch(
         ))
         .await
         .expect("first request should inject staged credential");
-    egress
+    let replay = egress
         .execute(request_with_staged_credential(scope, capability_id, handle))
         .await
-        .expect("second request in same dispatch should reuse staged credential");
+        .expect_err("consumed staged credential must not be reusable");
+    assert!(matches!(
+        replay,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
 
     let requests = recorded_requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert!(requests.iter().all(|request| {
-        request
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
             .headers
             .iter()
             .any(|(name, value)| name == "authorization" && value == "Bearer staged-secret")
-    }));
+    );
 }
 
 #[tokio::test]

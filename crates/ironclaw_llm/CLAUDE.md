@@ -222,7 +222,7 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 - `set_model()` returns error — model is fixed at construction time
 - Image attachments are silently dropped with a warning log
 
-**Env vars:** `OPENAI_CODEX_MODEL` (default: `gpt-5.3-codex`), `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_AUTH_URL`, `OPENAI_CODEX_API_URL`.
+**Env vars:** `OPENAI_CODEX_MODEL` (default: `gpt-5.5` — must be a model the ChatGPT account is entitled to; codex-only slugs like `gpt-5.3-codex` are rejected with HTTP 400 in subscription mode), `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_AUTH_URL`, `OPENAI_CODEX_API_URL`.
 
 ## Provider Chain Construction
 

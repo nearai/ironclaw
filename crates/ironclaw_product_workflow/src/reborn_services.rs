@@ -59,9 +59,10 @@ mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use llm_config::{
-    LlmActiveSelection, LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot,
-    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, SetActiveLlmRequest,
-    UpsertLlmProviderRequest,
+    CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
+    NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 pub use types::{
     RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
@@ -433,6 +434,35 @@ pub trait RebornServicesApi: Send + Sync {
         request: LlmProbeRequest,
     ) -> Result<LlmModelsResult, RebornServicesError> {
         let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Begin a NEAR AI browser login; returns the authorization URL to open.
+    async fn start_nearai_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Complete a NEAR AI wallet (NEP-413) login from a browser-signed message.
+    async fn complete_nearai_wallet_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Begin an OpenAI Codex device-code login; returns the user code + URL.
+    async fn start_codex_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<CodexLoginStart, RebornServicesError> {
+        let _ = caller;
         Err(llm_config::llm_config_unavailable())
     }
 }
@@ -1193,6 +1223,50 @@ impl RebornServicesApi for RebornServices {
             .ok_or_else(llm_config::llm_config_unavailable)?;
         service
             .list_models(caller, request)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn start_nearai_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .start_nearai_login(caller, request)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn start_codex_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<CodexLoginStart, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .start_codex_login(caller)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn complete_nearai_wallet_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .complete_nearai_wallet_login(caller, request)
             .await
             .map_err(llm_config::map_llm_config_error)
     }

@@ -9,14 +9,13 @@ use std::sync::Arc;
 
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
 use ironclaw_turns::{
-    GateRef, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnActor, TurnCoordinator,
-    TurnError, TurnErrorCategory, TurnRunId, TurnScope,
+    GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnScope,
 };
 use uuid::Uuid;
 
 use crate::binding_ref::{
     AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES, binding_ref_segment, bounded_idempotency_key,
-    bounded_reply_target_binding_ref, bounded_source_binding_ref,
 };
 use crate::{AuthContinuationRejectionKind, ProductWorkflowError};
 
@@ -76,9 +75,23 @@ impl ProductAuthTurnGateResumeDispatcher {
             });
         };
 
-        let scope = turn_scope_from_auth_event(&event)?;
-        let actor = TurnActor::new(event.scope.resource.user_id.clone());
         let run_id = parse_turn_run_id(turn_run_ref.as_str())?;
+        let scope = turn_scope_from_auth_event(&event)?;
+        let state = self
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id,
+            })
+            .await
+            .map_err(map_auth_resume_error)?;
+        let actor = state
+            .actor
+            .ok_or(ProductWorkflowError::AuthContinuationRejected {
+                kind: AuthContinuationRejectionKind::UnauthorizedBlockedGate,
+            })?;
+        let source_binding_ref = state.source_binding_ref;
+        let reply_target_binding_ref = state.reply_target_binding_ref;
         let gate_resolution_ref = parse_gate_ref(gate_ref.as_str())?;
         let binding_id = auth_continuation_binding_id(event.flow_id, &run_id, gate_ref.as_str());
         let idempotency_key = idempotency_key_for_binding(&binding_id)?;
@@ -89,18 +102,8 @@ impl ProductAuthTurnGateResumeDispatcher {
                 actor,
                 run_id,
                 gate_resolution_ref,
-                source_binding_ref: bounded_source_binding_ref(
-                    "auth-continuation-src",
-                    &binding_id,
-                    AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES,
-                )
-                .map_err(binding_ref_error)?,
-                reply_target_binding_ref: bounded_reply_target_binding_ref(
-                    "auth-continuation-reply",
-                    &binding_id,
-                    AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES,
-                )
-                .map_err(binding_ref_error)?,
+                source_binding_ref,
+                reply_target_binding_ref,
                 idempotency_key,
                 precondition: ResumeTurnPrecondition::BlockedAuthGate,
             })
@@ -253,11 +256,12 @@ fn turn_scope_from_auth_event(
             kind: AuthContinuationRejectionKind::MissingThreadScope,
         });
     };
-    Ok(TurnScope::new(
+    Ok(TurnScope::new_with_owner(
         event.scope.resource.tenant_id.clone(),
         event.scope.resource.agent_id.clone(),
         event.scope.resource.project_id.clone(),
         thread_id,
+        Some(event.scope.resource.user_id.clone()),
     ))
 }
 
@@ -284,12 +288,6 @@ fn idempotency_key_for_binding(binding_id: &str) -> Result<IdempotencyKey, Produ
     .map_err(|_| ProductWorkflowError::AuthContinuationRejected {
         kind: AuthContinuationRejectionKind::InvalidIdempotencyKey,
     })
-}
-
-fn binding_ref_error(_reason: String) -> ProductWorkflowError {
-    ProductWorkflowError::AuthContinuationRejected {
-        kind: AuthContinuationRejectionKind::InvalidBindingRef,
-    }
 }
 
 #[cfg(test)]
@@ -372,6 +370,12 @@ mod tests {
                 .expect("state lock")
                 .clone()
                 .ok_or(TurnError::ScopeNotFound)?;
+            if state.scope != request.scope {
+                return Err(TurnError::ScopeNotFound);
+            }
+            if state.actor.as_ref() != Some(&request.actor) {
+                return Err(TurnError::Unauthorized);
+            }
             if let Some(required) = request.precondition.required_status()
                 && state.status != required
             {
@@ -415,21 +419,33 @@ mod tests {
 
         async fn get_run_state(
             &self,
-            _request: GetRunStateRequest,
+            request: GetRunStateRequest,
         ) -> Result<TurnRunState, TurnError> {
-            self.state
+            let state = self
+                .state
                 .lock()
                 .expect("state lock")
                 .clone()
-                .ok_or(TurnError::ScopeNotFound)
+                .ok_or(TurnError::ScopeNotFound)?;
+            if state.scope != request.scope || state.run_id != request.run_id {
+                return Err(TurnError::ScopeNotFound);
+            }
+            Ok(state)
         }
     }
 
     fn scoped_event(continuation: AuthContinuationRef) -> AuthContinuationEvent {
+        scoped_event_for_owner("alice", continuation)
+    }
+
+    fn scoped_event_for_owner(
+        owner_user_id: &str,
+        continuation: AuthContinuationRef,
+    ) -> AuthContinuationEvent {
         let thread_id = ThreadId::new("thread-auth").unwrap();
         let resource = ResourceScope {
             tenant_id: TenantId::new("tenant-auth").unwrap(),
-            user_id: UserId::new("alice").unwrap(),
+            user_id: UserId::new(owner_user_id).unwrap(),
             agent_id: Some(AgentId::new("agent-auth").unwrap()),
             project_id: Some(ProjectId::new("project-auth").unwrap()),
             mission_id: None,
@@ -447,14 +463,25 @@ mod tests {
     }
 
     fn run_state(run_id: TurnRunId, status: TurnStatus, gate_ref: Option<&str>) -> TurnRunState {
+        run_state_for_actor_owner(run_id, status, gate_ref, "alice", "alice")
+    }
+
+    fn run_state_for_actor_owner(
+        run_id: TurnRunId,
+        status: TurnStatus,
+        gate_ref: Option<&str>,
+        actor_user_id: &str,
+        owner_user_id: &str,
+    ) -> TurnRunState {
         TurnRunState {
-            scope: TurnScope::new(
+            scope: TurnScope::new_with_owner(
                 TenantId::new("tenant-auth").unwrap(),
                 Some(AgentId::new("agent-auth").unwrap()),
                 Some(ProjectId::new("project-auth").unwrap()),
                 ThreadId::new("thread-auth").unwrap(),
+                Some(UserId::new(owner_user_id).unwrap()),
             ),
-            actor: Some(TurnActor::new(UserId::new("alice").unwrap())),
+            actor: Some(TurnActor::new(UserId::new(actor_user_id).unwrap())),
             turn_id: TurnId::new(),
             run_id,
             status,
@@ -504,6 +531,15 @@ mod tests {
         );
         assert_eq!(resumes[0].actor.user_id.as_str(), "alice");
         assert_eq!(resumes[0].scope.thread_id.as_str(), "thread-auth");
+        assert_eq!(resumes[0].source_binding_ref.as_str(), "source-auth");
+        assert_eq!(resumes[0].reply_target_binding_ref.as_str(), "reply-auth");
+        assert_eq!(
+            resumes[0]
+                .scope
+                .explicit_owner_user_id()
+                .map(UserId::as_str),
+            Some("alice")
+        );
         assert!(
             resumes[0]
                 .idempotency_key
@@ -514,6 +550,46 @@ mod tests {
         assert!(resumes[0].idempotency_key.as_str().contains("flow:"));
         assert!(resumes[0].idempotency_key.as_str().contains("run:"));
         assert!(resumes[0].idempotency_key.as_str().contains("gate:"));
+    }
+
+    #[tokio::test]
+    async fn turn_gate_continuation_uses_subject_scope_and_original_actor() {
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
+        let run_id = TurnRunId::new();
+        coordinator.set_state(run_state_for_actor_owner(
+            run_id,
+            TurnStatus::BlockedAuth,
+            Some("gate:auth"),
+            "alice",
+            "team-agent",
+        ));
+        let event = scoped_event_for_owner(
+            "team-agent",
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
+                gate_ref: AuthGateRef::new("gate:auth").unwrap(),
+            },
+        );
+
+        let resumed_run_id = dispatcher
+            .dispatch_turn_gate_resume(event)
+            .await
+            .expect("dispatch");
+
+        assert_eq!(resumed_run_id, run_id);
+        let resumes = coordinator.resumes();
+        assert_eq!(resumes.len(), 1);
+        assert_eq!(resumes[0].actor.user_id.as_str(), "alice");
+        assert_eq!(resumes[0].source_binding_ref.as_str(), "source-auth");
+        assert_eq!(resumes[0].reply_target_binding_ref.as_str(), "reply-auth");
+        assert_eq!(
+            resumes[0]
+                .scope
+                .explicit_owner_user_id()
+                .map(UserId::as_str),
+            Some("team-agent")
+        );
     }
 
     #[tokio::test]

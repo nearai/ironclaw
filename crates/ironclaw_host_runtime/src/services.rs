@@ -556,15 +556,13 @@ where
         .with_process_cancellation_registry(self.process_services.cancellation_registry())
         .with_runtime_health(runtime_health);
 
+        if let Some(run_state) = &self.run_state {
+            runtime = runtime.with_run_state(Arc::clone(run_state));
+        }
         if let Some(run_state_approval_store) = &self.run_state_approval_store {
             runtime = runtime.with_run_state_approval_store(Arc::clone(run_state_approval_store));
-        } else {
-            if let Some(run_state) = &self.run_state {
-                runtime = runtime.with_run_state(Arc::clone(run_state));
-            }
-            if let Some(approval_requests) = &self.approval_requests {
-                runtime = runtime.with_approval_requests(Arc::clone(approval_requests));
-            }
+        } else if let Some(approval_requests) = &self.approval_requests {
+            runtime = runtime.with_approval_requests(Arc::clone(approval_requests));
         }
         if let Some(capability_leases) = &self.capability_leases {
             runtime = runtime.with_capability_leases(Arc::clone(capability_leases));
