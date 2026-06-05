@@ -5,6 +5,7 @@ import { useT } from "../../lib/i18n.js";
 import { Badge } from "../../design-system/badge.js";
 import { Button } from "../../design-system/button.js";
 import { Card } from "../../design-system/card.js";
+import { Icon } from "../../design-system/icons.js";
 import { ProviderDialog } from "../settings/components/provider-dialog.js";
 import { ProviderLoginStatus } from "../settings/components/provider-login-status.js";
 import { useProviderManagementActions } from "../settings/hooks/useProviderManagementActions.js";
@@ -26,28 +27,100 @@ const FEATURED = [
   { id: "ollama", auth: "key", nameKey: "onboarding.providerOllama", descKey: "onboarding.providerOllamaDesc" },
 ];
 
+function NearAiSetupMenu({ provider, isBusy, login, t, onSetUp }) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef(null);
+
+  React.useEffect(() => {
+    if (!open) return undefined;
+    const onDoc = (event) => {
+      if (ref.current && !ref.current.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const menuItems = [
+    {
+      id: "api-key",
+      label: t("llm.addApiKey"),
+      disabled: isBusy,
+      run: () => onSetUp(provider),
+    },
+    {
+      id: "near-wallet",
+      label: t("onboarding.nearWallet"),
+      disabled: login.nearaiBusy,
+      run: login.startNearaiWallet,
+    },
+    {
+      id: "github",
+      label: "GitHub",
+      disabled: login.nearaiBusy,
+      run: () => login.startNearai("github"),
+    },
+    {
+      id: "google",
+      label: "Google",
+      disabled: login.nearaiBusy,
+      run: () => login.startNearai("google"),
+    },
+  ];
+
+  return html`
+    <div ref=${ref} className="relative shrink-0">
+      <${Button}
+        type="button"
+        variant="primary"
+        size="sm"
+        className="gap-1.5"
+        aria-haspopup="true"
+        aria-expanded=${open ? "true" : "false"}
+        onClick=${() => setOpen((v) => !v)}
+      >
+        ${t("onboarding.setUp")}
+        <${Icon} name="chevron" className="h-3.5 w-3.5" />
+      <//>
+      ${open &&
+      html`
+        <div
+          role="menu"
+          className="absolute right-0 top-10 z-20 min-w-[176px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[0_20px_40px_-20px_rgba(0,0,0,0.7)]"
+        >
+          ${menuItems.map(
+            (item) => html`
+              <button
+                key=${item.id}
+                type="button"
+                role="menuitem"
+                disabled=${item.disabled}
+                onClick=${() => {
+                  setOpen(false);
+                  item.run();
+                }}
+                className="flex w-full items-center rounded-[7px] px-2.5 py-1.5 text-left text-[13px] text-[var(--v2-text)] hover:bg-[var(--v2-surface-soft)] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                ${item.label}
+              </button>
+            `
+          )}
+        </div>
+      `}
+    </div>
+  `;
+}
+
 // One provider row: logo + name/subtitle on the left, the auth action(s) on the
 // right. Stacks vertically on mobile (actions wrap onto their own line) and sits
 // on a single line from `sm` up.
 function FeaturedProviderRow({ entry, provider, configured, isBusy, login, t, onUse, onSetUp }) {
   const name = t(entry.nameKey);
 
-  // Login-based providers (NEAR AI, Codex) always show their sign-in actions —
-  // never a "Use" button. The session/OAuth login is the only way to activate
-  // them, so a separate "Use" would be a dead end.
+  // Login-based providers keep their setup entrypoints visible because they
+  // activate through provider-owned auth flows rather than a generic "Use".
   let actions;
   if (entry.auth === "nearai") {
-    actions = html`
-      <${Button} type="button" variant="secondary" size="sm" disabled=${login.nearaiBusy} onClick=${login.startNearaiWallet}>
-        ${t("onboarding.nearWallet")}
-      <//>
-      <${Button} type="button" variant="secondary" size="sm" disabled=${login.nearaiBusy} onClick=${() => login.startNearai("github")}>
-        GitHub
-      <//>
-      <${Button} type="button" variant="secondary" size="sm" disabled=${login.nearaiBusy} onClick=${() => login.startNearai("google")}>
-        Google
-      <//>
-    `;
+    actions = html`<${NearAiSetupMenu} provider=${provider} isBusy=${isBusy} login=${login} t=${t} onSetUp=${onSetUp} />`;
   } else if (entry.auth === "codex") {
     actions = html`
       <${Button} type="button" variant="secondary" size="sm" disabled=${login.codexBusy} onClick=${login.startCodex}>
