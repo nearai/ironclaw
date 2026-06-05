@@ -7,10 +7,10 @@ use ironclaw_threads::{
     SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest, ThreadScope,
 };
 use ironclaw_turns::run_profile::{
-    LoopCompactionError, LoopCompactionMode, LoopCompactionPort, LoopCompactionRequest,
-    LoopCompactionResponse, LoopSafeSummary, LoopSummaryArtifactId, SystemInferenceError,
-    SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest, SystemInferenceResponse,
-    SystemInferenceTaskId, SystemPromptSource, SystemTaskKind,
+    LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome, LoopCompactionPort,
+    LoopCompactionRequest, LoopCompactionResponse, LoopSafeSummary, LoopSummaryArtifactId,
+    SystemInferenceError, SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
+    SystemInferenceResponse, SystemInferenceTaskId, SystemPromptSource, SystemTaskKind,
 };
 use thiserror::Error;
 
@@ -34,6 +34,30 @@ pub(crate) enum CompactionError {
     Cancelled,
     #[error("compaction persistence failed: {safe_summary}")]
     PersistenceFailed { safe_summary: LoopSafeSummary },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionMessageDisposition {
+    Include,
+    SkipEphemeral(CompactionSkipReason),
+    DeferUntilStable(CompactionDeferralReason),
+    RejectInvalid(CompactionRejectReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionSkipReason {
+    CapabilityDisplayPreview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionDeferralReason {
+    UnstableTranscriptStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionRejectReason {
+    UnsupportedStatus,
+    UnsupportedKind,
 }
 
 pub(crate) struct CompactionTask<S>
@@ -74,6 +98,11 @@ struct ValidatedCompactionRange {
     start_sequence: u64,
     end_sequence: u64,
     messages: Vec<ValidatedCompactionMessage>,
+}
+
+enum CompactionRangeDecision {
+    Ready(ValidatedCompactionRange),
+    Deferred { safe_summary: LoopSafeSummary },
 }
 
 struct ValidatedCompactionMessage {
@@ -141,9 +170,8 @@ where
     async fn compact_loop_context(
         &self,
         request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
-        let response = self
-            .task
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
+        self.task
             .run(CompactionTaskRequest {
                 task_id: request.task_id,
                 thread_id: request.thread_id,
@@ -155,8 +183,7 @@ where
                 deadline_ms: request.deadline_ms,
             })
             .await
-            .map_err(compaction_error_to_loop)?;
-        Ok(response)
+            .map_err(compaction_error_to_loop)
     }
 }
 
@@ -185,19 +212,26 @@ where
     async fn run(
         &self,
         request: CompactionTaskRequest,
-    ) -> Result<LoopCompactionResponse, CompactionError> {
-        let range = self.validate_range(&request).await?;
+    ) -> Result<LoopCompactionOutcome, CompactionError> {
+        let range = match self.validate_range(&request).await? {
+            CompactionRangeDecision::Ready(range) => range,
+            CompactionRangeDecision::Deferred { safe_summary } => {
+                return Ok(LoopCompactionOutcome::Deferred { safe_summary });
+            }
+        };
         let input = self.build_input(&range)?;
         let input_bytes = input.text.len();
         let response = self.run_inference(&request, input).await?;
         let summary = self.sanitize_summary(&response, input_bytes)?;
-        self.persist_summary(range, summary).await
+        self.persist_summary(range, summary)
+            .await
+            .map(LoopCompactionOutcome::Compacted)
     }
 
     async fn validate_range(
         &self,
         request: &CompactionTaskRequest,
-    ) -> Result<ValidatedCompactionRange, CompactionError> {
+    ) -> Result<CompactionRangeDecision, CompactionError> {
         if request.drop_through_seq == 0 {
             return Err(CompactionError::InvalidCutPoint);
         }
@@ -239,21 +273,35 @@ where
         }
         let thread_scope = range.thread.scope.clone();
         let messages = range.messages;
-        if !messages.iter().any(|message| {
-            message.sequence == request.drop_through_seq
-                && message.kind == MessageKind::User
-                && is_compaction_model_visible(message.kind, message.status)
-        }) {
-            return Err(CompactionError::InvalidCutPoint);
+        let terminal = messages
+            .iter()
+            .find(|message| message.sequence == request.drop_through_seq)
+            .ok_or(CompactionError::InvalidCutPoint)?;
+        let mut deferred_reason = None;
+        match classify_compaction_message(terminal.kind, terminal.status) {
+            CompactionMessageDisposition::DeferUntilStable(reason) => {
+                deferred_reason = Some(reason);
+            }
+            CompactionMessageDisposition::Include if terminal.kind == MessageKind::User => {}
+            CompactionMessageDisposition::Include
+            | CompactionMessageDisposition::SkipEphemeral(_)
+            | CompactionMessageDisposition::RejectInvalid(_) => {
+                return Err(CompactionError::InvalidCutPoint);
+            }
         }
 
         let mut validated_messages = Vec::with_capacity(messages.len());
         for message in messages {
-            if message.kind == MessageKind::CapabilityDisplayPreview {
-                return Err(CompactionError::InvalidCutPoint);
-            }
-            if !is_compaction_model_visible(message.kind, message.status) {
-                return Err(CompactionError::InvalidCutPoint);
+            match classify_compaction_message(message.kind, message.status) {
+                CompactionMessageDisposition::Include => {}
+                CompactionMessageDisposition::SkipEphemeral(_) => continue,
+                CompactionMessageDisposition::DeferUntilStable(reason) => {
+                    deferred_reason.get_or_insert(reason);
+                    continue;
+                }
+                CompactionMessageDisposition::RejectInvalid(_) => {
+                    return Err(CompactionError::InvalidCutPoint);
+                }
             }
             let body = message.content.ok_or(CompactionError::InvalidCutPoint)?;
             validated_messages.push(ValidatedCompactionMessage {
@@ -263,13 +311,17 @@ where
             });
         }
 
-        Ok(ValidatedCompactionRange {
+        if let Some(reason) = deferred_reason {
+            return Ok(defer_compaction(reason));
+        }
+
+        Ok(CompactionRangeDecision::Ready(ValidatedCompactionRange {
             thread_id: request.thread_id.clone(),
             thread_scope,
             start_sequence: start_exclusive.saturating_add(1),
             end_sequence: request.drop_through_seq,
             messages: validated_messages,
-        })
+        }))
     }
 
     fn build_input(
@@ -411,14 +463,49 @@ where
     ))
 }
 
+#[cfg(test)]
 fn is_compaction_model_visible(kind: MessageKind, status: MessageStatus) -> bool {
+    matches!(
+        classify_compaction_message(kind, status),
+        CompactionMessageDisposition::Include
+    )
+}
+
+fn classify_compaction_message(
+    kind: MessageKind,
+    status: MessageStatus,
+) -> CompactionMessageDisposition {
+    if matches!(status, MessageStatus::Redacted | MessageStatus::Deleted) {
+        return CompactionMessageDisposition::RejectInvalid(
+            CompactionRejectReason::UnsupportedStatus,
+        );
+    }
+    if matches!(
+        status,
+        MessageStatus::DeferredBusy
+            | MessageStatus::Draft
+            | MessageStatus::Interrupted
+            | MessageStatus::Superseded
+    ) {
+        return CompactionMessageDisposition::DeferUntilStable(
+            CompactionDeferralReason::UnstableTranscriptStatus,
+        );
+    }
     if !matches!(
         status,
         MessageStatus::Accepted | MessageStatus::Submitted | MessageStatus::Finalized
     ) {
-        return false;
+        return CompactionMessageDisposition::RejectInvalid(
+            CompactionRejectReason::UnsupportedStatus,
+        );
     }
-    matches!(
+
+    if kind == MessageKind::CapabilityDisplayPreview {
+        return CompactionMessageDisposition::SkipEphemeral(
+            CompactionSkipReason::CapabilityDisplayPreview,
+        );
+    }
+    if matches!(
         kind,
         MessageKind::User
             | MessageKind::Assistant
@@ -426,7 +513,20 @@ fn is_compaction_model_visible(kind: MessageKind, status: MessageStatus) -> bool
             | MessageKind::Summary
             | MessageKind::CheckpointReference
             | MessageKind::ToolResultReference
-    )
+    ) {
+        return CompactionMessageDisposition::Include;
+    }
+    CompactionMessageDisposition::RejectInvalid(CompactionRejectReason::UnsupportedKind)
+}
+
+fn defer_compaction(reason: CompactionDeferralReason) -> CompactionRangeDecision {
+    CompactionRangeDecision::Deferred {
+        safe_summary: match reason {
+            CompactionDeferralReason::UnstableTranscriptStatus => {
+                safe("compaction deferred until transcript stabilizes")
+            }
+        },
+    }
 }
 
 #[cfg(test)]

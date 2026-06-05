@@ -32,7 +32,10 @@ use ironclaw_secrets::{
     SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
 };
 
-use crate::http_body::{RuntimeHttpBodyStore, UnsupportedRuntimeHttpBodyStore};
+use crate::{
+    ToolCallHttpEgress,
+    http_body::{RuntimeHttpBodyStore, UnsupportedRuntimeHttpBodyStore},
+};
 
 /// Default maximum lifetime for one-shot runtime secret material staged in memory.
 pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(300);
@@ -490,7 +493,10 @@ impl BuiltinObligationServices {
     /// Builds host HTTP egress over this service graph's private handoff stores.
     /// Callers can supply concrete network transport without receiving mutable
     /// access to staged policy or secret material.
-    pub fn host_http_egress<N>(&self, network: N) -> impl RuntimeHttpEgress + use<N>
+    pub fn host_http_egress<N>(
+        &self,
+        network: N,
+    ) -> impl RuntimeHttpEgress + ToolCallHttpEgress + use<N>
     where
         N: NetworkHttpEgress + 'static,
     {
@@ -501,7 +507,7 @@ impl BuiltinObligationServices {
         &self,
         network: N,
         body_store: Arc<T>,
-    ) -> impl RuntimeHttpEgress + use<N, T>
+    ) -> impl RuntimeHttpEgress + ToolCallHttpEgress + use<N, T>
     where
         N: NetworkHttpEgress + 'static,
         T: RuntimeHttpBodyStore + 'static,

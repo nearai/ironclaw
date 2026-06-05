@@ -4852,6 +4852,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-test",
  "wat",
 ]
 

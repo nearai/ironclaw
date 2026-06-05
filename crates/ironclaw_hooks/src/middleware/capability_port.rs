@@ -678,6 +678,7 @@ mod tests {
                 result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
                     .expect("ok"),
                 safe_summary: format!("ran {}", request.capability_id),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
             }))
         }

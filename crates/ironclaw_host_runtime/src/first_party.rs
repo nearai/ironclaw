@@ -74,6 +74,7 @@ impl FirstPartyCapabilityRequest {
             services: InvocationServices {
                 filesystem: Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
                 runtime_http_egress,
+                tool_call_http_egress: None,
                 process: Arc::new(crate::LocalHostProcessPort::new()),
                 secret_store: None,
                 audit_sink: None,

@@ -20,7 +20,8 @@
 //! property that satisfies the "narrow Reborn public surface" requirement
 //! pinned by `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`.
 
-use std::collections::HashMap;
+// arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,17 +32,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_conversations::InMemoryConversationServices;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
 use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
     SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
-#[cfg(all(test, feature = "slack-v2-host-beta"))]
-use ironclaw_host_api::RuntimeHttpEgress;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId, ResourceScope,
@@ -84,7 +79,7 @@ use ironclaw_turns::{
     ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
-    TurnScope, TurnStatus,
+    TurnScope, TurnSpawnTreeStateStore, TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
@@ -92,16 +87,23 @@ use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
-use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
+use crate::runtime_input::{
+    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
+    TriggerPollerSettings,
+};
+#[cfg(any(test, feature = "test-support"))]
+use crate::trigger_poller::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::trigger_poller::{
     ConversationContentRefMaterializer, LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup,
     TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle,
-    TriggerTurnSnapshotSource, TrustedTenantTriggerFireAuthorizer, spawn_trigger_poller,
+    TriggerTurnSnapshotSource, spawn_trigger_poller,
 };
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
     build_reborn_services,
 };
+
+const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
 
 mod approval;
 mod auth_interaction;
@@ -206,6 +208,7 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
 pub struct RebornRuntime {
     services: RebornServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
     worker_handle: JoinHandle<()>,
@@ -271,19 +274,19 @@ async fn build_trigger_poller_services(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     thread_service: Arc<dyn SessionThreadService>,
+    authorizer_config: TriggerPollerAuthorizerConfig,
     tenant_id: TenantId,
     default_agent_id: AgentId,
 ) -> Result<TriggerPollerServices, RebornRuntimeError> {
-    let authorizer = Arc::new(TrustedTenantTriggerFireAuthorizer::new(tenant_id));
+    let authorizer = build_trigger_fire_authorizer(authorizer_config, tenant_id)?;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     {
-        let conversations = RebornFilesystemConversationServices::new(Arc::clone(
-            &local_runtime.subagent_goal_filesystem,
-        ))
-        .await
-        .map_err(|error| RebornRuntimeError::InvalidArgument {
-            reason: format!("trigger conversation services unavailable: {error}"),
-        })?;
+        let conversations = local_runtime
+            .durable_trigger_conversation_services()
+            .await
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("trigger conversation services unavailable: {error}"),
+            })?;
         #[cfg(any(test, feature = "test-support"))]
         let pairing_service: Arc<
             dyn ironclaw_conversations::ConversationActorPairingService,
@@ -308,8 +311,7 @@ async fn build_trigger_poller_services(
     }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     {
-        let _ = local_runtime;
-        let conversations = InMemoryConversationServices::default();
+        let conversations = local_runtime.trigger_conversation_services.clone();
         #[cfg(any(test, feature = "test-support"))]
         let pairing_service: Arc<
             dyn ironclaw_conversations::ConversationActorPairingService,
@@ -331,6 +333,45 @@ async fn build_trigger_poller_services(
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
         })
+    }
+}
+
+fn trigger_poller_authorization_required_error() -> RebornRuntimeError {
+    RebornRuntimeError::InvalidArgument {
+        reason: "trigger poller cannot be enabled until fire-time creator authorization is backed by the real agent/project membership source of truth".to_string(),
+    }
+}
+
+/// Validate the temporary trigger-poller authorizer shape after the caller has
+/// already decided to enable the poller.
+fn validate_trigger_poller_authorization(
+    trigger_poller: &TriggerPollerSettings,
+) -> Result<(), RebornRuntimeError> {
+    debug_assert!(trigger_poller.enabled);
+    match trigger_poller.authorizer {
+        #[cfg(any(test, feature = "test-support"))]
+        TriggerPollerAuthorizerConfig::TenantScopedPlaceholderForTest => Ok(()),
+        TriggerPollerAuthorizerConfig::CreatorMembershipRequired => {
+            Err(trigger_poller_authorization_required_error())
+        }
+    }
+}
+
+fn build_trigger_fire_authorizer(
+    authorizer_config: TriggerPollerAuthorizerConfig,
+    tenant_id: TenantId,
+) -> Result<Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>, RebornRuntimeError>
+{
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = tenant_id;
+    match authorizer_config {
+        #[cfg(any(test, feature = "test-support"))]
+        TriggerPollerAuthorizerConfig::TenantScopedPlaceholderForTest => Ok(Arc::new(
+            TenantScopedTrustedTriggerFireAuthorizer::new(tenant_id),
+        )),
+        TriggerPollerAuthorizerConfig::CreatorMembershipRequired => {
+            Err(trigger_poller_authorization_required_error())
+        }
     }
 }
 
@@ -538,24 +579,6 @@ impl RebornRuntime {
             Arc::clone(&parts.session),
             crate::LlmKeyStore::new(self.services.secret_store()),
         )))
-    }
-
-    // Only the Slack host-beta tests drive this seam; gate it to that
-    // feature's test build so a `webui-v2-beta`-only `--tests` build does
-    // not flag it as dead code.
-    #[cfg(all(test, feature = "slack-v2-host-beta"))]
-    pub(crate) fn set_local_runtime_http_egress_for_test(
-        &mut self,
-        runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
-    ) {
-        let local_runtime = self
-            .services
-            .local_runtime
-            .as_mut()
-            .expect("test runtime must include local runtime services");
-        Arc::get_mut(local_runtime)
-            .expect("test must mutate local runtime services before cloning the service Arc")
-            .runtime_http_egress = runtime_http_egress;
     }
 
     /// Diagnostic id for the no-profile run profile selected by this runtime.
@@ -1130,14 +1153,102 @@ impl RebornRuntime {
                 .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?,
             })
             .await?;
-        if matches!(
+        let cancellation_accepted = matches!(
             response.status,
             TurnStatus::CancelRequested | TurnStatus::Cancelled
-        ) {
+        );
+        if cancellation_accepted {
             self.append_webui_loop_cancelled(scope, run_id).await?;
         }
         self.wake_sender.wake();
+        if cancellation_accepted {
+            self.cancel_descendant_runs(scope, run_id, reason, idempotency_suffix)
+                .await?;
+        }
         Ok(response)
+    }
+
+    async fn cancel_descendant_runs(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        reason: SanitizedCancelReason,
+        idempotency_suffix: &str,
+    ) -> Result<(), RebornRuntimeError> {
+        let mut stack = self.turn_tree_store.children_of(scope, run_id).await?;
+        let mut visited = HashSet::new();
+        let mut visited_count = 0_usize;
+        while let Some(child) = stack.pop() {
+            if !visited.insert(child.run_id) {
+                continue;
+            }
+            visited_count += 1;
+            if visited_count > MAX_DESCENDANT_CANCEL_NODES {
+                tracing::warn!(
+                    scope = ?scope,
+                    run_id = %run_id,
+                    max_nodes = MAX_DESCENDANT_CANCEL_NODES,
+                    "stopped descendant cancellation traversal after node budget was reached"
+                );
+                break;
+            }
+            if child.status.is_terminal() {
+                continue;
+            }
+            let grandchildren = self
+                .turn_tree_store
+                .children_of(&child.scope, child.run_id)
+                .await?;
+            stack.extend(grandchildren);
+            let idempotency_key = IdempotencyKey::new(format!(
+                "{}-{}-descendant-{}",
+                self.source_binding_ref.as_str(),
+                idempotency_suffix,
+                child.run_id
+            ))
+            .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?;
+            let child_scope = child.scope.clone();
+            let child_run_id = child.run_id;
+            let response = self
+                .turn_coordinator
+                .cancel_run(CancelRunRequest {
+                    scope: child_scope.clone(),
+                    actor: TurnActor::new(self.actor_user_id.clone()),
+                    run_id: child_run_id,
+                    reason,
+                    idempotency_key,
+                })
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    let state = self
+                        .turn_coordinator
+                        .get_run_state(GetRunStateRequest {
+                            scope: child_scope,
+                            run_id: child_run_id,
+                        })
+                        .await?;
+                    if matches!(
+                        state.status,
+                        TurnStatus::CancelRequested | TurnStatus::Cancelled
+                    ) {
+                        self.wake_sender.wake();
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+            };
+            if matches!(
+                response.status,
+                TurnStatus::CancelRequested | TurnStatus::Cancelled
+            ) {
+                self.append_webui_loop_cancelled(&child.scope, child_run_id)
+                    .await?;
+            }
+            self.wake_sender.wake();
+        }
+        Ok(())
     }
 
     async fn append_webui_loop_cancelled(
@@ -1220,6 +1331,7 @@ pub async fn build_reborn_runtime(
         trigger_poller,
         poll,
         identity,
+        default_project_id,
         regex_skill_activation_enabled,
         skill_context_source: configured_skill_context_source,
         budget_defaults,
@@ -1295,7 +1407,7 @@ pub async fn build_reborn_runtime(
     let thread_scope = ThreadScope {
         tenant_id,
         agent_id,
-        project_id: None,
+        project_id: default_project_id,
         // Keep local-dev runtime threads aligned with WebUI's owner-scoped
         // facade so both entrypoints drive the same runner/evidence path.
         owner_user_id: Some(actor_user_id.clone()),
@@ -1621,10 +1733,12 @@ pub async fn build_reborn_runtime(
         Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     >;
     if trigger_poller.enabled {
+        validate_trigger_poller_authorization(&trigger_poller)?;
         let trigger_poller_services = build_trigger_poller_services(
             local_runtime,
             Arc::clone(&planned_turn_coordinator),
             Arc::clone(&thread_service),
+            trigger_poller.authorizer,
             thread_scope.tenant_id.clone(),
             validated_identity.agent_id.clone(),
         )
@@ -1686,6 +1800,7 @@ pub async fn build_reborn_runtime(
     Ok(RebornRuntime {
         services,
         turn_coordinator,
+        turn_tree_store: turn_state_store,
         thread_service,
         thread_scope,
         worker_handle,
@@ -2034,6 +2149,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use chrono::Utc;
     use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
 
     /// Wiring guard: the `regex_skill_activation_enabled` flag from
@@ -2079,7 +2195,7 @@ mod tests {
     use ironclaw_host_api::{
         Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId,
         CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal,
-        ResourceEstimate, ResourceScope, TenantId, UserId,
+        ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
             FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -2089,6 +2205,7 @@ mod tests {
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
         HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource, ModelCost,
+        SpawnSubagentMode, SubagentKindId, SubagentThreadKind, SubagentThreadMetadata,
     };
     use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_workflow::{
@@ -2101,11 +2218,15 @@ mod tests {
     };
     use ironclaw_run_state::ApprovalRequestStore;
     use ironclaw_skills::SkillTrust;
-    use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};
+    use ironclaw_threads::{
+        AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest,
+        MessageKind, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
+    };
     use ironclaw_turns::{
-        AcceptedMessageRef, BlockedReason, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
-        SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnId, TurnLeaseToken,
-        TurnRunId, TurnRunnerId, TurnStatus,
+        AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GetRunStateRequest,
+        IdempotencyKey, LoopResultRef, ReplyTargetBindingRef, SanitizedCancelReason,
+        SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+        TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
         run_profile::{
             InMemoryRunProfileResolver, LoopCapabilityPort, LoopCheckpointStateRef, LoopRunContext,
             ModelProfileId, ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver,
@@ -2674,7 +2795,9 @@ mod tests {
             source_binding_id: "runtime-trigger-readiness-source".to_string(),
             reply_target_binding_id: "runtime-trigger-readiness-reply".to_string(),
         })
-        .with_trigger_poller_settings(TriggerPollerSettings::enabled())
+        .with_trigger_poller_settings(
+            TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test(),
+        )
         .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
@@ -2683,6 +2806,48 @@ mod tests {
         assert!(runtime.services().readiness.workers.trigger_poller);
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_rejects_trigger_poller_without_creator_authorization() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "trigger auth required".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-trigger-auth-required-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trigger-auth-required-tenant".to_string(),
+            agent_id: "runtime-trigger-auth-required-agent".to_string(),
+            source_binding_id: "runtime-trigger-auth-required-source".to_string(),
+            reply_target_binding_id: "runtime-trigger-auth-required-reply".to_string(),
+        })
+        .with_trigger_poller_settings(TriggerPollerSettings::enabled())
+        .with_model_gateway_override(gateway);
+
+        let err = match build_reborn_runtime(input).await {
+            Ok(runtime) => {
+                runtime
+                    .shutdown()
+                    .await
+                    .expect("unexpected runtime shutdown");
+                panic!(
+                    "creator-membership-required setting must not enable trigger poller without real membership backend"
+                );
+            }
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, super::RebornRuntimeError::InvalidArgument { reason } if reason.contains("fire-time creator authorization"))
+        );
     }
 
     #[tokio::test]
@@ -2730,7 +2895,8 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .with_tenant_scoped_authorizer_for_test();
 
         let input = RebornRuntimeInput::from_services(
             RebornBuildInput::local_dev(
@@ -2785,7 +2951,9 @@ mod tests {
             source_binding_id: "runtime-trigger-shutdown-source".to_string(),
             reply_target_binding_id: "runtime-trigger-shutdown-reply".to_string(),
         })
-        .with_trigger_poller_settings(TriggerPollerSettings::enabled())
+        .with_trigger_poller_settings(
+            TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test(),
+        )
         .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
@@ -2918,6 +3086,156 @@ mod tests {
         assert_eq!(reply.status, TurnStatus::Completed);
         assert_eq!(reply.text.as_deref(), Some("recorded runtime reply"));
         assert_eq!(recorded_request_count(&requests), 1);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn cancel_run_propagates_to_subagent_children() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-cancel-child-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-cancel-child-tenant".to_string(),
+            agent_id: "runtime-cancel-child-agent".to_string(),
+            source_binding_id: "runtime-cancel-child-source".to_string(),
+            reply_target_binding_id: "runtime-cancel-child-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let parent_scope = runtime.turn_scope_for(&conversation.0);
+        let actor = TurnActor::new(runtime.actor_user_id.clone());
+        let parent = runtime
+            .turn_coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: parent_scope.clone(),
+                actor: actor.clone(),
+                accepted_message_ref: AcceptedMessageRef::new("msg:cancel-parent").unwrap(),
+                source_binding_ref: SourceBindingRef::new("source:cancel-parent").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:cancel-parent")
+                    .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("cancel-parent").unwrap(),
+                received_at: Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+            })
+            .await
+            .expect("parent submitted");
+        let SubmitTurnResponse::Accepted {
+            run_id: parent_run_id,
+            ..
+        } = parent;
+        let child_scope = TurnScope::new(
+            parent_scope.tenant_id.clone(),
+            parent_scope.agent_id.clone(),
+            parent_scope.project_id.clone(),
+            ThreadId::new("runtime-cancel-child-thread").unwrap(),
+        );
+        let child = runtime
+            .turn_tree_store
+            .submit_child_turn(
+                SubmitChildRunRequest {
+                    parent_scope: parent_scope.clone(),
+                    parent_run_id,
+                    child_scope: child_scope.clone(),
+                    actor,
+                    accepted_message_ref: AcceptedMessageRef::new("msg:cancel-child").unwrap(),
+                    source_binding_ref: SourceBindingRef::new("source:cancel-child").unwrap(),
+                    reply_target_binding_ref: ReplyTargetBindingRef::new("reply:cancel-child")
+                        .unwrap(),
+                    requested_run_profile: None,
+                    idempotency_key: IdempotencyKey::new("cancel-child").unwrap(),
+                    received_at: Utc::now(),
+                    requested_run_id: None,
+                    spawn_tree_descendant_cap: 4,
+                },
+                &AllowAllTurnAdmissionPolicy,
+                &InMemoryRunProfileResolver::default(),
+            )
+            .await
+            .expect("child submitted");
+        let SubmitTurnResponse::Accepted {
+            run_id: child_run_id,
+            ..
+        } = child;
+        let result_ref = LoopResultRef::new("result:runtime-cancel-child").unwrap();
+        runtime
+            .thread_service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: runtime.thread_scope.clone(),
+                thread_id: parent_scope.thread_id.clone(),
+                turn_run_id: parent_run_id.to_string(),
+                result_ref: result_ref.as_str().to_string(),
+                safe_summary: ToolResultSafeSummary::new("subagent spawned").unwrap(),
+                provider_call: None,
+            })
+            .await
+            .expect("parent result reference seeded");
+        let child_thread_scope = ThreadScope {
+            tenant_id: child_scope.tenant_id.clone(),
+            agent_id: child_scope.agent_id.clone().unwrap(),
+            project_id: child_scope.project_id.clone(),
+            owner_user_id: Some(runtime.actor_user_id.clone()),
+            mission_id: None,
+        };
+        runtime
+            .thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: child_thread_scope,
+                thread_id: Some(child_scope.thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: Some("Subagent".to_string()),
+                metadata_json: Some(
+                    serde_json::to_string(&SubagentThreadMetadata {
+                        kind: SubagentThreadKind::Subagent,
+                        parent_run_id,
+                        parent_thread_id: parent_scope.thread_id.clone(),
+                        tree_root_run_id: parent_run_id,
+                        child_run_id,
+                        subagent_kind: SubagentKindId::new("general").unwrap(),
+                        mode: SpawnSubagentMode::Blocking,
+                        result_ref,
+                        handoff: None,
+                    })
+                    .unwrap(),
+                ),
+            })
+            .await
+            .expect("child thread metadata seeded");
+
+        runtime
+            .cancel_run(
+                &parent_scope,
+                parent_run_id,
+                SanitizedCancelReason::UserRequested,
+                "test-parent-cancel",
+            )
+            .await
+            .expect("parent cancellation succeeds");
+
+        let child_state = runtime
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: child_scope,
+                run_id: child_run_id,
+            })
+            .await
+            .expect("child state");
+        assert_eq!(child_state.status, TurnStatus::Cancelled);
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
@@ -4590,9 +4908,10 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let webui_user_id = UserId::new("runtime-webui-skill-user").unwrap();
         let caller = WebUiAuthenticatedCaller::new(
             TenantId::new("runtime-webui-skill-tenant").unwrap(),
-            UserId::new("runtime-webui-skill-user").unwrap(),
+            webui_user_id.clone(),
             Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
             None,
         );
@@ -4634,16 +4953,21 @@ mod tests {
         let source = runtime
             .webui_skill_activation_source()
             .expect("webui skill activation source");
+        let turn_scope = TurnScope::new_with_owner(
+            TenantId::new("runtime-webui-skill-tenant").unwrap(),
+            Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
+            None,
+            thread_id.clone(),
+            Some(webui_user_id.clone()),
+        );
         let context = LoopRunContext::new(
-            runtime.turn_scope_for(&thread_id),
+            turn_scope,
             TurnId::new(),
             TurnRunId::new(),
             resolved_run_profile,
         )
         .with_accepted_message_ref(accepted_message_ref)
-        .with_actor(TurnActor::new(
-            UserId::new("runtime-webui-skill-user").unwrap(),
-        ));
+        .with_actor(TurnActor::new(webui_user_id));
         let selected = source
             .load_skill_context_candidates(&context)
             .await

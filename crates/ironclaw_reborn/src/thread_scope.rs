@@ -13,7 +13,7 @@
 //! removes.
 
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::TurnActor;
+use ironclaw_turns::{TurnActor, TurnScope};
 
 /// Canonical owner-scoping rule for per-caller thread isolation.
 pub(crate) struct ThreadScopeResolver;
@@ -34,6 +34,19 @@ impl ThreadScopeResolver {
             scope.owner_user_id = Some(actor.user_id.clone());
         }
         scope
+    }
+
+    pub(crate) fn resolve_for_turn(
+        base: &ThreadScope,
+        turn_scope: &TurnScope,
+        actor: Option<&TurnActor>,
+    ) -> ThreadScope {
+        if turn_scope.has_explicit_thread_owner() {
+            let mut scope = base.clone();
+            scope.owner_user_id = turn_scope.explicit_owner_user_id().cloned();
+            return scope;
+        }
+        Self::resolve(base, actor)
     }
 }
 
@@ -83,5 +96,22 @@ mod tests {
             resolved.owner_user_id.is_none(),
             "an owner-agnostic base must stay system/shared-scoped"
         );
+    }
+
+    #[test]
+    fn explicit_turn_owner_overrides_actor_rewrite() {
+        let base = scope(Some("runtime-owner"));
+        let turn_scope = TurnScope::new_with_owner(
+            base.tenant_id.clone(),
+            Some(base.agent_id.clone()),
+            base.project_id.clone(),
+            ironclaw_host_api::ThreadId::new("thread").unwrap(),
+            None,
+        );
+
+        let resolved =
+            ThreadScopeResolver::resolve_for_turn(&base, &turn_scope, Some(&actor("alice")));
+
+        assert_eq!(resolved.owner_user_id, None);
     }
 }

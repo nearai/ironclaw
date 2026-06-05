@@ -621,6 +621,13 @@ mod tests {
         build_runtime_input_with_options, resolve_google_oauth_config,
     };
 
+    fn clear_trigger_poller_env() -> (EnvGuard, EnvGuard) {
+        (
+            EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED"),
+            EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS"),
+        )
+    }
+
     #[tokio::test]
     async fn block_on_cli_can_run_inside_existing_tokio_runtime() {
         let value = block_on_cli(async { Ok::<_, anyhow::Error>(42) }).expect("block future");
@@ -630,6 +637,9 @@ mod tests {
 
     #[test]
     fn build_runtime_input_maps_configured_cli_identity() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         std::fs::create_dir_all(&reborn_home).expect("mkdir");
@@ -662,6 +672,9 @@ default_owner = "custom-owner"
 
     #[test]
     fn build_runtime_input_maps_regex_skill_activation_config() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         std::fs::create_dir_all(&reborn_home).expect("mkdir");
@@ -689,6 +702,9 @@ regex_activation_enabled = false
 
     #[test]
     fn build_runtime_input_rejects_local_dev_yolo_without_host_access_confirmation() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         std::fs::create_dir_all(&reborn_home).expect("mkdir");
@@ -710,6 +726,9 @@ regex_activation_enabled = false
 
     #[test]
     fn build_runtime_input_accepts_confirmed_local_dev_yolo_profile() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         std::fs::create_dir_all(&reborn_home).expect("mkdir");
@@ -748,6 +767,9 @@ regex_activation_enabled = false
     // ensures both branches do the right thing.
     #[test]
     fn build_runtime_input_for_run_rejects_default_project() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         std::fs::create_dir_all(&reborn_home).expect("mkdir");
@@ -778,6 +800,9 @@ default_project = "project-alpha"
 
     #[test]
     fn build_runtime_input_for_serve_accepts_default_project() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         std::fs::create_dir_all(&reborn_home).expect("mkdir");
@@ -804,8 +829,7 @@ default_project = "project-alpha"
     #[test]
     fn build_runtime_input_maps_trigger_poller_enabled_config() {
         let _lock = lock_trigger_env();
-        let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
-        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+        let (_enabled, _interval) = clear_trigger_poller_env();
 
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");

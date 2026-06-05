@@ -23,6 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ironclaw_host_api::ProjectId;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
@@ -137,6 +138,14 @@ pub struct TriggerPollerSettings {
     pub worker: TriggerPollerWorkerConfig,
     pub startup_jitter_max: Duration,
     pub tick_jitter_max: Duration,
+    pub(crate) authorizer: TriggerPollerAuthorizerConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerPollerAuthorizerConfig {
+    CreatorMembershipRequired,
+    #[cfg(any(test, feature = "test-support"))]
+    TenantScopedPlaceholderForTest,
 }
 
 impl Default for TriggerPollerSettings {
@@ -146,6 +155,7 @@ impl Default for TriggerPollerSettings {
             worker: TriggerPollerWorkerConfig::default(),
             startup_jitter_max: Duration::ZERO,
             tick_jitter_max: Duration::ZERO,
+            authorizer: TriggerPollerAuthorizerConfig::CreatorMembershipRequired,
         }
     }
 }
@@ -156,6 +166,22 @@ impl TriggerPollerSettings {
             enabled: true,
             ..Self::default()
         }
+    }
+
+    pub fn with_worker_config(mut self, worker: TriggerPollerWorkerConfig) -> Self {
+        self.worker = worker;
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn enabled_with_tenant_scoped_authorizer_for_test() -> Self {
+        Self::enabled().with_tenant_scoped_authorizer_for_test()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_tenant_scoped_authorizer_for_test(mut self) -> Self {
+        self.authorizer = TriggerPollerAuthorizerConfig::TenantScopedPlaceholderForTest;
+        self
     }
 }
 
@@ -175,6 +201,10 @@ pub struct RebornRuntimeInput {
     pub trigger_poller: TriggerPollerSettings,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
+    /// Optional project scope for runtime-owned thread I/O. Channel adapters
+    /// that stamp a project onto inbound turns must set the same project here,
+    /// otherwise the loop host rejects the run before model execution.
+    pub default_project_id: Option<ProjectId>,
     pub regex_skill_activation_enabled: bool,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     /// Pre-resolved budget defaults to seed the model-budget accountant.
@@ -220,6 +250,7 @@ impl RebornRuntimeInput {
             trigger_poller: TriggerPollerSettings::default(),
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
+            default_project_id: None,
             regex_skill_activation_enabled: true,
             skill_context_source: None,
             budget_defaults: None,
@@ -286,6 +317,11 @@ impl RebornRuntimeInput {
 
     pub fn with_identity(mut self, identity: RebornRuntimeIdentity) -> Self {
         self.identity = identity;
+        self
+    }
+
+    pub fn with_default_project_id(mut self, project_id: ProjectId) -> Self {
+        self.default_project_id = Some(project_id);
         self
     }
 

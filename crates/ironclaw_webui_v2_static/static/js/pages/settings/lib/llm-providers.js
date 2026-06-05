@@ -64,6 +64,21 @@ export function isProviderConfigured(provider, overrides) {
   return providerEffectiveBaseUrl(provider, overrides).trim().length > 0;
 }
 
+export function providerStatus(provider, overrides, activeProviderId) {
+  if (provider.id === activeProviderId) return "active";
+  return isProviderConfigured(provider, overrides) ? "ready" : "setup";
+}
+
+export function groupProvidersByStatus(providers, overrides, activeProviderId) {
+  const buckets = { active: [], ready: [], setup: [] };
+  if (!Array.isArray(providers)) return buckets;
+  for (const provider of providers) {
+    const status = providerStatus(provider, overrides, activeProviderId);
+    if (buckets[status]) buckets[status].push(provider);
+  }
+  return buckets;
+}
+
 export function providerMissingReason(provider, overrides) {
   const override = provider.builtin ? overrides[provider.id] || {} : {};
   const needsKey = provider.builtin ? provider.api_key_required !== false : provider.adapter !== "ollama";

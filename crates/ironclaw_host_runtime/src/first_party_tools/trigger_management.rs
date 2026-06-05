@@ -60,10 +60,19 @@ pub(super) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
 ) -> Result<(), HostApiError> {
+    insert_handlers_with_create_hook(registry, repository, Arc::new(NoopTriggerCreateHook))
+}
+
+pub(super) fn insert_handlers_with_create_hook(
+    registry: &mut FirstPartyCapabilityRegistry,
+    repository: Arc<dyn TriggerRepository>,
+    create_hook: Arc<dyn TriggerCreateHook>,
+) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
         Arc::new(TriggerManagementToolHandler {
             repository,
+            create_hook,
             clock: Arc::new(SystemTriggerManagementClock),
         }),
     )
@@ -77,7 +86,11 @@ pub(super) fn insert_handlers_with_clock(
 ) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
-        Arc::new(TriggerManagementToolHandler { repository, clock }),
+        Arc::new(TriggerManagementToolHandler {
+            repository,
+            create_hook: Arc::new(NoopTriggerCreateHook),
+            clock,
+        }),
     )
 }
 
@@ -108,6 +121,21 @@ trait TriggerManagementClock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
 
+#[async_trait]
+pub trait TriggerCreateHook: Send + Sync {
+    async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
+}
+
+#[derive(Debug)]
+struct NoopTriggerCreateHook;
+
+#[async_trait]
+impl TriggerCreateHook for NoopTriggerCreateHook {
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct SystemTriggerManagementClock;
 
@@ -119,6 +147,7 @@ impl TriggerManagementClock for SystemTriggerManagementClock {
 
 struct TriggerManagementToolHandler {
     repository: Arc<dyn TriggerRepository>,
+    create_hook: Arc<dyn TriggerCreateHook>,
     clock: Arc<dyn TriggerManagementClock>,
 }
 
@@ -134,6 +163,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
             TRIGGER_CREATE_CAPABILITY_ID => {
                 create_trigger(
                     &*self.repository,
+                    &*self.create_hook,
                     &request.scope,
                     request.input,
                     self.clock.now(),
@@ -179,6 +209,7 @@ struct TriggerListInput {
 
 async fn create_trigger(
     repository: &dyn TriggerRepository,
+    create_hook: &dyn TriggerCreateHook,
     scope: &ResourceScope,
     input: Value,
     now: DateTime<Utc>,
@@ -211,6 +242,19 @@ async fn create_trigger(
         .upsert_trigger(record.clone())
         .await
         .map_err(|error| trigger_repository_error("upsert_trigger", error))?;
+    if let Err(error) = create_hook.after_trigger_persisted(&record).await {
+        let hook_error = trigger_create_hook_error("after_trigger_persisted", error);
+        if let Err(remove_error) = repository
+            .remove_trigger(record.tenant_id.clone(), record.trigger_id)
+            .await
+        {
+            return Err(trigger_create_rollback_error(
+                "remove_trigger",
+                remove_error,
+            ));
+        }
+        return Err(hook_error);
+    }
     Ok(json!({
         "trigger": trigger_output(&record),
     }))
@@ -320,6 +364,36 @@ fn trigger_repository_error(
         "trigger management capability repository operation failed"
     );
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+}
+
+fn trigger_create_hook_error(
+    hook_operation: &'static str,
+    error: TriggerError,
+) -> FirstPartyCapabilityError {
+    tracing::debug!(
+        runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::Backend,
+        hook_operation,
+        trigger_error_kind = trigger_error_kind(&error),
+        "trigger management capability create hook failed"
+    );
+    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+}
+
+fn trigger_create_rollback_error(
+    repository_operation: &'static str,
+    error: TriggerError,
+) -> FirstPartyCapabilityError {
+    tracing::warn!(
+        runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::Backend,
+        repository_operation,
+        trigger_error_kind = trigger_error_kind(&error),
+        error_kind = "trigger_create_rollback_failed",
+        "trigger management capability create hook rollback failed"
+    );
+    FirstPartyCapabilityError::with_safe_summary(
+        RuntimeDispatchErrorKind::Backend,
+        "trigger create rollback failed after hook error",
+    )
 }
 
 fn trigger_error_kind(error: &TriggerError) -> &'static str {
