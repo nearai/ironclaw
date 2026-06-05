@@ -514,4 +514,46 @@ mod tests {
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].as_str(), literal_percent.as_str());
     }
+
+    #[tokio::test]
+    async fn list_active_users_by_allowed_email_domains_treats_underscore_literally() {
+        let store = store().await;
+        store
+            .resolve_or_create(identity("google", "g-1", Some("a@axexample.com"), true))
+            .await
+            .expect("resolve wildcard-looking domain");
+        let literal_underscore = store
+            .resolve_or_create(identity("google", "g-2", Some("b@a_example.com"), true))
+            .await
+            .expect("resolve literal underscore domain");
+
+        let users = store
+            .list_active_users_by_allowed_email_domains(&["a_example.com".to_string()])
+            .await
+            .expect("list active users");
+
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].as_str(), literal_underscore.as_str());
+    }
+
+    #[tokio::test]
+    async fn list_active_users_by_allowed_email_domains_treats_backslash_literally() {
+        let store = store().await;
+        store
+            .resolve_or_create(identity("google", "g-1", Some("a@example.com"), true))
+            .await
+            .expect("resolve normal domain");
+        let literal_backslash = store
+            .resolve_or_create(identity("google", "g-2", Some("b@exa\\mple.com"), true))
+            .await
+            .expect("resolve literal backslash domain");
+
+        let users = store
+            .list_active_users_by_allowed_email_domains(&["exa\\mple.com".to_string()])
+            .await
+            .expect("list active users");
+
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].as_str(), literal_backslash.as_str());
+    }
 }

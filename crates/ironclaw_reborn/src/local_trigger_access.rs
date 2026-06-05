@@ -41,7 +41,7 @@ pub enum LocalTriggerAccessSource {
 impl LocalTriggerAccessSource {
     fn as_str(self) -> &'static str {
         match self {
-            Self::LocalDevEnvBootstrap => "local_dev_bootstrap",
+            Self::LocalDevEnvBootstrap => "local_dev_env_bootstrap",
             Self::LocalDevSsoBootstrap => "local_dev_sso_bootstrap",
             Self::LocalDevRunBootstrap => "local_dev_run_bootstrap",
         }

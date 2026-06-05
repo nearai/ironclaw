@@ -823,6 +823,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn trigger_poller_bootstrap_seeds_no_project_local_access_checker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tenant_id = TenantId::new("serve-trigger-no-project-tenant").expect("tenant id");
+        let user_id = UserId::new("serve-trigger-no-project-user").expect("user id");
+        let agent_id = AgentId::new("serve-trigger-no-project-agent").expect("agent id");
+        let project_id = ProjectId::new("serve-trigger-no-project-project").expect("project id");
+        let user_store_path = dir.path().join("reborn-local-dev.db");
+        let runtime_input =
+            RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
+                "serve-trigger-owner",
+                dir.path().join("runtime"),
+            ))
+            .with_trigger_poller_settings(
+                ironclaw_reborn_composition::TriggerPollerSettings::enabled(),
+            );
+
+        let runtime_input = with_local_trigger_fire_access_checker(
+            runtime_input,
+            &user_store_path,
+            &tenant_id,
+            &user_id,
+            &agent_id,
+            None,
+        )
+        .await
+        .expect("bootstrap trigger fire access checker");
+
+        let checker = runtime_input
+            .trigger_fire_access_checker
+            .expect("checker is wired");
+        let decision = checker
+            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
+                tenant_id: tenant_id.clone(),
+                creator_user_id: user_id.clone(),
+                agent_id: Some(agent_id.clone()),
+                project_id: None,
+                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check trigger fire access");
+
+        assert_eq!(
+            decision,
+            ironclaw_reborn_composition::TriggerFireAccessDecision::Allowed
+        );
+
+        let project_scoped_decision = checker
+            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id: user_id,
+                agent_id: Some(agent_id),
+                project_id: Some(project_id),
+                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check project-scoped trigger fire access");
+
+        assert_eq!(
+            project_scoped_decision,
+            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
+                reason: "trigger creator does not have active local access for this scope"
+                    .to_string(),
+            }
+        );
+    }
+
     #[test]
     fn webui_oauth_callback_origin_uses_loopback_http() {
         assert_eq!(

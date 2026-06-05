@@ -270,4 +270,69 @@ mod tests {
             }
         );
     }
+
+    #[tokio::test]
+    async fn sso_auth_surface_reconciles_empty_admission_for_local_trigger_access() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_store_path = tmp.path().join("reborn-local-dev.db");
+        let access_store = open_local_trigger_access_store(&user_store_path)
+            .await
+            .expect("open local access store");
+        let tenant_id = TenantId::new("sso-auth-empty-tenant").expect("tenant id");
+        let agent_id = AgentId::new("sso-auth-empty-agent").expect("agent id");
+        let project_id = ProjectId::new("sso-auth-empty-project").expect("project id");
+        let stale_user_id = UserId::new("sso-auth-empty-stale").expect("stale user id");
+        access_store
+            .seed_local_access(ironclaw_reborn_composition::LocalTriggerAccessSeed {
+                tenant_id: &tenant_id,
+                user_id: &stale_user_id,
+                agent_id: Some(&agent_id),
+                project_id: Some(&project_id),
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .expect("seed stale access");
+
+        let sso = SsoStartupConfig {
+            providers: vec![Arc::new(StubProvider(
+                OAuthProviderName::new("google").expect("provider name"),
+            ))],
+            base_url: "https://app.example".to_string(),
+            allowed_email_domains: vec!["example.com".to_string()],
+        };
+        let _surface = build_webui_auth_surface(
+            Some(sso),
+            &user_store_path,
+            tenant_id.clone(),
+            SecretString::from("operator-session-secret".to_string()),
+            Arc::new(OneToken),
+            Some(LocalTriggerAccessBootstrapConfig {
+                tenant_id: tenant_id.clone(),
+                agent_id: agent_id.clone(),
+                project_id: Some(project_id.clone()),
+            }),
+        )
+        .await
+        .expect("build auth surface");
+
+        let denied = access_store
+            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id: stale_user_id,
+                agent_id: Some(agent_id),
+                project_id: Some(project_id),
+                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check stale access");
+        assert_eq!(
+            denied,
+            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
+                reason: "trigger creator does not have active local access for this scope"
+                    .to_string(),
+            }
+        );
+    }
 }
