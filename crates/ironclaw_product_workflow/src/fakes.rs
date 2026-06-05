@@ -130,11 +130,17 @@ impl FakeConversationBindingService {
                 .map_err(|e| ProductWorkflowError::BindingResolutionFailed {
                     reason: e.to_string(),
                 })?,
-            user_id: UserId::new(format!("user:{}", request.external_actor_ref.id())).map_err(
-                |e| ProductWorkflowError::BindingResolutionFailed {
+            actor_user_id: UserId::new(format!("user:{}", request.external_actor_ref.id()))
+                .map_err(|e| ProductWorkflowError::BindingResolutionFailed {
                     reason: e.to_string(),
-                },
-            )?,
+                })?,
+            subject_user_id: Some(
+                UserId::new(format!("user:{}", request.external_actor_ref.id())).map_err(|e| {
+                    ProductWorkflowError::BindingResolutionFailed {
+                        reason: e.to_string(),
+                    }
+                })?,
+            ),
             thread_id: ThreadId::new(format!(
                 "thread:{}:{}",
                 request.installation_id.as_str(),
@@ -580,11 +586,16 @@ impl FakeInboundTurnService {
                     reason: e.to_string(),
                 }
             })?,
-            user_id: UserId::new("user:fake").map_err(|e| {
+            actor_user_id: UserId::new("user:fake").map_err(|e| {
                 ProductWorkflowError::BindingResolutionFailed {
                     reason: e.to_string(),
                 }
             })?,
+            subject_user_id: Some(UserId::new("user:fake").map_err(|e| {
+                ProductWorkflowError::BindingResolutionFailed {
+                    reason: e.to_string(),
+                }
+            })?),
             thread_id: ThreadId::new("thread:fake").map_err(|e| {
                 ProductWorkflowError::BindingResolutionFailed {
                     reason: e.to_string(),

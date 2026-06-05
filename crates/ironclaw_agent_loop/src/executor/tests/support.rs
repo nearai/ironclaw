@@ -13,7 +13,7 @@ use ironclaw_turns::{
         CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
         ConcurrencyClass, ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind,
         LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionRequest, LoopCompactionResponse,
+        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
         LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken,
         LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
         LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
@@ -724,7 +724,7 @@ impl ironclaw_turns::run_profile::LoopCompactionPort for MockHost {
     async fn compact_loop_context(
         &self,
         request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
         self.compact_loop_context_for_tests(request).await
     }
 }

@@ -61,6 +61,7 @@ const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
 const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
 const SLACK_WEBHOOK_WORKFLOW_TIMEOUT: Duration = Duration::from_secs(55);
+const SLACK_FINAL_REPLY_MESSAGE_MAX_WAIT: Duration = Duration::from_secs(10);
 const SLACK_MAX_IN_FLIGHT_WEBHOOKS: usize = 64;
 const SLACK_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const SLACK_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
@@ -241,8 +242,9 @@ pub async fn build_slack_events_route_mount_with_actor_user_resolver(
     config: SlackHostBetaConfig,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
-    // The resolver controls inbound Slack actor binding. `config.user_id` still
-    // scopes the host-mediated Slack bot-token egress for this beta route.
+    // The resolver controls inbound Slack actor binding. `config.user_id`
+    // scopes shared Slack channel execution and host-mediated Slack bot-token
+    // egress for this beta route.
     let local_runtime = runtime
         .services()
         .local_runtime
@@ -268,6 +270,7 @@ pub async fn build_slack_events_route_mount_with_actor_user_resolver(
         config.agent_id.clone(),
         config.project_id.clone(),
     )
+    .with_default_subject_user_id(config.user_id.clone())
     .with_actor_user_resolver(actor_user_resolver, actor_pairings);
     let installation_resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(adapter_id, config.installation_id.clone()),
@@ -338,8 +341,12 @@ pub async fn build_slack_events_route_mount_with_actor_user_resolver(
             adapter,
             egress,
             delivery_sink,
+            auth_challenges: runtime.auth_challenge_provider(),
         },
-        SlackFinalReplyDeliverySettings::default(),
+        SlackFinalReplyDeliverySettings {
+            message_max_wait: SLACK_FINAL_REPLY_MESSAGE_MAX_WAIT,
+            ..SlackFinalReplyDeliverySettings::default()
+        },
     ));
 
     let slack_resolver = StaticSlackInstallationResolver::new([SlackInstallationRecord::new(
@@ -370,12 +377,12 @@ fn slack_protocol_egress(
         .local_runtime
         .as_ref()
         .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
-    let runtime_http_egress = local_runtime
-        .runtime_http_egress
+    let host_egress = local_runtime
+        .host_runtime_http_egress
         .clone()
         .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
     Ok(Arc::new(SlackProtocolHttpEgress::new(
-        runtime_http_egress,
+        host_egress,
         Arc::new(StaticSlackEgressCredentialProvider::new(
             token_handle.clone(),
             config.bot_token.expose_secret().to_string(),

@@ -6,7 +6,7 @@ use ironclaw_conversations::{
     ConversationBindingService, ConversationRouteKind, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundTurnError, ResolveConversationRequest,
 };
-use ironclaw_host_api::{AgentId, TenantId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 use ironclaw_safety::{
     InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
 };
@@ -15,35 +15,117 @@ use ironclaw_threads::{
     MessageContent, SessionThreadService as CanonicalSessionThreadService, ThreadScope,
 };
 use ironclaw_triggers::{
-    TriggerError, TriggerFire, TriggerMaterializedPrompt, TriggerPromptMaterializer,
+    TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerPromptMaterializer,
     TriggerTrustedInboundBinding,
 };
 use ironclaw_turns::{AdmissionRejectionReason, TurnError};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TriggerFireAuthRequest {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) creator_user_id: UserId,
+    pub(crate) agent_id: Option<AgentId>,
+    pub(crate) project_id: Option<ProjectId>,
+    pub(crate) trigger_id: TriggerId,
+    pub(crate) fire_slot: Timestamp,
+}
+
+impl TriggerFireAuthRequest {
+    fn for_fire(fire: &TriggerFire) -> Self {
+        Self {
+            tenant_id: fire.identity.tenant_id().clone(),
+            creator_user_id: fire.creator_user_id.clone(),
+            agent_id: fire.agent_id.clone(),
+            project_id: fire.project_id.clone(),
+            trigger_id: fire.identity.trigger_id(),
+            fire_slot: fire.identity.fire_slot(),
+        }
+    }
+}
+
+pub(crate) struct AccessCheckerTriggerFireAuthorizer {
+    checker: Arc<dyn crate::runtime_input::TriggerFireAccessChecker>,
+}
+
+impl AccessCheckerTriggerFireAuthorizer {
+    pub(crate) fn new(checker: Arc<dyn crate::runtime_input::TriggerFireAccessChecker>) -> Self {
+        Self { checker }
+    }
+}
+
+#[async_trait]
+impl TriggerFireAuthorizer for AccessCheckerTriggerFireAuthorizer {
+    async fn authorize_trigger_fire(
+        &self,
+        request: &TriggerFireAuthRequest,
+    ) -> Result<(), TriggerFireAuthError> {
+        let decision = self
+            .checker
+            .check_trigger_fire_access(crate::runtime_input::TriggerFireAccessCheck {
+                tenant_id: request.tenant_id.clone(),
+                creator_user_id: request.creator_user_id.clone(),
+                agent_id: request.agent_id.clone(),
+                project_id: request.project_id.clone(),
+                trigger_id: request.trigger_id,
+                fire_slot: request.fire_slot,
+            })
+            .await
+            .map_err(|error| TriggerFireAuthError::Retryable {
+                reason: error.to_string(),
+            })?;
+        match decision {
+            crate::runtime_input::TriggerFireAccessDecision::Allowed => Ok(()),
+            crate::runtime_input::TriggerFireAccessDecision::Denied { reason } => {
+                Err(TriggerFireAuthError::Denied { reason })
+            }
+        }
+    }
+}
+
+/// Fire-time host policy hook. The test-support implementation is only a
+/// tenant-scope guard; normal runtime wiring must use a creator access checker
+/// before external trigger delivery can launch.
 #[async_trait]
 pub(crate) trait TriggerFireAuthorizer: Send + Sync {
-    async fn authorize_trigger_fire(&self, fire: &TriggerFire) -> Result<(), TriggerFireAuthError>;
+    async fn authorize_trigger_fire(
+        &self,
+        request: &TriggerFireAuthRequest,
+    ) -> Result<(), TriggerFireAuthError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TriggerFireAuthError {
+    // arch-exempt: dead_code, Denied is reserved for real fire-time auth backend denials, plan #4436
+    #[allow(dead_code)]
     Denied { reason: String },
+    // Part of the fire-time authorization contract now so backend
+    // unavailability has stable retry semantics before the real access
+    // authorizer is wired. The tenant-scope placeholder does not construct it.
+    // arch-exempt: dead_code, Retryable is reserved for real fire-time auth backend failures, plan #4436
+    #[allow(dead_code)]
+    Retryable { reason: String },
 }
 
-pub(crate) struct TrustedTenantTriggerFireAuthorizer {
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct TenantScopedTrustedTriggerFireAuthorizer {
     tenant_id: TenantId,
 }
 
-impl TrustedTenantTriggerFireAuthorizer {
+#[cfg(any(test, feature = "test-support"))]
+impl TenantScopedTrustedTriggerFireAuthorizer {
     pub(crate) fn new(tenant_id: TenantId) -> Self {
         Self { tenant_id }
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
-impl TriggerFireAuthorizer for TrustedTenantTriggerFireAuthorizer {
-    async fn authorize_trigger_fire(&self, fire: &TriggerFire) -> Result<(), TriggerFireAuthError> {
-        if fire.identity.tenant_id() != &self.tenant_id {
+impl TriggerFireAuthorizer for TenantScopedTrustedTriggerFireAuthorizer {
+    async fn authorize_trigger_fire(
+        &self,
+        request: &TriggerFireAuthRequest,
+    ) -> Result<(), TriggerFireAuthError> {
+        if request.tenant_id != self.tenant_id {
             return Err(TriggerFireAuthError::Denied {
                 reason: "trigger tenant is outside this trusted poller scope".to_string(),
             });
@@ -89,8 +171,9 @@ where
         &self,
         fire: TriggerFire,
     ) -> Result<TriggerMaterializedPrompt, TriggerError> {
+        let auth_request = TriggerFireAuthRequest::for_fire(&fire);
         self.authorizer
-            .authorize_trigger_fire(&fire)
+            .authorize_trigger_fire(&auth_request)
             .await
             .map_err(trigger_authorization_error)?;
         validate_trusted_trigger_prompt(&*self.prompt_safety, &fire.prompt)
@@ -242,9 +325,18 @@ async fn record_trigger_prompt(
 
 fn trigger_authorization_error(error: TriggerFireAuthError) -> TriggerError {
     match error {
-        TriggerFireAuthError::Denied { reason } => TriggerError::InvalidMaterialization {
-            reason: format!("trusted trigger fire authorization denied: {reason}"),
-        },
+        TriggerFireAuthError::Denied { reason } => {
+            tracing::debug!(%reason, "trusted trigger fire authorization denied");
+            TriggerError::InvalidMaterialization {
+                reason: "trusted trigger fire authorization denied".to_string(),
+            }
+        }
+        TriggerFireAuthError::Retryable { reason } => {
+            tracing::debug!(%reason, "trusted trigger fire authorization retryable failure");
+            TriggerError::Backend {
+                reason: "trusted trigger fire authorization retryable failure".to_string(),
+            }
+        }
     }
 }
 
@@ -321,6 +413,10 @@ fn conversation_id<T>(result: Result<T, InboundTurnError>) -> Result<T, TriggerE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_input::{
+        TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
+        TriggerFireAccessError,
+    };
     use chrono::Utc;
     use ironclaw_conversations::{
         MessageIdempotencyStatus, ThreadAccessDecision, trusted_trigger_fire_submitter,
@@ -340,12 +436,14 @@ mod tests {
         UpdateAssistantDraftRequest, UpdateThreadGoalRequest, UpdateToolResultReferenceRequest,
     };
     use ironclaw_triggers::{
-        InMemoryTriggerRepository, ScheduleTriggerSourceProvider, TriggerActiveRunLookup,
-        TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerCompletionPolicy, TriggerError,
-        TriggerFire, TriggerFireIdentity, TriggerId, TriggerInboundContentRef,
-        TriggerMaterializedPrompt, TriggerPollerFailureReason, TriggerPollerFireOutcome,
-        TriggerPollerWorker, TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRecord,
-        TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
+        InMemoryTriggerRepository, ScheduleTriggerSourceProvider,
+        TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
+        TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerActiveRunLookup, TriggerActiveRunState,
+        TriggerActiveRunStateRequest, TriggerCompletionPolicy, TriggerError, TriggerFire,
+        TriggerFireIdentity, TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt,
+        TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerWorker,
+        TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRecord, TriggerRepository,
+        TriggerSchedule, TriggerSourceKind, TriggerState,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
@@ -354,10 +452,109 @@ mod tests {
         SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
         TurnRunId, TurnRunState, TurnScope, TurnStatus,
     };
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn tenant_authorizer(tenant_id: &TenantId) -> Arc<dyn TriggerFireAuthorizer> {
-        Arc::new(TrustedTenantTriggerFireAuthorizer::new(tenant_id.clone()))
+        Arc::new(TenantScopedTrustedTriggerFireAuthorizer::new(
+            tenant_id.clone(),
+        ))
+    }
+
+    struct StaticTriggerFireAuthorizer {
+        result: Result<(), TriggerFireAuthError>,
+        requests: Mutex<Vec<TriggerFireAuthRequest>>,
+    }
+
+    impl StaticTriggerFireAuthorizer {
+        fn new(result: Result<(), TriggerFireAuthError>) -> Self {
+            Self {
+                result,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<TriggerFireAuthRequest> {
+            self.requests.lock().expect("requests lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl TriggerFireAuthorizer for StaticTriggerFireAuthorizer {
+        async fn authorize_trigger_fire(
+            &self,
+            request: &TriggerFireAuthRequest,
+        ) -> Result<(), TriggerFireAuthError> {
+            self.requests
+                .lock()
+                .expect("requests lock")
+                .push(request.clone());
+            self.result.clone()
+        }
+    }
+
+    struct AuthFailureMaterializerFixture {
+        materializer: ConversationContentRefMaterializer<PanicBindingService>,
+        thread_service: Arc<InMemorySessionThreadService>,
+        thread_scope: ThreadScope,
+        authorizer: Arc<StaticTriggerFireAuthorizer>,
+        fire: TriggerFire,
+        auth_request: TriggerFireAuthRequest,
+    }
+
+    fn auth_failure_materializer(error: TriggerFireAuthError) -> AuthFailureMaterializerFixture {
+        let tenant_id = TenantId::new("trigger-auth-failure-tenant").expect("tenant id");
+        let creator_user_id = UserId::new("trigger-auth-failure-user").expect("user id");
+        let agent_id = AgentId::new("trigger-auth-failure-agent").expect("agent id");
+        let project_id = ProjectId::new("trigger-auth-failure-project").expect("project id");
+        let trigger_id = TriggerId::new();
+        let fire_slot = Utc::now();
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let authorizer = Arc::new(StaticTriggerFireAuthorizer::new(Err(error)));
+        let fire = TriggerFire {
+            identity: TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot),
+            creator_user_id: creator_user_id.clone(),
+            agent_id: Some(agent_id.clone()),
+            project_id: Some(project_id.clone()),
+            prompt: "summarize unread mail".to_string(),
+        };
+        let auth_request = TriggerFireAuthRequest::for_fire(&fire);
+        let thread_scope = ThreadScope {
+            tenant_id,
+            agent_id: agent_id.clone(),
+            project_id: Some(project_id),
+            owner_user_id: Some(creator_user_id),
+            mission_id: None,
+        };
+        let materializer = ConversationContentRefMaterializer::new(
+            PanicBindingService,
+            thread_service.clone(),
+            agent_id,
+            authorizer.clone(),
+        );
+        AuthFailureMaterializerFixture {
+            materializer,
+            thread_service,
+            thread_scope,
+            authorizer,
+            fire,
+            auth_request,
+        }
+    }
+
+    async fn assert_no_prompt_threads(
+        thread_service: &InMemorySessionThreadService,
+        scope: ThreadScope,
+    ) {
+        let threads = thread_service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope,
+                limit: Some(10),
+                cursor: None,
+            })
+            .await
+            .expect("threads load");
+        assert!(threads.threads.is_empty());
     }
 
     struct MissingActiveRunLookup;
@@ -463,7 +660,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_authorizer_allows_persisted_trigger_scope_inside_tenant() {
+    async fn trigger_fire_auth_request_captures_fire_scope() {
+        let tenant_id = TenantId::new("trigger-authorized-tenant").expect("tenant id");
+        let creator_user_id = UserId::new("trigger-authorized-user").expect("user id");
+        let agent_id = AgentId::new("trigger-authorized-agent").expect("agent id");
+        let project_id = ProjectId::new("trigger-authorized-project").expect("project id");
+        let trigger_id = TriggerId::new();
+        let fire_slot = Utc::now();
+        let fire = TriggerFire {
+            identity: TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot),
+            creator_user_id: creator_user_id.clone(),
+            agent_id: Some(agent_id.clone()),
+            project_id: Some(project_id.clone()),
+            prompt: "summarize unread mail".to_string(),
+        };
+
+        let request = TriggerFireAuthRequest::for_fire(&fire);
+
+        assert_eq!(request.tenant_id, tenant_id);
+        assert_eq!(request.creator_user_id, creator_user_id);
+        assert_eq!(request.agent_id, Some(agent_id));
+        assert_eq!(request.project_id, Some(project_id));
+        assert_eq!(request.trigger_id, trigger_id);
+        assert_eq!(request.fire_slot, fire_slot);
+    }
+
+    #[tokio::test]
+    async fn trigger_fire_auth_request_preserves_missing_optional_scope() {
+        let tenant_id = TenantId::new("trigger-authorized-tenant").expect("tenant id");
+        let creator_user_id = UserId::new("trigger-authorized-user").expect("user id");
+        let trigger_id = TriggerId::new();
+        let fire_slot = Utc::now();
+        let fire = TriggerFire {
+            identity: TriggerFireIdentity::new(tenant_id, trigger_id, fire_slot),
+            creator_user_id,
+            agent_id: None,
+            project_id: None,
+            prompt: "summarize unread mail".to_string(),
+        };
+
+        let request = TriggerFireAuthRequest::for_fire(&fire);
+
+        assert_eq!(request.agent_id, None);
+        assert_eq!(request.project_id, None);
+    }
+
+    #[tokio::test]
+    async fn tenant_scope_authorizer_allows_persisted_trigger_scope_inside_tenant() {
         let tenant_id = TenantId::new("trigger-authorized-tenant").expect("tenant id");
         let creator_user_id = UserId::new("trigger-authorized-different-user").expect("user id");
         let agent_id = AgentId::new("trigger-authorized-agent").expect("agent id");
@@ -475,15 +718,16 @@ mod tests {
             project_id: Some(project_id),
             prompt: "summarize unread mail".to_string(),
         };
+        let request = TriggerFireAuthRequest::for_fire(&fire);
 
-        TrustedTenantTriggerFireAuthorizer::new(tenant_id)
-            .authorize_trigger_fire(&fire)
+        TenantScopedTrustedTriggerFireAuthorizer::new(tenant_id)
+            .authorize_trigger_fire(&request)
             .await
             .expect("same-tenant persisted trigger scope is trusted");
     }
 
     #[tokio::test]
-    async fn tenant_authorizer_rejects_foreign_tenant_fire() {
+    async fn tenant_scope_authorizer_rejects_foreign_tenant_fire() {
         let poller_tenant = TenantId::new("trigger-poller-tenant").expect("tenant id");
         let foreign_tenant = TenantId::new("trigger-foreign-tenant").expect("tenant id");
         let creator_user_id = UserId::new("trigger-foreign-user").expect("user id");
@@ -494,9 +738,10 @@ mod tests {
             project_id: None,
             prompt: "summarize unread mail".to_string(),
         };
+        let request = TriggerFireAuthRequest::for_fire(&fire);
 
-        let error = TrustedTenantTriggerFireAuthorizer::new(poller_tenant)
-            .authorize_trigger_fire(&fire)
+        let error = TenantScopedTrustedTriggerFireAuthorizer::new(poller_tenant)
+            .authorize_trigger_fire(&request)
             .await
             .expect_err("foreign tenant fire is rejected");
 
@@ -504,6 +749,127 @@ mod tests {
             error,
             TriggerFireAuthError::Denied { reason }
                 if reason.contains("outside this trusted poller scope")
+        ));
+    }
+
+    struct RecordingAccessChecker {
+        decision: TriggerFireAccessDecision,
+        requests: Mutex<Vec<TriggerFireAccessCheck>>,
+    }
+
+    #[async_trait]
+    impl TriggerFireAccessChecker for RecordingAccessChecker {
+        async fn check_trigger_fire_access(
+            &self,
+            request: TriggerFireAccessCheck,
+        ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
+            self.requests.lock().expect("requests lock").push(request);
+            Ok(self.decision.clone())
+        }
+    }
+
+    struct FailingAccessChecker;
+
+    #[async_trait]
+    impl TriggerFireAccessChecker for FailingAccessChecker {
+        async fn check_trigger_fire_access(
+            &self,
+            _request: TriggerFireAccessCheck,
+        ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
+            Err(TriggerFireAccessError::Unavailable {
+                reason: "local access db busy".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn access_checker_authorizer_forwards_exact_fire_scope() {
+        let tenant_id = TenantId::new("trigger-access-tenant").expect("tenant id");
+        let creator_user_id = UserId::new("trigger-access-user").expect("user id");
+        let agent_id = AgentId::new("trigger-access-agent").expect("agent id");
+        let project_id = ProjectId::new("trigger-access-project").expect("project id");
+        let trigger_id = TriggerId::new();
+        let fire_slot = Utc::now();
+        let request = TriggerFireAuthRequest {
+            tenant_id: tenant_id.clone(),
+            creator_user_id: creator_user_id.clone(),
+            agent_id: Some(agent_id.clone()),
+            project_id: Some(project_id.clone()),
+            trigger_id,
+            fire_slot,
+        };
+        let checker = Arc::new(RecordingAccessChecker {
+            decision: TriggerFireAccessDecision::Allowed,
+            requests: Mutex::new(Vec::new()),
+        });
+
+        AccessCheckerTriggerFireAuthorizer::new(checker.clone())
+            .authorize_trigger_fire(&request)
+            .await
+            .expect("authorized");
+
+        assert_eq!(
+            checker.requests.lock().expect("requests lock").as_slice(),
+            [TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id,
+                agent_id: Some(agent_id),
+                project_id: Some(project_id),
+                trigger_id,
+                fire_slot,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn access_checker_authorizer_denies_when_checker_denies() {
+        let request = TriggerFireAuthRequest {
+            tenant_id: TenantId::new("trigger-access-denied-tenant").expect("tenant id"),
+            creator_user_id: UserId::new("trigger-access-denied-user").expect("user id"),
+            agent_id: None,
+            project_id: None,
+            trigger_id: TriggerId::new(),
+            fire_slot: Utc::now(),
+        };
+        let checker = Arc::new(RecordingAccessChecker {
+            decision: TriggerFireAccessDecision::Denied {
+                reason: "creator lost access".to_string(),
+            },
+            requests: Mutex::new(Vec::new()),
+        });
+
+        let error = AccessCheckerTriggerFireAuthorizer::new(checker)
+            .authorize_trigger_fire(&request)
+            .await
+            .expect_err("denied");
+
+        assert!(matches!(
+            error,
+            TriggerFireAuthError::Denied { reason } if reason == "creator lost access"
+        ));
+    }
+
+    #[tokio::test]
+    async fn access_checker_authorizer_returns_retryable_when_checker_unavailable() {
+        let request = TriggerFireAuthRequest {
+            tenant_id: TenantId::new("trigger-access-error-tenant").expect("tenant id"),
+            creator_user_id: UserId::new("trigger-access-error-user").expect("user id"),
+            agent_id: None,
+            project_id: None,
+            trigger_id: TriggerId::new(),
+            fire_slot: Utc::now(),
+        };
+
+        let error = AccessCheckerTriggerFireAuthorizer::new(Arc::new(FailingAccessChecker))
+            .authorize_trigger_fire(&request)
+            .await
+            .expect_err("retryable");
+
+        assert!(matches!(
+            error,
+            TriggerFireAuthError::Retryable { reason }
+                if reason.contains("trigger fire access backend unavailable")
+                    && reason.contains("local access db busy")
         ));
     }
 
@@ -902,9 +1268,14 @@ mod tests {
         conversations
             .pair_external_actor(
                 tenant_id.clone(),
-                AdapterKind::new("trigger").expect("adapter kind"),
-                AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
-                ExternalActorRef::new("user", creator_user_id.as_str()).expect("actor ref"),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                    .expect("installation id"),
+                ExternalActorRef::new(
+                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                    creator_user_id.as_str(),
+                )
+                .expect("actor ref"),
                 creator_user_id.clone(),
             )
             .await;
@@ -1034,9 +1405,14 @@ mod tests {
         conversations
             .pair_external_actor(
                 tenant_id.clone(),
-                AdapterKind::new("trigger").expect("adapter kind"),
-                AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
-                ExternalActorRef::new("user", creator_user_id.as_str()).expect("actor ref"),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                    .expect("installation id"),
+                ExternalActorRef::new(
+                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                    creator_user_id.as_str(),
+                )
+                .expect("actor ref"),
                 creator_user_id.clone(),
             )
             .await;
@@ -1182,9 +1558,14 @@ mod tests {
         conversations
             .pair_external_actor(
                 tenant_id.clone(),
-                AdapterKind::new("trigger").expect("adapter kind"),
-                AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
-                ExternalActorRef::new("user", creator_user_id.as_str()).expect("actor ref"),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                    .expect("installation id"),
+                ExternalActorRef::new(
+                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                    creator_user_id.as_str(),
+                )
+                .expect("actor ref"),
                 creator_user_id.clone(),
             )
             .await;
@@ -1293,9 +1674,14 @@ mod tests {
         conversations
             .pair_external_actor(
                 tenant_id.clone(),
-                AdapterKind::new("trigger").expect("adapter kind"),
-                AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
-                ExternalActorRef::new("user", creator_user_id.as_str()).expect("actor ref"),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                    .expect("installation id"),
+                ExternalActorRef::new(
+                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                    creator_user_id.as_str(),
+                )
+                .expect("actor ref"),
                 creator_user_id.clone(),
             )
             .await;
@@ -1320,6 +1706,46 @@ mod tests {
         assert!(
             matches!(error, TriggerError::Backend { reason } if reason == "trusted trigger submit retryable failure")
         );
+    }
+
+    #[tokio::test]
+    async fn materializer_rejects_authorizer_denial_before_binding_or_prompt_write() {
+        let fixture = auth_failure_materializer(TriggerFireAuthError::Denied {
+            reason: "creator no longer authorized for project".to_string(),
+        });
+
+        let error = fixture
+            .materializer
+            .materialize_prompt(fixture.fire)
+            .await
+            .expect_err("authorization denial rejects before materialization side effects");
+
+        assert!(
+            matches!(error, TriggerError::InvalidMaterialization { reason } if reason == "trusted trigger fire authorization denied")
+        );
+        assert_eq!(fixture.authorizer.requests(), vec![fixture.auth_request]);
+        assert_no_prompt_threads(&fixture.thread_service, fixture.thread_scope).await;
+    }
+
+    #[tokio::test]
+    async fn materializer_returns_retryable_error_when_authorizer_backend_fails() {
+        let fixture = auth_failure_materializer(TriggerFireAuthError::Retryable {
+            reason: "creator authorization backend unavailable".to_string(),
+        });
+
+        let error = fixture
+            .materializer
+            .materialize_prompt(fixture.fire)
+            .await
+            .expect_err(
+                "retryable authorization failure rejects before materialization side effects",
+            );
+
+        assert!(
+            matches!(error, TriggerError::Backend { reason } if reason == "trusted trigger fire authorization retryable failure")
+        );
+        assert_eq!(fixture.authorizer.requests(), vec![fixture.auth_request]);
+        assert_no_prompt_threads(&fixture.thread_service, fixture.thread_scope).await;
     }
 
     #[tokio::test]
@@ -1348,7 +1774,7 @@ mod tests {
             .expect_err("foreign tenant fire is rejected before materialization side effects");
 
         assert!(
-            matches!(error, TriggerError::InvalidMaterialization { reason } if reason.contains("outside this trusted poller scope"))
+            matches!(error, TriggerError::InvalidMaterialization { reason } if reason == "trusted trigger fire authorization denied")
         );
         let threads = thread_service
             .list_threads_for_scope(ListThreadsForScopeRequest {

@@ -70,18 +70,8 @@ pub(crate) fn resolve_slack_host_beta_config(
     let api_app_id = required_slack_config_value("api_app_id", &section.api_app_id, config_path)?;
     let slack_user_id = optional_slack_config_value("slack_user_id", &section.slack_user_id)?;
     let mapped_user_id = match optional_slack_config_value("user_id", &section.user_id)? {
-        Some(raw) => {
-            let user_id = ironclaw_reborn_composition::host_api::UserId::new(&raw)
-                .map_err(|err| anyhow!("[slack].user_id `{raw}` is invalid: {err}"))?;
-            if user_id != *default_user_id {
-                anyhow::bail!(
-                    "[slack].user_id `{raw}` must match the Reborn WebUI runtime owner `{default_user_id}`. \
-                     A mismatch makes Slack-originated threads unreadable by the turn runner. \
-                     Remove [slack].user_id or set it to `{default_user_id}`."
-                );
-            }
-            user_id
-        }
+        Some(raw) => ironclaw_reborn_composition::host_api::UserId::new(&raw)
+            .map_err(|err| anyhow!("[slack].user_id `{raw}` is invalid: {err}"))?,
         None => default_user_id.clone(),
     };
 
@@ -460,7 +450,7 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
-    fn slack_host_beta_config_rejects_divergent_user_mapping() {
+    fn slack_host_beta_config_accepts_distinct_shared_subject_user() {
         let _lock = env_lock();
         let _signing = EnvGuard::set(
             "IRONCLAW_TEST_SLACK_SIGNING_SECRET_DIVERGENT_USER",
@@ -480,7 +470,7 @@ mod tests {
             bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_DIVERGENT_USER".to_string()),
         };
 
-        let error = resolve_slack_host_beta_config(
+        let resolved = resolve_slack_host_beta_config(
             Some(&section),
             &tenant_id("tenant"),
             &agent_id("agent"),
@@ -488,14 +478,10 @@ mod tests {
             &user_id("web-user"),
             Path::new("/tmp/reborn-config.toml"),
         )
-        .expect_err("Slack user mapping must match the runtime owner");
+        .expect("Slack config should resolve")
+        .expect("Slack should be enabled");
 
-        assert!(
-            error
-                .to_string()
-                .contains("must match the Reborn WebUI runtime owner"),
-            "message: {error}"
-        );
+        assert_eq!(resolved.user_id, user_id("slack-mapped-user"));
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -532,14 +518,21 @@ mod tests {
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_host_beta_config_rejects_invalid_user_id_mapping() {
+        let _lock = env_lock();
+        let _signing = EnvGuard::set(
+            "IRONCLAW_TEST_SLACK_SIGNING_SECRET_INVALID_USER",
+            "signing-secret",
+        );
+        let _bot = EnvGuard::set("IRONCLAW_TEST_SLACK_BOT_TOKEN_INVALID_USER", "xoxb-token");
         let section = ironclaw_reborn_config::SlackSection {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
             api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
-            user_id: Some("invalid user".to_string()),
-            ..Default::default()
+            user_id: Some("invalid\nuser".to_string()),
+            signing_secret_env: Some("IRONCLAW_TEST_SLACK_SIGNING_SECRET_INVALID_USER".to_string()),
+            bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_INVALID_USER".to_string()),
         };
 
         let error = resolve_slack_host_beta_config(

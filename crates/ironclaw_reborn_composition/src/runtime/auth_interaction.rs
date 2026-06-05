@@ -11,9 +11,7 @@ use ironclaw_product_workflow::{
     ListPendingAuthInteractionsResponse, ProductWorkflowError, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse,
 };
-use ironclaw_turns::{
-    GateRef, TurnActor, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnScope, TurnStatus,
-};
+use ironclaw_turns::{GateRef, TurnPersistenceSnapshot, TurnRunId, TurnScope, TurnStatus};
 
 use crate::factory::LocalDevTurnStateStore;
 
@@ -77,7 +75,6 @@ impl LocalDevAuthInteractionReadModel {
         scope: &AuthInteractionScope,
     ) -> Result<Vec<BlockedAuthRun>, ProductWorkflowError> {
         let turn_scope = turn_scope_for_interaction(scope);
-        let actor = TurnActor::new(scope.user_id.clone());
         let snapshot = self.snapshot().await?;
         let mut runs = snapshot
             .runs
@@ -86,7 +83,6 @@ impl LocalDevAuthInteractionReadModel {
                 run.scope == turn_scope
                     && run.status == TurnStatus::BlockedAuth
                     && run.gate_ref.is_some()
-                    && snapshot_run_actor_matches(&snapshot, run, &actor)
             })
             .filter_map(|run| {
                 run.gate_ref.clone().map(|gate_ref| BlockedAuthRun {
@@ -105,7 +101,6 @@ impl LocalDevAuthInteractionReadModel {
         gate_ref: &GateRef,
     ) -> Result<Option<TurnRunId>, ProductWorkflowError> {
         let turn_scope = turn_scope_for_interaction(scope);
-        let actor = TurnActor::new(scope.user_id.clone());
         let snapshot = self.snapshot().await?;
         let active = snapshot
             .runs
@@ -114,7 +109,6 @@ impl LocalDevAuthInteractionReadModel {
                 run.scope == turn_scope
                     && run.status == TurnStatus::BlockedAuth
                     && run.gate_ref.as_ref() == Some(gate_ref)
-                    && snapshot_run_actor_matches(&snapshot, run, &actor)
             })
             .map(|run| run.run_id);
         if active.is_some() {
@@ -136,11 +130,7 @@ impl LocalDevAuthInteractionReadModel {
                 snapshot
                     .runs
                     .iter()
-                    .find(|run| {
-                        run.run_id == checkpoint.run_id
-                            && run.scope == turn_scope
-                            && snapshot_run_actor_matches(&snapshot, run, &actor)
-                    })
+                    .find(|run| run.run_id == checkpoint.run_id && run.scope == turn_scope)
                     .map(|run| run.run_id)
             })
             .collect::<Vec<_>>();
@@ -274,23 +264,13 @@ impl AuthInteractionReadModel for LocalDevAuthInteractionReadModel {
 }
 
 fn turn_scope_for_interaction(scope: &AuthInteractionScope) -> TurnScope {
-    TurnScope::new(
+    TurnScope::new_with_owner(
         scope.tenant_id.clone(),
         scope.agent_id.clone(),
         scope.project_id.clone(),
         scope.thread_id.clone(),
+        Some(scope.user_id.clone()),
     )
-}
-
-fn snapshot_run_actor_matches(
-    snapshot: &TurnPersistenceSnapshot,
-    run: &TurnRunRecord,
-    actor: &TurnActor,
-) -> bool {
-    snapshot
-        .turns
-        .iter()
-        .any(|turn| turn.turn_id == run.turn_id && turn.scope == run.scope && turn.actor == *actor)
 }
 
 fn auth_read_model_unavailable() -> ProductWorkflowError {

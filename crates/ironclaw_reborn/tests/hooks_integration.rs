@@ -214,6 +214,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
                 .expect("result ref literal is valid"),
             safe_summary: "stub capability completed".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
         }))
     }
@@ -284,6 +285,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
                 .expect("result ref literal is valid"),
             safe_summary: "stub capability completed".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
         }))
     }

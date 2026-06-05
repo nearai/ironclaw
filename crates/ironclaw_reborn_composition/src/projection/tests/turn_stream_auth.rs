@@ -140,6 +140,65 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
 }
 
 #[tokio::test]
+async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-auth-provider-error-thread").unwrap();
+    let turn_run = TurnRunId::new();
+    let gate_ref = "gate:auth-required";
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::BlockedAuth,
+                kind: TurnEventKind::Blocked,
+                blocked_gate: Some(TurnBlockedGateMetadata {
+                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_kind: TurnBlockedGateKind::Auth,
+                    credential_requirements: Vec::new(),
+                }),
+                sanitized_reason: Some("GitHub authentication required".to_string()),
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1)),
+        }),
+    )
+    .with_auth_challenges(Arc::new(FailingAuthChallengeProvider));
+
+    let error = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .expect_err("auth challenge lookup failure should be surfaced");
+
+    assert!(matches!(
+        error,
+        ProductAdapterError::WorkflowTransient { .. }
+    ));
+}
+
+#[tokio::test]
 async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_gate() {
     use crate::OAuthClientConfig;
     use crate::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};

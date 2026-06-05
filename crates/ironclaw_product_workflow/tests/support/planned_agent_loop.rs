@@ -159,9 +159,11 @@ pub fn capability_call_response(
 impl ProductLiveAgentLoopHarness {
     pub async fn new(config: ProductLiveAgentLoopHarnessConfig) -> Self {
         let binding_service = FakeConversationBindingService::new();
+        let user_id = UserId::new(config.user_id).expect("valid harness user id");
         let binding = ResolvedBinding {
             tenant_id: TenantId::new(config.tenant_id).expect("valid harness tenant id"),
-            user_id: UserId::new(config.user_id).expect("valid harness user id"),
+            actor_user_id: user_id.clone(),
+            subject_user_id: Some(user_id),
             thread_id: ThreadId::new(config.thread_id).expect("valid harness thread id"),
             agent_id: Some(AgentId::new(config.agent_id).expect("valid harness agent id")),
             project_id: None,
@@ -170,7 +172,7 @@ impl ProductLiveAgentLoopHarness {
             tenant_id: binding.tenant_id.clone(),
             agent_id: binding.agent_id.clone().expect("harness agent id"),
             project_id: binding.project_id.clone(),
-            owner_user_id: Some(binding.user_id.clone()),
+            owner_user_id: binding.subject_user_id.clone(),
             mission_id: None,
         };
         let thread_service = InMemorySessionThreadService::default();
@@ -231,7 +233,10 @@ impl ProductLiveAgentLoopHarness {
                     results: Arc::clone(&capability_results),
                     capability_id: harness_capability_id(&capability.capability_id),
                     input: capability.input,
-                    user_id: binding.user_id.clone(),
+                    user_id: binding
+                        .subject_user_id
+                        .clone()
+                        .expect("harness subject user id"),
                     cancellation_factory: cancellation_factory.clone(),
                     model_provider: config.model_provider.clone(),
                     model_id: config.model_id.clone(),
@@ -418,7 +423,7 @@ impl ProductLiveAgentLoopHarness {
             .coordinator
             .cancel_run(CancelRunRequest {
                 scope: self.turn_scope(),
-                actor: TurnActor::new(self.binding.user_id.clone()),
+                actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,
                 reason: SanitizedCancelReason::UserRequested,
                 idempotency_key: IdempotencyKey::new(format!("idem-harness-cancel-{run_id}"))
@@ -464,11 +469,12 @@ impl ProductLiveAgentLoopHarness {
     }
 
     fn turn_scope(&self) -> TurnScope {
-        TurnScope::new(
+        TurnScope::new_with_owner(
             self.binding.tenant_id.clone(),
             self.binding.agent_id.clone(),
             self.binding.project_id.clone(),
             self.binding.thread_id.clone(),
+            self.binding.subject_user_id.clone(),
         )
     }
 }
@@ -807,6 +813,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             result_ref: LoopResultRef::new(self.capability.result_ref.clone())
                 .expect("valid harness result ref"),
             safe_summary: self.capability.safe_summary.clone(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: self.capability.terminate_hint,
         }))
     }

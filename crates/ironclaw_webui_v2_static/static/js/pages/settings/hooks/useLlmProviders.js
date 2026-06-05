@@ -34,6 +34,12 @@ export function useLlmProviders({ settings: _settings, gatewayStatus }) {
     name: provider.description,
     has_api_key: provider.api_key_set === true,
   }));
+  // Whether the backend has a usable active provider. Prefer the persisted
+  // operator snapshot, but also honor runtime/env-configured LLMs surfaced by
+  // gateway status so first-run onboarding does not mask an already-live model.
+  const hasActiveProvider = Boolean(
+    snapshot.active?.provider_id || gatewayStatus?.llm_backend
+  );
   const activeProviderId =
     snapshot.active?.provider_id || gatewayStatus?.llm_backend || "nearai";
   const selectedModel = snapshot.active?.model || gatewayStatus?.llm_model || "";
@@ -107,6 +113,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus }) {
     builtinOverrides,
     activeProviderId,
     selectedModel,
+    hasActiveProvider,
     isLoading: providersQuery.isLoading,
     error: providersQuery.error,
     setActiveProvider: (provider) => setActiveMutation.mutateAsync(provider),

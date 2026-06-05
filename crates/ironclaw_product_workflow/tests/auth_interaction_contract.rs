@@ -523,6 +523,8 @@ async fn credential_provided_resumes_completed_auth_gate() {
         resumes[0].precondition,
         ResumeTurnPrecondition::BlockedAuthGate
     );
+    assert_eq!(resumes[0].source_binding_ref.as_str(), "src:auth");
+    assert_eq!(resumes[0].reply_target_binding_ref.as_str(), "reply:auth");
 }
 
 #[tokio::test]
@@ -581,6 +583,8 @@ async fn credential_selection_completes_pending_auth_gate_before_resume() {
         resumes[0].precondition,
         ResumeTurnPrecondition::BlockedAuthGate
     );
+    assert_eq!(resumes[0].source_binding_ref.as_str(), "src:auth");
+    assert_eq!(resumes[0].reply_target_binding_ref.as_str(), "reply:auth");
 }
 
 #[tokio::test]

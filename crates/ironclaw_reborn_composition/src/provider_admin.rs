@@ -260,6 +260,7 @@ pub struct RebornProviderMetadata {
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential_kind: Option<&'static str>,
+    pub accepts_api_key: bool,
     pub can_list_models: bool,
 }
 
@@ -449,6 +450,11 @@ fn provider_info(
             api_key_required: def.api_key_required,
             base_url: def.default_base_url.clone(),
             credential_kind: def.setup.as_ref().map(|setup| setup.kind()),
+            accepts_api_key: def.api_key_env.is_some()
+                || def
+                    .setup
+                    .as_ref()
+                    .is_some_and(ironclaw_llm::registry::SetupHint::accepts_api_key),
             can_list_models: def
                 .setup
                 .as_ref()

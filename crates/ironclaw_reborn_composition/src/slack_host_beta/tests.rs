@@ -8,6 +8,7 @@ use axum::http::{Request, StatusCode};
 use hmac::{Hmac, Mac};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse};
+use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
@@ -124,8 +125,7 @@ async fn custom_actor_user_resolver_routes_inbound_slack_event() {
 
 #[tokio::test]
 async fn build_slack_events_route_mount_fails_when_runtime_http_egress_unavailable() {
-    let (mut runtime, _root) = runtime().await;
-    runtime.set_local_runtime_http_egress_for_test(None);
+    let (runtime, _root) = runtime_without_host_egress().await;
 
     let error = match build_slack_events_route_mount(&runtime, config()).await {
         Ok(_) => panic!("Slack route requires runtime HTTP egress"),
@@ -158,9 +158,8 @@ async fn build_slack_host_beta_mounts_fails_when_durable_host_state_unavailable(
 
 #[tokio::test]
 async fn build_slack_events_route_mount_dispatches_signed_event_callback() {
-    let (mut runtime, _root) = runtime().await;
     let egress = Arc::new(RecordingRuntimeHttpEgress::default());
-    runtime.set_local_runtime_http_egress_for_test(Some(egress.clone()));
+    let (runtime, _root) = runtime_with_recording_egress(egress.clone()).await;
     let mount = build_slack_events_route_mount(&runtime, config())
         .await
         .expect("route builds");
@@ -211,9 +210,9 @@ async fn build_slack_events_route_mount_dispatches_signed_event_callback() {
 async fn duplicate_slack_event_replays_after_runtime_reopen_without_duplicate_reply() {
     let root = tempfile::tempdir().expect("tempdir");
     let runtime_root = root.path().join("local-dev");
-    let (mut first_runtime, _first_root) = runtime_at(&runtime_root).await;
     let first_egress = Arc::new(RecordingRuntimeHttpEgress::default());
-    first_runtime.set_local_runtime_http_egress_for_test(Some(first_egress.clone()));
+    let (first_runtime, _first_root) =
+        runtime_at_with_recording_egress(&runtime_root, first_egress.clone()).await;
     let first_mount = build_slack_events_route_mount(&first_runtime, config())
         .await
         .expect("first route builds");
@@ -235,9 +234,9 @@ async fn duplicate_slack_event_replays_after_runtime_reopen_without_duplicate_re
         .await
         .expect("first runtime shuts down");
 
-    let (mut second_runtime, _second_root) = runtime_at(&runtime_root).await;
     let second_egress = Arc::new(RecordingRuntimeHttpEgress::default());
-    second_runtime.set_local_runtime_http_egress_for_test(Some(second_egress.clone()));
+    let (second_runtime, _second_root) =
+        runtime_at_with_recording_egress(&runtime_root, second_egress.clone()).await;
     let second_mount = build_slack_events_route_mount(&second_runtime, config())
         .await
         .expect("second route builds");
@@ -299,9 +298,8 @@ async fn build_slack_host_beta_mounts_exposes_events_and_pairing_redeem_route() 
 
 #[tokio::test]
 async fn build_slack_host_beta_mounts_pairs_unknown_slack_actor_then_routes_bound_event() {
-    let (mut runtime, _root) = runtime().await;
     let egress = Arc::new(RecordingRuntimeHttpEgress::default());
-    runtime.set_local_runtime_http_egress_for_test(Some(egress.clone()));
+    let (runtime, _root) = runtime_with_recording_egress(egress.clone()).await;
     let mounts = build_slack_host_beta_mounts(&runtime, config_without_legacy_actor())
         .await
         .expect("mounts");
@@ -516,18 +514,59 @@ async fn runtime() -> (RebornRuntime, tempfile::TempDir) {
 }
 
 async fn runtime_at(root: impl AsRef<Path>) -> (RebornRuntime, ()) {
+    runtime_at_with_host_egress_override(root, None).await
+}
+
+async fn runtime_without_host_egress() -> (RebornRuntime, tempfile::TempDir) {
+    let root = tempfile::tempdir().expect("tempdir");
+    let runtime = runtime_at_with_host_egress_override(root.path().join("local-dev"), Some(None))
+        .await
+        .0;
+    (runtime, root)
+}
+
+async fn runtime_with_recording_egress(
+    egress: Arc<RecordingRuntimeHttpEgress>,
+) -> (RebornRuntime, tempfile::TempDir) {
+    let root = tempfile::tempdir().expect("tempdir");
+    let runtime = runtime_at_with_recording_egress(root.path().join("local-dev"), egress)
+        .await
+        .0;
+    (runtime, root)
+}
+
+async fn runtime_at_with_recording_egress(
+    root: impl AsRef<Path>,
+    egress: Arc<RecordingRuntimeHttpEgress>,
+) -> (RebornRuntime, ()) {
+    let runtime_egress: Arc<dyn RuntimeHttpEgress> = egress;
+    runtime_at_with_host_egress_override(
+        root,
+        Some(Some(
+            HostRuntimeHttpEgressPort::test_support_with_allow_all_obligations(runtime_egress),
+        )),
+    )
+    .await
+}
+
+async fn runtime_at_with_host_egress_override(
+    root: impl AsRef<Path>,
+    host_egress_override: Option<Option<HostRuntimeHttpEgressPort>>,
+) -> (RebornRuntime, ()) {
+    let mut build_input = RebornBuildInput::local_dev(USER, root.as_ref().to_path_buf())
+        .with_runtime_policy(local_dev_runtime_policy().expect("local policy"));
+    if let Some(host_egress_override) = host_egress_override {
+        build_input = build_input.with_host_runtime_http_egress_for_test(host_egress_override);
+    }
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(
-            RebornBuildInput::local_dev(USER, root.as_ref().to_path_buf())
-                .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
-        )
-        .with_identity(RebornRuntimeIdentity {
-            tenant_id: TENANT.to_string(),
-            agent_id: AGENT.to_string(),
-            source_binding_id: "slack-host-source".to_string(),
-            reply_target_binding_id: "slack-host-reply".to_string(),
-        })
-        .with_model_gateway_override(Arc::new(StaticGateway)),
+        RebornRuntimeInput::from_services(build_input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: TENANT.to_string(),
+                agent_id: AGENT.to_string(),
+                source_binding_id: "slack-host-source".to_string(),
+                reply_target_binding_id: "slack-host-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(StaticGateway)),
     )
     .await
     .expect("runtime builds");

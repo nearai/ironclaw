@@ -293,14 +293,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = pinned_model_override(route)?;
+        let model_override = request_model_override(route, self.provider.as_ref())?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, model_override)?;
+        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
         let mut completion =
             CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
-        completion.model = Some(model_override.to_string());
+        completion.model = Some(model_override);
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         complete_model_request(
@@ -327,14 +327,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = pinned_model_override(route)?;
+        let model_override = request_model_override(route, self.provider.as_ref())?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, model_override)?;
+        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
         let mut completion =
             CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
-        completion.model = Some(model_override.to_string());
+        completion.model = Some(model_override);
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let provider_turn_scope = format!(
@@ -706,21 +706,26 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
     converted
 }
 
-fn pinned_model_override(route: &LlmModelProfileRoute) -> Result<&str, HostManagedModelError> {
-    let Some(model_override) = route.model_override.as_deref() else {
-        return Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::PolicyDenied,
-            "model profile route must pin a concrete provider model",
-        ));
-    };
+fn request_model_override<P>(
+    route: &LlmModelProfileRoute,
+    provider: &P,
+) -> Result<String, HostManagedModelError>
+where
+    P: LlmProvider + ?Sized,
+{
+    let model_override = route
+        .model_override
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| provider.active_model_name());
     let trimmed = model_override.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
         return Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::PolicyDenied,
-            "model profile route must pin a concrete provider model",
+            "model profile route must resolve to a concrete provider model",
         ));
     }
-    Ok(trimmed)
+    Ok(trimmed.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

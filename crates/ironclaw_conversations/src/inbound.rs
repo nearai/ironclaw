@@ -444,7 +444,10 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-    use ironclaw_triggers::TrustedTriggerFireSubmitOutcome;
+    use ironclaw_triggers::{
+        TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
+        TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TrustedTriggerFireSubmitOutcome,
+    };
     use ironclaw_turns::{
         AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
         CancelRunResponse, EventCursor, GetRunStateRequest, ReplyTargetBindingRef,
@@ -774,7 +777,7 @@ mod tests {
                 reason: "empty".to_string(),
             },
             InboundTurnError::BindingRequired {
-                adapter_kind: "trigger".to_string(),
+                adapter_kind: TRIGGER_TRUSTED_ADAPTER_KIND.to_string(),
                 external_actor_id: "actor".to_string(),
             },
             InboundTurnError::AccessDenied {
@@ -891,15 +894,15 @@ mod tests {
     }
 
     fn trigger_adapter() -> AdapterKind {
-        AdapterKind::new("trigger").unwrap()
+        AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).unwrap()
     }
 
     fn trigger_installation() -> AdapterInstallationId {
-        AdapterInstallationId::new("reborn-trigger-poller").unwrap()
+        AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID).unwrap()
     }
 
     fn external_actor(value: &str) -> ExternalActorRef {
-        ExternalActorRef::new("user", value).unwrap()
+        ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, value).unwrap()
     }
 
     fn user(value: &str) -> UserId {

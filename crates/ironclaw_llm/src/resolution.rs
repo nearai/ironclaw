@@ -363,7 +363,10 @@ fn resolve_codex_cli_auth_provider() -> Result<ResolvedProviderConfig, LlmError>
         .or_else(|| nonempty_env("LLM_MODEL"))
         .unwrap_or_else(|| {
             if credentials.is_subscription {
-                "gpt-5.3-codex".to_string()
+                // Subscription (ChatGPT-account) Codex rejects codex-only slugs
+                // like `gpt-5.3-codex` with HTTP 400; use a model the account
+                // is entitled to.
+                "gpt-5.5".to_string()
             } else {
                 "gpt-4o-mini".to_string()
             }

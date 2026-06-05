@@ -6,11 +6,11 @@
 //! the loop host's thread ports ([`crate::loop_driver_host`]) AND the
 //! loop-exit completion-evidence read ([`crate::loop_exit_applier`]).
 //!
-//! [`ThreadScopeResolver::resolve`] is the single definition of that
-//! owner/project rewrite rule. Both subsystems call it, so the rule cannot drift
-//! between them — a second hand-rolled copy silently regressing
-//! multi-user isolation is exactly the maintainability hazard this
-//! removes.
+//! [`ThreadScopeResolver::resolve_for_turn_scope`] is the single definition of
+//! that owner/project rewrite rule. Both subsystems resolve through it
+//! (`resolve` is its owner-only helper), so the rule cannot drift between them
+//! — a second hand-rolled copy silently regressing multi-user isolation is
+//! exactly the maintainability hazard this removes.
 
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{TurnActor, TurnScope, run_profile::LoopRunContext};
@@ -56,7 +56,13 @@ impl ThreadScopeResolver {
         if base.project_id.is_some() && base.project_id != turn_scope.project_id {
             return Err(ThreadScopeResolutionError::ProjectMismatch);
         }
-        let mut scope = Self::resolve(base, actor);
+        let mut scope = if turn_scope.has_explicit_thread_owner() {
+            let mut scope = base.clone();
+            scope.owner_user_id = turn_scope.explicit_owner_user_id().cloned();
+            scope
+        } else {
+            Self::resolve(base, actor)
+        };
         if scope.project_id.is_none() {
             scope.project_id = turn_scope.project_id.clone();
         }
@@ -174,5 +180,23 @@ mod tests {
         .expect_err("fixed project base must not be overridden by turn scope");
 
         assert_eq!(error, ThreadScopeResolutionError::ProjectMismatch);
+    }
+
+    #[test]
+    fn explicit_turn_owner_overrides_actor_rewrite() {
+        let base = scope(Some("runtime-owner"));
+        let turn_scope = TurnScope::new_with_owner(
+            base.tenant_id.clone(),
+            Some(base.agent_id.clone()),
+            base.project_id.clone(),
+            ironclaw_host_api::ThreadId::new("thread").unwrap(),
+            None,
+        );
+
+        let resolved =
+            ThreadScopeResolver::resolve_for_turn_scope(&base, &turn_scope, Some(&actor("alice")))
+                .expect("explicit owner is valid for matching scope");
+
+        assert_eq!(resolved.owner_user_id, None);
     }
 }

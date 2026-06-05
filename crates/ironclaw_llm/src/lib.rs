@@ -71,7 +71,7 @@ pub use host::{
 };
 pub use nearai_chat::{DEFAULT_MODEL, ModelInfo, NearAiChatProvider, default_models};
 pub use openai_codex_provider::OpenAiCodexProvider;
-pub(crate) use openai_codex_session::OpenAiCodexSessionManager;
+pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
@@ -103,7 +103,7 @@ pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
 pub use runtime::{LlmReloadHandle, SwappableLlmProvider};
-pub use session::{SessionConfig, SessionManager, create_session_manager};
+pub use session::{NearWalletSignedMessage, SessionConfig, SessionManager, create_session_manager};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
 pub use token_refreshing::TokenRefreshingProvider;
 

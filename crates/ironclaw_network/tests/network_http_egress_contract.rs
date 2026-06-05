@@ -413,9 +413,19 @@ async fn reqwest_transport_enforces_streaming_response_limit_separately_from_req
         .expect_err("response body limit should stop reads after the limit");
     server.join().unwrap();
 
-    assert!(matches!(error, NetworkHttpError::ResponseBodyLimit { .. }));
+    assert!(matches!(
+        error,
+        NetworkHttpError::ResponseBodyLimit {
+            partial_response: Some(_),
+            ..
+        }
+    ));
     assert_eq!(error.request_bytes(), 5);
     assert_eq!(error.response_bytes(), 6);
+    let partial_response = error
+        .into_partial_response()
+        .expect("transport should retain a capped partial response");
+    assert_eq!(partial_response.body, b"abcde");
 }
 
 #[tokio::test]
@@ -442,10 +452,18 @@ async fn reqwest_transport_clamps_oversized_explicit_response_limit_to_safe_defa
         error,
         NetworkHttpError::ResponseBodyLimit {
             limit: DEFAULT_RESPONSE_BODY_LIMIT,
+            partial_response: Some(_),
             ..
         }
     ));
     assert_eq!(error.response_bytes(), DEFAULT_RESPONSE_BODY_LIMIT + 1);
+    let partial_response = error
+        .into_partial_response()
+        .expect("transport should retain a capped partial response");
+    assert_eq!(
+        partial_response.body.len() as u64,
+        DEFAULT_RESPONSE_BODY_LIMIT
+    );
 }
 
 #[tokio::test]
@@ -472,10 +490,18 @@ async fn reqwest_transport_clamps_unspecified_response_limit_to_safe_default() {
         error,
         NetworkHttpError::ResponseBodyLimit {
             limit: DEFAULT_RESPONSE_BODY_LIMIT,
+            partial_response: Some(_),
             ..
         }
     ));
     assert_eq!(error.response_bytes(), DEFAULT_RESPONSE_BODY_LIMIT + 1);
+    let partial_response = error
+        .into_partial_response()
+        .expect("transport should retain a capped partial response");
+    assert_eq!(
+        partial_response.body.len() as u64,
+        DEFAULT_RESPONSE_BODY_LIMIT
+    );
 }
 
 #[tokio::test]

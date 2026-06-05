@@ -29,8 +29,8 @@ mod system_inference;
 pub use crate::CapabilityActivityId;
 
 pub use compaction::{
-    CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionPort,
-    LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
+    CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
+    LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
 };
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
@@ -43,8 +43,8 @@ pub use host::{
     CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
     CapabilityDeniedReasonKindValue, CapabilityDescriptorView, CapabilityFailure,
     CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef, CapabilityInvocation,
-    CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint,
-    FinalizeAssistantMessage, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
+    CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, CapabilitySurfaceVersion,
+    ConcurrencyHint, FinalizeAssistantMessage, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
     LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES, LoadCheckpointPayloadRequest,
     LoadedCheckpointPayload, LoopCancelReasonKind, LoopCancellationPort, LoopCancellationSignal,
     LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,

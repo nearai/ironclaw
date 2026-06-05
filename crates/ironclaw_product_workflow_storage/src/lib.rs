@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use futures_util::StreamExt;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
@@ -30,6 +31,7 @@ const DEFAULT_LEDGER_ROOT: &str = "/engine/product_workflow/idempotency/actions"
 const ACTION_RECORD_KIND: &str = "product_workflow_action";
 const PRUNE_LEASE_RECORD_KIND: &str = "product_workflow_prune_lease";
 const PRUNE_LEASE_SECONDS: i64 = 30;
+const PRUNE_DELETE_CONCURRENCY: usize = 16;
 
 struct FilesystemIdempotencyLedger {
     filesystem: Arc<dyn LedgerFilesystem>,
@@ -79,9 +81,10 @@ impl FilesystemIdempotencyLedger {
     where
         F: RootFilesystem + 'static,
     {
+        let root = scoped_ledger_root_for_scope(default_scoped_ledger_root(), &scope);
         Self {
             filesystem: Arc::new(ScopedLedgerFilesystem { filesystem, scope }),
-            root: LedgerRoot::Scoped(default_scoped_ledger_root()),
+            root: LedgerRoot::Scoped(root),
             in_flight_lease,
             settled_entry_limit: None,
             settled_prune_interval: NonZeroUsize::new(1).expect("non-zero literal"), // safety: static literal is non-zero.
@@ -98,6 +101,7 @@ impl FilesystemIdempotencyLedger {
     where
         F: RootFilesystem + 'static,
     {
+        let root = scoped_ledger_root_for_scope(root, &scope);
         Self {
             filesystem: Arc::new(ScopedLedgerFilesystem { filesystem, scope }),
             root: LedgerRoot::Scoped(root),
@@ -247,21 +251,37 @@ impl FilesystemIdempotencyLedger {
         let Some(limit) = self.settled_entry_limit else {
             return Ok(());
         };
-        let mut settled = self.load_settled_actions().await?;
-        if settled.len() <= limit.get() {
+        let stale_cutoff =
+            Utc::now() - self.in_flight_lease - Duration::seconds(PRUNE_LEASE_SECONDS);
+        let terminal_may_exceed_limit = self.terminal_actions_may_exceed(limit).await?;
+        let stale_non_terminal_may_exist = self
+            .matching_action_exists(&stale_non_terminal_action_filter(stale_cutoff)?)
+            .await?;
+        if !terminal_may_exceed_limit && !stale_non_terminal_may_exist {
             return Ok(());
         }
         if !self.try_acquire_prune_lease().await? {
             return Ok(());
         }
-        settled.sort_by(|left, right| {
-            left.received_at
-                .cmp(&right.received_at)
-                .then_with(|| left.action_id.as_uuid().cmp(&right.action_id.as_uuid()))
-        });
-        let prune_count = settled.len() - limit.get();
-        for action in settled.into_iter().take(prune_count) {
-            self.prune_settled_action_if_current(&action).await?;
+        if terminal_may_exceed_limit {
+            let mut terminal = self.load_actions(&terminal_action_filter()?).await?;
+            if terminal.len() > limit.get() {
+                terminal.sort_by(|left, right| {
+                    left.received_at
+                        .cmp(&right.received_at)
+                        .then_with(|| left.action_id.as_uuid().cmp(&right.action_id.as_uuid()))
+                });
+                let prune_count = terminal.len() - limit.get();
+                self.prune_terminal_actions(terminal.into_iter().take(prune_count).collect())
+                    .await?;
+            }
+        }
+        if stale_non_terminal_may_exist {
+            let stale = self
+                .load_actions(&stale_non_terminal_action_filter(stale_cutoff)?)
+                .await?;
+            self.prune_stale_non_terminal_actions(stale, stale_cutoff)
+                .await?;
         }
         Ok(())
     }
@@ -313,7 +333,72 @@ impl FilesystemIdempotencyLedger {
         }
     }
 
-    async fn prune_settled_action_if_current(
+    async fn terminal_actions_may_exceed(
+        &self,
+        limit: NonZeroUsize,
+    ) -> Result<bool, ProductWorkflowError> {
+        let probe_limit = limit.get().saturating_add(1);
+        if probe_limit > Page::MAX_LIMIT as usize {
+            return Ok(true);
+        }
+        let entries = self
+            .filesystem
+            .query(
+                &self.root,
+                &terminal_action_filter()?,
+                Page::first(probe_limit as u32),
+            )
+            .await
+            .map_err(|error| filesystem_error("probe terminal actions", error))?;
+        Ok(entries.len() > limit.get())
+    }
+
+    async fn matching_action_exists(&self, filter: &Filter) -> Result<bool, ProductWorkflowError> {
+        let entries = self
+            .filesystem
+            .query(&self.root, filter, Page::first(1))
+            .await
+            .map_err(|error| filesystem_error("probe actions", error))?;
+        Ok(!entries.is_empty())
+    }
+
+    async fn prune_terminal_actions(
+        &self,
+        actions: Vec<ProductInboundAction>,
+    ) -> Result<(), ProductWorkflowError> {
+        let results = futures_util::stream::iter(
+            actions
+                .into_iter()
+                .map(|action| async move { self.prune_terminal_action_if_current(&action).await }),
+        )
+        .buffer_unordered(PRUNE_DELETE_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+        for result in results {
+            result?;
+        }
+        Ok(())
+    }
+
+    async fn prune_stale_non_terminal_actions(
+        &self,
+        actions: Vec<ProductInboundAction>,
+        cutoff: DateTime<Utc>,
+    ) -> Result<(), ProductWorkflowError> {
+        let results = futures_util::stream::iter(actions.into_iter().map(|action| async move {
+            self.prune_stale_non_terminal_action_if_current(&action, cutoff)
+                .await
+        }))
+        .buffer_unordered(PRUNE_DELETE_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+        for result in results {
+            result?;
+        }
+        Ok(())
+    }
+
+    async fn prune_terminal_action_if_current(
         &self,
         action: &ProductInboundAction,
     ) -> Result<(), ProductWorkflowError> {
@@ -321,17 +406,39 @@ impl FilesystemIdempotencyLedger {
         let Some((current, _version)) = load_action(self.filesystem.as_ref(), &path).await? else {
             return Ok(());
         };
-        if current.action_id != action.action_id || !matches!(current.phase, ActionPhase::Settled) {
+        if current.action_id != action.action_id || !current.is_terminal() {
             return Ok(());
         }
         match self.filesystem.delete(&path).await {
             Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
-            Err(error) => Err(filesystem_error("prune settled action", error)),
+            Err(error) => Err(filesystem_error("prune terminal action", error)),
         }
     }
 
-    async fn load_settled_actions(
+    async fn prune_stale_non_terminal_action_if_current(
         &self,
+        action: &ProductInboundAction,
+        cutoff: DateTime<Utc>,
+    ) -> Result<(), ProductWorkflowError> {
+        let path = action_path(&self.root, &action.fingerprint)?;
+        let Some((current, _version)) = load_action(self.filesystem.as_ref(), &path).await? else {
+            return Ok(());
+        };
+        if current.action_id != action.action_id
+            || current.is_terminal()
+            || current.received_at > cutoff
+        {
+            return Ok(());
+        }
+        match self.filesystem.delete(&path).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(filesystem_error("prune stale action", error)),
+        }
+    }
+
+    async fn load_actions(
+        &self,
+        filter: &Filter,
     ) -> Result<Vec<ProductInboundAction>, ProductWorkflowError> {
         let mut actions = Vec::new();
         let mut offset = 0;
@@ -339,18 +446,16 @@ impl FilesystemIdempotencyLedger {
             let page = Page::new(offset, Page::MAX_LIMIT);
             let entries = self
                 .filesystem
-                .query(&self.root, &settled_action_filter()?, page)
+                .query(&self.root, filter, page)
                 .await
-                .map_err(|error| filesystem_error("query settled actions", error))?;
+                .map_err(|error| filesystem_error("query actions", error))?;
             let received = entries.len();
             for entry in entries {
                 let action: ProductInboundAction = entry
                     .entry
                     .parse_json()
                     .map_err(|error| durable_error("deserialize action", error))?;
-                if matches!(action.phase, ActionPhase::Settled) {
-                    actions.push(action);
-                }
+                actions.push(action);
             }
             if received < Page::MAX_LIMIT as usize {
                 return Ok(actions);
@@ -806,10 +911,31 @@ fn entry_for_action(action: &ProductInboundAction) -> Result<Entry, ProductWorkf
     Ok(entry)
 }
 
-fn settled_action_filter() -> Result<Filter, ProductWorkflowError> {
+fn terminal_action_filter() -> Result<Filter, ProductWorkflowError> {
+    Ok(Filter::Or(vec![
+        phase_filter(ActionPhase::Settled)?,
+        phase_filter(ActionPhase::DeduplicatedReplay)?,
+    ]))
+}
+
+fn stale_non_terminal_action_filter(cutoff: DateTime<Utc>) -> Result<Filter, ProductWorkflowError> {
+    Ok(Filter::And(vec![
+        Filter::Or(vec![
+            phase_filter(ActionPhase::Received)?,
+            phase_filter(ActionPhase::Dispatched)?,
+        ]),
+        Filter::Range {
+            key: index_key("received_at_ms")?,
+            lo: IndexValue::I64(i64::MIN),
+            hi: IndexValue::I64(cutoff.timestamp_millis()),
+        },
+    ]))
+}
+
+fn phase_filter(phase: ActionPhase) -> Result<Filter, ProductWorkflowError> {
     Ok(Filter::Eq {
         key: index_key("phase")?,
-        value: text(phase_label(ActionPhase::Settled)),
+        value: text(phase_label(phase)),
     })
 }
 
@@ -898,6 +1024,41 @@ fn default_ledger_root() -> VirtualPath {
 fn default_scoped_ledger_root() -> ScopedPath {
     // safety: DEFAULT_LEDGER_ROOT is also valid in the scoped path grammar.
     ScopedPath::new(DEFAULT_LEDGER_ROOT).expect("default ledger root is a valid scoped path")
+}
+
+fn scoped_ledger_root_for_scope(root: ScopedPath, scope: &ResourceScope) -> ScopedPath {
+    let agent_id = scope
+        .agent_id
+        .as_ref()
+        .map(|agent_id| agent_id.as_str())
+        .unwrap_or("_");
+    let project_id = scope
+        .project_id
+        .as_ref()
+        .map(|project_id| project_id.as_str())
+        .unwrap_or("_");
+    let mission_id = scope
+        .mission_id
+        .as_ref()
+        .map(|mission_id| mission_id.as_str())
+        .unwrap_or("_");
+    let thread_id = scope
+        .thread_id
+        .as_ref()
+        .map(|thread_id| thread_id.as_str())
+        .unwrap_or("_");
+    let path = format!(
+        "{}/_scope/{}/{}/{}/{}/{}/{}",
+        root.as_str().trim_end_matches('/'),
+        hex_component(scope.tenant_id.as_str()),
+        hex_component(scope.user_id.as_str()),
+        hex_component(agent_id),
+        hex_component(project_id),
+        hex_component(mission_id),
+        hex_component(thread_id)
+    );
+    // safety: the input root is valid and every appended component is hex-encoded.
+    ScopedPath::new(path).expect("scope-partitioned ledger root is a valid scoped path")
 }
 
 fn ledger_path_kind_error(operation: FilesystemOperation) -> FilesystemError {

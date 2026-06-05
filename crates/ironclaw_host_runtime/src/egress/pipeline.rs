@@ -13,7 +13,30 @@ use crate::http_body::{
 
 pub(super) async fn execute<N, S>(
     service: &HostHttpEgressService<N, S>,
+    request: RuntimeHttpEgressRequest,
+) -> Result<RuntimeHttpEgressResponse, PipelineError>
+where
+    N: NetworkHttpEgress + Send + Sync,
+    S: SecretStore + Send + Sync,
+{
+    execute_inner(service, request, false).await
+}
+
+pub(super) async fn execute_for_model_visible_output<N, S>(
+    service: &HostHttpEgressService<N, S>,
+    request: RuntimeHttpEgressRequest,
+) -> Result<RuntimeHttpEgressResponse, PipelineError>
+where
+    N: NetworkHttpEgress + Send + Sync,
+    S: SecretStore + Send + Sync,
+{
+    execute_inner(service, request, true).await
+}
+
+async fn execute_inner<N, S>(
+    service: &HostHttpEgressService<N, S>,
     mut request: RuntimeHttpEgressRequest,
+    allow_partial_response_body: bool,
 ) -> Result<RuntimeHttpEgressResponse, PipelineError>
 where
     N: NetworkHttpEgress + Send + Sync,
@@ -26,7 +49,6 @@ where
         .map_err(PipelineError::pre_transport)?;
     let scope = request.scope.clone();
     let capability_id = request.capability_id.clone();
-
     let redaction_values = super::credential::apply_credential_injections(
         service.secrets(),
         service.secret_injections(),
@@ -34,7 +56,11 @@ where
     )
     .map_err(PipelineError::pre_transport_keep_staged_secrets)?;
 
-    let response = dispatch_network(service, request, network_policy).await?;
+    let response = if allow_partial_response_body {
+        dispatch_network_for_model_visible_output(service, request, network_policy).await?
+    } else {
+        dispatch_network(service, request, network_policy).await?
+    };
     let credentials_injected = !redaction_values.is_empty();
     let (response, response_redacted) = super::sanitize::sanitize_runtime_response(
         response,
@@ -103,16 +129,7 @@ where
 {
     service
         .network()
-        .execute(NetworkHttpRequest {
-            scope: request.scope.clone(),
-            method: request.method,
-            url: std::mem::take(&mut request.url),
-            headers: std::mem::take(&mut request.headers),
-            body: std::mem::take(&mut request.body),
-            policy: network_policy,
-            response_body_limit: request.response_body_limit,
-            timeout_ms: request.timeout_ms,
-        })
+        .execute(network_request(&mut request, network_policy))
         .await
         .map_err(|error| {
             PipelineError::post_transport(runtime_network_error(
@@ -120,4 +137,45 @@ where
                 error,
             ))
         })
+}
+
+async fn dispatch_network_for_model_visible_output<N, S>(
+    service: &HostHttpEgressService<N, S>,
+    mut request: RuntimeHttpEgressRequest,
+    network_policy: NetworkPolicy,
+) -> Result<ironclaw_network::NetworkHttpResponse, PipelineError>
+where
+    N: NetworkHttpEgress + Send + Sync,
+{
+    match service
+        .network()
+        .execute(network_request(&mut request, network_policy))
+        .await
+    {
+        Ok(response) => Ok(response),
+        Err(ironclaw_network::NetworkHttpError::ResponseBodyLimit {
+            partial_response: Some(partial_response),
+            ..
+        }) => Ok(partial_response),
+        Err(error) => Err(PipelineError::post_transport(runtime_network_error(
+            service.unsafe_raw_diagnostics_allowed(),
+            error,
+        ))),
+    }
+}
+
+fn network_request(
+    request: &mut RuntimeHttpEgressRequest,
+    network_policy: NetworkPolicy,
+) -> NetworkHttpRequest {
+    NetworkHttpRequest {
+        scope: request.scope.clone(),
+        method: request.method,
+        url: std::mem::take(&mut request.url),
+        headers: std::mem::take(&mut request.headers),
+        body: std::mem::take(&mut request.body),
+        policy: network_policy,
+        response_body_limit: request.response_body_limit,
+        timeout_ms: request.timeout_ms,
+    }
 }

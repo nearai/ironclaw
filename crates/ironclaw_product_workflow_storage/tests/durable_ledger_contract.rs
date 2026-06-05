@@ -12,7 +12,10 @@ use chrono::{Duration, Utc};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_filesystem::{
+    CasExpectation, Entry, Filter, InMemoryBackend, IndexKey, IndexValue, RecordKind,
+    ScopedFilesystem,
+};
 use ironclaw_host_api::{
     AgentId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
     ResourceScope, ScopedPath, TenantId, UserId, VirtualPath,
@@ -80,6 +83,106 @@ fn resource_scope(user_id: &str) -> ResourceScope {
         thread_id: None,
         invocation_id: InvocationId::new(),
     }
+}
+
+fn scoped_prune_lease_path(scope: &ResourceScope) -> ScopedPath {
+    ScopedPath::new(format!(
+        "{}/_control/prune_lease.json",
+        scoped_ledger_root(scope).as_str()
+    ))
+    .expect("valid prune lease path")
+}
+
+fn scoped_ledger_root(scope: &ResourceScope) -> ScopedPath {
+    let agent_id = scope
+        .agent_id
+        .as_ref()
+        .map(|agent_id| agent_id.as_str())
+        .unwrap_or("_");
+    let project_id = scope
+        .project_id
+        .as_ref()
+        .map(|project_id| project_id.as_str())
+        .unwrap_or("_");
+    let mission_id = scope
+        .mission_id
+        .as_ref()
+        .map(|mission_id| mission_id.as_str())
+        .unwrap_or("_");
+    let thread_id = scope
+        .thread_id
+        .as_ref()
+        .map(|thread_id| thread_id.as_str())
+        .unwrap_or("_");
+    ScopedPath::new(format!(
+        "/engine/product_workflow/idempotency/actions/_scope/{}/{}/{}/{}/{}/{}",
+        hex_component(scope.tenant_id.as_str()),
+        hex_component(scope.user_id.as_str()),
+        hex_component(agent_id),
+        hex_component(project_id),
+        hex_component(mission_id),
+        hex_component(thread_id)
+    ))
+    .expect("valid ledger root")
+}
+
+fn hex_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+async fn write_scoped_prune_lease(
+    filesystem: &ScopedFilesystem<InMemoryBackend>,
+    scope: &ResourceScope,
+    expires_at_ms: i64,
+) {
+    let payload = serde_json::json!({ "expires_at_ms": expires_at_ms });
+    let entry = Entry::record(
+        RecordKind::new("product_workflow_prune_lease").expect("valid record kind"),
+        &payload,
+    )
+    .expect("valid prune lease entry");
+    filesystem
+        .put(
+            scope,
+            &scoped_prune_lease_path(scope),
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("write prune lease");
+}
+
+async fn stale_received_record_count(
+    filesystem: &ScopedFilesystem<InMemoryBackend>,
+    scope: &ResourceScope,
+    cutoff_ms: i64,
+) -> usize {
+    filesystem
+        .query(
+            scope,
+            &scoped_ledger_root(scope),
+            &Filter::And(vec![
+                Filter::Eq {
+                    key: IndexKey::new("phase").expect("phase index"),
+                    value: IndexValue::Text("received".to_string()),
+                },
+                Filter::Range {
+                    key: IndexKey::new("received_at_ms").expect("received_at_ms index"),
+                    lo: IndexValue::I64(i64::MIN),
+                    hi: IndexValue::I64(cutoff_ms),
+                },
+            ]),
+            Default::default(),
+        )
+        .await
+        .expect("query stale received records")
+        .len()
 }
 
 #[cfg(feature = "postgres")]
@@ -414,6 +517,22 @@ async fn assert_settled_prune_interval_defers_until_interval(
     ));
 }
 
+async fn settle_noop(
+    ledger: &dyn IdempotencyLedger,
+    fingerprint: ActionFingerprintKey,
+    received_at: chrono::DateTime<Utc>,
+) {
+    let IdempotencyDecision::New(mut action) = ledger
+        .begin_or_replay(fingerprint, received_at)
+        .await
+        .expect("begin action")
+    else {
+        panic!("expected new action");
+    };
+    action.settle(ProductInboundAck::NoOp);
+    ledger.settle(action).await.expect("settle action");
+}
+
 #[tokio::test]
 async fn scoped_filesystem_settled_action_replays() {
     let filesystem = scoped_filesystem();
@@ -432,6 +551,39 @@ async fn scoped_filesystem_settled_action_replays() {
 }
 
 #[tokio::test]
+async fn scoped_filesystem_settled_action_isolated_across_scopes() {
+    let filesystem = scoped_filesystem();
+    let alpha = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+        Arc::clone(&filesystem),
+        resource_scope("user:scope-alpha"),
+        Duration::seconds(10),
+    );
+    let beta = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+        filesystem,
+        resource_scope("user:scope-beta"),
+        Duration::seconds(10),
+    );
+    let received_at = Utc::now();
+    let shared = fingerprint("scoped-shared");
+
+    settle_noop(&alpha, shared.clone(), received_at).await;
+
+    assert!(matches!(
+        beta.begin_or_replay(shared.clone(), received_at + Duration::seconds(1))
+            .await
+            .expect("beta must not see alpha action"),
+        IdempotencyDecision::New(_)
+    ));
+    assert!(matches!(
+        alpha
+            .begin_or_replay(shared, received_at + Duration::seconds(1))
+            .await
+            .expect("alpha still replays its own action"),
+        IdempotencyDecision::Replay(_)
+    ));
+}
+
+#[tokio::test]
 async fn scoped_filesystem_in_flight_action_blocks_until_lease_expires() {
     let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
         scoped_filesystem(),
@@ -440,6 +592,141 @@ async fn scoped_filesystem_in_flight_action_blocks_until_lease_expires() {
     );
 
     assert_in_flight_action_blocks_until_lease_expires(&ledger, "scoped-lease").await;
+}
+
+#[tokio::test]
+async fn scoped_filesystem_fresh_prune_lease_skips_retention() {
+    let filesystem = scoped_filesystem();
+    let scope = resource_scope("user:scoped-fresh-prune-lease");
+    let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+        Arc::clone(&filesystem),
+        scope.clone(),
+        Duration::seconds(10),
+    )
+    .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"))
+    .with_settled_prune_interval(NonZeroUsize::new(2).expect("non-zero interval"));
+    let received_at = Utc::now();
+    let oldest = fingerprint("scoped-fresh-prune-lease-oldest");
+    let newest = fingerprint("scoped-fresh-prune-lease-newest");
+
+    settle_noop(&ledger, oldest.clone(), received_at).await;
+    write_scoped_prune_lease(
+        filesystem.as_ref(),
+        &scope,
+        (Utc::now() + Duration::seconds(30)).timestamp_millis(),
+    )
+    .await;
+    settle_noop(&ledger, newest, received_at + Duration::seconds(1)).await;
+
+    assert!(matches!(
+        ledger
+            .begin_or_replay(oldest, received_at + Duration::seconds(2))
+            .await
+            .expect("fresh prune lease skips retention"),
+        IdempotencyDecision::Replay(_)
+    ));
+}
+
+#[tokio::test]
+async fn scoped_filesystem_expired_prune_lease_allows_retention() {
+    let filesystem = scoped_filesystem();
+    let scope = resource_scope("user:scoped-expired-prune-lease");
+    let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+        Arc::clone(&filesystem),
+        scope.clone(),
+        Duration::seconds(10),
+    )
+    .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"))
+    .with_settled_prune_interval(NonZeroUsize::new(2).expect("non-zero interval"));
+    let received_at = Utc::now();
+    let oldest = fingerprint("scoped-expired-prune-lease-oldest");
+    let newest = fingerprint("scoped-expired-prune-lease-newest");
+
+    settle_noop(&ledger, oldest.clone(), received_at).await;
+    write_scoped_prune_lease(
+        filesystem.as_ref(),
+        &scope,
+        (Utc::now() - Duration::seconds(30)).timestamp_millis(),
+    )
+    .await;
+    settle_noop(&ledger, newest.clone(), received_at + Duration::seconds(1)).await;
+
+    assert!(matches!(
+        ledger
+            .begin_or_replay(oldest, received_at + Duration::seconds(2))
+            .await
+            .expect("expired prune lease allows retention"),
+        IdempotencyDecision::New(_)
+    ));
+    assert!(matches!(
+        ledger
+            .begin_or_replay(newest, received_at + Duration::seconds(2))
+            .await
+            .expect("newest remains available for replay"),
+        IdempotencyDecision::Replay(_)
+    ));
+}
+
+#[tokio::test]
+async fn scoped_filesystem_prunes_terminal_replay_and_stale_reservation() {
+    let filesystem = scoped_filesystem();
+    let scope = resource_scope("user:scoped-terminal-and-stale-prune");
+    let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+        Arc::clone(&filesystem),
+        scope.clone(),
+        Duration::seconds(10),
+    )
+    .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"));
+    let received_at = Utc::now();
+    let terminal_replay = fingerprint("scoped-terminal-replay-prune");
+    let newest = fingerprint("scoped-terminal-replay-newest");
+    let stale = fingerprint("scoped-stale-reservation-prune");
+    let stale_received_at = received_at - Duration::seconds(90);
+
+    let IdempotencyDecision::New(mut terminal_action) = ledger
+        .begin_or_replay(terminal_replay.clone(), received_at)
+        .await
+        .expect("begin terminal replay")
+    else {
+        panic!("expected terminal replay action");
+    };
+    terminal_action.mark_deduplicated(ProductInboundAck::NoOp);
+    ledger
+        .settle(terminal_action)
+        .await
+        .expect("settle terminal replay");
+    assert!(matches!(
+        ledger
+            .begin_or_replay(stale.clone(), stale_received_at)
+            .await
+            .expect("begin stale reservation"),
+        IdempotencyDecision::New(_)
+    ));
+    settle_noop(&ledger, newest.clone(), received_at + Duration::seconds(1)).await;
+
+    assert!(matches!(
+        ledger
+            .begin_or_replay(terminal_replay, received_at + Duration::seconds(2))
+            .await
+            .expect("terminal replay was pruned"),
+        IdempotencyDecision::New(_)
+    ));
+    assert!(matches!(
+        ledger
+            .begin_or_replay(newest, received_at + Duration::seconds(2))
+            .await
+            .expect("newest remains available for replay"),
+        IdempotencyDecision::Replay(_)
+    ));
+    assert_eq!(
+        stale_received_record_count(
+            filesystem.as_ref(),
+            &scope,
+            (received_at - Duration::seconds(40)).timestamp_millis(),
+        )
+        .await,
+        0
+    );
 }
 
 #[tokio::test]

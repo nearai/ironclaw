@@ -244,32 +244,27 @@ where
         // [`ThreadScopeResolver`], so the two cannot drift. The run-state
         // read (for the actor) only runs when the base scope is
         // owner-scoped; an owner-less applier keeps its shared/system slot.
-        thread_scope = if thread_scope.owner_user_id.is_some() {
-            let run_state = self
-                .turn_state_store
-                .get_run_state(GetRunStateRequest {
-                    scope: request.scope.clone(),
-                    run_id: request.run_id,
-                })
-                .await?;
-            crate::thread_scope::ThreadScopeResolver::resolve_for_turn_scope(
-                &thread_scope,
-                &request.scope,
-                run_state.actor.as_ref(),
-            )
-            .map_err(|error| TurnError::InvalidRequest {
-                reason: error.to_string(),
-            })?
-        } else {
-            crate::thread_scope::ThreadScopeResolver::resolve_for_turn_scope(
-                &thread_scope,
-                &request.scope,
-                None,
-            )
-            .map_err(|error| TurnError::InvalidRequest {
-                reason: error.to_string(),
-            })?
-        };
+        let actor =
+            if !request.scope.has_explicit_thread_owner() && thread_scope.owner_user_id.is_some() {
+                let run_state = self
+                    .turn_state_store
+                    .get_run_state(GetRunStateRequest {
+                        scope: request.scope.clone(),
+                        run_id: request.run_id,
+                    })
+                    .await?;
+                run_state.actor
+            } else {
+                None
+            };
+        thread_scope = crate::thread_scope::ThreadScopeResolver::resolve_for_turn_scope(
+            &thread_scope,
+            request.scope,
+            actor.as_ref(),
+        )
+        .map_err(|error| TurnError::InvalidRequest {
+            reason: error.to_string(),
+        })?;
         ensure_thread_scope_matches_turn_scope(&thread_scope, request.scope)?;
         let history = self
             .thread_service

@@ -934,6 +934,7 @@ impl HostRuntimeLoopCapabilityPort {
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
             result_ref,
             safe_summary: "capability info returned".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
         }))
     }
@@ -1756,6 +1757,7 @@ async fn runtime_outcome_to_loop(
             CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref,
                 safe_summary: "capability completed".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
             })
         }

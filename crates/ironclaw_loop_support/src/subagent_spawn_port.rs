@@ -371,10 +371,40 @@ struct SpawnCompensationState {
     gate_written: Option<GateRef>,
     result_written: Option<LoopResultRef>,
     submitted_child_tree: Option<(TurnScope, TurnRunId)>,
+    submitted_child_run: Option<(TurnScope, TurnActor, TurnRunId)>,
+    thread_written: Option<(ThreadScope, ThreadId)>,
+    spawn_slot_committed: bool,
 }
 
 impl SpawnCompensationState {
     async fn rollback(&mut self, deps: &SubagentSpawnDeps, run_context: &LoopRunContext) {
+        if let Some((scope, actor, run_id)) = self.submitted_child_run.as_ref() {
+            match IdempotencyKey::new(format!(
+                "subagent-rollback-cancel:{}:{}",
+                run_context.run_id, run_id
+            )) {
+                Ok(idempotency_key) => {
+                    let _ = deps
+                        .turn_state_store
+                        .request_cancel(CancelRunRequest {
+                            scope: scope.clone(),
+                            actor: actor.clone(),
+                            run_id: *run_id,
+                            reason: SanitizedCancelReason::Superseded,
+                            idempotency_key,
+                        })
+                        .await;
+                }
+                Err(reason) => {
+                    tracing::warn!(
+                        run_id = %run_context.run_id,
+                        child_run_id = %run_id,
+                        %reason,
+                        "subagent rollback skipped child-run cancel because idempotency key was invalid"
+                    );
+                }
+            }
+        }
         if let Some(gate_ref) = self.gate_written.as_ref() {
             let _ = deps.gate_store.delete_awaited_child(gate_ref).await;
         }
@@ -392,6 +422,9 @@ impl SpawnCompensationState {
                 .turn_state_store
                 .release_tree_descendants(scope, *tree_root, 1)
                 .await;
+        }
+        if let Some((scope, thread_id)) = self.thread_written.as_ref() {
+            let _ = deps.thread_service.delete_thread(scope, thread_id).await;
         }
     }
 }
@@ -518,6 +551,18 @@ impl SubagentSpawnCapabilityPort {
         args: SpawnSubagentArgs,
         gate_override: Option<GateRef>,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        let mut compensation = SpawnCompensationState::default();
+        self.handle_spawn_with_gate_recording(invocation, args, gate_override, &mut compensation)
+            .await
+    }
+
+    async fn handle_spawn_with_gate_recording(
+        &self,
+        invocation: &CapabilityInvocation,
+        args: SpawnSubagentArgs,
+        gate_override: Option<GateRef>,
+        compensation: &mut SpawnCompensationState,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         let Some(spawn_slot) = self.reserve_spawn_slot() else {
             return Ok(spawn_rejected("fanout_cap_exceeded"));
         };
@@ -580,7 +625,6 @@ impl SubagentSpawnCapabilityPort {
         let tree_root = parent_record
             .spawn_tree_root_run_id
             .unwrap_or(self.run_context.run_id);
-        let mut compensation = SpawnCompensationState::default();
         let spawn_ctx = SpawnContext {
             definition,
             child_scope,
@@ -590,11 +634,12 @@ impl SubagentSpawnCapabilityPort {
         };
 
         let result = self
-            .finish_spawn(args, spawn_ctx, actor, invocation, &mut compensation)
+            .finish_spawn(args, spawn_ctx, actor, invocation, compensation)
             .await;
         match result {
             Ok(outcome) => {
                 spawn_slot.commit();
+                compensation.spawn_slot_committed = true;
                 Ok(outcome)
             }
             Err(error) => {
@@ -712,6 +757,7 @@ impl SubagentSpawnCapabilityPort {
             })
             .await
             .map_err(map_thread_error)?;
+        compensation.thread_written = Some((child_scope.clone(), child_thread.thread_id.clone()));
         let child_turn_scope = TurnScope::new(
             child_scope.tenant_id.clone(),
             Some(child_scope.agent_id.clone()),
@@ -797,6 +843,7 @@ impl SubagentSpawnCapabilityPort {
             .await
             .map_err(map_turn_error)?;
         compensation.submitted_child_tree = Some((self.run_context.scope.clone(), tree_root));
+        compensation.submitted_child_run = Some((child_turn_scope.clone(), actor.clone(), run_id));
         if let Err(error) = self
             .deps
             .thread_service
@@ -809,8 +856,6 @@ impl SubagentSpawnCapabilityPort {
             )
             .await
         {
-            self.cancel_child_after_submission_failure(&child_turn_scope, actor, run_id)
-                .await?;
             return Err(map_thread_error(error));
         }
 
@@ -822,28 +867,19 @@ impl SubagentSpawnCapabilityPort {
         })
     }
 
-    async fn cancel_child_after_submission_failure(
-        &self,
-        child_scope: &TurnScope,
-        actor: TurnActor,
-        child_run_id: TurnRunId,
-    ) -> Result<(), AgentLoopHostError> {
-        self.deps
-            .turn_state_store
-            .request_cancel(CancelRunRequest {
-                scope: child_scope.clone(),
-                actor,
-                run_id: child_run_id,
-                reason: SanitizedCancelReason::Superseded,
-                idempotency_key: IdempotencyKey::new(format!(
-                    "subagent-cancel:{}:{}",
-                    self.run_context.run_id, child_run_id
-                ))
-                .map_err(invalid_static_ref)?,
-            })
-            .await
-            .map(|_| ())
-            .map_err(map_turn_error)
+    async fn rollback_batch_compensation(&self, compensations: &mut Vec<SpawnCompensationState>) {
+        // Roll back in reverse creation order. Each compensation performs
+        // destructive best-effort cleanup, so keeping this serial preserves a
+        // deterministic unwind order across child runs and their resources.
+        while let Some(mut compensation) = compensations.pop() {
+            let release_spawn_slot = compensation.spawn_slot_committed;
+            compensation
+                .rollback(self.deps.as_ref(), &self.run_context)
+                .await;
+            if release_spawn_slot {
+                self.release_spawn_slot();
+            }
+        }
     }
 }
 
@@ -971,6 +1007,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
         let mut outcomes = Vec::with_capacity(request.invocations.len());
+        let mut batch_compensations = Vec::new();
         // Pre-decode every spawn invocation before allocating the shared batch
         // gate. Only batches with at least two valid blocking spawns benefit
         // from gate coalescing; otherwise the gate would be created and never
@@ -1001,18 +1038,47 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         while index < request.invocations.len() {
             let invocation = &request.invocations[index];
             if self.is_spawn(&invocation.capability_id) {
-                let outcome = if let Some(outcome) = self.authorize_spawn(invocation).await? {
-                    outcome
-                } else {
-                    let args = spawn_args.remove(&index).ok_or_else(|| {
-                        AgentLoopHostError::new(
-                            AgentLoopHostErrorKind::Invalid,
-                            "subagent spawn args missing from pre-decode pass",
-                        )
-                    })?;
-                    let gate_override = batch_blocking_gate.clone();
-                    self.handle_spawn_with_gate(invocation, args, gate_override)
-                        .await?
+                let outcome = match self.authorize_spawn(invocation).await {
+                    Ok(Some(outcome)) => outcome,
+                    Ok(None) => {
+                        let args = match spawn_args.remove(&index) {
+                            Some(args) => args,
+                            None => {
+                                let error = AgentLoopHostError::new(
+                                    AgentLoopHostErrorKind::Invalid,
+                                    "subagent spawn args missing from pre-decode pass",
+                                );
+                                self.rollback_batch_compensation(&mut batch_compensations)
+                                    .await;
+                                return Err(error);
+                            }
+                        };
+                        let gate_override = batch_blocking_gate.clone();
+                        let mut compensation = SpawnCompensationState::default();
+                        let outcome = match self
+                            .handle_spawn_with_gate_recording(
+                                invocation,
+                                args,
+                                gate_override,
+                                &mut compensation,
+                            )
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => {
+                                self.rollback_batch_compensation(&mut batch_compensations)
+                                    .await;
+                                return Err(error);
+                            }
+                        };
+                        batch_compensations.push(compensation);
+                        outcome
+                    }
+                    Err(error) => {
+                        self.rollback_batch_compensation(&mut batch_compensations)
+                            .await;
+                        return Err(error);
+                    }
                 };
                 let batch_await_dependent = matches!(
                     &outcome,
@@ -1024,6 +1090,9 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 let suspended = outcome.is_suspension();
                 outcomes.push(outcome);
                 if suspended && request.stop_on_first_suspension && !batch_await_dependent {
+                    // Suspension is a partial-success boundary, not a failed
+                    // batch; prior successful spawns remain committed.
+                    batch_compensations.clear();
                     return Ok(CapabilityBatchOutcome {
                         outcomes,
                         stopped_on_suspension: true,
@@ -1045,10 +1114,21 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                     invocations: request.invocations[start..index].to_vec(),
                     stop_on_first_suspension: request.stop_on_first_suspension,
                 })
-                .await?;
+                .await;
+            let inner = match inner {
+                Ok(inner) => inner,
+                Err(error) => {
+                    self.rollback_batch_compensation(&mut batch_compensations)
+                        .await;
+                    return Err(error);
+                }
+            };
             let stopped = inner.stopped_on_suspension;
             outcomes.extend(inner.outcomes);
             if stopped && request.stop_on_first_suspension {
+                // Propagate the inner partial-success stop without rolling back
+                // earlier successful spawns from this outer batch.
+                batch_compensations.clear();
                 return Ok(CapabilityBatchOutcome {
                     outcomes,
                     stopped_on_suspension: true,

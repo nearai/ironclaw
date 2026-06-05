@@ -455,6 +455,7 @@ mod tests {
                 Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:ok").expect("valid result ref"),
                     safe_summary: "ok".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                 }))
             }

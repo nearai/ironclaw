@@ -65,8 +65,8 @@ use ironclaw_turns::{
         InstructionBundleMaterializedMessage, InstructionMaterializationStore,
         InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
         LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCompactionError, LoopCompactionPort, LoopCompactionRequest,
-        LoopCompactionResponse, LoopContextBundle, LoopContextPort, LoopContextRequest,
+        LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
+        LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
         LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
         LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
         LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
@@ -1709,7 +1709,7 @@ impl LoopCompactionPort for RebornLoopDriverHost {
     async fn compact_loop_context(
         &self,
         request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
         self.compaction.compact_loop_context(request).await
     }
 }
@@ -1999,11 +1999,18 @@ fn validate_thread_scope(
     }
     // The thread store keys threads by `owner_user_id` (via the MountView in
     // `ThreadScope::to_resource_scope`), but that axis is not part of the
-    // on-disk thread path, so a wrong owner silently reads an empty subtree
-    // and surfaces as `UnknownThread` deep in the Prompt stage. When the run
-    // carries an authenticated actor and the thread scope declares an owner,
-    // require them to agree so the divergence fails loud here instead.
-    if let (Some(thread_owner), Some(actor)) =
+    // on-disk thread path, so a wrong owner silently reads an empty subtree.
+    // Actor-fallback turns still require owner=actor. Explicit-owner turns
+    // intentionally allow actor/subject divergence for shared Slack/team
+    // routes, but the explicit subject must match the resolved thread owner.
+    if run_context.scope.has_explicit_thread_owner() {
+        if run_context.scope.explicit_owner_user_id() != thread_scope.owner_user_id.as_ref() {
+            return Err(RebornLoopDriverHostError::ScopeMismatch {
+                reason: "thread scope owner does not match the explicit loop run subject"
+                    .to_string(),
+            });
+        }
+    } else if let (Some(thread_owner), Some(actor)) =
         (thread_scope.owner_user_id.as_ref(), run_context.actor())
         && thread_owner != &actor.user_id
     {

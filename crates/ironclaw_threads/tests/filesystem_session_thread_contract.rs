@@ -26,6 +26,66 @@ use ironclaw_threads::{
 };
 
 #[tokio::test]
+async fn filesystem_delete_thread_removes_owned_thread_and_hides_missing_or_wrong_scope() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-delete", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let owned_scope = scope("delete-owned");
+    let wrong_scope = scope("delete-wrong");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owned_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-delete-owned").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let wrong_scope_error = service
+        .delete_thread(&wrong_scope, &thread.thread_id)
+        .await
+        .expect_err("wrong-scope delete should hide thread existence");
+    assert_unknown_thread(wrong_scope_error, &thread.thread_id);
+
+    service
+        .read_thread(ThreadHistoryRequest {
+            scope: owned_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .expect("wrong-scope delete must not remove owned thread");
+
+    service
+        .delete_thread(&owned_scope, &thread.thread_id)
+        .await
+        .expect("owned delete succeeds");
+
+    let deleted_error = service
+        .read_thread(ThreadHistoryRequest {
+            scope: owned_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .expect_err("deleted thread should no longer be readable");
+    assert_unknown_thread(deleted_error, &thread.thread_id);
+
+    let repeat_error = service
+        .delete_thread(&owned_scope, &thread.thread_id)
+        .await
+        .expect_err("repeat delete should be non-enumerating missing shape");
+    assert_unknown_thread(repeat_error, &thread.thread_id);
+
+    let missing = ThreadId::new("thread-delete-missing").unwrap();
+    let missing_error = service
+        .delete_thread(&owned_scope, &missing)
+        .await
+        .expect_err("missing delete should be non-enumerating");
+    assert_unknown_thread(missing_error, &missing);
+}
+
+#[tokio::test]
 async fn durable_history_round_trips_through_filesystem_store() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-a", "alice");
@@ -963,6 +1023,13 @@ fn scope(label: &str) -> ThreadScope {
         project_id: Some(ProjectId::new(format!("project-{label}")).unwrap()),
         owner_user_id: Some(UserId::new(format!("user-{label}")).unwrap()),
         mission_id: None,
+    }
+}
+
+fn assert_unknown_thread(error: SessionThreadError, thread_id: &ThreadId) {
+    match error {
+        SessionThreadError::UnknownThread { thread_id: actual } => assert_eq!(actual, *thread_id),
+        other => panic!("expected UnknownThread for {thread_id}, got {other:?}"),
     }
 }
 
