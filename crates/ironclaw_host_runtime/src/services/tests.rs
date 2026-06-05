@@ -208,19 +208,20 @@ async fn host_runtime_http_egress_port_executes_with_host_staged_credentials() {
     .await
     .expect("host egress port should stage credentials and execute");
 
-    let requests = recorded_requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer host-staged-token".to_string()
-        ))
-    );
-    drop(requests);
+    {
+        let requests = recorded_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization"),
+            Some(&(
+                "authorization".to_string(),
+                "Bearer host-staged-token".to_string()
+            ))
+        );
+    }
 
     let error = port
         .execute(HostRuntimeHttpEgressRequest {
