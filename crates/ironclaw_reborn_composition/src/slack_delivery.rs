@@ -216,7 +216,7 @@ impl SlackFinalReplyDeliveryObserver {
         let notification = match state.status {
             TurnStatus::Completed => {
                 let Some(text) = self
-                    .wait_for_latest_assistant_text(&thread_scope, &binding, run_id)
+                    .wait_for_latest_assistant_text(thread_scope, binding, run_id)
                     .await?
                 else {
                     tracing::warn!(

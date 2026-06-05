@@ -524,7 +524,7 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
 }
 
 #[tokio::test]
-async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
+async fn reborn_e2e_gate_host_http_reuses_staged_policy_and_secret_until_cleanup() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -624,12 +624,12 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
     let replay = service
         .execute(request)
         .await
-        .expect_err("consumed staged secret must not be reusable");
-    assert!(matches!(replay, RuntimeHttpEgressError::Credential { .. }));
+        .expect("staged secret should remain reusable within the capability invocation");
+    assert_eq!(replay.status, 200);
     assert_eq!(
         network_recorder.lock().unwrap().len(),
-        1,
-        "replay must fail before a second outbound transport attempt"
+        2,
+        "same capability invocation should be able to make multiple authenticated egress calls"
     );
 }
 
