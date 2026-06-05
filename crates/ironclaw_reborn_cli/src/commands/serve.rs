@@ -353,13 +353,22 @@ impl ServeCommand {
             // Open the canonical Reborn identity resolver on the runtime's
             // existing substrate handle (the same `reborn-local-dev.db` the
             // runtime owns) rather than opening a second handle to the file.
-            // `None` means the runtime carries no local-runtime substrate;
-            // the auth surface fails closed when SSO is configured.
-            let identity_resolver = match runtime.open_reborn_identity_resolver(&tenant_id).await {
-                Some(result) => {
-                    Some(result.context("failed to initialize the Reborn identity resolver")?)
+            // Only SSO-enabled WebUI needs it: an env-bearer-only deployment
+            // resolves its single configured user without any identity store,
+            // so skip opening (and its legacy migration) when SSO is disabled
+            // — otherwise a disabled-SSO deployment could fail startup on an
+            // unused identity backend. `None` also covers the case where the
+            // runtime carries no local-runtime substrate; the auth surface
+            // fails closed when SSO is configured but no resolver is available.
+            let identity_resolver = if sso_startup.is_some() {
+                match runtime.open_reborn_identity_resolver(&tenant_id).await {
+                    Some(result) => {
+                        Some(result.context("failed to initialize the Reborn identity resolver")?)
+                    }
+                    None => None,
                 }
-                None => None,
+            } else {
+                None
             };
 
             // Assemble the WebChat v2 auth surface (authenticator + optional

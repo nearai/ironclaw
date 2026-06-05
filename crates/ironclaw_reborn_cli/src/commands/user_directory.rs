@@ -21,7 +21,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_reborn_composition::host_api::{TenantId, UserId};
-use ironclaw_reborn_composition::{RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind};
+use ironclaw_reborn_composition::{
+    ExternalSubjectId, ProviderKind, RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
+};
 use ironclaw_reborn_webui_ingress::{
     OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError,
 };
@@ -121,17 +123,22 @@ impl UserDirectory for WebuiUserDirectory {
         // An OAuth login is an `oauth`-surface external identity: no adapter
         // installation, keyed by provider + subject within the host tenant.
         // The admitted (verified, allowlisted) email is what cross-provider
-        // linking keys on, so it is the email handed to the resolver.
+        // linking keys on, so it is the email handed to the resolver. The
+        // key parts are validated into newtypes at this boundary.
+        let provider_kind = ProviderKind::new(provider.as_str())
+            .map_err(|err| UserDirectoryError::Backend(err.to_string()))?;
+        let external_subject_id = ExternalSubjectId::new(profile.provider_user_id.as_str())
+            .map_err(|err| UserDirectoryError::Backend(err.to_string()))?;
         self.resolver
             .resolve_or_create(ResolveExternalIdentity {
-                tenant_id: &self.tenant_id,
+                tenant_id: self.tenant_id.clone(),
                 surface_kind: SurfaceKind::Oauth,
-                provider_kind: provider.as_str(),
+                provider_kind,
                 provider_instance_id: None,
-                external_subject_id: profile.provider_user_id.as_str(),
-                email: Some(admitted_email.as_str()),
+                external_subject_id,
+                email: Some(admitted_email),
                 email_verified: true,
-                display_name: profile.display_name.as_deref(),
+                display_name: profile.display_name.clone(),
             })
             .await
             .map_err(|err| UserDirectoryError::Backend(err.to_string()))

@@ -4420,6 +4420,98 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn open_reborn_identity_resolver_migrates_legacy_webui_identities_through_runtime() {
+        use ironclaw_reborn_identity::{
+            ExternalSubjectId, ProviderKind, ResolveExternalIdentity, SurfaceKind,
+        };
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-identity-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-identity-tenant".to_string(),
+            agent_id: "runtime-identity-agent".to_string(),
+            source_binding_id: "runtime-identity-source".to_string(),
+            reply_target_binding_id: "runtime-identity-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let tenant = TenantId::new("runtime-identity-tenant").expect("tenant");
+
+        // Seed a legacy pre-#4381 WebUI identity into the SAME substrate DB the
+        // runtime owns, exactly as the old store wrote it.
+        let substrate = Arc::clone(
+            &runtime
+                .services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime substrate")
+                .identity_substrate_db,
+        );
+        let seed = substrate.connect().expect("substrate connection");
+        seed.execute_batch(
+            "CREATE TABLE user_identities (\
+                 provider TEXT NOT NULL, provider_user_id TEXT NOT NULL, \
+                 user_id TEXT NOT NULL, email TEXT, email_verified INTEGER NOT NULL, \
+                 created_at TEXT NOT NULL, \
+                 PRIMARY KEY (provider, provider_user_id));",
+        )
+        .await
+        .expect("seed legacy schema");
+        seed.execute(
+            "INSERT INTO user_identities \
+                 (provider, provider_user_id, user_id, email, email_verified, created_at) \
+                 VALUES ('google', 'g-legacy', 'legacy-runtime-user', 'legacy@x.com', 1, \
+                     '2026-01-01T00:00:00Z')",
+            (),
+        )
+        .await
+        .expect("seed legacy identity");
+
+        // The production accessor `serve` relies on: it opens the resolver on
+        // the runtime-owned substrate handle and runs the legacy fold, so the
+        // returning legacy user must resolve to their original UserId rather
+        // than being re-minted.
+        let resolver = runtime
+            .open_reborn_identity_resolver(&tenant)
+            .await
+            .expect("runtime carries a local-runtime substrate")
+            .expect("resolver opens");
+        let resolved = resolver
+            .resolve_or_create(ResolveExternalIdentity {
+                tenant_id: tenant.clone(),
+                surface_kind: SurfaceKind::Oauth,
+                provider_kind: ProviderKind::new("google").expect("provider"),
+                provider_instance_id: None,
+                external_subject_id: ExternalSubjectId::new("g-legacy").expect("subject"),
+                email: Some("legacy@x.com".to_string()),
+                email_verified: true,
+                display_name: None,
+            })
+            .await
+            .expect("resolve");
+        assert_eq!(
+            resolved.as_str(),
+            "legacy-runtime-user",
+            "a returning legacy SSO user keeps their UserId through the runtime accessor"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
     #[tokio::test]
     async fn build_webui_services_without_host_runtime_returns_503_on_list_automations() {
         let root = tempfile::tempdir().expect("tempdir");

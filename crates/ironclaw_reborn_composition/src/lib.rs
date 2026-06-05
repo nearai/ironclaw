@@ -284,7 +284,8 @@ pub mod host_api {
 /// (composition CLAUDE.md: "keep lower substrate handles private").
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn_identity::{
-    RebornIdentityError, RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
+    ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind, RebornIdentityError,
+    RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
 };
 
 /// Test-support: open a standalone canonical Reborn identity resolver on the

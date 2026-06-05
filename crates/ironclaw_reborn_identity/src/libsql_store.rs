@@ -137,14 +137,18 @@ impl RebornIdentityResolver for RebornLibSqlIdentityStore {
     /// 3. Else, a brand-new user + identity.
     async fn resolve_or_create(
         &self,
-        identity: ResolveExternalIdentity<'_>,
+        identity: ResolveExternalIdentity,
     ) -> Result<UserId, RebornIdentityError> {
         let tenant = identity.tenant_id.as_str();
         let surface = identity.surface_kind.as_str();
         // No installation (browser OAuth) collapses to "" so the composite
         // primary key stays total — a NULL key part would make every row
         // distinct and defeat the lookup.
-        let instance = identity.provider_instance_id.unwrap_or("");
+        let instance = identity
+            .provider_instance_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or("");
 
         let conn = self.conn().await?;
 
@@ -156,9 +160,9 @@ impl RebornIdentityResolver for RebornLibSqlIdentityStore {
             &conn,
             tenant,
             surface,
-            identity.provider_kind,
+            identity.provider_kind.as_str(),
             instance,
-            identity.external_subject_id,
+            identity.external_subject_id.as_str(),
         )
         .await?
         {
@@ -178,9 +182,9 @@ impl RebornIdentityResolver for RebornLibSqlIdentityStore {
             &tx,
             tenant,
             surface,
-            identity.provider_kind,
+            identity.provider_kind.as_str(),
             instance,
-            identity.external_subject_id,
+            identity.external_subject_id.as_str(),
         )
         .await?
         {
@@ -196,7 +200,7 @@ impl RebornIdentityResolver for RebornLibSqlIdentityStore {
         //    address at a provider that does not verify it. Tenant-scoped
         //    so two tenants sharing an email address stay separate users.
         if identity.email_verified
-            && let Some(email) = identity.email
+            && let Some(email) = identity.email.as_deref()
         {
             let email_lc = email.to_ascii_lowercase();
             if let Some(user_id) = query_one_string(
@@ -220,8 +224,8 @@ impl RebornIdentityResolver for RebornLibSqlIdentityStore {
             &tx,
             &UserRecord {
                 id: new_user_id.clone(),
-                email: identity.email.map(str::to_string),
-                display_name: identity.display_name.map(str::to_string),
+                email: identity.email.clone(),
+                display_name: identity.display_name.clone(),
                 created_at: now.clone(),
                 updated_at: now.clone(),
             },
@@ -240,17 +244,21 @@ impl RebornIdentityResolver for RebornLibSqlIdentityStore {
     /// this external identity key, or `None`.
     async fn lookup(
         &self,
-        key: ExternalIdentityKey<'_>,
+        key: ExternalIdentityKey,
     ) -> Result<Option<UserId>, RebornIdentityError> {
-        let instance = key.provider_instance_id.unwrap_or("");
+        let instance = key
+            .provider_instance_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or("");
         let conn = self.conn().await?;
         match select_identity_user(
             &conn,
             key.tenant_id.as_str(),
             key.surface_kind.as_str(),
-            key.provider_kind,
+            key.provider_kind.as_str(),
             instance,
-            key.external_subject_id,
+            key.external_subject_id.as_str(),
         )
         .await?
         {
@@ -264,10 +272,14 @@ impl RebornIdentityResolver for RebornLibSqlIdentityStore {
     /// `user_id`. Channel actors carry no email, so the row stores none.
     async fn bind(
         &self,
-        key: ExternalIdentityKey<'_>,
+        key: ExternalIdentityKey,
         user_id: &UserId,
     ) -> Result<(), RebornIdentityError> {
-        let instance = key.provider_instance_id.unwrap_or("");
+        let instance = key
+            .provider_instance_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or("");
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
         let conn = self.conn().await?;
         conn.execute(
@@ -280,9 +292,9 @@ impl RebornIdentityResolver for RebornLibSqlIdentityStore {
             libsql::params![
                 key.tenant_id.as_str(),
                 key.surface_kind.as_str(),
-                key.provider_kind,
+                key.provider_kind.as_str(),
                 instance,
-                key.external_subject_id,
+                key.external_subject_id.as_str(),
                 user_id.as_str(),
                 now.as_str()
             ],
@@ -294,7 +306,7 @@ impl RebornIdentityResolver for RebornLibSqlIdentityStore {
 }
 
 fn identity_record(
-    identity: &ResolveExternalIdentity<'_>,
+    identity: &ResolveExternalIdentity,
     instance: &str,
     user_id: &UserId,
     created_at: &str,
@@ -302,11 +314,11 @@ fn identity_record(
     ExternalIdentityRecord {
         tenant_id: identity.tenant_id.clone(),
         surface_kind: identity.surface_kind,
-        provider_kind: identity.provider_kind.to_string(),
+        provider_kind: identity.provider_kind.as_str().to_string(),
         provider_instance_id: instance.to_string(),
-        external_subject_id: identity.external_subject_id.to_string(),
+        external_subject_id: identity.external_subject_id.as_str().to_string(),
         user_id: user_id.clone(),
-        email: identity.email.map(str::to_string),
+        email: identity.email.clone(),
         email_verified: identity.email_verified,
         created_at: created_at.to_string(),
     }
@@ -428,7 +440,7 @@ async fn insert_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SurfaceKind;
+    use crate::{ExternalSubjectId, ProviderInstanceId, ProviderKind, SurfaceKind};
     use ironclaw_host_api::TenantId;
 
     async fn store() -> RebornLibSqlIdentityStore {
@@ -450,37 +462,47 @@ mod tests {
         TenantId::new(id).expect("tenant")
     }
 
-    fn oauth<'a>(
-        tenant: &'a TenantId,
-        provider: &'a str,
-        sub: &'a str,
-        email: Option<&'a str>,
+    fn provider_kind(value: &str) -> ProviderKind {
+        ProviderKind::new(value).expect("valid provider kind")
+    }
+
+    fn subject(value: &str) -> ExternalSubjectId {
+        ExternalSubjectId::new(value).expect("valid external subject")
+    }
+
+    fn oauth(
+        tenant: &TenantId,
+        provider: &str,
+        sub: &str,
+        email: Option<&str>,
         verified: bool,
-    ) -> ResolveExternalIdentity<'a> {
+    ) -> ResolveExternalIdentity {
         ResolveExternalIdentity {
-            tenant_id: tenant,
+            tenant_id: tenant.clone(),
             surface_kind: SurfaceKind::Oauth,
-            provider_kind: provider,
+            provider_kind: provider_kind(provider),
             provider_instance_id: None,
-            external_subject_id: sub,
-            email,
+            external_subject_id: subject(sub),
+            email: email.map(str::to_string),
             email_verified: verified,
             display_name: None,
         }
     }
 
-    fn channel_actor<'a>(
-        tenant: &'a TenantId,
-        provider: &'a str,
-        instance: &'a str,
-        actor: &'a str,
-    ) -> ResolveExternalIdentity<'a> {
+    fn channel_actor(
+        tenant: &TenantId,
+        provider: &str,
+        instance: &str,
+        actor: &str,
+    ) -> ResolveExternalIdentity {
         ResolveExternalIdentity {
-            tenant_id: tenant,
+            tenant_id: tenant.clone(),
             surface_kind: SurfaceKind::ChannelActor,
-            provider_kind: provider,
-            provider_instance_id: Some(instance),
-            external_subject_id: actor,
+            provider_kind: provider_kind(provider),
+            provider_instance_id: Some(
+                ProviderInstanceId::new(instance).expect("valid provider instance"),
+            ),
+            external_subject_id: subject(actor),
             email: None,
             email_verified: false,
             display_name: None,
@@ -774,17 +796,52 @@ mod tests {
         assert_eq!(count, "1", "exactly one user row must exist");
     }
 
-    fn channel_key<'a>(
-        tenant: &'a TenantId,
-        provider: &'a str,
-        subject: &'a str,
-    ) -> ExternalIdentityKey<'a> {
+    #[tokio::test]
+    async fn concurrent_first_logins_for_same_identity_resolve_to_one_user() {
+        // Two simultaneous first logins for the SAME exact key (same tenant,
+        // surface, provider, instance, subject) must converge on one user.
+        // This guards the in-transaction re-check specifically: the fast-path
+        // read misses for both racers, so the loser must observe the winner's
+        // insert under the write lock instead of minting a second user. A
+        // regression dropping that re-check would still pass the verified-email
+        // test above (which races two *different* keys) but fail here.
+        let store = Arc::new(store().await);
+        let (a, b) = (store.clone(), store.clone());
+        let (ra, rb) = tokio::join!(
+            tokio::spawn(async move {
+                let t = tenant("t");
+                a.resolve_or_create(oauth(&t, "google", "same-sub", Some("a@x.com"), true))
+                    .await
+            }),
+            tokio::spawn(async move {
+                let t = tenant("t");
+                b.resolve_or_create(oauth(&t, "google", "same-sub", Some("a@x.com"), true))
+                    .await
+            }),
+        );
+        let user_a = ra.expect("join").expect("resolve");
+        let user_b = rb.expect("join").expect("resolve");
+        assert_eq!(
+            user_a.as_str(),
+            user_b.as_str(),
+            "concurrent first-logins for the same identity key must share a user"
+        );
+
+        let conn = store.conn().await.expect("conn");
+        let count = query_one_string(&conn, "SELECT CAST(COUNT(*) AS TEXT) FROM users", ())
+            .await
+            .expect("count")
+            .expect("row");
+        assert_eq!(count, "1", "exactly one user row must exist");
+    }
+
+    fn channel_key(tenant: &TenantId, provider: &str, actor: &str) -> ExternalIdentityKey {
         ExternalIdentityKey {
-            tenant_id: tenant,
+            tenant_id: tenant.clone(),
             surface_kind: SurfaceKind::ChannelActor,
-            provider_kind: provider,
+            provider_kind: provider_kind(provider),
             provider_instance_id: None,
-            external_subject_id: subject,
+            external_subject_id: subject(actor),
         }
     }
 
@@ -878,11 +935,11 @@ mod tests {
         // A channel-actor binding must not satisfy an oauth-surface lookup
         // even with identical provider/subject — surface_kind separates them.
         let oauth_same = ExternalIdentityKey {
-            tenant_id: &t,
+            tenant_id: t.clone(),
             surface_kind: SurfaceKind::Oauth,
-            provider_kind: "slack",
+            provider_kind: provider_kind("slack"),
             provider_instance_id: None,
-            external_subject_id: "U-1",
+            external_subject_id: subject("U-1"),
         };
         assert!(store.lookup(oauth_same).await.expect("lookup").is_none());
     }

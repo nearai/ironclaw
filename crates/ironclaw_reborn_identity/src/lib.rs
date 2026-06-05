@@ -22,8 +22,10 @@
 //! Reborn persistence surface is libSQL-only, so there is no Postgres
 //! parity to maintain here.
 
+mod key;
 mod libsql_store;
 
+pub use key::{ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind};
 pub use libsql_store::RebornLibSqlIdentityStore;
 
 use async_trait::async_trait;
@@ -54,46 +56,45 @@ impl SurfaceKind {
     }
 }
 
-/// A normalized external identity to resolve. Borrowed fields so callers
-/// (WebUI ingress, product adapters) hand over already-validated provider
-/// data without this layer depending on their profile types.
-///
-/// `provider_kind` / `provider_instance_id` / `external_subject_id` are
-/// adapter-supplied boundary strings (a provider name, an installation id,
-/// a provider subject); they are stored as opaque, separately-columned key
-/// parts (never flattened, so delimiter-like ids cannot collide).
-pub struct ResolveExternalIdentity<'a> {
+/// A normalized external identity to resolve. Callers (WebUI ingress,
+/// product adapters) construct the typed key parts up front, so this layer
+/// never depends on their profile types and the provider/instance/subject
+/// ids cross the boundary as validated newtypes rather than raw strings
+/// (`.claude/rules/types.md`). The key parts are stored as opaque,
+/// separately-columned values (never flattened, so delimiter-like ids
+/// cannot collide).
+pub struct ResolveExternalIdentity {
     /// Trusted host tenant. Identity resolution and email linking are
     /// scoped to it, so tenants never share users.
-    pub tenant_id: &'a TenantId,
+    pub tenant_id: TenantId,
     /// Which surface this identity arrived through.
     pub surface_kind: SurfaceKind,
     /// Provider name (`google`, `github`, `telegram`, `slack`, …).
-    pub provider_kind: &'a str,
+    pub provider_kind: ProviderKind,
     /// Adapter installation id where relevant (channel actors); `None` for
     /// surfaces without an installation (browser OAuth login).
-    pub provider_instance_id: Option<&'a str>,
+    pub provider_instance_id: Option<ProviderInstanceId>,
     /// Stable per-provider subject id (OAuth `sub`, channel actor id).
-    pub external_subject_id: &'a str,
+    pub external_subject_id: ExternalSubjectId,
     /// Email claimed by the provider, if any.
-    pub email: Option<&'a str>,
+    pub email: Option<String>,
     /// Whether the provider asserts the email is verified. Only a verified
     /// email may link to an existing account.
     pub email_verified: bool,
     /// Optional display name.
-    pub display_name: Option<&'a str>,
+    pub display_name: Option<String>,
 }
 
 /// The identity-only key part of an external identity (no email /
 /// profile). Used by the link-only [`lookup`](RebornIdentityResolver::lookup)
 /// and [`bind`](RebornIdentityResolver::bind) paths that channel actors
 /// (e.g. Slack) use, where there is no email and no minting.
-pub struct ExternalIdentityKey<'a> {
-    pub tenant_id: &'a TenantId,
+pub struct ExternalIdentityKey {
+    pub tenant_id: TenantId,
     pub surface_kind: SurfaceKind,
-    pub provider_kind: &'a str,
-    pub provider_instance_id: Option<&'a str>,
-    pub external_subject_id: &'a str,
+    pub provider_kind: ProviderKind,
+    pub provider_instance_id: Option<ProviderInstanceId>,
+    pub external_subject_id: ExternalSubjectId,
 }
 
 /// A persisted canonical user.
@@ -153,17 +154,15 @@ pub trait RebornIdentityResolver: Send + Sync {
     /// email-domain allowlist).
     async fn resolve_or_create(
         &self,
-        identity: ResolveExternalIdentity<'_>,
+        identity: ResolveExternalIdentity,
     ) -> Result<UserId, RebornIdentityError>;
 
     /// Link-only lookup: return the user already bound to this external
     /// identity, or `None`. NEVER creates a user. Channel actors (e.g.
     /// Slack) resolve through this so an unbound actor fails closed
     /// instead of auto-provisioning a Reborn account.
-    async fn lookup(
-        &self,
-        key: ExternalIdentityKey<'_>,
-    ) -> Result<Option<UserId>, RebornIdentityError>;
+    async fn lookup(&self, key: ExternalIdentityKey)
+    -> Result<Option<UserId>, RebornIdentityError>;
 
     /// Link an external identity to an ALREADY-EXISTING user (no user
     /// creation). Re-binding the same key re-points it at `user_id`. The
@@ -171,7 +170,7 @@ pub trait RebornIdentityResolver: Send + Sync {
     /// binding proves the actor is a known Reborn user before binding).
     async fn bind(
         &self,
-        key: ExternalIdentityKey<'_>,
+        key: ExternalIdentityKey,
         user_id: &UserId,
     ) -> Result<(), RebornIdentityError>;
 }
@@ -183,21 +182,21 @@ where
 {
     async fn resolve_or_create(
         &self,
-        identity: ResolveExternalIdentity<'_>,
+        identity: ResolveExternalIdentity,
     ) -> Result<UserId, RebornIdentityError> {
         self.as_ref().resolve_or_create(identity).await
     }
 
     async fn lookup(
         &self,
-        key: ExternalIdentityKey<'_>,
+        key: ExternalIdentityKey,
     ) -> Result<Option<UserId>, RebornIdentityError> {
         self.as_ref().lookup(key).await
     }
 
     async fn bind(
         &self,
-        key: ExternalIdentityKey<'_>,
+        key: ExternalIdentityKey,
         user_id: &UserId,
     ) -> Result<(), RebornIdentityError> {
         self.as_ref().bind(key, user_id).await
