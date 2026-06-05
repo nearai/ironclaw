@@ -1056,18 +1056,27 @@ impl ProtocolHttpEgress for RecordingEgress {
 
 fn slack_response_for_request(request: &EgressRequest) -> EgressResponse {
     if request.path().as_str().starts_with("/api/chat.") {
-        assert!(
-            request
-                .headers()
-                .iter()
-                .any(|header| header.name() == "content-type"
-                    && header.value() == "application/json"),
-            "Slack chat Web API helpers must send JSON content type"
-        );
+        let has_json_content_type = request
+            .headers()
+            .iter()
+            .any(|header| header.name() == "content-type" && header.value() == "application/json");
+        if !has_json_content_type {
+            return EgressResponse::new(
+                200,
+                br#"{"ok":false,"error":"missing_post_type"}"#.to_vec(),
+            );
+        }
     }
     if request.path().as_str() == "/api/chat.postMessage" {
-        let body: serde_json::Value =
-            serde_json::from_slice(request.body()).expect("Slack post body is JSON");
+        let body: serde_json::Value = match serde_json::from_slice(request.body()) {
+            Ok(body) => body,
+            Err(_) => {
+                return EgressResponse::new(
+                    200,
+                    br#"{"ok":false,"error":"invalid_json"}"#.to_vec(),
+                );
+            }
+        };
         let channel = body["channel"].as_str().unwrap_or("DTEST");
         let ts_seed = stable_slack_test_ts(request.body());
         return EgressResponse::new(
