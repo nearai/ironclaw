@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Docs format_paragraph",
+  "description": "Set paragraph style.",
+  "type": "object",
+  "required": [
+    "document_id",
+    "start_index",
+    "end_index"
+  ],
+  "properties": {
+    "document_id": {
+      "type": "string",
+      "description": "The document ID."
+    },
+    "start_index": {
+      "type": "integer",
+      "description": "Start index inclusive."
+    },
+    "end_index": {
+      "type": "integer",
+      "description": "End index exclusive."
+    },
+    "named_style": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Named paragraph style."
+    },
+    "alignment": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Paragraph alignment."
+    },
+    "line_spacing": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Line spacing percentage."
+    }
+  },
+  "additionalProperties": false
+}

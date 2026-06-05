@@ -23,6 +23,7 @@
         "channels/slack",
         "channels/whatsapp",
         "channels/feishu",
+        "channels/wecom",
         "channels/wechat"
       ],
       "shared_auth": null

@@ -38,22 +38,23 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordVersion,
     RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
 
 use crate::{
     AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse, EventCursor,
     GetLoopCheckpointRequest, GetRunStateRequest, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LoopCheckpointRecord, LoopCheckpointStore,
     PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
-    TurnError, TurnEventPage, TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunState,
-    TurnScope, TurnStateStore,
+    SpawnTreeReservation, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
+    TurnAdmissionLimitProvider, TurnAdmissionPolicy, TurnError, TurnEventPage,
+    TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState,
+    TurnScope, TurnSpawnTreeStateStore, TurnStateStore,
     events::project_turn_events,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
+        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
     },
 };
 
@@ -174,9 +175,13 @@ where
         let _guard = record_lock.lock().await;
         for _ in 0..FILESYSTEM_CAS_RETRIES {
             let (snapshot, version) = self.read_snapshot_unlocked().await?;
+            let old_snapshot = snapshot.clone();
             let store = self.build_in_memory_store(snapshot)?;
             let (outcome, store) = apply(store).await;
             let new_snapshot = store.persistence_snapshot();
+            if new_snapshot == old_snapshot {
+                return outcome;
+            }
             let entry = snapshot_entry(&new_snapshot)?;
             let cas = match version {
                 Some(v) => CasExpectation::Version(v),
@@ -265,6 +270,90 @@ where
 }
 
 #[async_trait]
+impl<F> TurnSpawnTreeStateStore for FilesystemTurnStateStore<F>
+where
+    F: RootFilesystem,
+{
+    async fn submit_child_turn(
+        &self,
+        request: SubmitChildRunRequest,
+        admission_policy: &dyn TurnAdmissionPolicy,
+        run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        let profile_resolution = run_profile_resolver
+            .resolve_run_profile(crate::RunProfileResolutionRequest {
+                requested_run_profile: request.requested_run_profile.clone(),
+                ..crate::RunProfileResolutionRequest::interactive_default()
+            })
+            .await;
+        let pre_resolved = PreResolvedRunProfileResolver::new(profile_resolution);
+        self.apply(|store| {
+            let request = request.clone();
+            let pre_resolved = pre_resolved.clone();
+            async move {
+                let outcome = store
+                    .submit_child_turn(request, admission_policy, &pre_resolved)
+                    .await;
+                (outcome, store)
+            }
+        })
+        .await
+    }
+
+    async fn children_of(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        let (snapshot, _) = self.read_snapshot().await?;
+        // Walk the snapshot directly instead of rebuilding the in-memory store
+        // (which constructs every index for every record) just to answer a
+        // single parent→children lookup.
+        Ok(project_children_of(&snapshot, scope, run_id))
+    }
+
+    async fn get_run_record(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        let (snapshot, _) = self.read_snapshot().await?;
+        Ok(project_run_record(&snapshot, scope, run_id))
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+        cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        self.apply(|store| async move {
+            let outcome = store
+                .reserve_tree_descendants(scope, root_run_id, delta, cap)
+                .await;
+            (outcome, store)
+        })
+        .await
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+    ) -> Result<(), TurnError> {
+        self.apply(|store| async move {
+            let outcome = store
+                .release_tree_descendants(scope, root_run_id, delta)
+                .await;
+            (outcome, store)
+        })
+        .await
+    }
+}
+
+#[async_trait]
 impl<F> TurnEventProjectionSource for FilesystemTurnStateStore<F>
 where
     F: RootFilesystem,
@@ -272,6 +361,7 @@ where
     async fn read_turn_events_after(
         &self,
         scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
@@ -279,6 +369,7 @@ where
         Ok(project_turn_events(
             &snapshot.events,
             scope,
+            owner_user_id,
             after,
             limit,
             snapshot.event_retention_floor,
@@ -421,14 +512,28 @@ where
         .await
     }
 
-    async fn record_recovery_required(
+    async fn record_runner_failure(
         &self,
-        request: RecordRecoveryRequiredRequest,
+        request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
         self.apply(|store| {
             let request = request.clone();
             async move {
-                let outcome = store.record_recovery_required(request).await;
+                let outcome = store.record_runner_failure(request).await;
+                (outcome, store)
+            }
+        })
+        .await
+    }
+
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.apply(|store| {
+            let request = request.clone();
+            async move {
+                let outcome = store.relinquish_run(request).await;
                 (outcome, store)
             }
         })
@@ -482,6 +587,51 @@ fn snapshot_path() -> Result<ScopedPath, TurnError> {
             reason: format!("invalid turn-state snapshot path: {error}"),
         }
     })
+}
+
+/// Project the children of a run directly from a snapshot without building
+/// an `InMemoryTurnStateStore`. Mirrors `InMemoryTurnStateStore::children_of`
+/// scope semantics: returns an empty list when the parent is missing or out of
+/// scope, filters children by the parent's scope envelope (tenant/agent/project),
+/// and sorts by `received_at`.
+fn project_children_of(
+    snapshot: &TurnPersistenceSnapshot,
+    scope: &TurnScope,
+    run_id: TurnRunId,
+) -> Vec<TurnRunRecord> {
+    let Some(parent) = snapshot.runs.iter().find(|record| record.run_id == run_id) else {
+        return Vec::new();
+    };
+    if parent.scope != *scope {
+        return Vec::new();
+    }
+    let mut children: Vec<TurnRunRecord> = snapshot
+        .runs
+        .iter()
+        .filter(|record| {
+            record.parent_run_id == Some(run_id)
+                && record.scope.tenant_id == scope.tenant_id
+                && record.scope.agent_id == scope.agent_id
+                && record.scope.project_id == scope.project_id
+        })
+        .cloned()
+        .collect();
+    children.sort_by_key(|record| record.received_at);
+    children
+}
+
+/// Project a run record by id directly from a snapshot, scoped exactly to
+/// `scope`. Mirrors `InMemoryTurnStateStore::get_run_record` semantics.
+fn project_run_record(
+    snapshot: &TurnPersistenceSnapshot,
+    scope: &TurnScope,
+    run_id: TurnRunId,
+) -> Option<TurnRunRecord> {
+    snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id && record.scope == *scope)
+        .cloned()
 }
 
 fn snapshot_entry(snapshot: &TurnPersistenceSnapshot) -> Result<Entry, TurnError> {

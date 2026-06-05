@@ -16,7 +16,8 @@ use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, ProductLiveCancellationProbe,
+    HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
     RunCancellationFactory, RunCancellationHandle,
 };
 use ironclaw_product_adapters::{
@@ -30,7 +31,6 @@ use ironclaw_product_workflow::{
     InboundTurnService, ResolvedBinding,
 };
 use ironclaw_reborn::{
-    loop_driver_host::LoopCapabilityPortFactory,
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
     model_routes::{
         ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
@@ -79,7 +79,7 @@ pub struct ProductLiveAgentLoopHarness {
     cancellation_factory: Arc<ReadyRunCancellationFactory>,
     composition: RebornRuntimeLoopComposition<
         InMemoryTurnStateStore,
-        InMemorySessionThreadService,
+        dyn SessionThreadService,
         RecordingModelGateway,
     >,
     model_requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
@@ -144,10 +144,13 @@ pub fn capability_call_response(
 ) -> HostManagedModelResponse {
     HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        usage: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             surface_version: harness_surface_version(),
             capability_id: harness_capability_id(capability_id.into()),
             input_ref: CapabilityInputRef::new(input_ref.into()).expect("valid harness input ref"),
+            effective_capability_ids: Vec::new(),
             provider_replay: None,
         }]),
     }
@@ -156,9 +159,11 @@ pub fn capability_call_response(
 impl ProductLiveAgentLoopHarness {
     pub async fn new(config: ProductLiveAgentLoopHarnessConfig) -> Self {
         let binding_service = FakeConversationBindingService::new();
+        let user_id = UserId::new(config.user_id).expect("valid harness user id");
         let binding = ResolvedBinding {
             tenant_id: TenantId::new(config.tenant_id).expect("valid harness tenant id"),
-            user_id: UserId::new(config.user_id).expect("valid harness user id"),
+            actor_user_id: user_id.clone(),
+            subject_user_id: Some(user_id),
             thread_id: ThreadId::new(config.thread_id).expect("valid harness thread id"),
             agent_id: Some(AgentId::new(config.agent_id).expect("valid harness agent id")),
             project_id: None,
@@ -167,7 +172,7 @@ impl ProductLiveAgentLoopHarness {
             tenant_id: binding.tenant_id.clone(),
             agent_id: binding.agent_id.clone().expect("harness agent id"),
             project_id: binding.project_id.clone(),
-            owner_user_id: Some(binding.user_id.clone()),
+            owner_user_id: binding.subject_user_id.clone(),
             mission_id: None,
         };
         let thread_service = InMemorySessionThreadService::default();
@@ -228,7 +233,10 @@ impl ProductLiveAgentLoopHarness {
                     results: Arc::clone(&capability_results),
                     capability_id: harness_capability_id(&capability.capability_id),
                     input: capability.input,
-                    user_id: binding.user_id.clone(),
+                    user_id: binding
+                        .subject_user_id
+                        .clone()
+                        .expect("harness subject user id"),
                     cancellation_factory: cancellation_factory.clone(),
                     model_provider: config.model_provider.clone(),
                     model_id: config.model_id.clone(),
@@ -251,6 +259,8 @@ impl ProductLiveAgentLoopHarness {
                     .expect("valid harness model route"),
             ),
         );
+        let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> =
+            Arc::new(ProductLiveCapabilityIo::default());
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             turn_state: Arc::clone(&turn_store),
             thread_service: Arc::new(thread_service.clone()),
@@ -261,6 +271,21 @@ impl ProductLiveAgentLoopHarness {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             capability_factory,
             capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
+            capability_result_writer,
+            subagent_goal_store: Arc::new(
+                ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
+            ),
+            subagent_gate_store: Arc::new(
+                ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(
+                ),
+            ),
+            subagent_definition_resolver: Arc::new(
+                ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
+            ),
+            subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
+                ProductLiveCapabilityIo::default(),
+            ))),
+            subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
             loop_exit_evidence: Arc::new(
                 ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                     Arc::new(thread_service.clone()),
@@ -280,6 +305,7 @@ impl ProductLiveAgentLoopHarness {
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
             safety_context: Some(test_safety_context()),
             hook_dispatcher_builder_factory: None,
+            turn_event_sink: None,
         })
         .expect("product-live planned AgentLoop harness should build");
 
@@ -398,7 +424,7 @@ impl ProductLiveAgentLoopHarness {
             .coordinator
             .cancel_run(CancelRunRequest {
                 scope: self.turn_scope(),
-                actor: TurnActor::new(self.binding.user_id.clone()),
+                actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,
                 reason: SanitizedCancelReason::UserRequested,
                 idempotency_key: IdempotencyKey::new(format!("idem-harness-cancel-{run_id}"))
@@ -444,11 +470,12 @@ impl ProductLiveAgentLoopHarness {
     }
 
     fn turn_scope(&self) -> TurnScope {
-        TurnScope::new(
+        TurnScope::new_with_owner(
             self.binding.tenant_id.clone(),
             self.binding.agent_id.clone(),
             self.binding.project_id.clone(),
             self.binding.thread_id.clone(),
+            self.binding.subject_user_id.clone(),
         )
     }
 }
@@ -527,10 +554,13 @@ impl ScriptedHostRuntimeToolCall {
         };
         Ok(Some(HostManagedModelResponse {
             safe_text_deltas: Vec::new(),
+            safe_reasoning_deltas: Vec::new(),
+            usage: None,
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
                 surface_version,
                 capability_id: self.capability_id.clone(),
                 input_ref,
+                effective_capability_ids: vec![self.capability_id.clone()],
                 provider_replay: None,
             }]),
         }))
@@ -784,6 +814,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             result_ref: LoopResultRef::new(self.capability.result_ref.clone())
                 .expect("valid harness result ref"),
             safe_summary: self.capability.safe_summary.clone(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: self.capability.terminate_hint,
         }))
     }

@@ -34,6 +34,7 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_reborn",
     "ironclaw_product_adapters",
     "ironclaw_product_workflow",
+    "ironclaw_triggers",
     "ironclaw_wasm_product_adapters",
 ];
 

@@ -7,7 +7,7 @@ use ironclaw_turns::{
     SanitizedFailure, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
     TurnRunnerId, TurnScope,
     runner::{
-        ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordRecoveryRequiredRequest,
+        ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordRunnerFailureRequest,
         RecoverExpiredLeasesRequest, TurnRunTransitionPort,
     },
 };
@@ -402,7 +402,7 @@ async fn drain_queued_runs(
 
 enum ExecutorTaskOutcome {
     Completed,
-    RecoveryRequired(Option<SanitizedFailure>),
+    TerminalFailure(Option<SanitizedFailure>),
 }
 
 fn spawn_executor_task(
@@ -429,10 +429,10 @@ fn spawn_executor_task(
                 result = &mut executor_result => {
                     break match result {
                         Ok(Ok(())) => ExecutorTaskOutcome::Completed,
-                        Ok(Err(error)) => ExecutorTaskOutcome::RecoveryRequired(Some(
+                        Ok(Err(error)) => ExecutorTaskOutcome::TerminalFailure(Some(
                             error.failure().clone(),
                         )),
-                        Err(_) => ExecutorTaskOutcome::RecoveryRequired(scheduler_failure(
+                        Err(_) => ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
                             "scheduler_executor_panic",
                         )),
                     };
@@ -444,7 +444,7 @@ fn spawn_executor_task(
                         recovery_runner_id,
                         recovery_lease_token,
                     ).await {
-                        break ExecutorTaskOutcome::RecoveryRequired(scheduler_failure(
+                        break ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
                             "scheduler_heartbeat_failed",
                         ));
                     }
@@ -454,8 +454,8 @@ fn spawn_executor_task(
 
         match outcome {
             ExecutorTaskOutcome::Completed => {}
-            ExecutorTaskOutcome::RecoveryRequired(Some(failure)) => {
-                record_recovery_required(
+            ExecutorTaskOutcome::TerminalFailure(Some(failure)) => {
+                record_terminal_failure(
                     Arc::clone(&transitions),
                     recovery_run_id,
                     recovery_runner_id,
@@ -464,8 +464,8 @@ fn spawn_executor_task(
                 )
                 .await;
             }
-            ExecutorTaskOutcome::RecoveryRequired(None) => {
-                debug!("turn run scheduler could not sanitize recovery category");
+            ExecutorTaskOutcome::TerminalFailure(None) => {
+                debug!("turn run scheduler could not sanitize terminal failure category");
             }
         }
 
@@ -494,7 +494,7 @@ async fn heartbeat_claimed_run(
     true
 }
 
-async fn record_recovery_required(
+async fn record_terminal_failure(
     transitions: Arc<dyn TurnRunTransitionPort>,
     run_id: ironclaw_turns::TurnRunId,
     runner_id: ironclaw_turns::TurnRunnerId,
@@ -502,7 +502,7 @@ async fn record_recovery_required(
     failure: SanitizedFailure,
 ) {
     let result = transitions
-        .record_recovery_required(RecordRecoveryRequiredRequest {
+        .record_runner_failure(RecordRunnerFailureRequest {
             run_id,
             runner_id,
             lease_token,
@@ -510,7 +510,7 @@ async fn record_recovery_required(
         })
         .await;
     if let Err(error) = result {
-        debug!(error = %error, "turn run scheduler recovery transition failed");
+        debug!(error = %error, "turn run scheduler terminal failure transition failed");
     }
 }
 
@@ -520,7 +520,7 @@ fn scheduler_failure(category: &'static str) -> Option<SanitizedFailure> {
         Err(error) => {
             debug!(
                 category,
-                error, "turn run scheduler static recovery category failed validation"
+                error, "turn run scheduler static terminal failure category failed validation"
             );
             None
         }

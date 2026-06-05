@@ -23,9 +23,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(test)]
+use async_trait::async_trait;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
+use ironclaw_reborn_config::BudgetDefaults;
+#[cfg(feature = "root-llm-provider")]
+use ironclaw_reborn_config::RebornBootConfig;
+use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
 use crate::hooks::HooksActivationConfig;
 use crate::input::RebornBuildInput;
@@ -60,63 +66,60 @@ impl Default for RebornRuntimeIdentity {
     }
 }
 
-/// Configuration for the host-managed LLM model gateway wired into the
-/// composed Reborn runtime.
-///
-/// Only available when this crate is built with the `root-llm-provider`
-/// feature. Mirrors `ironclaw_llm::RegistryProviderConfig` but stays in
-/// composition-owned types so callers (the CLI) never name `ironclaw_llm`
-/// directly.
-#[cfg(feature = "root-llm-provider")]
-pub const DEFAULT_LLM_REQUEST_TIMEOUT_SECS: u64 = 120;
-
 pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-#[cfg(feature = "root-llm-provider")]
-#[derive(Debug, Clone)]
-pub struct RebornLlmConfig {
-    /// Provider id (e.g. `"openai"`, `"anthropic"`, `"ollama"`).
-    pub provider_id: String,
-    /// Model id passed to the provider (e.g. `"gpt-4o-mini"`).
-    pub model: String,
-    /// Provider API base URL.
-    pub base_url: String,
-    /// API key, if the provider requires one. `None` for keyless providers
-    /// like Ollama.
-    pub api_key: Option<secrecy::SecretString>,
-    /// API protocol identifier — maps onto
-    /// `ironclaw_llm::ProviderProtocol`. Canonical accepted values:
-    /// `"open_ai_completions"`, `"anthropic"`, `"ollama"`, `"deep_seek"`,
-    /// `"gemini"`, `"open_router"`, `"github_copilot"`.
-    /// Legacy aliases `"openai"`, `"openai_completions"`, `"deepseek"`,
-    /// and `"openrouter"` are also accepted.
-    pub protocol: String,
-    /// Request timeout in seconds passed to the underlying HTTP client.
-    pub request_timeout_secs: u64,
-    /// Extra HTTP headers injected on every request.
-    pub extra_headers: Vec<(String, String)>,
+/// Fire-time access request for a persisted trigger.
+///
+/// This is the host/composition-facing access check shape. Checks are exact:
+/// `None` for `agent_id` or `project_id` means the trigger has no value for
+/// that scope dimension, not that the checker should treat it as a wildcard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerFireAccessCheck {
+    /// Tenant that owns the persisted trigger.
+    pub tenant_id: TenantId,
+    /// User that created the persisted trigger and whose access is evaluated
+    /// again at fire time.
+    pub creator_user_id: UserId,
+    /// Optional agent scope stored on the trigger.
+    pub agent_id: Option<AgentId>,
+    /// Optional project scope stored on the trigger.
+    pub project_id: Option<ProjectId>,
+    /// Trigger being fired. Included so production access checks can audit or
+    /// apply trigger-specific policy without changing this request shape.
+    pub trigger_id: TriggerId,
+    /// Deterministic fire slot being submitted. Included for audit and policy
+    /// decisions that depend on scheduled fire identity.
+    pub fire_slot: Timestamp,
 }
 
-#[cfg(feature = "root-llm-provider")]
-impl RebornLlmConfig {
-    /// Convenience constructor for the common OpenAI Chat Completions case.
-    pub fn openai_compat(
-        provider_id: impl Into<String>,
-        base_url: impl Into<String>,
-        model: impl Into<String>,
-        api_key: secrecy::SecretString,
-    ) -> Self {
-        Self {
-            provider_id: provider_id.into(),
-            model: model.into(),
-            base_url: base_url.into(),
-            api_key: Some(api_key),
-            protocol: "open_ai_completions".to_string(),
-            request_timeout_secs: DEFAULT_LLM_REQUEST_TIMEOUT_SECS,
-            extra_headers: Vec::new(),
-        }
-    }
+/// Result of a fire-time trigger access check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerFireAccessDecision {
+    /// The trigger creator is still authorized for the exact trigger scope.
+    Allowed,
+    /// The trigger creator is not authorized for the exact trigger scope.
+    Denied { reason: String },
+}
+
+/// Error returned when the access backend cannot answer the request.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TriggerFireAccessError {
+    /// The backing access source was unavailable; trigger fire handling should
+    /// treat this as retryable rather than a permanent denial.
+    #[error("trigger fire access backend unavailable: {reason}")]
+    Unavailable { reason: String },
+}
+
+/// Fire-time trigger access checker supplied by the composition root.
+#[async_trait]
+pub trait TriggerFireAccessChecker: Send + Sync {
+    /// Check whether the persisted trigger creator may fire the trigger for
+    /// the exact stored tenant/agent/project scope.
+    async fn check_trigger_fire_access(
+        &self,
+        request: TriggerFireAccessCheck,
+    ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError>;
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -124,17 +127,7 @@ impl RebornLlmConfig {
 pub struct ResolvedRebornLlm {
     provider_id: String,
     model: String,
-    pub(crate) source: ResolvedRebornLlmSource,
-}
-
-#[cfg(feature = "root-llm-provider")]
-#[derive(Debug, Clone)]
-pub(crate) enum ResolvedRebornLlmSource {
-    Catalog(RebornLlmConfig),
-    RegistryProvider {
-        config: ironclaw_llm::RegistryProviderConfig,
-        request_timeout_secs: u64,
-    },
+    pub(crate) config: ironclaw_llm::LlmConfig,
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -147,25 +140,11 @@ impl ResolvedRebornLlm {
         &self.model
     }
 
-    pub fn from_catalog(config: RebornLlmConfig) -> Self {
+    pub fn from_llm_config(config: ironclaw_llm::LlmConfig) -> Self {
         Self {
-            provider_id: config.provider_id.clone(),
-            model: config.model.clone(),
-            source: ResolvedRebornLlmSource::Catalog(config),
-        }
-    }
-
-    pub(crate) fn from_registry_provider(
-        config: ironclaw_llm::RegistryProviderConfig,
-        request_timeout_secs: u64,
-    ) -> Self {
-        Self {
-            provider_id: config.provider_id.clone(),
-            model: config.model.clone(),
-            source: ResolvedRebornLlmSource::RegistryProvider {
-                config,
-                request_timeout_secs,
-            },
+            provider_id: config.active_provider_id(),
+            model: config.active_model_name(),
+            config,
         }
     }
 }
@@ -202,6 +181,65 @@ impl Default for PollSettings {
     }
 }
 
+/// Configuration for the composition-owned scheduled-trigger poller.
+///
+/// This is intentionally separate from [`PollSettings`], which controls
+/// caller-side waiting for an already submitted turn. The trigger poller is a
+/// background worker that scans due trigger records and submits trusted inbound
+/// turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerPollerSettings {
+    pub enabled: bool,
+    pub worker: TriggerPollerWorkerConfig,
+    pub startup_jitter_max: Duration,
+    pub tick_jitter_max: Duration,
+    pub(crate) authorizer: TriggerPollerAuthorizerConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerPollerAuthorizerConfig {
+    CreatorAccessRequired,
+    #[cfg(any(test, feature = "test-support"))]
+    TenantScopedPlaceholderForTest,
+}
+
+impl Default for TriggerPollerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            worker: TriggerPollerWorkerConfig::default(),
+            startup_jitter_max: Duration::ZERO,
+            tick_jitter_max: Duration::ZERO,
+            authorizer: TriggerPollerAuthorizerConfig::CreatorAccessRequired,
+        }
+    }
+}
+
+impl TriggerPollerSettings {
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_worker_config(mut self, worker: TriggerPollerWorkerConfig) -> Self {
+        self.worker = worker;
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn enabled_with_tenant_scoped_authorizer_for_test() -> Self {
+        Self::enabled().with_tenant_scoped_authorizer_for_test()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_tenant_scoped_authorizer_for_test(mut self) -> Self {
+        self.authorizer = TriggerPollerAuthorizerConfig::TenantScopedPlaceholderForTest;
+        self
+    }
+}
+
 /// Full input for `build_reborn_runtime` — substrate config plus the extras
 /// needed to assemble a runnable Reborn agent.
 #[derive(Default)]
@@ -209,18 +247,50 @@ pub struct RebornRuntimeInput {
     pub services: Option<RebornBuildInput>,
     #[cfg(feature = "root-llm-provider")]
     pub llm: Option<ResolvedRebornLlm>,
+    /// Operator boot config. When present (and `root-llm-provider` is on), the
+    /// WebUI facade composes the LLM-config settings service from it so the
+    /// settings surface can read/write `providers.json` + `config.toml`.
+    #[cfg(feature = "root-llm-provider")]
+    pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
+    pub trigger_poller: TriggerPollerSettings,
+    pub trigger_fire_access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
+    /// Optional project scope for runtime-owned thread I/O. Channel adapters
+    /// that stamp a project onto inbound turns must set the same project here,
+    /// otherwise the loop host rejects the run before model execution.
+    pub default_project_id: Option<ProjectId>,
+    pub regex_skill_activation_enabled: bool,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
-    /// Hook-framework activation knobs. Default OFF (the rollout-safety
-    /// contract). The env var (`HOOKS_ENABLED`) is read ONCE at the edge that
-    /// populates this input (the CLI / ingress adapter) via
-    /// [`HooksActivationConfig::from_env`]; the composition root consumes this
-    /// typed config and never touches the environment itself.
+    /// Hook-framework activation knobs. Default OFF. Callers resolve
+    /// environment or config into this typed value once at the edge.
     pub hooks: HooksActivationConfig,
-    #[cfg(test)]
+    /// Pre-resolved budget defaults to seed the model-budget accountant.
+    /// The caller owns the config-layer precedence (compiled -> section
+    /// -> env) and must call [`BudgetDefaults::validate`] before
+    /// supplying. When unset, `build_reborn_runtime` falls back to
+    /// `BudgetDefaults::compiled_defaults().with_env()` + validate so
+    /// existing call sites keep working; new call sites should provide
+    /// a resolved value to avoid the runtime reading process env
+    /// (review feedback Thermo-Nuclear #1).
+    pub budget_defaults: Option<BudgetDefaults>,
+    /// Observer that receives every `BudgetEvent` emitted by the model
+    /// budget accountant / resource governor. When unset, the runtime
+    /// installs [`TracingBudgetEventObserver`](crate::TracingBudgetEventObserver)
+    /// so events still reach the tracing pipeline; production owners
+    /// supply their own observer (SSE projection, WS fan-out,
+    /// telemetry export) here.
+    pub budget_event_observer: Option<Arc<dyn crate::BudgetEventObserver>>,
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
+    /// Cost table to pair with the model-gateway override. Without this,
+    /// tests that use `with_test_model_gateway` would lose the accountant
+    /// entirely (the LLM-resolved cost table comes from
+    /// `LlmModelProfilePolicy::build_cost_table()` which the test
+    /// override skips).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) model_cost_table_override: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>>,
 }
 
 impl RebornRuntimeInput {
@@ -233,19 +303,47 @@ impl RebornRuntimeInput {
             services: Some(services),
             #[cfg(feature = "root-llm-provider")]
             llm: None,
+            #[cfg(feature = "root-llm-provider")]
+            boot: None,
             runner: TurnRunnerSettings::default(),
+            trigger_poller: TriggerPollerSettings::default(),
+            trigger_fire_access_checker: None,
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
+            default_project_id: None,
+            regex_skill_activation_enabled: true,
             skill_context_source: None,
             hooks: HooksActivationConfig::default(),
-            #[cfg(test)]
+            budget_defaults: None,
+            budget_event_observer: None,
+            #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            model_cost_table_override: None,
         }
     }
 
-    #[cfg(feature = "root-llm-provider")]
-    pub fn with_llm(mut self, llm: RebornLlmConfig) -> Self {
-        self.llm = Some(ResolvedRebornLlm::from_catalog(llm));
+    /// Supply pre-resolved budget defaults. The caller is responsible
+    /// for applying the desired config-layer precedence (compiled,
+    /// TOML, env) and calling [`BudgetDefaults::validate`] before
+    /// passing. Without this, `build_reborn_runtime` falls back to
+    /// `compiled_defaults().with_env()` + validate (review feedback
+    /// Thermo-Nuclear #1: budget defaults belong to the composition
+    /// root, not a wiring helper).
+    pub fn with_budget_defaults(mut self, defaults: BudgetDefaults) -> Self {
+        self.budget_defaults = Some(defaults);
+        self
+    }
+
+    /// Install a custom observer for the model budget event stream.
+    /// Production callers wire this to project events onto SSE / WS /
+    /// telemetry; without it, the runtime installs the tracing-only
+    /// observer so events still surface in structured logs.
+    pub fn with_budget_event_observer(
+        mut self,
+        observer: Arc<dyn crate::BudgetEventObserver>,
+    ) -> Self {
+        self.budget_event_observer = Some(observer);
         self
     }
 
@@ -255,8 +353,29 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Supply the operator boot config so the WebUI facade can compose the
+    /// LLM-config settings service.
+    #[cfg(feature = "root-llm-provider")]
+    pub fn with_boot_config(mut self, boot: RebornBootConfig) -> Self {
+        self.boot = Some(boot);
+        self
+    }
+
     pub fn with_runner_settings(mut self, runner: TurnRunnerSettings) -> Self {
         self.runner = runner;
+        self
+    }
+
+    pub fn with_trigger_poller_settings(mut self, trigger_poller: TriggerPollerSettings) -> Self {
+        self.trigger_poller = trigger_poller;
+        self
+    }
+
+    pub fn with_trigger_fire_access_checker(
+        mut self,
+        checker: Arc<dyn TriggerFireAccessChecker>,
+    ) -> Self {
+        self.trigger_fire_access_checker = Some(checker);
         self
     }
 
@@ -270,26 +389,70 @@ impl RebornRuntimeInput {
         self
     }
 
+    pub fn with_default_project_id(mut self, project_id: ProjectId) -> Self {
+        self.default_project_id = Some(project_id);
+        self
+    }
+
+    pub fn with_regex_skill_activation_enabled(mut self, enabled: bool) -> Self {
+        self.regex_skill_activation_enabled = enabled;
+        self
+    }
+
+    /// Override the runtime owner id after the input (and its host-access
+    /// disclosure gate) has been built. The WebChat v2 serve path uses this to
+    /// align the runtime owner with the authenticated WebUI user. No-op when
+    /// the services input is absent.
+    pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
+        self.services = self
+            .services
+            .map(|services| services.with_owner_id(owner_id));
+        self
+    }
+
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
         self
     }
 
-    /// Set the hook-framework activation config. Callers at the edge resolve
-    /// this once (e.g. [`HooksActivationConfig::from_env`]) and thread the typed
-    /// value through rather than letting the composition root read the
-    /// environment itself.
     pub fn with_hooks_config(mut self, hooks: HooksActivationConfig) -> Self {
         self.hooks = hooks;
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_model_gateway_override(
+    pub fn grants_trusted_laptop_access(&self) -> bool {
+        self.services
+            .as_ref()
+            .is_some_and(|services| services.grants_trusted_laptop_access())
+    }
+
+    /// Test-only hook: drive `build_reborn_runtime` with a stub
+    /// `HostManagedModelGateway` (e.g. [`crate::test_support::BudgetTestGateway`])
+    /// instead of the LLM-backed gateway. Gated on `cfg(any(test,
+    /// feature = "test-support"))` so it is available to this crate's
+    /// own tests and to downstream integration tests that opt in via
+    /// the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_model_gateway_override(
         mut self,
         gateway: Arc<dyn HostManagedModelGateway>,
     ) -> Self {
         self.model_gateway_override = Some(gateway);
+        self
+    }
+
+    /// Test-only hook: pair the model gateway override with a custom
+    /// cost table. Without this, gateway overrides produce no
+    /// accountant and budget tests cannot assert ledger state — the
+    /// LLM-derived cost table comes from
+    /// `LlmModelProfilePolicy::build_cost_table()` which the test
+    /// override skips.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_model_cost_table_override(
+        mut self,
+        cost_table: Arc<dyn ironclaw_loop_support::ModelCostTable>,
+    ) -> Self {
+        self.model_cost_table_override = Some(cost_table);
         self
     }
 }

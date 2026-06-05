@@ -1,59 +1,108 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    EffectKind, NetworkMethod, NetworkPolicy, PermissionMode, ResourceCeiling, ResourceEstimate,
-    ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError,
-    RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest, RuntimeKind, SandboxQuota,
+    EffectKind, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy,
+    PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage,
+    RuntimeDispatchErrorKind, RuntimeHttpEgressError, RuntimeHttpEgressReasonCode,
+    RuntimeHttpEgressRequest, RuntimeHttpSaveTarget, RuntimeKind, SandboxQuota, ScopedPath,
+    VirtualPath, valid_http_field_name,
 };
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 
-use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest, input_error};
+use super::{
+    first_party_capability_manifest,
+    http_output::{HttpDispatchOutput, shape_response},
+    input_error,
+};
 
 pub const HTTP_CAPABILITY_ID: &str = "builtin.http";
+pub const HTTP_SAVE_CAPABILITY_ID: &str = "builtin.http.save";
 
 const DEFAULT_HTTP_TIMEOUT_MS: u32 = 10_000;
 const MAX_HTTP_TIMEOUT_MS: u32 = 30_000;
-const DEFAULT_RESPONSE_BODY_LIMIT: u64 = 512 * 1024;
-const MAX_RESPONSE_BODY_LIMIT: u64 = 700 * 1024;
+pub(super) const MAX_HTTP_OUTPUT_BYTES: u64 = 15 * 1024 * 1024;
+const DEFAULT_INLINE_RESPONSE_BODY_LIMIT: u64 = 48 * 1024;
+const MAX_INLINE_RESPONSE_BODY_LIMIT: u64 = 256 * 1024;
+const DEFAULT_SAVE_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
+const MAX_SAVE_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
 const DEFAULT_NETWORK_EGRESS_BYTES: u64 = 16 * 1024;
 const MAX_NETWORK_EGRESS_BYTES: u64 = 256 * 1024;
 const MAX_HTTP_HEADERS: usize = 64;
 const MAX_HTTP_HEADER_NAME_BYTES: usize = 512;
 const MAX_HTTP_HEADER_VALUE_BYTES: usize = 8 * 1024;
 
-pub(super) struct HttpDispatchOutput {
-    pub output: Value,
-    pub network_egress_bytes: u64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpSaveMode {
+    Disabled,
+    Required,
+}
+
+impl HttpSaveMode {
+    fn for_capability(capability_id: &str) -> Self {
+        if capability_id == HTTP_SAVE_CAPABILITY_ID {
+            Self::Required
+        } else {
+            Self::Disabled
+        }
+    }
 }
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
-    first_party_capability_manifest(
+    http_manifest(
         HTTP_CAPABILITY_ID,
         "Perform an outbound HTTP request through host egress. Redirect responses are returned; the host transport does not follow them.",
         vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )
+}
+
+pub(super) fn save_manifest() -> Result<CapabilityManifest, ExtensionError> {
+    http_manifest(
+        HTTP_SAVE_CAPABILITY_ID,
+        "Perform an outbound HTTP request through host egress and save the sanitized response body through scoped filesystem authority.",
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::WriteFilesystem,
+        ],
+    )
+}
+
+fn http_manifest(
+    capability_id: &str,
+    description: &str,
+    effects: Vec<EffectKind>,
+) -> Result<CapabilityManifest, ExtensionError> {
+    first_party_capability_manifest(
+        capability_id,
+        description,
+        effects,
         PermissionMode::Ask,
-        Some(ResourceProfile {
-            default_estimate: ResourceEstimate {
-                wall_clock_ms: Some(DEFAULT_HTTP_TIMEOUT_MS.into()),
-                output_bytes: Some(DEFAULT_RESPONSE_BODY_LIMIT),
-                network_egress_bytes: Some(DEFAULT_NETWORK_EGRESS_BYTES),
-                ..ResourceEstimate::default()
-            },
-            hard_ceiling: Some(ResourceCeiling {
-                max_usd: None,
-                max_input_tokens: None,
-                max_output_tokens: None,
-                max_wall_clock_ms: Some(MAX_HTTP_TIMEOUT_MS.into()),
-                max_output_bytes: Some(FIRST_PARTY_MAX_OUTPUT_BYTES),
-                sandbox: Some(SandboxQuota {
-                    network_egress_bytes: Some(MAX_NETWORK_EGRESS_BYTES),
-                    ..SandboxQuota::default()
-                }),
+        Some(http_resource_profile()),
+    )
+}
+
+fn http_resource_profile() -> ResourceProfile {
+    ResourceProfile {
+        default_estimate: ResourceEstimate {
+            wall_clock_ms: Some(DEFAULT_HTTP_TIMEOUT_MS.into()),
+            output_bytes: Some(DEFAULT_INLINE_RESPONSE_BODY_LIMIT),
+            network_egress_bytes: Some(DEFAULT_NETWORK_EGRESS_BYTES),
+            ..ResourceEstimate::default()
+        },
+        hard_ceiling: Some(ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: Some(MAX_HTTP_TIMEOUT_MS.into()),
+            max_output_bytes: Some(MAX_HTTP_OUTPUT_BYTES),
+            sandbox: Some(SandboxQuota {
+                network_egress_bytes: Some(MAX_NETWORK_EGRESS_BYTES),
+                ..SandboxQuota::default()
             }),
         }),
-    )
+    }
 }
 
 pub(super) async fn dispatch(
@@ -68,61 +117,112 @@ pub(super) async fn dispatch(
     // Keep this handler as a translator only: URL parsing, DNS/private-IP
     // enforcement, allowlists, transport, and credential injection remain in
     // HostHttpEgressService / ironclaw_network.
-    let mut headers = headers(&request.input)?;
+    let unsafe_raw_diagnostics_allowed = request.services.unsafe_raw_diagnostics_allowed;
+    let mut headers = headers(&request.input).map_err(|error| {
+        log_raw_http_input_error_for_local_diagnostics(
+            unsafe_raw_diagnostics_allowed,
+            &request.input,
+            "headers",
+            error,
+        )
+    })?;
     if json_body_needs_default_content_type(&request.input) && !has_header(&headers, "content-type")
     {
         headers.push(("content-type".to_string(), "application/json".to_string()));
     }
+    let method = method(&request.input).map_err(|error| {
+        log_raw_http_input_error_for_local_diagnostics(
+            unsafe_raw_diagnostics_allowed,
+            &request.input,
+            "method",
+            error,
+        )
+    })?;
+    let url = required_string(&request.input, "url")
+        .map_err(|error| {
+            log_raw_http_input_error_for_local_diagnostics(
+                unsafe_raw_diagnostics_allowed,
+                &request.input,
+                "url",
+                error,
+            )
+        })?
+        .to_string();
+    let body = body(&request.input).map_err(|error| {
+        log_raw_http_input_error_for_local_diagnostics(
+            unsafe_raw_diagnostics_allowed,
+            &request.input,
+            "body",
+            error,
+        )
+    })?;
+    let save_mode = HttpSaveMode::for_capability(request.capability_id.as_str());
+    let response_body_limit = response_body_limit(&request.input, save_mode).map_err(|error| {
+        log_raw_http_input_error_for_local_diagnostics(
+            unsafe_raw_diagnostics_allowed,
+            &request.input,
+            "response_body_limit",
+            error,
+        )
+    })?;
+    let timeout_ms = timeout_ms(&request.input).map_err(|error| {
+        log_raw_http_input_error_for_local_diagnostics(
+            unsafe_raw_diagnostics_allowed,
+            &request.input,
+            "timeout_ms",
+            error,
+        )
+    })?;
+    let save_body_to =
+        save_body_to(&request.input, request.mounts.as_ref(), save_mode).map_err(|error| {
+            log_raw_http_input_error_for_local_diagnostics(
+                unsafe_raw_diagnostics_allowed,
+                &request.input,
+                "save_to",
+                error,
+            )
+        })?;
     let http_request = RuntimeHttpEgressRequest {
         runtime: RuntimeKind::FirstParty,
         scope: request.scope.clone(),
         capability_id: request.capability_id.clone(),
-        method: method(&request.input)?,
-        url: required_string(&request.input, "url")?.to_string(),
+        method,
+        url,
         headers,
-        body: body(&request.input)?,
+        body,
         network_policy: staged_policy_placeholder(),
         credential_injections: Vec::new(),
         // Always send a bounded limit, even when caller omits the field, so the
         // host transport stays fail-closed instead of inheriting an unbounded cap.
-        response_body_limit: Some(response_body_limit(&request.input)?),
-        timeout_ms: Some(timeout_ms(&request.input)?),
+        response_body_limit: Some(response_body_limit),
+        save_body_to,
+        timeout_ms: Some(timeout_ms),
     };
-    let response = tokio::task::spawn_blocking(move || egress.execute(http_request))
-        .await
-        .map_err(|error| {
-            if error.is_panic() {
-                tracing::error!("first-party HTTP egress worker panicked");
+    let tool_call_egress = request.services.tool_call_http_egress.clone();
+    let egress_future = async move {
+        match save_mode {
+            HttpSaveMode::Disabled => {
+                let tool_call_egress =
+                    tool_call_egress.ok_or_else(|| RuntimeHttpEgressError::Network {
+                        reason: "tool-call HTTP egress was not configured".to_string(),
+                        request_bytes: 0,
+                        response_bytes: 0,
+                    })?;
+                tool_call_egress
+                    .execute_for_model_visible_output(http_request)
+                    .await
             }
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
-        })?
-        .map_err(http_error)?;
-    let mut output = Map::new();
-    output.insert("status".to_string(), json!(response.status));
-    output.insert("headers".to_string(), response_headers(response.headers));
-    // Response bodies must be valid UTF-8 to appear as body_text. Any invalid
-    // byte returns the full response as body_base64 to avoid lossy surprises.
-    match String::from_utf8(response.body) {
-        Ok(body_text) => {
-            output.insert("body_text".to_string(), Value::String(body_text));
+            HttpSaveMode::Required => egress.execute(http_request).await,
         }
-        Err(error) => {
-            output.insert(
-                "body_base64".to_string(),
-                Value::String(BASE64_STANDARD.encode(error.into_bytes())),
-            );
-        }
-    }
-    output.insert("request_bytes".to_string(), json!(response.request_bytes));
-    output.insert("response_bytes".to_string(), json!(response.response_bytes));
-    output.insert(
-        "redaction_applied".to_string(),
-        json!(response.redaction_applied),
-    );
-    Ok(HttpDispatchOutput {
-        output: Value::Object(output),
-        network_egress_bytes: response.request_bytes,
-    })
+    };
+    let response = super::run_egress_catching_panic(
+        egress_future,
+        "first-party HTTP egress future panicked",
+        || FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend),
+    )
+    .await?
+    .map_err(http_error)?;
+    Ok(shape_response(response, response_body_limit))
 }
 
 fn method(input: &Value) -> Result<NetworkMethod, FirstPartyCapabilityError> {
@@ -180,7 +280,7 @@ fn headers(input: &Value) -> Result<Vec<(String, String)>, FirstPartyCapabilityE
 }
 
 fn header_pair(name: &str, value: &str) -> Result<(String, String), FirstPartyCapabilityError> {
-    if !valid_header_name(name)
+    if !valid_http_field_name(name)
         || name.len() > MAX_HTTP_HEADER_NAME_BYTES
         || value.len() > MAX_HTTP_HEADER_VALUE_BYTES
         || value
@@ -190,33 +290,6 @@ fn header_pair(name: &str, value: &str) -> Result<(String, String), FirstPartyCa
         return Err(input_error());
     }
     Ok((name.to_string(), value.to_string()))
-}
-
-fn valid_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            matches!(
-                byte,
-                b'0'..=b'9'
-                    | b'A'..=b'Z'
-                    | b'a'..=b'z'
-                    | b'!'
-                    | b'#'
-                    | b'$'
-                    | b'%'
-                    | b'&'
-                    | b'\''
-                    | b'*'
-                    | b'+'
-                    | b'-'
-                    | b'.'
-                    | b'^'
-                    | b'_'
-                    | b'`'
-                    | b'|'
-                    | b'~'
-            )
-        })
 }
 
 fn body(input: &Value) -> Result<Vec<u8>, FirstPartyCapabilityError> {
@@ -262,14 +335,20 @@ fn staged_policy_placeholder() -> NetworkPolicy {
     NetworkPolicy::default()
 }
 
-fn response_body_limit(input: &Value) -> Result<u64, FirstPartyCapabilityError> {
-    ranged_u64(
-        input,
-        "response_body_limit",
-        DEFAULT_RESPONSE_BODY_LIMIT,
-        1,
-        MAX_RESPONSE_BODY_LIMIT,
-    )
+fn response_body_limit(
+    input: &Value,
+    save_mode: HttpSaveMode,
+) -> Result<u64, FirstPartyCapabilityError> {
+    let default = match save_mode {
+        HttpSaveMode::Disabled => DEFAULT_INLINE_RESPONSE_BODY_LIMIT,
+        HttpSaveMode::Required => DEFAULT_SAVE_RESPONSE_BODY_LIMIT,
+    };
+    let max = match save_mode {
+        HttpSaveMode::Disabled => MAX_INLINE_RESPONSE_BODY_LIMIT,
+        HttpSaveMode::Required => MAX_SAVE_RESPONSE_BODY_LIMIT,
+    };
+    let limit = ranged_u64(input, "response_body_limit", default, 1, max)?;
+    Ok(limit)
 }
 
 fn timeout_ms(input: &Value) -> Result<u32, FirstPartyCapabilityError> {
@@ -278,9 +357,61 @@ fn timeout_ms(input: &Value) -> Result<u32, FirstPartyCapabilityError> {
         "timeout_ms",
         DEFAULT_HTTP_TIMEOUT_MS.into(),
         1,
-        MAX_HTTP_TIMEOUT_MS.into(),
+        u64::MAX,
     )?;
+    let value = value.min(u64::from(MAX_HTTP_TIMEOUT_MS));
     u32::try_from(value).map_err(|_| input_error())
+}
+
+fn save_body_to(
+    input: &Value,
+    mounts: Option<&MountView>,
+    mode: HttpSaveMode,
+) -> Result<Option<RuntimeHttpSaveTarget>, FirstPartyCapabilityError> {
+    let Some(value) = input.get("save_to") else {
+        if mode == HttpSaveMode::Required {
+            return Err(input_error());
+        }
+        return Ok(None);
+    };
+    if mode == HttpSaveMode::Disabled {
+        return Err(input_error());
+    }
+    let path = value.as_str().ok_or_else(input_error)?;
+    if path.trim().is_empty() {
+        return Err(input_error());
+    }
+    let mounts = mounts.ok_or_else(input_error)?;
+    let path = mounts
+        .scoped_path(path.to_string())
+        .map_err(|_| input_error())?;
+    let (virtual_path, grant) = mounts
+        .resolve_with_grant(&path)
+        .map_err(|_| input_error())?;
+    if !grant.permissions.write {
+        return Err(input_error());
+    }
+    Ok(Some(RuntimeHttpSaveTarget {
+        mount_grant: Some(write_only_save_grant(&path, virtual_path)?),
+        path,
+    }))
+}
+
+fn write_only_save_grant(
+    path: &ScopedPath,
+    virtual_path: VirtualPath,
+) -> Result<MountGrant, FirstPartyCapabilityError> {
+    Ok(MountGrant::new(
+        MountAlias::new(path.as_str()).map_err(|_| input_error())?,
+        virtual_path,
+        MountPermissions {
+            read: false,
+            write: true,
+            delete: false,
+            list: false,
+            execute: false,
+        },
+    ))
 }
 
 fn ranged_u64(
@@ -300,23 +431,15 @@ fn ranged_u64(
     Ok(value)
 }
 
-fn response_headers(headers: Vec<(String, String)>) -> Value {
-    Value::Array(
-        headers
-            .into_iter()
-            .map(|(name, value)| json!({ "name": name, "value": value }))
-            .collect(),
-    )
-}
-
 fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {
     let kind = match error.reason_code() {
         // Host credential injection failures are backend/client integration faults;
         // production maps RuntimeDispatchErrorKind::Client to RuntimeFailureKind::Backend.
         RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
         RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
+        RuntimeHttpEgressReasonCode::PolicyDenied => RuntimeDispatchErrorKind::PolicyDenied,
         RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
-        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OutputDecode,
+        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
         RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
             RuntimeDispatchErrorKind::OutputTooLarge
         }
@@ -331,4 +454,25 @@ fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {
         usage.network_egress_bytes = error.request_bytes();
     }
     FirstPartyCapabilityError::new(kind).with_usage(usage)
+}
+
+fn log_raw_http_input_error_for_local_diagnostics(
+    unsafe_raw_diagnostics_allowed: bool,
+    input: &Value,
+    validation_stage: &'static str,
+    error: FirstPartyCapabilityError,
+) -> FirstPartyCapabilityError {
+    tracing::debug!(
+        validation_stage,
+        "first-party HTTP tool input validation failed"
+    );
+    if crate::unsafe_raw_http_diagnostics_enabled(unsafe_raw_diagnostics_allowed) {
+        tracing::warn!(
+            validation_stage,
+            raw_http_tool_input = %input,
+            unsafe_raw_diagnostics = true,
+            "unsafe raw HTTP tool input diagnostic enabled"
+        );
+    }
+    error
 }

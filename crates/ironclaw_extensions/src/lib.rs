@@ -9,7 +9,7 @@ use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, ExtensionLifecycleOperation, HostApiError,
     HostPortCatalog, PackageId, PackageIdentity, PackageSource, RequestedTrustClass, RuntimeKind,
-    TrustClass, VirtualPath,
+    TrustClass, VirtualPath, sha256_digest_token,
 };
 use ironclaw_trust::TrustPolicyInput;
 use std::collections::{BTreeSet, HashSet};
@@ -237,6 +237,18 @@ pub struct ExtensionPackage {
     pub root: VirtualPath,
     pub manifest: ExtensionManifest,
     pub capabilities: Vec<CapabilityDescriptor>,
+    pub manifest_digest: Option<String>,
+    pub descriptor_schema_mode: CapabilityDescriptorSchemaMode,
+}
+
+/// How package capability descriptor schemas are derived from the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityDescriptorSchemaMode {
+    /// Descriptors must carry the manifest's `$ref` schema projection.
+    ManifestRefs,
+    /// Descriptors may carry inline schemas, but all non-schema fields must
+    /// still match the manifest projection exactly.
+    InlineDynamic,
 }
 
 impl ExtensionPackage {
@@ -244,47 +256,99 @@ impl ExtensionPackage {
         manifest: ExtensionManifest,
         root: VirtualPath,
     ) -> Result<Self, ExtensionError> {
+        Self::from_manifest_with_digest(manifest, root, None)
+    }
+
+    pub fn from_manifest_toml(
+        manifest: ExtensionManifest,
+        root: VirtualPath,
+        manifest_toml: &str,
+    ) -> Result<Self, ExtensionError> {
+        Self::from_manifest_with_digest(
+            manifest,
+            root,
+            Some(sha256_digest_token(manifest_toml.as_bytes())),
+        )
+    }
+
+    pub fn from_manifest_with_digest(
+        manifest: ExtensionManifest,
+        root: VirtualPath,
+        manifest_digest: Option<String>,
+    ) -> Result<Self, ExtensionError> {
         ensure_extension_root_matches(&manifest.id, &root)?;
-        let expected_prefix = format!("{}.", manifest.id.as_str());
-        let mut seen_capabilities = HashSet::new();
-        let capabilities = manifest
-            .capabilities
-            .iter()
-            .map(|capability| {
-                if !capability.id.as_str().starts_with(&expected_prefix) {
-                    return Err(ExtensionError::InvalidManifest {
-                        reason: format!(
-                            "capability id {} must be provider-prefixed with {}",
-                            capability.id.as_str(),
-                            expected_prefix
-                        ),
-                    });
-                }
-                if !seen_capabilities.insert(capability.id.clone()) {
-                    return Err(ExtensionError::DuplicateCapability {
-                        id: capability.id.clone(),
-                    });
-                }
-                Ok(CapabilityDescriptor {
-                    id: capability.id.clone(),
-                    provider: manifest.id.clone(),
-                    runtime: manifest.runtime_kind(),
-                    trust_ceiling: manifest.descriptor_trust_default,
-                    description: capability.description.clone(),
-                    parameters_schema: descriptor_schema_ref(capability),
-                    effects: capability.effects.clone(),
-                    default_permission: capability.default_permission,
-                    resource_profile: capability.resource_profile.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, ExtensionError>>()?;
+        let capabilities = capability_descriptors_from_manifest(&manifest)?;
 
         Ok(Self {
             id: manifest.id.clone(),
             root,
             manifest,
             capabilities,
+            manifest_digest,
+            descriptor_schema_mode: CapabilityDescriptorSchemaMode::ManifestRefs,
         })
+    }
+
+    pub fn from_host_bundled_manifest_with_inline_dynamic_schemas(
+        manifest: ExtensionManifest,
+        root: VirtualPath,
+        manifest_digest: Option<String>,
+        capabilities: Vec<CapabilityDescriptor>,
+    ) -> Result<Self, ExtensionError> {
+        if manifest.source != ManifestSource::HostBundled {
+            return Err(ExtensionError::InvalidManifest {
+                reason:
+                    "inline dynamic descriptor schemas are only supported for host-bundled packages"
+                        .to_string(),
+            });
+        }
+        ensure_extension_root_matches(&manifest.id, &root)?;
+        let expected = capability_descriptors_from_manifest(&manifest)?;
+        if !descriptors_match_except_schema(&capabilities, &expected) {
+            return Err(ExtensionError::InvalidManifest {
+                reason: "inline dynamic capability descriptors do not match manifest declarations"
+                    .to_string(),
+            });
+        }
+        Ok(Self {
+            id: manifest.id.clone(),
+            root,
+            manifest,
+            capabilities,
+            manifest_digest,
+            descriptor_schema_mode: CapabilityDescriptorSchemaMode::InlineDynamic,
+        })
+    }
+
+    pub fn manifest_digest(&self) -> Option<String> {
+        self.manifest_digest.clone()
+    }
+
+    pub(crate) fn validate_consistency(&self) -> Result<(), ExtensionError> {
+        if self.id != self.manifest.id {
+            return Err(ExtensionError::InvalidManifest {
+                reason: format!(
+                    "package id {} does not match manifest id {}",
+                    self.id, self.manifest.id
+                ),
+            });
+        }
+        ensure_extension_root_matches(&self.manifest.id, &self.root)?;
+        let expected = capability_descriptors_from_manifest(&self.manifest)?;
+        let consistent = match self.descriptor_schema_mode {
+            CapabilityDescriptorSchemaMode::ManifestRefs => self.capabilities == expected,
+            CapabilityDescriptorSchemaMode::InlineDynamic => {
+                self.manifest.source == ManifestSource::HostBundled
+                    && descriptors_match_except_schema(&self.capabilities, &expected)
+            }
+        };
+        if !consistent {
+            return Err(ExtensionError::InvalidManifest {
+                reason: "package capability descriptors do not match manifest declarations"
+                    .to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Build the trust-policy identity for this package.
@@ -331,7 +395,20 @@ impl ExtensionPackage {
     }
 }
 
+fn descriptors_match_except_schema(
+    actual: &[CapabilityDescriptor],
+    expected: &[CapabilityDescriptor],
+) -> bool {
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|(actual, expected)| {
+            let mut normalized = actual.clone();
+            normalized.parameters_schema = expected.parameters_schema.clone();
+            normalized == *expected
+        })
+}
+
 pub mod host_api;
+mod hosted_mcp_discovery;
 mod installations;
 mod lifecycle;
 mod registry;
@@ -339,6 +416,10 @@ pub mod v2;
 
 pub use host_api::capability_provider::{
     CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, CapabilityProviderHostApiContract,
+};
+pub use hosted_mcp_discovery::{
+    HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations, is_hosted_http_mcp_package,
+    package_with_discovered_hosted_mcp_tools,
 };
 pub use v2::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2,
@@ -360,7 +441,7 @@ pub use installations::{
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
 };
-pub use registry::ExtensionRegistry;
+pub use registry::{ExtensionRegistry, SharedExtensionRegistry};
 
 /// Filesystem-backed extension discovery.
 pub struct ExtensionDiscovery;
@@ -428,7 +509,7 @@ impl ExtensionDiscovery {
                     actual: manifest.id,
                 });
             }
-            let package = ExtensionPackage::from_manifest(manifest, entry.path)?;
+            let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, &text)?;
             registry.insert(package)?;
         }
 
@@ -459,6 +540,45 @@ fn extension_id_from_package_root(root: &VirtualPath) -> Result<ExtensionId, Ext
         return Err(invalid_package_root(root));
     }
     Ok(ExtensionId::new(extension_id.to_string())?)
+}
+
+fn capability_descriptors_from_manifest(
+    manifest: &ExtensionManifest,
+) -> Result<Vec<CapabilityDescriptor>, ExtensionError> {
+    let expected_prefix = format!("{}.", manifest.id.as_str());
+    let mut seen_capabilities = HashSet::new();
+    manifest
+        .capabilities
+        .iter()
+        .map(|capability| {
+            if !capability.id.as_str().starts_with(&expected_prefix) {
+                return Err(ExtensionError::InvalidManifest {
+                    reason: format!(
+                        "capability id {} must be provider-prefixed with {}",
+                        capability.id.as_str(),
+                        expected_prefix
+                    ),
+                });
+            }
+            if !seen_capabilities.insert(capability.id.clone()) {
+                return Err(ExtensionError::DuplicateCapability {
+                    id: capability.id.clone(),
+                });
+            }
+            Ok(CapabilityDescriptor {
+                id: capability.id.clone(),
+                provider: manifest.id.clone(),
+                runtime: manifest.runtime_kind(),
+                trust_ceiling: manifest.descriptor_trust_default,
+                description: capability.description.clone(),
+                parameters_schema: descriptor_schema_ref(capability),
+                effects: capability.effects.clone(),
+                default_permission: capability.default_permission,
+                runtime_credentials: capability.runtime_credentials.clone(),
+                resource_profile: capability.resource_profile.clone(),
+            })
+        })
+        .collect()
 }
 
 fn invalid_package_root(root: &VirtualPath) -> ExtensionError {

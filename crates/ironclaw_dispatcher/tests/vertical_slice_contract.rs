@@ -153,6 +153,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoAdapter {
             })?;
         Ok(RuntimeAdapterResult {
             output,
+            display_preview: None,
             output_bytes: usage.output_bytes,
             usage,
             receipt,

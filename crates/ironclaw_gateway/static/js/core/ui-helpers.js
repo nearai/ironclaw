@@ -260,6 +260,7 @@ document.getElementById('memory-save-btn').addEventListener('click', () => saveM
 document.getElementById('memory-cancel-btn').addEventListener('click', () => cancelMemoryEdit());
 document.getElementById('logs-server-level').addEventListener('change', (e) => setServerLogLevel(e.target.value));
 document.getElementById('logs-pause-btn').addEventListener('click', () => toggleLogsPause());
+document.getElementById('logs-download-btn').addEventListener('click', () => downloadLogsJsonl());
 document.getElementById('logs-clear-btn').addEventListener('click', () => clearLogs());
 document.getElementById('wasm-install-btn').addEventListener('click', () => installWasmExtension());
 document.getElementById('mcp-add-btn').addEventListener('click', () => addMcpServer());

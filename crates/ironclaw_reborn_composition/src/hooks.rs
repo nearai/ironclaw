@@ -138,11 +138,17 @@ impl HooksActivationConfig {
     /// case-insensitive) enable the framework; everything else — including an
     /// unset variable or an unparseable value — leaves it disabled.
     pub fn from_env() -> Self {
-        match std::env::var(HOOKS_ENABLED_ENV) {
-            Ok(value) => Self {
+        Self::from_env_value(ironclaw_common::env_helpers::env_or_override(
+            HOOKS_ENABLED_ENV,
+        ))
+    }
+
+    fn from_env_value(value: Option<String>) -> Self {
+        match value {
+            Some(value) => Self {
                 enabled: is_truthy(&value),
             },
-            Err(_) => Self::disabled(),
+            None => Self::disabled(),
         }
     }
 
@@ -279,8 +285,8 @@ fn install_extension_sets(
         let (next, _hook_ids) = registrar
             .install(
                 set.extension_id.clone(),
-                set.extension_version.clone(),
-                set.entries.clone(),
+                &set.extension_version,
+                &set.entries,
                 builder,
             )
             .map_err(|error| RebornBuildError::InvalidConfig {
@@ -327,7 +333,10 @@ pub fn build_hook_dispatcher_builder_factory(
 
 /// Per-extension typed install record captured once at plan-construction so
 /// the per-run rebuild never re-parses TOML (the only fallible, external-input
-/// step). `HookManifestEntry` is cheap to clone relative to per-run dispatch.
+/// step). The entries are *lent* to `HookRegistrar::install` by reference on
+/// every rebuild (it takes `&[HookManifestEntry]`), so a host spawn never
+/// clones the whole entry vector — only the inner hook body data the registrar
+/// must move into each constructed hook.
 struct ExtensionInstallSet {
     extension_id: ironclaw_host_api::ExtensionId,
     extension_version: String,
@@ -596,6 +605,29 @@ prompt_doc_ref = "prompts/{id}/run.md"
         assert!(!HooksActivationConfig::default().is_enabled());
         assert!(!HooksActivationConfig::disabled().is_enabled());
         assert!(HooksActivationConfig::enabled().is_enabled());
+    }
+
+    #[test]
+    fn from_env_returns_enabled_when_hooks_enabled_set_to_true() {
+        // `truthy_tokens_enable_only_canonical_values` covers `is_truthy`
+        // directly; this drives the `from_env` wrapper through the workspace's
+        // safe runtime env overlay so a regression that drops env lookup is
+        // caught without unsafe process-env mutation.
+        ironclaw_common::env_helpers::set_runtime_env(HOOKS_ENABLED_ENV, "true");
+        let enabled = HooksActivationConfig::from_env().is_enabled();
+        ironclaw_common::env_helpers::remove_runtime_env(HOOKS_ENABLED_ENV);
+        assert!(
+            enabled,
+            "HOOKS_ENABLED=true must enable the framework through from_env"
+        );
+    }
+
+    #[test]
+    fn from_env_defaults_to_disabled_when_unset() {
+        // Pin the fail-safe-OFF half of the env parser: an absent value must
+        // leave the framework disabled.
+        let enabled = HooksActivationConfig::from_env_value(None).is_enabled();
+        assert!(!enabled, "unset HOOKS_ENABLED must leave the framework OFF");
     }
 
     #[test]

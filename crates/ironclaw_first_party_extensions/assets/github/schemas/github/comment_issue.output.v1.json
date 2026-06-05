@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub comment issue output",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "id": { "type": "integer" },
+    "node_id": { "type": "string" },
+    "html_url": { "type": "string" },
+    "issue_url": { "type": "string" },
+    "body": { "type": "string" },
+    "user": { "type": "object" },
+    "created_at": { "type": "string" },
+    "updated_at": { "type": "string" }
+  },
+  "required": ["id", "html_url", "body"]
+}

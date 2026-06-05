@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Drive share_file",
+  "description": "Share a file or folder with someone.",
+  "type": "object",
+  "required": [
+    "file_id",
+    "email"
+  ],
+  "properties": {
+    "file_id": {
+      "type": "string",
+      "description": "The file ID to share."
+    },
+    "email": {
+      "type": "string",
+      "description": "Recipient email address."
+    },
+    "role": {
+      "type": "string",
+      "description": "Permission role. Defaults to reader."
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Optional sharing notification message."
+    }
+  },
+  "additionalProperties": false
+}

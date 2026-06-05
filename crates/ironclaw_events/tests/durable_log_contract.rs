@@ -908,6 +908,7 @@ async fn direct_construction_serialize_path_resanitizes_error_kind() {
         timestamp: chrono::Utc::now(),
         kind: RuntimeEventKind::DispatchFailed,
         scope,
+        parent_invocation_id: None,
         capability_id: capability_id(),
         provider: Some(extension_id()),
         runtime: Some(RuntimeKind::Wasm),

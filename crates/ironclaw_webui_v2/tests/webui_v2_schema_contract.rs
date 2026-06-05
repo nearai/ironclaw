@@ -1,9 +1,11 @@
 use chrono::Utc;
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, ThreadId};
 use ironclaw_product_workflow::{
-    AuthPromptView, FinalReplyView, GatePromptView, ProductOutboundPayload, ProductProjectionItem,
-    ProductProjectionState, ProgressKind, ProgressUpdateView, ProjectionCursor,
-    RebornCancelRunResponse, RebornGetRunStateResponse, RebornSubmitTurnResponse,
+    AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
+    CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundPayload,
+    ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase, ProgressKind,
+    ProgressUpdateView, ProjectionCursor, RebornCancelRunResponse, RebornGetRunStateResponse,
+    RebornSubmitTurnResponse,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, EventCursor, RunProfileId, RunProfileVersion, SanitizedFailure, TurnRunId,
@@ -25,6 +27,43 @@ fn progress(kind: ProgressKind) -> ProgressUpdateView {
         turn_run_id: run_id(),
         kind,
         generated_at: Utc::now(),
+    }
+}
+
+fn capability_activity() -> CapabilityActivityView {
+    CapabilityActivityView {
+        invocation_id: InvocationId::new(),
+        turn_run_id: Some(run_id()),
+        thread_id: Some(ThreadId::new("thread-alpha").expect("thread")),
+        capability_id: CapabilityId::new("script.echo").expect("capability"),
+        status: CapabilityActivityStatusView::Running,
+        provider: Some(ExtensionId::new("script").expect("provider")),
+        runtime: Some(RuntimeKind::Script),
+        process_id: None,
+        output_bytes: None,
+        error_kind: None,
+        updated_at: Utc::now(),
+    }
+}
+
+fn capability_display_preview() -> CapabilityDisplayPreviewView {
+    CapabilityDisplayPreviewView {
+        timeline_message_id: Some("timeline-message-1".to_string()),
+        invocation_id: InvocationId::new(),
+        turn_run_id: Some(run_id()),
+        thread_id: Some(ThreadId::new("thread-alpha").expect("thread")),
+        capability_id: CapabilityId::new("builtin.read_file").expect("capability"),
+        status: CapabilityActivityStatusView::Completed,
+        title: "read_file".to_string(),
+        subtitle: Some("src/main.rs".to_string()),
+        input_summary: Some("path: src/main.rs".to_string()),
+        output_summary: Some("read file".to_string()),
+        output_preview: Some("fn main() {}".to_string()),
+        output_kind: Some("text".to_string()),
+        output_bytes: Some(12),
+        result_ref: Some("result:tool-output".to_string()),
+        truncated: false,
+        updated_at: Utc::now(),
     }
 }
 
@@ -51,6 +90,11 @@ fn auth_prompt() -> AuthPromptView {
         auth_request_ref: "auth:oauth".to_string(),
         headline: "Connect account".to_string(),
         body: "Connect before continuing.".to_string(),
+        challenge_kind: None,
+        provider: None,
+        account_label: None,
+        authorization_url: None,
+        expires_at: None,
     }
 }
 
@@ -103,10 +147,41 @@ fn projection_state() -> ProductProjectionState {
             ProductProjectionItem::RunStatus {
                 run_id: run_id(),
                 status: "running".to_string(),
+                failure_category: None,
+                failure_summary: None,
+            },
+            ProductProjectionItem::RunStatus {
+                run_id: run_id(),
+                status: "failed".to_string(),
+                failure_category: Some(
+                    ironclaw_turns::SanitizedFailure::new("driver_failed").unwrap(),
+                ),
+                failure_summary: Some(
+                    "The run failed because the execution driver reported an error.".to_string(),
+                ),
+            },
+            ProductProjectionItem::WorkSummary {
+                id: "work-summary-1".to_string(),
+                run_id: run_id(),
+                phase: ProductWorkSummaryPhase::Planning,
+                body: "checking branch state".to_string(),
             },
         ],
     )
     .expect("projection state")
+}
+
+#[test]
+fn capability_display_preview_event_serializes_timeline_message_id() {
+    let frame = WebChatV2EventFrame {
+        cursor: cursor(),
+        event: WebChatV2Event::CapabilityDisplayPreview {
+            preview: capability_display_preview(),
+        },
+    };
+
+    let json = serde_json::to_value(&frame).expect("serialize frame");
+    assert_eq!(json["preview"]["timeline_message_id"], "timeline-message-1");
 }
 
 #[test]
@@ -129,6 +204,18 @@ fn webchat_v2_event_schema_has_stable_wire_names() {
                 progress: progress(ProgressKind::ToolRunning),
             },
             "capability_progress",
+        ),
+        (
+            WebChatV2Event::CapabilityActivity {
+                activity: capability_activity(),
+            },
+            "capability_activity",
+        ),
+        (
+            WebChatV2Event::CapabilityDisplayPreview {
+                preview: capability_display_preview(),
+            },
+            "capability_display_preview",
         ),
         (
             WebChatV2Event::Gate {
@@ -203,6 +290,14 @@ fn outbound_payload_mapping_covers_every_browser_event_variant() {
             ProductOutboundPayload::Progress(progress(ProgressKind::ToolRunning)),
             "capability_progress",
         ),
+        (
+            ProductOutboundPayload::CapabilityActivity(capability_activity()),
+            "capability_activity",
+        ),
+        (
+            ProductOutboundPayload::CapabilityDisplayPreview(capability_display_preview()),
+            "capability_display_preview",
+        ),
         (ProductOutboundPayload::GatePrompt(gate_prompt()), "gate"),
         (
             ProductOutboundPayload::AuthPrompt(auth_prompt()),
@@ -220,6 +315,7 @@ fn outbound_payload_mapping_covers_every_browser_event_variant() {
             },
             "projection_update",
         ),
+        (ProductOutboundPayload::KeepAlive, "keep_alive"),
     ];
 
     for (payload, expected_type) in cases {

@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Slides get_presentation",
+  "description": "Get presentation metadata.",
+  "type": "object",
+  "required": [
+    "presentation_id"
+  ],
+  "properties": {
+    "presentation_id": {
+      "type": "string",
+      "description": "The presentation ID."
+    }
+  },
+  "additionalProperties": false
+}

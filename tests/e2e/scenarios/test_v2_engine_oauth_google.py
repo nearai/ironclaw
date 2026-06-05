@@ -180,14 +180,15 @@ def _write_google_skill(skills_dir: str, mock_api_host: str):
     skill_content = f"""---
 name: google_drive
 version: "1.0.0"
-keywords:
-  - google
-  - drive
-  - files
-  - docs
-tags:
-  - google
-  - api
+activation:
+  keywords:
+    - google
+    - drive
+    - files
+    - docs
+  tags:
+    - google
+    - api
 credentials:
   - name: google_drive_token
     provider: google

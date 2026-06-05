@@ -124,6 +124,7 @@ struct ProjectionValidationLiveCacheKey {
 enum ProjectionEnvelopeKind {
     ThreadSnapshot,
     ThreadUpdates,
+    ThreadLiveUpdate,
     DeliveryStatus,
     Debug,
 }
@@ -224,6 +225,7 @@ fn envelope_kind(envelope: &ProductProjectionEnvelope) -> ProjectionEnvelopeKind
     match envelope {
         ProductProjectionEnvelope::ThreadSnapshot(_) => ProjectionEnvelopeKind::ThreadSnapshot,
         ProductProjectionEnvelope::ThreadUpdates(_) => ProjectionEnvelopeKind::ThreadUpdates,
+        ProductProjectionEnvelope::ThreadLiveUpdate(_) => ProjectionEnvelopeKind::ThreadLiveUpdate,
         ProductProjectionEnvelope::DeliveryStatus(_) => ProjectionEnvelopeKind::DeliveryStatus,
         ProductProjectionEnvelope::Debug(_) => ProjectionEnvelopeKind::Debug,
     }

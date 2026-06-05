@@ -21,12 +21,20 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `IdempotencyLedger` | Durable action deduplication port |
 | `InMemoryIdempotencyLedger` | Local-dev/test ledger with in-flight lease recovery semantics |
 | `ProductInboundAction` | Durable ledger record for inbound actions |
-| `RebornServicesApi` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; refuses persistent (`always: true`) approvals until an approval-policy port lands |
+| `ProductCommandAdmissionService` | Source/auth-aware admission port that decides whether a typed product command may execute |
+| `ProductCommandService` | Reborn-native product command execution port for already-admitted typed commands |
+| `ApprovalInteractionService` / `DefaultApprovalInteractionService` | Approval-only product/WebUI boundary for listing redacted pending approval gates and resolving click approve/deny through canonical approval resolver + turn coordinator ports |
+| `RunStateApprovalInteractionReadModel` | Canonical read model that returns status-bearing approval gates from scoped approval-request records plus the parked turn-run locator; `ApprovalInteractionService::list_pending` filters those records to pending UI DTOs |
+| `AuthInteractionService` / `DefaultAuthInteractionService` | Auth-required product/WebUI boundary for listing redacted pending auth gates and resolving credential/callback/cancel decisions through typed auth-flow manager + turn coordinator ports |
+| `RebornServicesApi` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; exposes connectable channel metadata for deterministic UI actions; rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; refuses persistent (`always: true`) approvals until an approval-policy port lands |
 
 ## Dependencies
 
 - `ironclaw_product_adapters` — trait definitions, envelope/ack types, `ProjectionStream` for SSE
+- `ironclaw_approvals` / `ironclaw_authorization` — canonical approval resolution and scoped lease issue ports used by approval interactions
+- `ironclaw_auth` — typed product-auth continuation events consumed by the workflow auth bridge
 - `ironclaw_conversations` — canonical actor/conversation binding and thread route ownership
+- `ironclaw_run_state` — approval request store contract surfaced through approval resolution/read-model ports
 - `ironclaw_turns` — turn coordinator, scope, IDs
 - `ironclaw_threads` — session thread service contract
 - `ironclaw_host_api` — canonical identifiers (TenantId, UserId, etc.)
@@ -41,6 +49,43 @@ Agent-loop note: product-facing turns enter through workflow services and
 canonical turn submission. Do not shortcut directly to `AgentLoopDriver`,
 `PlannedDriver`, host runtime services, or loop host factories from adapters or
 workflow callers.
+
+Product commands are not turns. Adapters may parse slash syntax at the edge, but
+`ProductInboundPayload::Command` must enter the workflow as normalized command
+payloads. The source/auth decision belongs to `ProductCommandAdmissionService`;
+the source-agnostic command model must not know which product surface produced
+the command. Admitted commands dispatch through `ProductCommandService`, not
+`InboundTurnService`, v1 `SubmissionParser`, v1 command routers, or agent-loop
+command handlers.
+
+Approval interactions are click-approval only. Pending approval DTOs must be
+redacted, scoped, and derived from canonical run-state/approval records or a
+projection read model built from them. Approve/deny decisions must go through
+`ApprovalResolutionPort` and `TurnCoordinator`; product/WebUI code must not
+directly execute tools, mutate approval stores ad hoc, or implement
+`AlwaysAllow` before a durable approval-policy port exists. High-value signing
+and attested approvals require a separate service shape with canonical payload
+attestation and must not be folded into this redacted click-approval DTO.
+
+Auth interactions are auth-required gates only. Pending auth DTOs must be
+redacted, scoped, and derived from typed auth-flow state plus the parked
+turn-run locator. Credential/callback completion refs are opaque host-issued
+references; raw tokens, OAuth codes, verifier material, provider errors, host
+paths, or backend diagnostics must not enter product payloads or projection
+DTOs. Resume/cancel decisions must go through `AuthFlowManager` and
+`TurnCoordinator`; product/WebUI code must not handle raw credentials, mutate
+auth-flow records directly, or resume blocked auth gates without the
+`BlockedAuthGate` precondition.
+
+WebUI gate resolution routing should use current run-state first: a
+`BlockedApproval` run enters `ApprovalInteractionService`, a `BlockedAuth` run
+enters `AuthInteractionService`, and generic fallback is only for non-typed
+blocked gates or legacy/replay shapes. Do not let generic WebUI gate handling
+resume/cancel auth-blocked runs.
+Typed auth/approval interaction services intentionally re-read run-state through
+`blocked_gate_state` immediately before resume/cancel side effects. Treat that
+second read as a freshness/TOCTOU guard unless a future coordinator returns a
+sealed gate grant that can safely replace it.
 
 WebUI-facing facade methods must bind browser thread ids through
 `SessionThreadService` using a `ThreadScope` derived from the authenticated
@@ -65,6 +110,15 @@ resolve. Thread hints in subscription requests may narrow to the already
 resolved binding only; they are not authority to switch threads or tenants.
 Projection/subscription resolution is lookup-only and must not create bindings,
 threads, or external-event route reservations.
+
+Outbound delivery orchestration starts only after `ironclaw_outbound` resolves
+and validates a communication delivery candidate. `OutboundPolicyService`
+remains the authority for reply-target validation and delivery-attempt metadata.
+Product workflow may attach trusted product target metadata from conversation
+binding and call `ProductAdapter::render_outbound`, but it must not choose a
+different reply target, read outbound preferences itself, or render anything
+before policy approval. Target metadata resolvers must be lookup-only and keyed
+by the sealed validated reply-target binding.
 
 ## Test support
 

@@ -37,6 +37,7 @@ mod component_runtime;
 mod config;
 mod egress_policy;
 mod runner;
+mod runner_immediate_ack;
 mod store;
 
 pub use auth_verifier::{
@@ -56,3 +57,4 @@ pub use runner::{
     NativeProductAdapterRunnerConfig, RunnerError, WebhookAuth, WebhookProcessOutcome,
     evidence_from_bearer_subject, evidence_from_session_subject,
 };
+pub use runner_immediate_ack::ImmediateAckWorkflowObserver;

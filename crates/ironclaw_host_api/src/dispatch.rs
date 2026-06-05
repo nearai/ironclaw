@@ -4,13 +4,15 @@
 //! normalized runtime result. Concrete dispatcher/runtime crates implement the
 //! behavior; caller-facing workflow crates depend only on this neutral port.
 
+use std::fmt;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
     CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
-    ResourceScope, ResourceUsage, RuntimeKind,
+    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -24,6 +26,47 @@ pub struct CapabilityDispatchRequest {
     pub input: Value,
 }
 
+/// Display-only preview metadata for a completed capability result.
+///
+/// This side channel lets runtime/tool implementations provide renderer-ready
+/// material without changing the model-visible capability output shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDisplayOutputPreview {
+    pub output_summary: Option<String>,
+    /// Raw, unsanitized content — callers MUST sanitize before display or logging.
+    /// The canonical sanitization point is the projection layer in
+    /// `ironclaw_reborn_composition`. New consumers must not read this field
+    /// without sanitizing.
+    pub output_preview: String,
+    pub output_kind: String,
+    pub subtitle: Option<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDisplayText {
+    pub text: String,
+    pub truncated: bool,
+}
+
+pub fn truncate_capability_display_text(text: &str, max_bytes: usize) -> CapabilityDisplayText {
+    if text.len() <= max_bytes {
+        return CapabilityDisplayText {
+            text: text.to_string(),
+            truncated: false,
+        };
+    }
+
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    CapabilityDisplayText {
+        text: text[..end].to_string(),
+        truncated: true,
+    }
+}
+
 /// Normalized dispatch result returned by a runtime dispatcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDispatchResult {
@@ -31,6 +74,7 @@ pub struct CapabilityDispatchResult {
     pub provider: ExtensionId,
     pub runtime: RuntimeKind,
     pub output: Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
     pub receipt: ResourceReceipt,
 }
@@ -51,8 +95,10 @@ pub enum RuntimeDispatchErrorKind {
     Memory,
     MethodMissing,
     NetworkDenied,
+    OperationFailed,
     OutputDecode,
     OutputTooLarge,
+    PolicyDenied,
     Resource,
     SecretDenied,
     UndeclaredCapability,
@@ -76,8 +122,10 @@ impl RuntimeDispatchErrorKind {
             Self::Memory => "Memory",
             Self::MethodMissing => "MethodMissing",
             Self::NetworkDenied => "NetworkDenied",
+            Self::OperationFailed => "OperationFailed",
             Self::OutputDecode => "OutputDecode",
             Self::OutputTooLarge => "OutputTooLarge",
+            Self::PolicyDenied => "PolicyDenied",
             Self::Resource => "Resource",
             Self::SecretDenied => "SecretDenied",
             Self::UndeclaredCapability => "UndeclaredCapability",
@@ -102,8 +150,10 @@ impl RuntimeDispatchErrorKind {
             Self::Memory => "memory",
             Self::MethodMissing => "method_missing",
             Self::NetworkDenied => "network_denied",
+            Self::OperationFailed => "operation_failed",
             Self::OutputDecode => "output_decode",
             Self::OutputTooLarge => "output_too_large",
+            Self::PolicyDenied => "policy_denied",
             Self::Resource => "resource",
             Self::SecretDenied => "secret_denied",
             Self::UndeclaredCapability => "undeclared_capability",
@@ -127,6 +177,7 @@ pub enum DispatchFailureKind {
     RuntimeMismatch,
     MissingRuntimeBackend,
     UnsupportedRuntime,
+    AuthRequired,
     Runtime(RuntimeDispatchErrorKind),
 }
 
@@ -138,6 +189,7 @@ impl DispatchFailureKind {
             Self::RuntimeMismatch => "RuntimeMismatch",
             Self::MissingRuntimeBackend => "MissingRuntimeBackend",
             Self::UnsupportedRuntime => "UnsupportedRuntime",
+            Self::AuthRequired => "AuthRequired",
             Self::Runtime(kind) => kind.as_str(),
         }
     }
@@ -150,7 +202,7 @@ impl std::fmt::Display for DispatchFailureKind {
 }
 
 /// Runtime dispatch failures surfaced through the neutral host API port.
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum DispatchError {
     #[error("unknown capability {capability}")]
     UnknownCapability { capability: CapabilityId },
@@ -176,6 +228,17 @@ pub enum DispatchError {
         capability: CapabilityId,
         runtime: RuntimeKind,
     },
+    /// Authentication is required to dispatch this capability.
+    ///
+    /// `required_secrets` names the credentials the caller must stage.  The
+    /// field is intentionally absent from the `Debug` output to avoid leaking
+    /// secret-handle identifiers into logs.
+    #[error("capability {capability} dispatch requires authentication")]
+    AuthRequired {
+        capability: CapabilityId,
+        required_secrets: Vec<SecretHandle>,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    },
     #[error("MCP dispatch failed: {kind}")]
     Mcp { kind: RuntimeDispatchErrorKind },
     #[error("script dispatch failed: {kind}")]
@@ -183,7 +246,91 @@ pub enum DispatchError {
     #[error("WASM dispatch failed: {kind}")]
     Wasm { kind: RuntimeDispatchErrorKind },
     #[error("first-party dispatch failed: {kind}")]
-    FirstParty { kind: RuntimeDispatchErrorKind },
+    FirstParty {
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+    },
+}
+
+impl fmt::Debug for DispatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownCapability { capability } => f
+                .debug_struct("UnknownCapability")
+                .field("capability", capability)
+                .finish(),
+            Self::UnknownProvider {
+                capability,
+                provider,
+            } => f
+                .debug_struct("UnknownProvider")
+                .field("capability", capability)
+                .field("provider", provider)
+                .finish(),
+            Self::RuntimeMismatch {
+                capability,
+                descriptor_runtime,
+                package_runtime,
+            } => f
+                .debug_struct("RuntimeMismatch")
+                .field("capability", capability)
+                .field("descriptor_runtime", descriptor_runtime)
+                .field("package_runtime", package_runtime)
+                .finish(),
+            Self::MissingRuntimeBackend { runtime } => f
+                .debug_struct("MissingRuntimeBackend")
+                .field("runtime", runtime)
+                .finish(),
+            Self::UnsupportedRuntime {
+                capability,
+                runtime,
+            } => f
+                .debug_struct("UnsupportedRuntime")
+                .field("capability", capability)
+                .field("runtime", runtime)
+                .finish(),
+            // `required_secrets` handle names are omitted from Debug output to
+            // prevent leaking secret identifiers into logs and error chains.
+            Self::AuthRequired {
+                capability,
+                required_secrets,
+                credential_requirements,
+            } => f
+                .debug_struct("AuthRequired")
+                .field("capability", capability)
+                .field(
+                    "required_secrets",
+                    &format!("[{} handle(s) redacted]", required_secrets.len()),
+                )
+                .field(
+                    "credential_requirements",
+                    &format!(
+                        "[{} requirement(s) redacted]",
+                        credential_requirements.len()
+                    ),
+                )
+                .finish(),
+            Self::Mcp { kind } => f.debug_struct("Mcp").field("kind", kind).finish(),
+            Self::Script { kind } => f.debug_struct("Script").field("kind", kind).finish(),
+            Self::Wasm { kind } => f.debug_struct("Wasm").field("kind", kind).finish(),
+            Self::FirstParty { kind, .. } => {
+                f.debug_struct("FirstParty").field("kind", kind).finish()
+            }
+        }
+    }
+}
+
+/// Stable two-variant error for staged credential operations.
+///
+/// Both the host-runtime staging layer (`ProductAuthCredentialStageError`) and the
+/// per-extension staging traits (e.g. `GsuiteCredentialStageError`) map 1:1 to this
+/// type so that no mechanical conversion glue is needed across crate boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialStageError {
+    /// Credential is missing, expired, or revoked — user must re-authenticate.
+    AuthRequired,
+    /// Internal staging failure not attributable to the user's credentials.
+    Backend,
 }
 
 impl DispatchError {
@@ -194,10 +341,30 @@ impl DispatchError {
             Self::RuntimeMismatch { .. } => DispatchFailureKind::RuntimeMismatch,
             Self::MissingRuntimeBackend { .. } => DispatchFailureKind::MissingRuntimeBackend,
             Self::UnsupportedRuntime { .. } => DispatchFailureKind::UnsupportedRuntime,
+            Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
             Self::Mcp { kind }
             | Self::Script { kind }
             | Self::Wasm { kind }
-            | Self::FirstParty { kind } => DispatchFailureKind::Runtime(*kind),
+            | Self::FirstParty { kind, .. } => DispatchFailureKind::Runtime(*kind),
+        }
+    }
+
+    /// Stable event-token string for the error, suitable for telemetry and structured logging.
+    ///
+    /// This is the single canonical source for dispatch error event tokens; crates should
+    /// call this method rather than maintaining a parallel local `match` over `DispatchError`.
+    pub fn event_kind(&self) -> &'static str {
+        match self {
+            Self::UnknownCapability { .. } => "unknown_capability",
+            Self::UnknownProvider { .. } => "unknown_provider",
+            Self::RuntimeMismatch { .. } => "runtime_mismatch",
+            Self::MissingRuntimeBackend { .. } => "missing_runtime_backend",
+            Self::UnsupportedRuntime { .. } => "unsupported_runtime",
+            Self::AuthRequired { .. } => "auth_required",
+            Self::Mcp { kind }
+            | Self::Script { kind }
+            | Self::Wasm { kind }
+            | Self::FirstParty { kind, .. } => kind.event_kind(),
         }
     }
 }

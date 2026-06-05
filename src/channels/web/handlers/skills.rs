@@ -462,6 +462,7 @@ mod tests {
         let metadata = ironclaw_skills::registry::InstalledSkillMetadata {
             source_url: Some("https://example.com/skill".to_string()),
             source_subdir: None,
+            ..Default::default()
         };
         let extra_files = vec![
             ironclaw_skills::registry::InstallFile {

@@ -122,6 +122,13 @@ where
 fn skill_bundle_source_error_to_context_error(
     error: SkillBundleSourceError,
 ) -> HostSkillContextBuildError {
+    tracing::warn!(
+        component = "skill_bundle_context_source",
+        operation = "map_source_error",
+        error = %error,
+        error_debug = ?error,
+        "skill bundle source error mapped to safe skill context error"
+    );
     // Collapse bundle-source internals into the public-safe context error taxonomy:
     // unavailable, parse/policy failure, budget exhaustion, or internal bug.
     match error {
@@ -465,7 +472,9 @@ mod tests {
         assert_eq!(snippets.len(), 1);
         assert_eq!(snippets[0].snippet_ref, "skill:alpha");
         assert!(snippets[0].safe_summary.contains("safe alpha description"));
-        assert!(snippets[0].safe_summary.contains("trusted alpha prompt"));
+        assert!(!snippets[0].safe_summary.contains("trusted alpha prompt"));
+        assert!(snippets[0].model_content.contains("safe alpha description"));
+        assert!(snippets[0].model_content.contains("trusted alpha prompt"));
     }
 
     #[tokio::test]
@@ -501,7 +510,7 @@ mod tests {
         );
         assert!(
             !snippets[0]
-                .safe_summary
+                .model_content
                 .contains("RAW_INSTALLED_PROMPT_SENTINEL")
         );
     }
