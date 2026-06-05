@@ -12,6 +12,8 @@ use crate::{
     LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
 };
 
+const OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES: usize = 512;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornConnectableChannelListResponse {
     pub channels: Vec<RebornConnectableChannelInfo>,
@@ -246,6 +248,133 @@ pub struct RebornListThreadsResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornListAutomationsResponse {
     pub automations: Vec<RebornAutomationInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOutboundPreferencesResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_reply_target: Option<RebornOutboundDeliveryTargetSummary>,
+    pub default_modality: RebornOutboundDeliveryModality,
+}
+
+impl Default for RebornOutboundPreferencesResponse {
+    fn default() -> Self {
+        Self {
+            final_reply_target: None,
+            default_modality: RebornOutboundDeliveryModality::Text,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOutboundDeliveryTargetListResponse {
+    pub targets: Vec<RebornOutboundDeliveryTargetOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOutboundDeliveryTargetOption {
+    pub target: RebornOutboundDeliveryTargetSummary,
+    pub capabilities: RebornOutboundDeliveryTargetCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOutboundDeliveryTargetSummary {
+    pub target_id: RebornOutboundDeliveryTargetId,
+    pub channel: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOutboundDeliveryTargetCapabilities {
+    pub final_replies: bool,
+    pub gate_prompts: bool,
+    pub auth_prompts: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornOutboundDeliveryModality {
+    Text,
+}
+
+/// Browser-safe opaque outbound delivery target id.
+///
+/// Composition resolves this id to an adapter-owned reply target before writing
+/// outbound preferences.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct RebornOutboundDeliveryTargetId(String);
+
+impl RebornOutboundDeliveryTargetId {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        validate_outbound_delivery_target_id(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for RebornOutboundDeliveryTargetId {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for RebornOutboundDeliveryTargetId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for RebornOutboundDeliveryTargetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<RebornOutboundDeliveryTargetId> for String {
+    fn from(value: RebornOutboundDeliveryTargetId) -> Self {
+        value.0
+    }
+}
+
+fn validate_outbound_delivery_target_id(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("outbound delivery target id must not be empty".to_string());
+    }
+    if value.trim() != value {
+        return Err(
+            "outbound delivery target id must not contain leading or trailing whitespace"
+                .to_string(),
+        );
+    }
+    if value.len() > OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES {
+        return Err(format!(
+            "outbound delivery target id must be at most {OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES} bytes"
+        ));
+    }
+    if value.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err("outbound delivery target id must not contain control characters".to_string());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSetOutboundPreferencesRequest {
+    /// `Some(id)` sets the final-reply target; `None` clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_reply_target_id: Option<RebornOutboundDeliveryTargetId>,
 }
 
 /// Allowlisted terminal status exposed by automation list projections.

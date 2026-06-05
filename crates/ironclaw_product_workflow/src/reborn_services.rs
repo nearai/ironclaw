@@ -77,7 +77,11 @@ pub use types::{
     RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
     RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornListThreadsResponse, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornSetOutboundPreferencesRequest,
     RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
 };
@@ -118,6 +122,59 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
         Ok(RebornConnectableChannelListResponse {
             channels: self.channels.iter().cloned().collect(),
         })
+    }
+}
+
+#[async_trait]
+pub trait OutboundPreferencesProductFacade: Send + Sync {
+    async fn get_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
+
+    async fn set_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError>;
+}
+
+#[derive(Debug)]
+pub struct UnsupportedOutboundPreferencesProductFacade;
+
+impl UnsupportedOutboundPreferencesProductFacade {
+    pub fn new_static() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductFacade {
+    async fn get_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Ok(RebornOutboundPreferencesResponse::default())
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(outbound_preferences_unavailable())
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        Err(outbound_preferences_unavailable())
     }
 }
 
@@ -338,6 +395,30 @@ pub trait RebornServicesApi: Send + Sync {
         })
     }
 
+    async fn get_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Ok(RebornOutboundPreferencesResponse::default())
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(outbound_preferences_unavailable())
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        let _ = caller;
+        Err(outbound_preferences_unavailable())
+    }
+
     async fn list_extensions(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -487,6 +568,7 @@ pub struct RebornServices {
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
+    outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
@@ -510,6 +592,9 @@ impl RebornServices {
             )),
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
             connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
+            outbound_preferences_facade: Arc::new(
+                UnsupportedOutboundPreferencesProductFacade::new_static(),
+            ),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             extension_credentials: None,
@@ -551,6 +636,14 @@ impl RebornServices {
         connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     ) -> Self {
         self.connectable_channels_facade = connectable_channels_facade;
+        self
+    }
+
+    pub fn with_outbound_preferences_facade(
+        mut self,
+        outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
+    ) -> Self {
+        self.outbound_preferences_facade = outbound_preferences_facade;
         self
     }
 
@@ -1119,6 +1212,34 @@ impl RebornServicesApi for RebornServices {
             .await
     }
 
+    async fn get_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        self.outbound_preferences_facade
+            .get_outbound_preferences(caller)
+            .await
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        self.outbound_preferences_facade
+            .set_outbound_preferences(caller, request)
+            .await
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        self.outbound_preferences_facade
+            .list_outbound_delivery_targets(caller)
+            .await
+    }
+
     async fn list_extensions(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1372,6 +1493,10 @@ impl RebornServices {
 }
 
 fn automation_unavailable() -> RebornServicesError {
+    RebornServicesError::service_unavailable(true)
+}
+
+fn outbound_preferences_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(true)
 }
 

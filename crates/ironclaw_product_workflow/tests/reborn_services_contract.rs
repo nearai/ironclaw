@@ -27,19 +27,23 @@ use ironclaw_product_workflow::{
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, ProductAgentBoundCaller, ProductWorkflowError,
-    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornGetRunStateRequest,
+    ListPendingAuthInteractionsResponse, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
+    ProductWorkflowError, RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
+    RebornGetRunStateRequest, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
     RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, StaticConnectableChannelsProductFacade,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    approval_gate_ref,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    StaticConnectableChannelsProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -789,6 +793,92 @@ impl AutomationProductFacade for StaticAutomationFacade {
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Ok(self.output.clone())
     }
+}
+
+#[derive(Debug, Clone)]
+struct OutboundPreferencesSetCall {
+    caller: WebUiAuthenticatedCaller,
+    request: RebornSetOutboundPreferencesRequest,
+}
+
+#[derive(Default)]
+struct RecordingOutboundPreferencesFacade {
+    get_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    set_calls: Mutex<Vec<OutboundPreferencesSetCall>>,
+    list_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
+}
+
+impl RecordingOutboundPreferencesFacade {
+    fn get_calls(&self) -> Vec<WebUiAuthenticatedCaller> {
+        self.get_calls.lock().expect("lock").clone()
+    }
+
+    fn set_calls(&self) -> Vec<OutboundPreferencesSetCall> {
+        self.set_calls.lock().expect("lock").clone()
+    }
+
+    fn list_calls(&self) -> Vec<WebUiAuthenticatedCaller> {
+        self.list_calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
+    async fn get_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        self.get_calls.lock().expect("lock").push(caller);
+        Ok(RebornOutboundPreferencesResponse {
+            final_reply_target: Some(outbound_target_summary("slack-dm-alpha")),
+            default_modality: RebornOutboundDeliveryModality::Text,
+        })
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        self.set_calls
+            .lock()
+            .expect("lock")
+            .push(OutboundPreferencesSetCall { caller, request });
+        Ok(RebornOutboundPreferencesResponse {
+            final_reply_target: Some(outbound_target_summary("slack-dm-beta")),
+            default_modality: RebornOutboundDeliveryModality::Text,
+        })
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        self.list_calls.lock().expect("lock").push(caller);
+        Ok(RebornOutboundDeliveryTargetListResponse {
+            targets: vec![RebornOutboundDeliveryTargetOption {
+                target: outbound_target_summary("slack-dm-alpha"),
+                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                    final_replies: true,
+                    gate_prompts: true,
+                    auth_prompts: true,
+                },
+            }],
+        })
+    }
+}
+
+fn outbound_target_summary(target_id: &str) -> RebornOutboundDeliveryTargetSummary {
+    RebornOutboundDeliveryTargetSummary {
+        target_id: outbound_target_id(target_id),
+        channel: "slack".to_string(),
+        display_name: "Slack DM".to_string(),
+        description: Some("Slack direct message".to_string()),
+    }
+}
+
+fn outbound_target_id(target_id: &str) -> RebornOutboundDeliveryTargetId {
+    RebornOutboundDeliveryTargetId::new(target_id).expect("valid target id")
 }
 
 fn automation_info(
@@ -3956,6 +4046,208 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
     assert_eq!(
         channel.command_aliases,
         vec!["slack".to_string(), "slack account".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn get_outbound_preferences_unwired_returns_empty_projection() {
+    // large_file: outbound preference tests stay in this caller-level facade
+    // suite so the shared RebornServices fakes keep coverage at the API seam.
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let response = services
+        .get_outbound_preferences(caller())
+        .await
+        .expect("default outbound preferences");
+
+    assert!(response.final_reply_target.is_none());
+    assert_eq!(
+        response.default_modality,
+        RebornOutboundDeliveryModality::Text
+    );
+}
+
+#[tokio::test]
+async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let set_error = services
+        .set_outbound_preferences(
+            caller(),
+            RebornSetOutboundPreferencesRequest {
+                final_reply_target_id: Some(outbound_target_id("slack-dm-alpha")),
+            },
+        )
+        .await
+        .expect_err("unwired preference mutation");
+    assert_eq!(set_error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(set_error.status_code, 503);
+    assert!(set_error.retryable);
+
+    let list_error = services
+        .list_outbound_delivery_targets(caller())
+        .await
+        .expect_err("unwired target listing");
+    assert_eq!(list_error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(list_error.status_code, 503);
+    assert!(list_error.retryable);
+}
+
+#[tokio::test]
+async fn outbound_preferences_facade_forwards_caller_and_request() {
+    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_outbound_preferences_facade(outbound_facade.clone());
+
+    let get_response = services
+        .get_outbound_preferences(caller())
+        .await
+        .expect("get outbound preferences");
+    assert_eq!(
+        get_response
+            .final_reply_target
+            .as_ref()
+            .map(|target| target.target_id.as_str()),
+        Some("slack-dm-alpha")
+    );
+
+    let set_response = services
+        .set_outbound_preferences(
+            caller_for_user_with_project("user-bravo", None),
+            RebornSetOutboundPreferencesRequest {
+                final_reply_target_id: Some(outbound_target_id("slack-dm-beta")),
+            },
+        )
+        .await
+        .expect("set outbound preferences");
+    assert_eq!(
+        set_response
+            .final_reply_target
+            .as_ref()
+            .map(|target| target.target_id.as_str()),
+        Some("slack-dm-beta")
+    );
+
+    let targets = services
+        .list_outbound_delivery_targets(caller_for_user("user-charlie"))
+        .await
+        .expect("list outbound targets");
+    assert_eq!(targets.targets.len(), 1);
+    assert_eq!(
+        targets.targets[0].target.target_id.as_str(),
+        "slack-dm-alpha"
+    );
+    assert!(targets.targets[0].capabilities.final_replies);
+
+    let get_calls = outbound_facade.get_calls();
+    assert_eq!(get_calls.len(), 1);
+    assert_eq!(get_calls[0].tenant_id.as_str(), "tenant-alpha");
+    assert_eq!(get_calls[0].user_id.as_str(), "user-alpha");
+
+    let set_calls = outbound_facade.set_calls();
+    assert_eq!(set_calls.len(), 1);
+    assert_eq!(set_calls[0].caller.user_id.as_str(), "user-bravo");
+    assert!(set_calls[0].caller.agent_id.is_some());
+    assert!(set_calls[0].caller.project_id.is_none());
+    assert_eq!(
+        set_calls[0]
+            .request
+            .final_reply_target_id
+            .as_ref()
+            .map(|target_id| target_id.as_str()),
+        Some("slack-dm-beta")
+    );
+
+    let list_calls = outbound_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(list_calls[0].user_id.as_str(), "user-charlie");
+}
+
+#[tokio::test]
+async fn set_outbound_preferences_can_clear_final_target() {
+    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_outbound_preferences_facade(outbound_facade.clone());
+
+    services
+        .set_outbound_preferences(
+            caller(),
+            RebornSetOutboundPreferencesRequest {
+                final_reply_target_id: None,
+            },
+        )
+        .await
+        .expect("clear outbound preferences");
+
+    let set_calls = outbound_facade.set_calls();
+    assert_eq!(set_calls.len(), 1);
+    assert!(set_calls[0].request.final_reply_target_id.is_none());
+}
+
+#[tokio::test]
+async fn set_outbound_preferences_rejects_malformed_target_id_before_facade() {
+    for target_id in [
+        "",
+        " ",
+        " slack-dm-alpha",
+        "slack-dm-alpha ",
+        "slack-dm-alpha\ninjected",
+        "slack-dm-alpha\0injected",
+    ] {
+        serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
+            "final_reply_target_id": target_id,
+        }))
+        .expect_err("malformed target id");
+    }
+
+    let oversized_target_id = "a".repeat(513);
+    serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
+        "final_reply_target_id": oversized_target_id,
+    }))
+    .expect_err("oversized target id");
+}
+
+#[tokio::test]
+async fn set_outbound_preferences_accepts_max_length_target_id_before_facade() {
+    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_outbound_preferences_facade(outbound_facade.clone());
+
+    let max_length_target_id = "a".repeat(512);
+    services
+        .set_outbound_preferences(
+            caller(),
+            RebornSetOutboundPreferencesRequest {
+                final_reply_target_id: Some(outbound_target_id(&max_length_target_id)),
+            },
+        )
+        .await
+        .expect("max-length target id");
+
+    let set_calls = outbound_facade.set_calls();
+    assert_eq!(set_calls.len(), 1);
+    assert_eq!(
+        set_calls[0]
+            .request
+            .final_reply_target_id
+            .as_ref()
+            .map(|target_id| target_id.as_str()),
+        Some(max_length_target_id.as_str())
     );
 }
 
