@@ -84,7 +84,7 @@ async fn reborn_provider_tool_arguments_are_schema_coerced_before_http_dispatch(
         request
             .headers
             .iter()
-            .any(|(name, value)| name.to_ascii_lowercase() == "x-coercion" && value == "ok"),
+            .any(|(name, value)| name.eq_ignore_ascii_case("x-coercion") && value == "ok"),
         "stringified headers should be coerced before HTTP dispatch: {:?}",
         &request.headers
     );
