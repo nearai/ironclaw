@@ -218,13 +218,16 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   is backed by the real agent/project access source of truth, a normal
   runtime must fail closed instead of enabling the trigger poller with the
   tenant-scope placeholder.
-- Local-dev `serve` may satisfy that contract by seeding active access rows
-  from trusted operator/env configuration at boot and, when local-dev SSO is
-  enabled, reconciling existing admitted SSO users at boot and seeding each
-  admitted SSO identity at login. It wires the same store as the fire-time
-  access checker. Bootstrap-owned active rows no longer present in the trusted
-  env/SSO admission set are marked inactive, while manually inactive rows are
-  not silently reactivated. The seeded row is exact
+- Local-dev `run` and `serve` may satisfy that contract by seeding active
+  access rows from trusted operator configuration at boot. `run` reconciles the
+  configured CLI owner for its tenant/agent/no-project scope because the generic
+  `run` path does not yet wire `[identity].default_project` into trigger create
+  scope. `serve` reconciles the env-bearer WebUI user and, when local-dev SSO is
+  enabled, existing admitted SSO users at boot plus each admitted SSO identity
+  at login. Both paths wire the same store as the fire-time access checker.
+  Bootstrap-owned active rows no longer present in the trusted local admission
+  set are marked inactive, while manually inactive rows are not silently
+  reactivated. The seeded row is exact
   `tenant_id`/`creator_user_id`/`agent_id`/`project_id` access; a missing
   project is not a wildcard.
 - The trusted inbound request is a host-owned synthetic inbound shape around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it has no adapter-supplied requested-scope hints before binding resolution.
