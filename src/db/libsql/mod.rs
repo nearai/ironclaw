@@ -9,6 +9,7 @@
 mod conversations;
 mod identities;
 mod jobs;
+mod log_entries;
 mod pairing;
 mod routines;
 mod sandbox;

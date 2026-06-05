@@ -992,6 +992,21 @@ ALTER TABLE agent_jobs ADD COLUMN restart_params TEXT;
 CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
 "#,
     ),
+    (
+        25,
+        "log_entries",
+        r#"
+CREATE TABLE IF NOT EXISTS log_entries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    level       TEXT NOT NULL,
+    target      TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_log_entries_recorded_at ON log_entries (recorded_at DESC);
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already

@@ -17,8 +17,8 @@ use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
     ApiTokenRecord, ChannelPairingStore, ConversationStore, Database, IdentityStore, JobStore,
-    PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore, ToolFailureStore,
-    UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
+    LogEntryRecord, LogStore, PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore,
+    ToolFailureStore, UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -1649,5 +1649,47 @@ impl IdentityStore for PgBackend {
 
         tx.commit().await?;
         Ok(())
+    }
+}
+
+// ==================== LogStore ====================
+
+#[async_trait]
+impl LogStore for PgBackend {
+    async fn insert_log_entry(
+        &self,
+        level: &str,
+        target: &str,
+        message: &str,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        conn.execute(
+            "INSERT INTO log_entries (level, target, message) VALUES ($1, $2, $3)",
+            &[&level, &target, &message],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn list_log_entries(&self, limit: i64) -> Result<Vec<LogEntryRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let rows = conn
+            .query(
+                "SELECT level, target, message, recorded_at \
+                 FROM log_entries ORDER BY recorded_at DESC LIMIT $1",
+                &[&limit],
+            )
+            .await?;
+        let mut entries: Vec<LogEntryRecord> = rows
+            .iter()
+            .map(|r| LogEntryRecord {
+                level: r.get(0),
+                target: r.get(1),
+                message: r.get(2),
+                recorded_at: r.get(3),
+            })
+            .collect();
+        entries.reverse();
+        Ok(entries)
     }
 }

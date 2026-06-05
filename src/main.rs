@@ -473,6 +473,21 @@ async fn async_main() -> anyhow::Result<()> {
 
     // ── Channel setup ──────────────────────────────────────────────────
 
+    // Spawn DB writer for log persistence (info+ entries only).
+    if let Some(ref db) = components.db {
+        let (log_tx, mut log_rx) =
+            tokio::sync::mpsc::channel::<t3claw::channels::web::log_layer::LogEntry>(1024);
+        log_broadcaster.set_db_writer(log_tx);
+        let db_for_logs = Arc::clone(db);
+        tokio::spawn(async move {
+            while let Some(entry) = log_rx.recv().await {
+                let _ = db_for_logs
+                    .insert_log_entry(&entry.level, &entry.target, &entry.message)
+                    .await;
+            }
+        });
+    }
+
     // Default user ID for extension operations (single-user mode).
     let ext_user_id = config.owner_id.clone();
     let settings_persistence_available = components.db.is_some();

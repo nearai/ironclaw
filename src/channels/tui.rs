@@ -331,20 +331,7 @@ impl Channel for TuiChannel {
 
         // Forward log entries from the LogBroadcaster to the TUI's Logs tab
         if let Some(ref broadcaster) = self.log_broadcaster {
-            // Replay recent history first
             let log_tx = event_tx.clone();
-            for entry in broadcaster.recent_entries() {
-                let _ = log_tx
-                    .send(TuiEvent::Log {
-                        level: entry.level,
-                        target: entry.target,
-                        message: entry.message,
-                        timestamp: entry.timestamp,
-                    })
-                    .await;
-            }
-
-            // Subscribe to live log stream
             let mut log_rx = broadcaster.subscribe();
             tokio::spawn(async move {
                 while let Ok(entry) = log_rx.recv().await {

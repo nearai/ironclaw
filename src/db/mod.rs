@@ -1246,6 +1246,30 @@ pub trait IdentityStore: Send + Sync {
     ) -> Result<(), DatabaseError>;
 }
 
+/// A single persisted log entry (info+ only).
+#[derive(Debug, Clone)]
+pub struct LogEntryRecord {
+    pub level: String,
+    pub target: String,
+    pub message: String,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// Persistence for diagnostic log entries.
+#[async_trait]
+pub trait LogStore: Send + Sync {
+    /// Append a single log entry.
+    async fn insert_log_entry(
+        &self,
+        level: &str,
+        target: &str,
+        message: &str,
+    ) -> Result<(), DatabaseError>;
+
+    /// Return the most recent `limit` entries, oldest-first.
+    async fn list_log_entries(&self, limit: i64) -> Result<Vec<LogEntryRecord>, DatabaseError>;
+}
+
 /// Backend-agnostic database supertrait.
 ///
 /// Combines all sub-traits into one. Existing `Arc<dyn Database>` consumers
@@ -1262,6 +1286,7 @@ pub trait Database:
     + UserStore
     + ChannelPairingStore
     + IdentityStore
+    + LogStore
     + Send
     + Sync
 {

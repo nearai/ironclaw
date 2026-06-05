@@ -5,6 +5,9 @@ let logBuffer = []; // buffer while paused
 function connectLogSSE() {
   if (logEventSource) logEventSource.close();
 
+  const output = document.getElementById('logs-output');
+  if (output) output.innerHTML = '';
+
   const logSseUrl = (token && !oidcProxyAuth)
     ? '/api/logs/events?token=' + encodeURIComponent(token)
     : '/api/logs/events';

@@ -9,27 +9,23 @@
 //!        ▼
 //!   LogBroadcaster::send()
 //!        │
-//!        ├──► broadcast::Sender<LogEntry>  (live subscribers)
-//!        └──► ring buffer (recent history for late joiners)
+//!        ├──► broadcast::Sender<LogEntry>  (live SSE subscribers)
+//!        └──► mpsc::Sender<LogEntry>       (DB writer, info+ only)
 //!                   │
 //!                   ▼
-//!             SSE /api/logs/events
+//!             log_entries table  ←  queried on GET /api/logs/events
 //! ```
 
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, reload};
 
 use t3claw_safety::LeakDetector;
-
-/// Maximum number of recent log entries kept for late-joining SSE subscribers.
-const HISTORY_CAP: usize = 500;
 
 /// A single log entry broadcast to connected clients.
 #[derive(Debug, Clone, Serialize)]
@@ -40,16 +36,15 @@ pub struct LogEntry {
     pub timestamp: String,
 }
 
-/// Broadcasts log entries to SSE subscribers.
+/// Broadcasts log entries to SSE subscribers and an optional DB writer.
 ///
-/// Created early in main.rs (before tracing init), shared with both
-/// the tracing layer and the gateway's SSE endpoint.
-///
-/// Keeps a ring buffer of recent entries so browsers that connect
-/// after startup still see the boot log.
+/// Created early in startup (before the DB is available). Call
+/// `set_db_writer` once the DB is initialised to start persisting
+/// `info` and above.
 pub struct LogBroadcaster {
     tx: broadcast::Sender<LogEntry>,
-    recent: Mutex<VecDeque<LogEntry>>,
+    /// Set after DB init; receives info+ entries for async persistence.
+    db_writer: Mutex<Option<mpsc::Sender<LogEntry>>>,
     /// Scrubs secrets from log messages before broadcasting to SSE clients.
     leak_detector: LeakDetector,
 }
@@ -59,45 +54,41 @@ impl LogBroadcaster {
         let (tx, _) = broadcast::channel(512);
         Self {
             tx,
-            recent: Mutex::new(VecDeque::with_capacity(HISTORY_CAP)),
+            db_writer: Mutex::new(None),
             leak_detector: LeakDetector::new(),
         }
     }
 
+    /// Wire up the background DB writer. Call once after DB init.
+    pub fn set_db_writer(&self, sender: mpsc::Sender<LogEntry>) {
+        if let Ok(mut w) = self.db_writer.lock() {
+            *w = Some(sender);
+        }
+    }
+
     pub fn send(&self, mut entry: LogEntry) {
-        // Scrub secrets from the message before it reaches any subscriber.
-        // This is defense-in-depth: even if code elsewhere accidentally logs
-        // a secret, it won't be broadcast to SSE clients.
+        // Scrub secrets before anything reaches subscribers or the DB.
         entry.message = self
             .leak_detector
             .scan_and_clean(&entry.message)
             .unwrap_or_else(|_| "[log message redacted: contained blocked secret]".to_string());
 
-        // Stash in ring buffer (for late joiners)
-        if let Ok(mut buf) = self.recent.lock() {
-            if buf.len() >= HISTORY_CAP {
-                buf.pop_front();
+        // Persist info+ to DB (fire-and-forget; drops on full channel).
+        if entry.level != "DEBUG" && entry.level != "TRACE" {
+            if let Ok(guard) = self.db_writer.lock() {
+                if let Some(ref tx) = *guard {
+                    let _ = tx.try_send(entry.clone());
+                }
             }
-            buf.push_back(entry.clone());
         }
-        // Broadcast to live subscribers (ok to drop if nobody listening)
+
+        // Broadcast to live SSE subscribers.
         let _ = self.tx.send(entry);
     }
 
     /// Subscribe to the live event stream.
     pub fn subscribe(&self) -> broadcast::Receiver<LogEntry> {
         self.tx.subscribe()
-    }
-
-    /// Snapshot of recent entries for replaying to a new subscriber.
-    ///
-    /// Returns entries oldest-first so that the frontend's `prepend()`
-    /// naturally places the newest entry at the top of the DOM.
-    pub fn recent_entries(&self) -> Vec<LogEntry> {
-        self.recent
-            .lock()
-            .map(|buf| buf.iter().cloned().collect())
-            .unwrap_or_default()
     }
 }
 
@@ -370,61 +361,6 @@ mod tests {
         let json = serde_json::to_string(&entry).expect("should serialize");
         assert!(json.contains("\"level\":\"ERROR\""));
         assert!(json.contains("something broke"));
-    }
-
-    #[test]
-    fn test_recent_entries_buffer() {
-        let broadcaster = LogBroadcaster::new();
-
-        for i in 0..5 {
-            broadcaster.send(LogEntry {
-                level: "INFO".to_string(),
-                target: "test".to_string(),
-                message: format!("msg {}", i),
-                timestamp: "2024-01-01T00:00:00.000Z".to_string(),
-            });
-        }
-
-        let recent = broadcaster.recent_entries();
-        assert_eq!(recent.len(), 5);
-        assert_eq!(recent[0].message, "msg 0");
-        assert_eq!(recent[4].message, "msg 4");
-    }
-
-    #[test]
-    fn test_recent_entries_cap() {
-        let broadcaster = LogBroadcaster::new();
-
-        // Overflow the buffer
-        for i in 0..(HISTORY_CAP + 50) {
-            broadcaster.send(LogEntry {
-                level: "INFO".to_string(),
-                target: "test".to_string(),
-                message: format!("msg {}", i),
-                timestamp: "2024-01-01T00:00:00.000Z".to_string(),
-            });
-        }
-
-        let recent = broadcaster.recent_entries();
-        assert_eq!(recent.len(), HISTORY_CAP);
-        // Oldest should be msg 50 (first 50 evicted)
-        assert_eq!(recent[0].message, "msg 50");
-    }
-
-    #[test]
-    fn test_recent_entries_available_without_subscribers() {
-        let broadcaster = LogBroadcaster::new();
-        // No subscribe() call, just send
-        broadcaster.send(LogEntry {
-            level: "INFO".to_string(),
-            target: "test".to_string(),
-            message: "before anyone listened".to_string(),
-            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
-        });
-
-        let recent = broadcaster.recent_entries();
-        assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].message, "before anyone listened");
     }
 
     #[test]

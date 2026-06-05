@@ -1,10 +1,10 @@
 //! Runtime log streaming and log-level control.
 //!
-//! Owns `GET /api/logs/events` (SSE stream of live log entries with a
-//! startup-replay prefix) and `GET/PUT /api/logs/level` (runtime log-level
-//! knob). The slice is deliberately tiny — logs have no cross-cutting state,
-//! no shared helpers, and only ever read from
-//! [`GatewayState::log_broadcaster`] / [`GatewayState::log_level_handle`].
+//! Owns `GET /api/logs/events` (SSE stream of live log entries prefixed with
+//! DB history) and `GET/PUT /api/logs/level` (runtime log-level knob). The
+//! slice is deliberately tiny — logs have no cross-cutting state, no shared
+//! helpers, and only ever read from [`GatewayState::log_broadcaster`] /
+//! [`GatewayState::log_level_handle`] / [`GatewayState::store`].
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -21,14 +21,18 @@ use axum::{
 use tokio_stream::StreamExt;
 
 use crate::channels::web::auth::AuthenticatedUser;
+use crate::channels::web::log_layer::LogEntry;
 use crate::channels::web::platform::state::GatewayState;
 
-/// `GET /api/logs/events` — SSE stream of live log entries.
+/// How many log entries to load from DB when the page opens.
+const LOG_HISTORY_LIMIT: i64 = 300;
+
+/// `GET /api/logs/events` — SSE stream of log entries.
 ///
-/// Replays a short history buffer so late-joining browsers see startup
-/// logs, then forwards every new entry from the runtime log broadcaster.
-/// The subscription is opened *before* the history snapshot so nothing
-/// falls between the two.
+/// Loads the most recent `LOG_HISTORY_LIMIT` entries from DB as the history
+/// prefix (info+ only), then forwards every new entry from the live broadcaster
+/// (all levels). The subscription is opened before the DB query so no live
+/// entries fall through the gap.
 pub(crate) async fn logs_events_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
@@ -38,8 +42,27 @@ pub(crate) async fn logs_events_handler(
         "Log broadcaster not available".to_string(),
     ))?;
 
+    // Subscribe before loading history so no live entries are missed.
     let rx = broadcaster.subscribe();
-    let history = broadcaster.recent_entries();
+
+    // Load persisted history from DB (best-effort; empty slice if DB unavailable).
+    let history: Vec<LogEntry> = if let Some(ref db) = state.store {
+        db.list_log_entries(LOG_HISTORY_LIMIT)
+            .await
+            .unwrap_or_default() // silent-ok: dashboard refresh, live stream still works
+            .into_iter()
+            .map(|r| LogEntry {
+                level: r.level,
+                target: r.target,
+                message: r.message,
+                timestamp: r
+                    .recorded_at
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let history_stream = futures::stream::iter(history).map(|entry| {
         let data = serde_json::to_string(&entry).unwrap_or_default();
