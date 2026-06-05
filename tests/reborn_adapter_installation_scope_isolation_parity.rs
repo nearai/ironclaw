@@ -52,22 +52,22 @@ async fn reborn_adapter_installation_scope_isolation_parity() {
     .await
     .expect("install B harness");
 
-    install_a.start();
-    install_b.start();
-
     let alpha = install_a
         .submit_text_for(ROOM, "alice", EVENT, "installation alpha turn")
         .await
         .expect("submit installation alpha turn");
+    install_a.start();
     install_a
         .wait_for_submitted_status(&alpha, TurnStatus::Completed)
         .await
         .expect("install alpha completed");
+    install_a.shutdown().await;
 
     let beta = install_b
         .submit_text_for(ROOM, "alice", EVENT, "installation beta turn")
         .await
         .expect("submit installation beta turn with same external event id");
+    install_b.start();
     install_b
         .wait_for_submitted_status(&beta, TurnStatus::Completed)
         .await
@@ -104,7 +104,6 @@ async fn reborn_adapter_installation_scope_isolation_parity() {
     install_a.assert_model_exhausted();
     install_b.assert_model_exhausted();
 
-    install_a.shutdown().await;
     install_b.shutdown().await;
 }
 

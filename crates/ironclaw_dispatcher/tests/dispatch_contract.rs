@@ -497,6 +497,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
             })?;
         Ok(RuntimeAdapterResult {
             output: self.output.clone(),
+            display_preview: None,
             output_bytes: usage.output_bytes,
             usage,
             receipt,

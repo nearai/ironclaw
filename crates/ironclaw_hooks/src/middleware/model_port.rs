@@ -129,10 +129,12 @@ mod tests {
             }
             Ok(LoopModelResponse {
                 chunks: Vec::new(),
+                safe_reasoning_deltas: Vec::new(),
                 output: ParentLoopOutput::AssistantReply(AssistantReply {
                     content: "hi".to_string(),
                 }),
                 effective_model_profile_id: ModelProfileId::new("model_test").expect("ok"),
+                usage: None,
             })
         }
     }

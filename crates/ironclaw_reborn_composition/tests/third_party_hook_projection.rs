@@ -201,6 +201,7 @@ fn ids_at(registry: &HookProjectionRegistry, point: HookPointSpec) -> Vec<HookId
         .expect("factory builds")
         .expect("flag ON yields a factory");
     factory()
+        .expect("mint hook builder")
         .build_arc()
         .active_bindings_snapshot(point)
         .into_iter()
@@ -213,6 +214,7 @@ fn before_capability_ids(registry: &HookProjectionRegistry) -> Vec<HookId> {
         .expect("factory builds")
         .expect("flag ON yields a factory");
     factory()
+        .expect("mint hook builder")
         .build_arc()
         .active_bindings_snapshot(HookPointSpec::BeforeCapability)
         .into_iter()
@@ -420,7 +422,7 @@ async fn matrix_before_capability_installed_deny_is_allowed_and_fires() {
     let factory = build_hook_dispatcher_builder_factory(both_flags_on(), &registry)
         .expect("factory")
         .expect("flag ON yields factory");
-    let dispatcher = factory().build_arc();
+    let dispatcher = factory().expect("mint hook builder").build_arc();
     assert!(
         ids_at(&registry, HookPointSpec::BeforeCapability)
             .contains(&installed_hook_id("gate-ext", "deny-run")),
@@ -531,7 +533,7 @@ async fn matrix_owning_extension_is_derived_not_spoofable() {
     let factory = build_hook_dispatcher_builder_factory(both_flags_on(), &registry)
         .expect("factory")
         .expect("flag ON yields factory");
-    let dispatcher = factory().build_arc();
+    let dispatcher = factory().expect("mint hook builder").build_arc();
     let bindings = dispatcher.active_bindings_snapshot(HookPointSpec::BeforeCapability);
     let binding = bindings
         .iter()

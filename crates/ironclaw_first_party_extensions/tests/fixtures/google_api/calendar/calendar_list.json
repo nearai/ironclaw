@@ -1,0 +1,24 @@
+{
+  "kind": "calendar#calendarList",
+  "etag": "\"p32abcdef\"",
+  "items": [
+    {
+      "kind": "calendar#calendarListEntry",
+      "etag": "\"1700000000000000\"",
+      "id": "primary",
+      "summary": "Ada Lovelace",
+      "description": "Primary calendar",
+      "timeZone": "America/New_York",
+      "primary": true,
+      "accessRole": "owner"
+    },
+    {
+      "kind": "calendar#calendarListEntry",
+      "etag": "\"1700000000000001\"",
+      "id": "team@example.com",
+      "summary": "Team Calendar",
+      "timeZone": "America/New_York",
+      "accessRole": "writer"
+    }
+  ]
+}

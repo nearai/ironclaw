@@ -19,11 +19,13 @@ use ironclaw_turns::{
         CancellationPolicy, CapabilityBatchInvocation, CapabilityBatchOutcome,
         CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
         CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilityResultMessage, CapabilitySurfaceProfileId, CapabilitySurfaceVersion,
-        CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContextProfileId,
-        FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextRequest,
-        LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+        CapabilityProgress, CapabilityResultMessage, CapabilitySurfaceProfileId,
+        CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
+        ConcurrencyHint, ContextProfileId, FinalizeAssistantMessage, LoopCancellationPort,
+        LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef,
+        LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest, LoopCompactionResponse,
+        LoopContextBundle, LoopContextCompactionMetadata, LoopContextRequest, LoopDriverId,
+        LoopInput, LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
         LoopInputCursorToken, LoopModelMessage, LoopModelRequest, LoopModelResponse,
         LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
         LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk, ParentLoopOutput,
@@ -50,11 +52,16 @@ pub struct MockAgentLoopDriverHost {
     call_log: Mutex<Vec<MockHostCall>>,
     checkpoints: Arc<CheckpointRecorder>,
     visible_capabilities: Vec<CapabilityDescriptorView>,
+    prompt_compaction_indexes: Mutex<VecDeque<Vec<LoopContextCompactionMetadata>>>,
     staged_iterations: Mutex<VecDeque<u32>>,
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
+    compaction_result: Mutex<Result<LoopCompactionOutcome, LoopCompactionError>>,
+    progress_events: Mutex<Vec<LoopProgressEvent>>,
     acked_tokens: Mutex<Vec<LoopInputAckToken>>,
+    finalized_assistant_messages: Mutex<Vec<String>>,
     cancellation: Mutex<Option<LoopCancellationSignal>>,
+    cancellation_notify: tokio::sync::Notify,
 }
 
 impl MockAgentLoopDriverHost {
@@ -81,6 +88,22 @@ impl MockAgentLoopDriverHost {
         lock_or_panic(&self.acked_tokens).clone()
     }
 
+    /// Returns loop progress events emitted through the host progress port.
+    pub fn progress_events(&self) -> Vec<LoopProgressEvent> {
+        clone_mutex_vec(&self.progress_events)
+    }
+
+    /// Returns finalized assistant message contents in call order.
+    pub fn finalized_assistant_messages(&self) -> Vec<String> {
+        clone_mutex_vec(&self.finalized_assistant_messages)
+    }
+
+    /// Sets the exact cancellation signal and wakes async waiters.
+    pub fn set_cancellation_signal(&self, signal: LoopCancellationSignal) {
+        *lock_or_panic(&self.cancellation) = Some(signal);
+        self.cancellation_notify.notify_waiters();
+    }
+
     fn record_call(&self, call: MockHostCall) {
         lock_or_panic(&self.call_log).push(call);
     }
@@ -91,8 +114,10 @@ pub struct MockAgentLoopDriverHostBuilder {
     run_context: LoopRunContext,
     script: ScenarioScript,
     visible_capabilities: Vec<CapabilityDescriptorView>,
+    prompt_compaction_indexes: VecDeque<Vec<LoopContextCompactionMetadata>>,
     fail_prompt_with: Option<AgentLoopHostErrorKind>,
     fail_model_with: Option<AgentLoopHostErrorKind>,
+    compaction_result: Result<LoopCompactionOutcome, LoopCompactionError>,
     cancellation: Option<LoopCancellationSignal>,
 }
 
@@ -106,8 +131,10 @@ impl MockAgentLoopDriverHostBuilder {
                 capability_id("demo.echo"),
                 ConcurrencyHint::SafeForParallel,
             )],
+            prompt_compaction_indexes: VecDeque::new(),
             fail_prompt_with: None,
             fail_model_with: None,
+            compaction_result: Err(LoopCompactionError::InputTooLarge),
             cancellation: None,
         }
     }
@@ -130,6 +157,21 @@ impl MockAgentLoopDriverHostBuilder {
         self
     }
 
+    /// Sets the compaction metadata returned by prompt bundle construction.
+    pub fn prompt_compaction_index(mut self, index: Vec<LoopContextCompactionMetadata>) -> Self {
+        self.prompt_compaction_indexes = VecDeque::from([index]);
+        self
+    }
+
+    /// Sets the compaction metadata returned by successive prompt bundle builds.
+    pub fn prompt_compaction_indexes(
+        mut self,
+        indexes: Vec<Vec<LoopContextCompactionMetadata>>,
+    ) -> Self {
+        self.prompt_compaction_indexes = indexes.into();
+        self
+    }
+
     /// Forces every model call to fail with the selected host error kind.
     pub fn fail_model_with(mut self, kind: AgentLoopHostErrorKind) -> Self {
         self.fail_model_with = Some(kind);
@@ -139,6 +181,24 @@ impl MockAgentLoopDriverHostBuilder {
     /// Forces every prompt-build call to fail with the selected host error kind.
     pub fn fail_prompt_with(mut self, kind: AgentLoopHostErrorKind) -> Self {
         self.fail_prompt_with = Some(kind);
+        self
+    }
+
+    /// Sets the response returned by the host compaction port.
+    pub fn compaction_result(
+        mut self,
+        result: Result<LoopCompactionResponse, LoopCompactionError>,
+    ) -> Self {
+        self.compaction_result = result.map(LoopCompactionOutcome::Compacted);
+        self
+    }
+
+    /// Sets the full outcome returned by the host compaction port.
+    pub fn compaction_outcome(
+        mut self,
+        outcome: Result<LoopCompactionOutcome, LoopCompactionError>,
+    ) -> Self {
+        self.compaction_result = outcome;
         self
     }
 
@@ -158,11 +218,16 @@ impl MockAgentLoopDriverHostBuilder {
                 call_log: Mutex::new(Vec::new()),
                 checkpoints: checkpoints.clone(),
                 visible_capabilities: self.visible_capabilities,
+                prompt_compaction_indexes: Mutex::new(self.prompt_compaction_indexes),
                 staged_iterations: Mutex::new(VecDeque::new()),
                 fail_prompt_with: Mutex::new(self.fail_prompt_with),
                 fail_model_with: Mutex::new(self.fail_model_with),
+                compaction_result: Mutex::new(self.compaction_result),
+                progress_events: Mutex::new(Vec::new()),
                 acked_tokens: Mutex::new(Vec::new()),
+                finalized_assistant_messages: Mutex::new(Vec::new()),
                 cancellation: Mutex::new(self.cancellation),
+                cancellation_notify: tokio::sync::Notify::new(),
             },
             checkpoints,
         )
@@ -376,6 +441,8 @@ pub enum ScriptedCapabilityOutcome {
     Completed {
         /// Result ref.
         result_ref: String,
+        /// Whether this result advanced host evidence/state.
+        progress: CapabilityProgress,
         /// Whether this result should naturally end the loop.
         terminate_hint: bool,
     },
@@ -394,6 +461,20 @@ pub enum ScriptedCapabilityOutcome {
         /// Gate ref.
         gate_ref: String,
     },
+    /// Dependent-run gate.
+    AwaitDependentRun {
+        /// Gate ref.
+        gate_ref: String,
+        /// Result ref updated when the dependent run completes.
+        result_ref: String,
+    },
+    /// Spawned child run result.
+    SpawnedChildRun {
+        /// Child run id.
+        child_run_id: TurnRunId,
+        /// Result ref.
+        result_ref: String,
+    },
     /// Failed result.
     Failed {
         /// Error kind string consumed by the executor classifier.
@@ -406,6 +487,25 @@ impl ScriptedCapabilityOutcome {
     pub fn completed(result_ref: impl Into<String>) -> Self {
         Self::Completed {
             result_ref: result_ref.into(),
+            progress: CapabilityProgress::MadeProgress,
+            terminate_hint: false,
+        }
+    }
+
+    /// Creates a completed outcome whose typed progress reports no change.
+    pub fn completed_no_change(result_ref: impl Into<String>) -> Self {
+        Self::Completed {
+            result_ref: result_ref.into(),
+            progress: CapabilityProgress::NoChange,
+            terminate_hint: false,
+        }
+    }
+
+    /// Creates a completed outcome whose typed progress reports a blocker.
+    pub fn completed_blocked(result_ref: impl Into<String>) -> Self {
+        Self::Completed {
+            result_ref: result_ref.into(),
+            progress: CapabilityProgress::Blocked,
             terminate_hint: false,
         }
     }
@@ -414,6 +514,7 @@ impl ScriptedCapabilityOutcome {
     pub fn completed_with_terminate_hint(result_ref: impl Into<String>) -> Self {
         Self::Completed {
             result_ref: result_ref.into(),
+            progress: CapabilityProgress::MadeProgress,
             terminate_hint: true,
         }
     }
@@ -556,6 +657,9 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockAgentLoopDriverHost {
                 content_ref: loop_message_ref("msg:user"),
             }],
             surface_version: Some(surface_version()),
+            compaction_message_index: lock_or_panic(&self.prompt_compaction_indexes)
+                .pop_front()
+                .unwrap_or_default(),
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,
@@ -688,8 +792,9 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
 impl ironclaw_turns::run_profile::LoopTranscriptPort for MockAgentLoopDriverHost {
     async fn finalize_assistant_message(
         &self,
-        _request: FinalizeAssistantMessage,
+        request: FinalizeAssistantMessage,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
+        lock_or_panic(&self.finalized_assistant_messages).push(request.reply.content);
         self.record_call(MockHostCall::FinalizeAssistantMessage);
         Ok(loop_message_ref("msg:assistant"))
     }
@@ -739,17 +844,30 @@ impl ironclaw_turns::run_profile::LoopCheckpointPort for MockAgentLoopDriverHost
 
 #[async_trait]
 impl ironclaw_turns::run_profile::LoopProgressPort for MockAgentLoopDriverHost {
-    async fn emit_loop_progress(
-        &self,
-        _event: LoopProgressEvent,
-    ) -> Result<(), AgentLoopHostError> {
+    async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
+        lock_or_panic(&self.progress_events).push(event);
         Ok(())
     }
 }
 
+#[async_trait]
+impl ironclaw_turns::run_profile::LoopCompactionPort for MockAgentLoopDriverHost {
+    async fn compact_loop_context(
+        &self,
+        _request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
+        lock_or_panic(&self.compaction_result).clone()
+    }
+}
+
+#[async_trait]
 impl LoopCancellationPort for MockAgentLoopDriverHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         lock_or_panic(&self.cancellation).clone()
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        wait_for_cancellation_signal(&self.cancellation, &self.cancellation_notify).await
     }
 }
 
@@ -884,9 +1002,11 @@ fn scripted_model_response(
         chunks: vec![ModelStreamChunk {
             safe_text_delta: String::new(),
         }],
+        safe_reasoning_deltas: Vec::new(),
         output,
         effective_model_profile_id: ModelProfileId::new("model")
             .unwrap_or_else(|error| panic!("test model id should be valid: {error}")),
+        usage: None,
     })
 }
 
@@ -896,6 +1016,7 @@ fn scripted_capability_call(call: ScriptedCapabilityCall) -> CapabilityCallCandi
         capability_id: capability_id(&call.name),
         input_ref: CapabilityInputRef::new(call.input_ref)
             .unwrap_or_else(|error| panic!("test capability input ref should be valid: {error}")),
+        effective_capability_ids: vec![capability_id(&call.name)],
         provider_replay: None,
     }
 }
@@ -906,11 +1027,13 @@ fn scripted_capability_outcome(
     match outcome {
         ScriptedCapabilityOutcome::Completed {
             result_ref,
+            progress,
             terminate_hint,
         } => Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
             result_ref: LoopResultRef::new(result_ref)
                 .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
             safe_summary: "completed".to_string(),
+            progress,
             terminate_hint,
         })),
         ScriptedCapabilityOutcome::ApprovalRequired { gate_ref } => {
@@ -922,6 +1045,7 @@ fn scripted_capability_outcome(
         ScriptedCapabilityOutcome::AuthRequired { gate_ref } => {
             Ok(CapabilityOutcome::AuthRequired {
                 gate_ref: loop_gate_ref(&gate_ref),
+                credential_requirements: Vec::new(),
                 safe_summary: "auth required".to_string(),
             })
         }
@@ -931,6 +1055,23 @@ fn scripted_capability_outcome(
                 safe_summary: "resource blocked".to_string(),
             })
         }
+        ScriptedCapabilityOutcome::AwaitDependentRun {
+            gate_ref,
+            result_ref,
+        } => Ok(CapabilityOutcome::AwaitDependentRun {
+            gate_ref: loop_gate_ref(&gate_ref),
+            result_ref: loop_result_ref(&result_ref),
+            safe_summary: "await dependent run".to_string(),
+        }),
+        ScriptedCapabilityOutcome::SpawnedChildRun {
+            child_run_id,
+            result_ref,
+        } => Ok(CapabilityOutcome::SpawnedChildRun {
+            child_run_id,
+            result_ref: LoopResultRef::new(result_ref)
+                .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
+            safe_summary: "spawned child run".to_string(),
+        }),
         ScriptedCapabilityOutcome::Failed { error_kind } => {
             Ok(CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind,
@@ -956,8 +1097,10 @@ fn scripted_failure_kind(kind: &str) -> CapabilityFailureKind {
         "cancelled" => CapabilityFailureKind::Cancelled,
         "dispatcher" => CapabilityFailureKind::Dispatcher,
         "input_invalid" | "invalid_input" => CapabilityFailureKind::InvalidInput,
+        "invalid_output" => CapabilityFailureKind::InvalidOutput,
         "missing_runtime" => CapabilityFailureKind::MissingRuntime,
         "network" => CapabilityFailureKind::Network,
+        "operation_failed" => CapabilityFailureKind::OperationFailed,
         "output_too_large" => CapabilityFailureKind::OutputTooLarge,
         "policy_denied" => CapabilityFailureKind::PolicyDenied,
         "process" => CapabilityFailureKind::Process,
@@ -982,6 +1125,11 @@ fn loop_gate_ref(value: &str) -> LoopGateRef {
     LoopGateRef::new(value).unwrap_or_else(|error| panic!("test gate ref should be valid: {error}"))
 }
 
+fn loop_result_ref(value: &str) -> LoopResultRef {
+    LoopResultRef::new(value)
+        .unwrap_or_else(|error| panic!("test result ref should be valid: {error}"))
+}
+
 fn safe_ref_suffix(value: &str) -> String {
     value
         .chars()
@@ -993,6 +1141,19 @@ fn safe_ref_suffix(value: &str) -> String {
             }
         })
         .collect()
+}
+
+pub(crate) async fn wait_for_cancellation_signal(
+    cancellation: &Mutex<Option<LoopCancellationSignal>>,
+    notify: &tokio::sync::Notify,
+) -> LoopCancellationSignal {
+    loop {
+        let notified = notify.notified();
+        if let Some(signal) = lock_or_panic(cancellation).clone() {
+            return signal;
+        }
+        notified.await;
+    }
 }
 
 fn lock_or_panic<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

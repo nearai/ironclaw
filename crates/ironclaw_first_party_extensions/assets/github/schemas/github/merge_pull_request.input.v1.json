@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub merge_pull_request input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository owner or organization."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository name."
+    },
+    "pr_number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Pull request number."
+    },
+    "commit_title": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Merge commit title."
+    },
+    "commit_message": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Merge commit message."
+    },
+    "merge_method": {
+      "type": "string",
+      "enum": [
+        "merge",
+        "squash",
+        "rebase"
+      ],
+      "default": "merge"
+    }
+  },
+  "required": [
+    "owner",
+    "repo",
+    "pr_number"
+  ]
+}

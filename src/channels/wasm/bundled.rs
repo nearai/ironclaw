@@ -23,6 +23,7 @@ const KNOWN_CHANNELS: &[(&str, &str)] = &[
     ("discord", "discord_channel"),
     ("whatsapp", "whatsapp_channel"),
     ("feishu", "feishu_channel"),
+    ("wecom", "wecom_channel"),
     ("wechat", "wechat_channel"),
 ];
 

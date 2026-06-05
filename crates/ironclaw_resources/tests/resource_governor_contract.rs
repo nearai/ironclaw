@@ -247,7 +247,7 @@ fn usd_limit_check_denies_instead_of_panicking_on_decimal_overflow() {
 
     assert!(matches!(
         err,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == account && denial.dimension == ResourceDimension::Usd
     ));
 }
@@ -279,7 +279,7 @@ fn reserve_denies_when_usd_limit_would_be_exceeded() {
 
     assert!(matches!(
         err,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == account && denial.dimension == ResourceDimension::Usd
     ));
 }
@@ -317,7 +317,7 @@ fn reserve_denies_runtime_quota_even_without_usd() {
 
     assert!(matches!(
         err,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == account && denial.dimension == ResourceDimension::WallClockMs
     ));
 }
@@ -361,7 +361,7 @@ fn active_reservations_consume_concurrency_until_released() {
     );
     assert!(matches!(
         second,
-        Err(ResourceError::LimitExceeded(denial))
+        Err(ResourceError::LimitExceeded { denial, .. })
             if denial.dimension == ResourceDimension::ConcurrencySlots
     ));
 
@@ -578,7 +578,7 @@ fn tenant_limit_applies_across_projects() {
 
     assert!(matches!(
         err,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == tenant_account && denial.dimension == ResourceDimension::Usd
     ));
 }
@@ -624,7 +624,7 @@ fn resource_governor_enforces_agent_scoped_limits_independently() {
         )
         .unwrap_err();
 
-    assert!(matches!(denial, ResourceError::LimitExceeded(_)));
+    assert!(matches!(denial, ResourceError::LimitExceeded { .. }));
     assert_eq!(
         governor.reserved_for(&ResourceAccount::agent(tenant, user, None, agent_a)),
         ResourceTally {
@@ -687,7 +687,7 @@ fn persistent_governor_reloads_active_holds_and_usage_from_store() {
         .unwrap_err();
     assert!(matches!(
         concurrency_denial,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == account
                 && denial.dimension == ResourceDimension::ConcurrencySlots
                 && denial.active_reserved == ResourceValue::Integer(1)
@@ -715,7 +715,7 @@ fn persistent_governor_reloads_active_holds_and_usage_from_store() {
         .unwrap_err();
     assert!(matches!(
         usd_denial,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == account
                 && denial.dimension == ResourceDimension::Usd
                 && denial.current_usage == ResourceValue::Decimal(dec!(0.95))
@@ -1143,7 +1143,7 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
         .unwrap_err();
     assert!(matches!(
         concurrency_denial,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == account && denial.dimension == ResourceDimension::ConcurrencySlots
     ));
 
@@ -1167,7 +1167,7 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
         .unwrap_err();
     assert!(matches!(
         usd_denial,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == account
                 && denial.dimension == ResourceDimension::Usd
                 && denial.current_usage == ResourceValue::Decimal(dec!(0.95))
@@ -1244,7 +1244,7 @@ fn project_and_agent_limits_both_apply_without_override() {
 
     assert!(matches!(
         err,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == project_account && denial.dimension == ResourceDimension::Usd
     ));
 
@@ -1279,7 +1279,7 @@ fn project_and_agent_limits_both_apply_without_override() {
 
     assert!(matches!(
         err,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == agent_account && denial.dimension == ResourceDimension::Usd
     ));
 }
@@ -1383,7 +1383,7 @@ fn project_limit_denies_leaf_even_when_tenant_allows() {
 
     assert!(matches!(
         err,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == project && denial.dimension == ResourceDimension::Usd
     ));
 }
@@ -1434,7 +1434,7 @@ fn reconciled_usage_counts_against_future_reservations() {
 
     assert!(matches!(
         err,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == account
                 && denial.dimension == ResourceDimension::Usd
                 && denial.current_usage == ResourceValue::Decimal(dec!(0.80))
@@ -1499,7 +1499,7 @@ fn active_reserved_and_usage_appear_in_denial_details() {
 
     assert!(matches!(
         err,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == account
                 && denial.dimension == ResourceDimension::Usd
                 && denial.limit == ResourceValue::Decimal(dec!(1.00))
@@ -1552,7 +1552,7 @@ fn actual_usage_above_estimate_is_recorded_and_blocks_future_work() {
                 ..ResourceEstimate::default()
             },
         ),
-        Err(ResourceError::LimitExceeded(denial))
+        Err(ResourceError::LimitExceeded { denial, .. })
             if denial.current_usage == ResourceValue::Decimal(dec!(0.95))
     ));
 }
@@ -1661,7 +1661,7 @@ fn assert_denied_dimension(
     let err = governor.reserve(scope, estimate).unwrap_err();
     assert!(matches!(
         err,
-        ResourceError::LimitExceeded(denial)
+        ResourceError::LimitExceeded { denial, .. }
             if denial.account == account && denial.dimension == expected
     ));
 }
@@ -1786,7 +1786,7 @@ fn reserve_returns_requires_approval_above_pause_below_hard_limit() {
         )
         .unwrap_err();
     match err {
-        ResourceError::RequiresApproval(needed) => {
+        ResourceError::RequiresApproval { needed, .. } => {
             assert_eq!(needed.account, account);
             assert_eq!(needed.dimension, ResourceDimension::Usd);
             assert!(needed.utilization >= 0.90);
@@ -1824,7 +1824,7 @@ fn hard_limit_overrun_returns_limit_exceeded_not_requires_approval() {
             },
         )
         .unwrap_err();
-    assert!(matches!(err, ResourceError::LimitExceeded(_)));
+    assert!(matches!(err, ResourceError::LimitExceeded { .. }));
 }
 
 #[test]
@@ -1953,7 +1953,7 @@ fn threshold_pause_fires_at_exactly_100_percent_when_pause_below_one() {
         )
         .unwrap_err();
     match err {
-        ResourceError::RequiresApproval(needed) => {
+        ResourceError::RequiresApproval { needed, .. } => {
             assert_eq!(needed.dimension, ResourceDimension::Usd);
             assert!(needed.utilization >= 1.0 - f64::EPSILON);
         }
@@ -2057,7 +2057,7 @@ fn calendar_day_period_resets_at_local_midnight() {
             },
         )
         .unwrap_err();
-    assert!(matches!(denied, ResourceError::LimitExceeded(_)));
+    assert!(matches!(denied, ResourceError::LimitExceeded { .. }));
 
     // Advance the clock past LA midnight into day 2. New period, full budget.
     clock.set(day2_morning_utc);
@@ -2164,11 +2164,237 @@ fn cascade_reports_first_failing_account_in_user_project_order() {
         )
         .unwrap_err();
     match err {
-        ResourceError::LimitExceeded(denial) => {
+        ResourceError::LimitExceeded { denial, .. } => {
             assert_eq!(denial.account, project_account);
         }
         other => panic!("expected project-level denial, got {other:?}"),
     }
+}
+
+/// Regression for #3841 follow-up "report accumulated metrics before pausing":
+/// when one dimension crosses warn while another dimension hard-denies, the
+/// terminal denial must carry the warning so audit/SSE consumers see both.
+#[test]
+fn limit_exceeded_carries_warnings_from_other_dimensions() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = ResourceScope {
+        tenant_id: TenantId::new("tenant-cascade-warn").unwrap(),
+        user_id: UserId::new("cascade-warn-user").unwrap(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    let account = ResourceAccount::user(scope.tenant_id.clone(), scope.user_id.clone());
+    // Two dimensions on the same account: USD is well under cap (no warn),
+    // input_tokens sits at 80% (above warn=0.5), output_tokens overruns by
+    // 200% (hard deny). The terminal denial on output_tokens must still
+    // include the input_tokens warning.
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(10.00)),
+                max_input_tokens: Some(100),
+                max_output_tokens: Some(10),
+                thresholds: BudgetThresholds {
+                    warn_at: 0.5,
+                    pause_at: 0.95,
+                },
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    // Burn 80 input tokens of prior usage so the next reservation crosses warn.
+    let prior = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                input_tokens: Some(80),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor
+        .reconcile(
+            prior.id,
+            ResourceUsage {
+                input_tokens: 80,
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+    // Now request 20 output_tokens (cap 10, hard deny) + 5 input_tokens
+    // (running total 85, warn at 0.5 fires).
+    let err = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                input_tokens: Some(5),
+                output_tokens: Some(20),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+    let warnings = match err {
+        ResourceError::LimitExceeded {
+            ref denial,
+            ref warnings,
+        } => {
+            assert_eq!(
+                denial.dimension,
+                ResourceDimension::OutputTokens,
+                "denial must fire on the over-cap dimension"
+            );
+            warnings.clone()
+        }
+        other => panic!("expected LimitExceeded, got {other:?}"),
+    };
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.dimension == ResourceDimension::InputTokens),
+        "input_tokens warning must accompany the output_tokens denial — got {warnings:?}"
+    );
+}
+
+/// Regression for #3841 follow-up "A2: project BudgetEvent into the gateway
+/// event stream". A reserve that crosses warn → pause must emit at least
+/// one Warned event before the ApprovalRequested event, and a hard-cap
+/// overrun must emit Denied while preserving prior warnings.
+#[test]
+fn governor_emits_budget_events_through_event_sink() {
+    use std::sync::Arc;
+
+    use ironclaw_resources::{
+        BudgetEvent, BudgetPeriod, BudgetThresholds, InMemoryBudgetEventSink,
+    };
+    let sink = Arc::new(InMemoryBudgetEventSink::new());
+    let governor = InMemoryResourceGovernor::default().with_event_sink(sink.clone());
+
+    let scope = ResourceScope {
+        tenant_id: TenantId::new("tenant-sink").unwrap(),
+        user_id: UserId::new("sink-user").unwrap(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    let account = ResourceAccount::user(scope.tenant_id.clone(), scope.user_id.clone());
+
+    governor
+        .set_limit(
+            account,
+            ResourceLimits {
+                max_usd: Some(dec!(10.00)),
+                period: BudgetPeriod::Rolling24h,
+                thresholds: BudgetThresholds {
+                    warn_at: 0.5,
+                    pause_at: 0.9,
+                },
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        sink.snapshot()
+            .iter()
+            .any(|e| matches!(e, BudgetEvent::LimitChanged { .. })),
+        "set_limit must emit LimitChanged"
+    );
+
+    // Reserve a small amount — no warn yet.
+    let outcome = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(2.00)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor
+        .reconcile(
+            outcome.id,
+            ResourceUsage {
+                usd: dec!(2.00),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        sink.snapshot()
+            .iter()
+            .any(|e| matches!(e, BudgetEvent::Reserved { .. })),
+        "reserve must emit Reserved"
+    );
+    assert!(
+        sink.snapshot()
+            .iter()
+            .any(|e| matches!(e, BudgetEvent::Reconciled { .. })),
+        "reconcile must emit Reconciled"
+    );
+
+    // Drain so the next assertions only see new events.
+    sink.drain();
+
+    // Now reserve enough to cross warn (0.5) but still under pause.
+    let _ = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(4.00)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    let warn_events = sink.drain();
+    assert!(
+        warn_events
+            .iter()
+            .any(|e| matches!(e, BudgetEvent::Warned { .. })),
+        "crossing warn threshold must emit Warned — got {warn_events:?}"
+    );
+
+    // Push into pause (0.9 of $10 with $6 already spent + new $3 = $9 → 90%).
+    let approval = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(3.00)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(approval, ResourceError::RequiresApproval { .. }));
+    let pause_events = sink.drain();
+    assert!(
+        pause_events
+            .iter()
+            .any(|e| matches!(e, BudgetEvent::ApprovalRequested { .. })),
+        "pause threshold must emit ApprovalRequested — got {pause_events:?}"
+    );
+
+    // Push over the hard cap.
+    let denial = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(100.00)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(denial, ResourceError::LimitExceeded { .. }));
+    let deny_events = sink.drain();
+    assert!(
+        deny_events
+            .iter()
+            .any(|e| matches!(e, BudgetEvent::Denied { .. })),
+        "hard cap must emit Denied — got {deny_events:?}"
+    );
 }
 
 #[test]

@@ -77,7 +77,10 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     .unwrap()
     .unwrap();
 
-    assert_eq!(reply.status, TurnStatus::Cancelled);
+    // With no LLM gateway configured the driver returns Unavailable, which
+    // maps to a terminal Failed turn instead of the pre-PR RecoveryRequired
+    // path that cancelled via the standalone-runtime cancel guard.
+    assert_eq!(reply.status, TurnStatus::Failed);
     assert_eq!(reply.text, None);
 
     let second_reply = tokio::time::timeout(
@@ -88,7 +91,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     .unwrap()
     .unwrap();
 
-    assert_eq!(second_reply.status, TurnStatus::Cancelled);
+    assert_eq!(second_reply.status, TurnStatus::Failed);
     assert_eq!(second_reply.text, None);
 
     runtime.shutdown().await.unwrap();
@@ -138,18 +141,18 @@ async fn send_user_message_with_cancellation_cancels_submitted_run() {
 async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let root = tempfile::tempdir().unwrap();
     let storage_root = root.path().join("local-dev");
-    std::fs::create_dir_all(storage_root.join("skills/code-review/references")).unwrap();
+    std::fs::create_dir_all(storage_root.join("skills/filesystem-review/references")).unwrap();
     std::fs::write(
-        storage_root.join("skills/code-review/SKILL.md"),
+        storage_root.join("skills/filesystem-review/SKILL.md"),
         skill_md(
-            "code-review",
-            "review",
+            "filesystem-review",
+            "filesystem-review",
             "Use filesystem-backed review guidance.",
         ),
     )
     .unwrap();
     std::fs::write(
-        storage_root.join("skills/code-review/references/policy.md"),
+        storage_root.join("skills/filesystem-review/references/policy.md"),
         "filesystem policy",
     )
     .unwrap();
@@ -172,20 +175,23 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let conversation = runtime.new_conversation().await.unwrap();
     let result = tokio::time::timeout(
         Duration::from_secs(3),
-        runtime.execute_skill_message(&conversation, "please review this"),
+        runtime.execute_skill_message(&conversation, "$filesystem-review"),
     )
     .await
     .unwrap()
     .unwrap();
 
     assert_eq!(result.plan.activations().len(), 1);
-    assert_eq!(result.plan.activations()[0].name, "code-review");
+    assert_eq!(result.plan.activations()[0].name, "filesystem-review");
     assert_eq!(result.plan.active_bundles().len(), 1);
     assert_eq!(
         result.plan.active_bundles()[0].source,
         RebornSkillSourceKind::User
     );
-    assert_eq!(result.plan.active_bundles()[0].skill_name, "code-review");
+    assert_eq!(
+        result.plan.active_bundles()[0].skill_name,
+        "filesystem-review"
+    );
 
     let asset = runtime
         .read_skill_execution_asset(
@@ -254,7 +260,7 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
     assert_eq!(runtime.default_run_profile_id(), "reborn-planned-default");
 
     // Runtime starts: a conversation turn runs through the composed dispatcher
-    // (the stub gateway cancels, as in the other local-dev runtime tests).
+    // and reaches a terminal state without hanging.
     let conversation = runtime.new_conversation().await.unwrap();
     let reply = tokio::time::timeout(
         Duration::from_secs(2),
@@ -264,13 +270,13 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
     .unwrap()
     .unwrap();
     // TODO(coverage gap, inherited from the removed test): the stub local-dev
-    // gateway cancels the turn before any capability call dispatches, so this
-    // asserts `Cancelled` rather than observing the projected `deny-run` hook
-    // actually firing on `example-hook-ext.run`. The wiring (discovery +
+    // gateway terminates the turn before any capability call dispatches, so this
+    // asserts terminal progress rather than observing the projected `deny-run`
+    // hook actually firing on `example-hook-ext.run`. The wiring (discovery +
     // projection + tenant threading) is exercised at build/start; end-to-end
     // hook *enforcement* through `build_reborn_runtime` still needs a harness
     // that drives a real capability call to completion.
-    assert_eq!(reply.status, TurnStatus::Cancelled);
+    assert!(reply.status.is_terminal(), "got {:?}", reply.status);
 
     runtime.shutdown().await.unwrap();
 }

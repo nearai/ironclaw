@@ -1,5 +1,6 @@
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::{CapabilityVisibility, ExtensionPackage, ExtensionRegistry};
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityGrant, Decision, EffectKind, ResourceEstimate, RuntimeKind,
     canonical_json_v1, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
@@ -9,6 +10,8 @@ use serde_json::{Value, json};
 
 use crate::{
     CapabilitySurfaceVersion, HostRuntimeError, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    capability_catalog::read_json_ref,
+    first_party_tools::{BUILTIN_FIRST_PARTY_PROVIDER, resolve_builtin_input_schema_ref},
     plan_capability,
 };
 
@@ -117,6 +120,7 @@ pub(crate) struct CapabilityCatalog<'a> {
     authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
     base_version: &'a CapabilitySurfaceVersion,
     runtime_policy: &'a EffectiveRuntimePolicy,
+    filesystem: Option<&'a dyn RootFilesystem>,
 }
 
 impl<'a> CapabilityCatalog<'a> {
@@ -131,7 +135,13 @@ impl<'a> CapabilityCatalog<'a> {
             authorizer,
             base_version,
             runtime_policy,
+            filesystem: None,
         }
+    }
+
+    pub(crate) fn with_filesystem(mut self, filesystem: &'a dyn RootFilesystem) -> Self {
+        self.filesystem = Some(filesystem);
+        self
     }
 
     pub(crate) async fn visible_capabilities(
@@ -149,7 +159,8 @@ impl<'a> CapabilityCatalog<'a> {
             if capabilities.len() >= max_capabilities {
                 break;
             }
-            if !request.policy.allows_runtime(descriptor.runtime)
+            if !self.is_model_visible(descriptor)
+                || !request.policy.allows_runtime(descriptor.runtime)
                 || !request.policy.allows_effects(&descriptor.effects)
             {
                 continue;
@@ -180,7 +191,7 @@ impl<'a> CapabilityCatalog<'a> {
             };
 
             capabilities.push(VisibleCapability {
-                descriptor: descriptor.clone(),
+                descriptor: self.surface_descriptor(descriptor).await?,
                 access,
                 estimated_resources: estimate,
             });
@@ -197,6 +208,87 @@ impl<'a> CapabilityCatalog<'a> {
             capabilities,
         })
     }
+
+    fn is_model_visible(&self, descriptor: &CapabilityDescriptor) -> bool {
+        self.registry
+            .capability_visibility(&descriptor.id)
+            .unwrap_or(CapabilityVisibility::Model)
+            == CapabilityVisibility::Model
+    }
+
+    async fn surface_descriptor(
+        &self,
+        descriptor: &CapabilityDescriptor,
+    ) -> Result<CapabilityDescriptor, HostRuntimeError> {
+        let mut descriptor = descriptor.clone();
+        let reference = descriptor
+            .parameters_schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        if descriptor.provider.as_str() == BUILTIN_FIRST_PARTY_PROVIDER {
+            let Some(reference) = reference else {
+                return Err(HostRuntimeError::invalid_request(format!(
+                    "built-in capability {} must publish from an input schema ref",
+                    descriptor.id
+                )));
+            };
+            descriptor.parameters_schema = resolve_builtin_input_schema_ref(&reference)
+                .ok_or_else(|| {
+                    HostRuntimeError::invalid_request(format!(
+                        "built-in capability {} references unknown input schema {}",
+                        descriptor.id, reference
+                    ))
+                })?;
+            return Ok(descriptor);
+        }
+
+        let Some(reference) = reference else {
+            return Ok(descriptor);
+        };
+        let Some(filesystem) = self.filesystem else {
+            return Ok(descriptor);
+        };
+        let Some(package) = self.registry.get_extension(&descriptor.provider) else {
+            return Ok(descriptor);
+        };
+        descriptor.parameters_schema =
+            resolve_package_input_schema_ref(filesystem, package, &descriptor.id, &reference)
+                .await?;
+        Ok(descriptor)
+    }
+}
+
+async fn resolve_package_input_schema_ref(
+    filesystem: &dyn RootFilesystem,
+    package: &ExtensionPackage,
+    capability_id: &ironclaw_host_api::CapabilityId,
+    reference: &str,
+) -> Result<Value, HostRuntimeError> {
+    let Some(declaration) = package
+        .manifest
+        .capabilities
+        .iter()
+        .find(|capability| &capability.id == capability_id)
+    else {
+        return Err(HostRuntimeError::invalid_request(format!(
+            "capability {capability_id} is missing manifest declaration"
+        )));
+    };
+    if declaration.input_schema_ref.as_str() != reference {
+        return Err(HostRuntimeError::invalid_request(format!(
+            "capability {capability_id} descriptor schema ref {reference} does not match manifest input schema ref {}",
+            declaration.input_schema_ref.as_str()
+        )));
+    }
+    read_json_ref(
+        filesystem,
+        &package.root,
+        &declaration.input_schema_ref,
+        "input_schema_ref",
+    )
+    .await
 }
 
 fn surface_version(
@@ -380,4 +472,64 @@ fn stable_json_string(value: &Value) -> Result<String, HostRuntimeError> {
 
 fn host_api_error(error: ironclaw_host_api::HostApiError) -> HostRuntimeError {
     HostRuntimeError::invalid_request(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_authorization::GrantAuthorizer;
+    use ironclaw_host_api::{
+        CapabilityId, ExtensionId, PermissionMode, TrustClass,
+        runtime_policy::{
+            ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
+            FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+        },
+    };
+
+    fn test_runtime_policy() -> EffectiveRuntimePolicy {
+        EffectiveRuntimePolicy {
+            deployment: DeploymentMode::LocalSingleUser,
+            requested_profile: RuntimeProfile::SecureDefault,
+            resolved_profile: RuntimeProfile::SecureDefault,
+            filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+            process_backend: ProcessBackendKind::None,
+            network_mode: NetworkMode::Deny,
+            secret_mode: SecretMode::Deny,
+            approval_policy: ApprovalPolicy::AskAlways,
+            audit_mode: AuditMode::LocalMinimal,
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_surface_descriptor_requires_input_schema_ref() {
+        let descriptor = CapabilityDescriptor {
+            id: CapabilityId::new("builtin.bad").unwrap(),
+            provider: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).unwrap(),
+            runtime: RuntimeKind::FirstParty,
+            trust_ceiling: TrustClass::UserTrusted,
+            description: "bad built-in descriptor".to_string(),
+            parameters_schema: json!({"type": "object"}),
+            effects: vec![EffectKind::DispatchCapability],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            resource_profile: None,
+        };
+        let registry = ExtensionRegistry::new();
+        let runtime_policy = test_runtime_policy();
+        let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+        let authorizer = GrantAuthorizer;
+        let catalog =
+            CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy);
+
+        let error = catalog
+            .surface_descriptor(&descriptor)
+            .await
+            .expect_err("built-in schema refs are required");
+
+        assert!(
+            matches!(error, HostRuntimeError::InvalidRequest { ref reason }
+                if reason.contains("must publish from an input schema ref")),
+            "unexpected error: {error:?}"
+        );
+    }
 }

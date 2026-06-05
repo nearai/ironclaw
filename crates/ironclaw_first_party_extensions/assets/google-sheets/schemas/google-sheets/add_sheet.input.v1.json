@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Sheets add_sheet",
+  "description": "Add a sheet tab.",
+  "type": "object",
+  "required": [
+    "spreadsheet_id",
+    "title"
+  ],
+  "properties": {
+    "spreadsheet_id": {
+      "type": "string",
+      "description": "The spreadsheet ID."
+    },
+    "title": {
+      "type": "string",
+      "description": "New sheet title."
+    }
+  },
+  "additionalProperties": false
+}

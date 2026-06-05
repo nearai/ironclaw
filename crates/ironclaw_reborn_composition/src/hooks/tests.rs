@@ -203,7 +203,7 @@ fn enabled_config_with_empty_production_catalog_yields_valid_zero_binding_factor
             .expect("enabled build with empty registry + empty catalog succeeds")
             .expect("flag ON yields a factory even with an empty catalog");
     // The factory mints a valid dispatcher with no first-party bindings.
-    let dispatcher = factory().build_arc();
+    let dispatcher = factory().expect("mint hook builder").build_arc();
     let bindings = dispatcher.active_bindings_snapshot(HookPointSpec::AfterCapability);
     assert!(
         bindings.is_empty(),
@@ -226,7 +226,7 @@ fn activation_installs_a_test_first_party_hook_through_the_real_path() {
     )
     .expect("enabled build with a test first-party hook succeeds")
     .expect("flag ON yields a factory");
-    let dispatcher = factory().build_arc();
+    let dispatcher = factory().expect("mint hook builder").build_arc();
     let test_id = HookId::for_builtin(TEST_NOOP_OBSERVER_CANONICAL_PATH, HookVersion::ONE);
     let bindings = dispatcher.active_bindings_snapshot(HookPointSpec::AfterCapability);
     assert!(
@@ -242,8 +242,8 @@ fn factory_mints_independent_dispatchers_per_call() {
         build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
             .expect("enabled build succeeds")
             .expect("flag ON yields a factory");
-    let a = factory().build_arc();
-    let b = factory().build_arc();
+    let a = factory().expect("mint hook builder").build_arc();
+    let b = factory().expect("mint hook builder").build_arc();
     assert!(
         !Arc::ptr_eq(&a, &b),
         "each factory call must mint a fresh dispatcher (per-run isolation)"
@@ -321,7 +321,7 @@ fn valid_extension_hook_manifest_installs_at_installed_tier() {
     )
     .expect("enabled build with a valid extension hook succeeds")
     .expect("flag ON yields a factory");
-    let dispatcher = factory().build_arc();
+    let dispatcher = factory().expect("mint hook builder").build_arc();
 
     let expected = installed_hook_id("valid-ext", "0.1.0", "deny-run");
     let bindings = dispatcher.active_bindings_snapshot(HookPointSpec::BeforeCapability);
@@ -360,7 +360,7 @@ body = { mode = "nonsense" }
         build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
             .expect("malformed INSTALLED manifest must NOT fail the build (quarantine)")
             .expect("flag ON yields a factory");
-    let dispatcher = factory().build_arc();
+    let dispatcher = factory().expect("mint hook builder").build_arc();
     assert!(
         dispatcher
             .active_bindings_snapshot(HookPointSpec::BeforeCapability)
@@ -429,7 +429,7 @@ body = { mode = "nonsense" }
         build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
             .expect("partial-invalid set must quarantine, not fail the build")
             .expect("flag ON yields a factory");
-    let dispatcher = factory().build_arc();
+    let dispatcher = factory().expect("mint hook builder").build_arc();
     let bindings = dispatcher.active_bindings_snapshot(HookPointSpec::BeforeCapability);
 
     // None of `mixed`'s hooks installed.
@@ -470,7 +470,7 @@ body = { mode = "predicate", spec = { type = "deny_capability", reason = "wider-
         build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
             .expect("ungranted wider-scope INSTALLED hook must quarantine, not fail the build")
             .expect("flag ON yields a factory");
-    let dispatcher = factory().build_arc();
+    let dispatcher = factory().expect("mint hook builder").build_arc();
     assert!(
         dispatcher
             .active_bindings_snapshot(HookPointSpec::BeforeCapability)
@@ -509,7 +509,7 @@ body = { mode = "wasm", export = "evaluate" }
         build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
             .expect("WASM-bodied third-party hook must quarantine, not fail the build")
             .expect("flag ON yields a factory");
-    let dispatcher = factory().build_arc();
+    let dispatcher = factory().expect("mint hook builder").build_arc();
     let bindings = dispatcher.active_bindings_snapshot(HookPointSpec::BeforeCapability);
     assert!(
         !bindings
@@ -589,7 +589,7 @@ fn surplus_extensions_beyond_consider_cap_are_quarantined() {
         build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
             .expect("surplus extensions must quarantine, not fail the build")
             .expect("flag ON yields a factory");
-    let dispatcher = factory().build_arc();
+    let dispatcher = factory().expect("mint hook builder").build_arc();
     let installed = dispatcher
         .active_bindings_snapshot(HookPointSpec::BeforeCapability)
         .len();
@@ -888,7 +888,7 @@ body = { mode = "nonsense" }
     });
     // Building a dispatcher confirms the survivors replay cleanly (the
     // quarantine already fired during composition, inside `with_capture`).
-    let _dispatcher = factory().build_arc();
+    let _dispatcher = factory().expect("mint hook builder").build_arc();
 
     let tenants: Vec<&str> = captured
         .iter()

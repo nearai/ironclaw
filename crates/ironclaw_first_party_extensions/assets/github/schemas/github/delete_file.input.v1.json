@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub delete_file input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository owner or organization."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository name."
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "description": "Repository file path."
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "description": "Commit message."
+    },
+    "sha": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Current blob SHA."
+    },
+    "branch": {
+      "type": "string",
+      "maxLength": 255,
+      "description": "Target branch."
+    },
+    "committer": {
+      "$ref": "#/$defs/git_identity"
+    },
+    "author": {
+      "$ref": "#/$defs/git_identity"
+    }
+  },
+  "required": [
+    "owner",
+    "repo",
+    "path",
+    "message",
+    "sha"
+  ],
+  "$defs": {
+    "git_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536,
+          "description": "Git author/committer name."
+        },
+        "email": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 320,
+          "description": "Git author/committer email."
+        }
+      },
+      "required": [
+        "name",
+        "email"
+      ]
+    }
+  }
+}

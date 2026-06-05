@@ -25,6 +25,18 @@ use super::projection::{
     MAX_TOTAL_HOOKS_PER_TENANT, enforce_root_containment, tenant_extension_root,
 };
 
+/// Build the error returned when a per-run install replay fails inside the
+/// [`HookDispatcherBuilderFactory`] closure. Every install set replayed there
+/// was already validated against a scratch builder at composition time, so this
+/// is unreachable in practice; the typed error (rather than `.expect()`) means a
+/// future regression surfaces as a build failure instead of a panic, per the
+/// project's no-`.expect()`-in-production rule.
+fn reborn_replay_error(
+    reason: String,
+) -> ironclaw_reborn::loop_driver_host::RebornLoopDriverHostError {
+    ironclaw_reborn::loop_driver_host::RebornLoopDriverHostError::InvalidRequest { reason }
+}
+
 /// Install the first-party builtin hook set into `builder`.
 ///
 /// Builtin hooks are `Builtin`-tier (full authority within the framework) and
@@ -162,12 +174,7 @@ pub(super) fn project_extension_hook_sets(
         // ── Validate the WHOLE set against a scratch builder. Commit nothing
         // here; the survivors are replayed against the real builder later. ──
         let scratch = HookDispatcherBuilder::new(HookRegistry::new());
-        match registrar.install(
-            extension_id.clone(),
-            extension_version.clone(),
-            entries.clone(),
-            scratch,
-        ) {
+        match registrar.install(extension_id.clone(), &extension_version, &entries, scratch) {
             Ok(_validated) => {
                 if !trusted {
                     third_party_hook_total += hook_count;
@@ -355,24 +362,42 @@ where
     let factory: HookDispatcherBuilderFactory = Arc::new(move || {
         // Fresh registry + builder per run: no cross-run state leak.
         let mut builder = HookDispatcherBuilder::new(HookRegistry::new());
-        // safety: `install_first_party` is a pure replayable function of the builder; the identical call was proven to succeed against a scratch builder in the composition-time validation block above (fail-closed via `?`). A per-run replay therefore cannot fail.
-        let first_party = "first-party hook install validated at composition time";
-        builder = install_first_party(builder).expect(first_party); // safety: replay of composition-validated install; see binding above
+        // `install_first_party` is a pure replayable function of the builder;
+        // the identical call was proven to succeed against a scratch builder in
+        // the composition-time validation block above (fail-closed via `?`). A
+        // per-run replay therefore cannot fail in practice — the `?` propagates
+        // any future regression as a build error rather than a panic (CLAUDE.md:
+        // no `.expect()` in production code).
+        builder = install_first_party(builder).map_err(|error| {
+            reborn_replay_error(format!(
+                "per-run first-party hook install replay failed \
+                 (validated at composition time): {error}"
+            ))
+        })?;
         let registrar = HookRegistrar::new(Arc::clone(&evaluator_for_factory));
         for set in &extension_install_sets {
-            // safety: each surviving set was already projected from TOML (the only fallible, external-input step) AND fully validated against a scratch builder above (quarantined sets never reach here). registrar.install is a deterministic function of these cloned inputs, so the per-run replay of a scratch-validated set cannot fail.
-            let ext_install = "extension hook install validated at composition time";
+            // Each surviving set was already projected from TOML (the only
+            // fallible external-input step) AND fully validated against a scratch
+            // builder above (quarantined sets never reach here). The per-run
+            // replay of a scratch-validated set cannot fail in practice; the `?`
+            // surfaces any regression as a build error instead of a panic.
             let (next, _ids) = registrar
                 .install(
                     set.extension_id.clone(),
-                    set.extension_version.clone(),
-                    set.entries.clone(),
+                    &set.extension_version,
+                    &set.entries,
                     builder,
                 )
-                .expect(ext_install); // safety: replay of composition-validated install set; see binding above
+                .map_err(|error| {
+                    reborn_replay_error(format!(
+                        "per-run hook install replay failed for extension `{}` \
+                         (validated at composition time): {error}",
+                        set.extension_id.as_str()
+                    ))
+                })?;
             builder = next;
         }
-        builder
+        Ok(builder)
     });
 
     Ok(Some(factory))

@@ -29,6 +29,7 @@ const KEYBINDINGS: &[(&str, &str)] = &[
     ("Esc", "Interrupt / cancel"),
     ("y / n / a", "Approval shortcuts"),
     ("1-5", "Log level filter (Logs tab)"),
+    ("Ctrl-S", "Download logs (Logs tab)"),
 ];
 
 pub(crate) struct HelpOverlayWidget {

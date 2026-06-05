@@ -139,7 +139,35 @@ async fn trusted_skill_includes_prompt_content() {
     let snippets = service.skill_snippets(&snapshot).await.unwrap();
     assert_eq!(snippets.len(), 1);
     assert!(snippets[0].safe_summary.contains("the description"));
-    assert!(snippets[0].safe_summary.contains("the prompt content"));
+    assert!(!snippets[0].safe_summary.contains("the prompt content"));
+    assert!(snippets[0].model_content.contains("the description"));
+    assert!(snippets[0].model_content.contains("the prompt content"));
+}
+
+#[tokio::test]
+async fn trusted_skill_allows_operational_paths_in_prompt_content() {
+    let prompt = concat!(
+        "Create a review worktree under /tmp/ironclaw-review-123 and ",
+        "write the GitHub payload to /tmp/cr-review-payload.json."
+    );
+    let snapshot =
+        SkillRunSnapshot::from_entries(vec![visible_trusted("alpha", "the description", prompt)]);
+    let service = SkillContextService::new(snapshot.clone());
+
+    let snippets = service.skill_snippets(&snapshot).await.unwrap();
+
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].safe_summary, "the description");
+    assert!(
+        snippets[0]
+            .model_content
+            .contains("/tmp/ironclaw-review-123")
+    );
+    assert!(
+        snippets[0]
+            .model_content
+            .contains("/tmp/cr-review-payload.json")
+    );
 }
 
 #[tokio::test]
@@ -150,8 +178,9 @@ async fn installed_skill_excludes_prompt_content() {
     let snippets = service.skill_snippets(&snapshot).await.unwrap();
     assert_eq!(snippets.len(), 1);
     assert!(snippets[0].safe_summary.contains("the description"));
+    assert!(snippets[0].model_content.contains("the description"));
     assert!(
-        !snippets[0].safe_summary.contains("secret prompt"),
+        !snippets[0].model_content.contains("secret prompt"),
         "installed skill must not expose prompt content"
     );
 }
@@ -256,14 +285,64 @@ async fn tampered_snapshot_version_fails_closed() {
 }
 
 #[tokio::test]
-async fn oversized_single_snippet_fails_budget() {
+async fn oversized_single_snippet_is_allowed_within_aggregate_budget() {
+    let safe_description = "desc";
+    let prompt = "x".repeat(16 * 1024);
+    let model_content_bytes = safe_description.len() + "\n\n".len() + prompt.len();
+    let max_context_bytes = "skill:alpha".len() + model_content_bytes;
     let snapshot =
-        SkillRunSnapshot::from_entries(vec![visible_trusted("alpha", "desc", &"x".repeat(128))]);
-    let service =
-        SkillContextService::with_budget(snapshot.clone(), SkillContextBudget::new(64, 512));
+        SkillRunSnapshot::from_entries(vec![visible_trusted("alpha", safe_description, &prompt)]);
+    let service = SkillContextService::with_budget(
+        snapshot.clone(),
+        SkillContextBudget {
+            max_snippet_bytes: model_content_bytes + 1,
+            max_context_bytes,
+        },
+    );
+
+    let snippets = service.skill_snippets(&snapshot).await.unwrap();
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].safe_summary, safe_description);
+    assert!(!snippets[0].safe_summary.contains(&prompt));
+    assert!(snippets[0].model_content.contains(safe_description));
+    assert!(snippets[0].model_content.contains(&prompt));
+}
+
+#[tokio::test]
+async fn single_snippet_over_per_snippet_budget_fails_budget() {
+    let prompt = "x".repeat(128);
+    let snapshot = SkillRunSnapshot::from_entries(vec![visible_trusted("alpha", "desc", &prompt)]);
+    let service = SkillContextService::with_budget(
+        snapshot.clone(),
+        SkillContextBudget {
+            max_snippet_bytes: 64,
+            max_context_bytes: 512,
+        },
+    );
 
     let err = service.skill_snippets(&snapshot).await.unwrap_err();
     assert_eq!(err, SkillContextError::ContextBudgetExceeded);
+}
+
+#[tokio::test]
+async fn single_snippet_at_per_snippet_budget_limit_is_allowed() {
+    let max_snippet_bytes = 64;
+    let safe_description = "desc";
+    let prompt_prefix_bytes = safe_description.len() + "\n\n".len();
+    let prompt = "x".repeat(max_snippet_bytes - prompt_prefix_bytes);
+    let snapshot =
+        SkillRunSnapshot::from_entries(vec![visible_trusted("alpha", safe_description, &prompt)]);
+    let service = SkillContextService::with_budget(
+        snapshot.clone(),
+        SkillContextBudget {
+            max_snippet_bytes,
+            max_context_bytes: 128,
+        },
+    );
+
+    let snippets = service.skill_snippets(&snapshot).await.unwrap();
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].model_content.len(), max_snippet_bytes);
 }
 
 #[tokio::test]
@@ -272,20 +351,37 @@ async fn aggregate_skill_context_fails_budget() {
         visible_trusted("alpha", "first description", "first prompt"),
         visible_trusted("beta", "second description", "second prompt"),
     ]);
-    let service =
-        SkillContextService::with_budget(snapshot.clone(), SkillContextBudget::new(40, 64));
+    let service = SkillContextService::with_budget(snapshot.clone(), SkillContextBudget::new(64));
 
     let err = service.skill_snippets(&snapshot).await.unwrap_err();
     assert_eq!(err, SkillContextError::ContextBudgetExceeded);
 }
 
 #[tokio::test]
+async fn aggregate_skill_context_allows_exact_budget_limit() {
+    let snapshot = SkillRunSnapshot::from_entries(vec![
+        visible_trusted_without_prompt("alpha", "first"),
+        visible_trusted_without_prompt("beta", "second"),
+    ]);
+    let max_context_bytes =
+        "skill:alpha".len() + "first".len() + "skill:beta".len() + "second".len();
+    let service = SkillContextService::with_budget(
+        snapshot.clone(),
+        SkillContextBudget::new(max_context_bytes),
+    );
+
+    let snippets = service.skill_snippets(&snapshot).await.unwrap();
+    assert_eq!(snippets.len(), 2);
+    let actual_context_bytes: usize = snippets
+        .iter()
+        .map(|snippet| snippet.snippet_ref.len() + snippet.model_content.len())
+        .sum();
+    assert_eq!(actual_context_bytes, max_context_bytes);
+}
+
+#[tokio::test]
 async fn invalid_budget_configuration_is_distinct_from_exceeded_budget() {
-    for budget in [
-        SkillContextBudget::new(0, 64),
-        SkillContextBudget::new(64, 0),
-        SkillContextBudget::new(128, 64),
-    ] {
+    for budget in [SkillContextBudget::new(0)] {
         let snapshot =
             SkillRunSnapshot::from_entries(vec![visible_trusted("alpha", "desc", "prompt")]);
         let service = SkillContextService::with_budget(snapshot.clone(), budget);
@@ -341,27 +437,11 @@ async fn unsafe_visible_metadata_fails_before_loop_snippet_emission() {
             )]),
         ),
         (
-            "unsafe trusted prompt would leak through safe_summary",
-            SkillRunSnapshot::from_entries(vec![visible_trusted(
-                "alpha",
-                "safe description",
-                "load secret://oauth-token",
-            )]),
-        ),
-        (
             "uppercase capability marker in description would leak through safe_summary",
             SkillRunSnapshot::from_entries(vec![visible_trusted(
                 "alpha",
                 "raw capability handle CAP_file_read_123",
                 "safe prompt",
-            )]),
-        ),
-        (
-            "mixed-case secret marker in prompt would leak through safe_summary",
-            SkillRunSnapshot::from_entries(vec![visible_trusted(
-                "alpha",
-                "safe description",
-                "load Secret://oauth-token",
             )]),
         ),
     ];
@@ -442,7 +522,9 @@ async fn mixed_visibility_correct_filtering() {
         .find(|s| s.snippet_ref == "skill:alpha")
         .unwrap();
     assert!(alpha.safe_summary.contains("trusted visible"));
-    assert!(alpha.safe_summary.contains("trusted prompt"));
+    assert!(!alpha.safe_summary.contains("trusted prompt"));
+    assert!(alpha.model_content.contains("trusted visible"));
+    assert!(alpha.model_content.contains("trusted prompt"));
 
     // Installed excludes prompt
     let beta = snippets
@@ -451,7 +533,7 @@ async fn mixed_visibility_correct_filtering() {
         .unwrap();
     assert!(beta.safe_summary.contains("installed visible"));
     assert!(
-        !beta.safe_summary.contains("secret prompt"),
+        !beta.model_content.contains("secret prompt"),
         "installed skill must not expose prompt content"
     );
 

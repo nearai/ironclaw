@@ -14,6 +14,11 @@ import time
 import uuid
 from aiohttp import web
 
+DENIAL_PATTERN = re.compile(
+    r"user denied action|user denied tool|denied:\s*",
+    re.IGNORECASE,
+)
+
 CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
     (re.compile(r"\bhello\b|\bhi\b|\bhey\b", re.IGNORECASE), "Hello! How can I help you today?"),
@@ -866,6 +871,24 @@ def _conversation_has_active_skill(messages: list[dict], skill_name: str) -> boo
     return False
 
 
+def _conversation_uses_codeact(messages: list[dict]) -> bool:
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        text = _message_text(msg)
+        if "Python REPL environment" in text and "```repl" in text:
+            return True
+    return False
+
+
+def _conversation_includes_denial(messages: list[dict]) -> bool:
+    for msg in messages:
+        text = f"{_message_text(msg)}\n{_message_payload_text(msg)}"
+        if DENIAL_PATTERN.search(text):
+            return True
+    return False
+
+
 def _active_skill_names(messages: list[dict]) -> set[str]:
     names = set()
     for msg in messages:
@@ -1036,9 +1059,20 @@ def match_response(messages: list[dict]) -> str:
     resumed = _resumed_action_summary(messages)
     if resumed:
         return resumed
-    if "user denied action" in content.lower():
-        action_match = re.search(r"User denied action '([^']+)'", content)
-        action_name = action_match.group(1) if action_match else "that action"
+    denial_text = f"{content}\n{payload_text}"
+    if DENIAL_PATTERN.search(denial_text):
+        action_match = re.search(
+            r"User denied action '([^']+)'", denial_text, re.IGNORECASE
+        )
+        tool_match = re.search(
+            r"user denied tool '([^']+)'", denial_text, re.IGNORECASE
+        )
+        if action_match:
+            action_name = action_match.group(1)
+        elif tool_match:
+            action_name = tool_match.group(1)
+        else:
+            action_name = "that action"
         return (
             f"The request for {action_name} was denied. "
             "No installation or setup was performed."
@@ -1205,18 +1239,69 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
         return None
     lower = content.lower()
     recent_tool_results = _find_tool_results(messages)
-    if (
-        ("check gmail unread" in lower or "gmail unread" in lower)
-        and any(
-            tr["name"] == "gmail"
-            and "Extension not installed:" in tr["content"]
+    # #3533: gmail-install-then-retry sequence.
+    #
+    # Turn 1: user says "check gmail unread" → match_tool_call below dispatches
+    #         a direct `gmail` call. Engine rejects with either "Extension not
+    #         installed:" (pre-#3533 wording, from the bridge-side
+    #         not-installed reject — the chat-driven install path was wired up
+    #         here in mock_llm but non-functional because `tool_install` was
+    #         hidden from the agent surface) or "is not callable in this
+    #         execution context" (post-#3533, engine-side preflight rejection,
+    #         tool_install restored on the agent surface).
+    # Turn 2: this branch fires — call `tool_install("gmail")`.
+    # Turn 3: install succeeded → call `gmail` again, this time the engine's
+    #         auth preflight raises an Authentication gate.
+    # Turn 4 (after OAuth completes): mock LLM falls through to the
+    #         tool-result-summary path returning the "Quarterly update" text.
+    if "check gmail unread" in lower or "gmail unread" in lower:
+        # Three engine paths can surface gmail-unavailable depending on
+        # whether gmail is in the registry, installed-but-blocked, or
+        # entirely unknown:
+        #   * "Extension not installed: gmail"           — registry has it, not installed
+        #   * "is not callable in this execution context" — installed but engine-v2 blocked
+        #   * "Tool gmail not found"                      — not even in the dispatcher (workflow-canary stack)
+        # A real LLM would treat all three the same way and reach for
+        # `tool_install`. Mirror that — restricting to the first two
+        # made the workflow-canary `tool_install_chat` probe fall
+        # through to text and never recover.
+        gmail_error = next(
+            (
+                tr
+                for tr in recent_tool_results
+                if tr["name"] == "gmail"
+                and (
+                    "Extension not installed:" in tr["content"]
+                    or "is not callable in this execution context" in tr["content"]
+                    or "Tool gmail not found" in tr["content"]
+                )
+            ),
+            None,
+        )
+        install_done = any(
+            tr["name"] == "tool_install"
+            and "error" not in tr["content"].lower()
             for tr in recent_tool_results
         )
-    ):
-        return [{
-            "tool_name": "tool_install",
-            "arguments": {"name": "gmail"},
-        }]
+        if gmail_error and not install_done:
+            return [{
+                "tool_name": "tool_install",
+                "arguments": {"name": "gmail"},
+            }]
+        if install_done and not any(
+            tr["name"] == "gmail" and "is not callable" not in tr["content"]
+            and "Extension not installed" not in tr["content"]
+            and "Tool gmail not found" not in tr["content"]
+            for tr in recent_tool_results
+        ):
+            # Retry gmail after install — the engine's auth preflight will
+            # raise an Authentication gate, which surfaces the auth card.
+            # After OAuth completes, this re-fires and reaches the actual
+            # gmail tool with the correct `list_messages` action.
+            return [{
+                "tool_name": "gmail",
+                "arguments": {"action": "list_messages"},
+            }]
     if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
         bundle_path = _active_skill_bundle_path(messages, "pikastream-video-meeting")
         if (
@@ -1310,6 +1395,10 @@ def _find_tool_result(messages: list[dict]) -> dict | None:
     """Backward-compat single-result helper used by the special-response path."""
     results = _find_tool_results(messages)
     return results[0] if results else None
+
+
+def _tool_results_include_denial(tool_results: list[dict]) -> bool:
+    return any(DENIAL_PATTERN.search(tr.get("content", "")) for tr in tool_results)
 
 
 def _recent_tool_names(messages: list[dict]) -> set[str]:
@@ -1801,9 +1890,47 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
         if special and _conversation_has_user_trigger(messages, lifecycle_trigger):
             return await _dispatch_special_response(request, cid, stream, special)
 
-    # Tool result(s) in messages -> text summary covering every fresh result
     tool_results = _find_tool_results(messages)
+    # #3533: when a multi-step recovery is in progress (e.g. gmail not
+    # installed → `tool_install` → retry gmail), the next move is another
+    # tool call, not a text summary of the failure. Let `match_tool_call`
+    # take precedence over the tool-result-summary fallback whenever it
+    # has a follow-up call to emit.
+    if tool_results:
+        followup = match_tool_call(messages, has_tools)
+        if followup:
+            if not stream:
+                return _tool_call_response(cid, followup)
+            return await _stream_tool_call(request, cid, followup)
+    if (
+        not tool_results
+        and _conversation_uses_codeact(messages)
+        and re.search(
+            r"list.*(?:google|drive).*files|show.*drive",
+            _last_user_content(messages),
+            re.IGNORECASE,
+        )
+    ):
+        text = (
+            "```repl\n"
+            f"result = await http(method=\"GET\", url=\"{_github_api_url}/drive/v3/files\")\n"
+            "FINAL(str(result))\n"
+            "```"
+        )
+        if not stream:
+            return _text_response(cid, text)
+        return await _stream_text(request, cid, text)
+
+    # Tool result(s) in messages -> text summary covering every fresh result
     if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+        if _conversation_includes_denial(messages) or _tool_results_include_denial(tool_results):
+            text = (
+                "The request for shell was denied. "
+                "No installation or setup was performed."
+            )
+            if not stream:
+                return _text_response(cid, text)
+            return await _stream_text(request, cid, text)
         recent_tool_names = _recent_tool_names(messages)
         if "shell" in recent_tool_names:
             text = (
@@ -1816,6 +1943,14 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
             return await _stream_text(request, cid, text)
     if tool_results:
         if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+            if _tool_results_include_denial(tool_results):
+                text = (
+                    "The request for shell was denied. "
+                    "No installation or setup was performed."
+                )
+                if not stream:
+                    return _text_response(cid, text)
+                return await _stream_text(request, cid, text)
             if any(tr["name"] == "shell" for tr in tool_results):
                 text = (
                     "Python dependencies are prepared for the Pika video-meeting skill. "

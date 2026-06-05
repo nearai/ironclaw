@@ -504,6 +504,7 @@ impl HookedLoopCapabilityPort {
                 match self.gate_ref_factory.mint_auth_ref(reason.as_str()).await {
                     Ok(gate_ref) => Some(CapabilityOutcome::AuthRequired {
                         gate_ref,
+                        credential_requirements: Vec::new(),
                         safe_summary: reason.as_str().to_string(),
                     }),
                     Err(_) => Some(fail_closed_gate_ref_unavailable(reason.as_str())),
@@ -677,6 +678,7 @@ mod tests {
                 result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
                     .expect("ok"),
                 safe_summary: format!("ran {}", request.capability_id),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
             }))
         }
@@ -1046,6 +1048,7 @@ mod tests {
             CapabilityOutcome::AuthRequired {
                 gate_ref,
                 safe_summary,
+                ..
             } => {
                 assert!(gate_ref.as_str().starts_with("gate:hook-auth-"));
                 assert_eq!(safe_summary, "needs auth for this capability");

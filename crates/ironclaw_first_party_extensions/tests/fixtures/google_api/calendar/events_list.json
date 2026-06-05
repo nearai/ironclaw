@@ -1,0 +1,44 @@
+{
+  "kind": "calendar#events",
+  "etag": "\"p33abcdef\"",
+  "summary": "Ada Lovelace",
+  "timeZone": "America/New_York",
+  "nextPageToken": "CiAKGjBpNDd2Nm",
+  "items": [
+    {
+      "kind": "calendar#event",
+      "etag": "\"3500000000000000\"",
+      "id": "evt-standup-001",
+      "iCalUID": "evt-standup-001@google.com",
+      "sequence": 3,
+      "status": "confirmed",
+      "htmlLink": "https://calendar.google.com/event?eid=evt-standup-001",
+      "summary": "Daily standup",
+      "description": "Quick sync",
+      "location": "Room 4",
+      "start": { "dateTime": "2026-05-21T09:00:00-04:00", "timeZone": "America/New_York" },
+      "end": { "dateTime": "2026-05-21T09:15:00-04:00", "timeZone": "America/New_York" },
+      "attendees": [
+        { "email": "ada@example.com", "responseStatus": "accepted", "organizer": true },
+        { "email": "grace@example.com", "responseStatus": "needsAction" }
+      ],
+      "reminders": { "useDefault": true }
+    },
+    {
+      "kind": "calendar#event",
+      "etag": "\"3500000000000001\"",
+      "id": "evt-review-002",
+      "iCalUID": "evt-review-002@google.com",
+      "sequence": 1,
+      "status": "confirmed",
+      "htmlLink": "https://calendar.google.com/event?eid=evt-review-002",
+      "summary": "Design review",
+      "start": { "dateTime": "2026-05-21T13:00:00-04:00" },
+      "end": { "dateTime": "2026-05-21T14:00:00-04:00" },
+      "reminders": {
+        "useDefault": false,
+        "overrides": [{ "method": "popup", "minutes": 10 }]
+      }
+    }
+  ]
+}

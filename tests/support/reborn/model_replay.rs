@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -11,7 +12,8 @@ use ironclaw_loop_support::{
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
-    LoopCapabilityPort, ProviderToolCall, ProviderToolCallReplay, VisibleCapabilityRequest,
+    LoopCapabilityPort, ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition,
+    VisibleCapabilityRequest,
 };
 use thiserror::Error;
 
@@ -45,7 +47,33 @@ pub enum RebornModelReplayStep {
         response: HostManagedModelResponse,
         expected_tool_results: Vec<ExpectedToolResult>,
     },
+    AssertProviderToolsThenResponse {
+        capability_ids: Vec<CapabilityId>,
+        response: HostManagedModelResponse,
+        expected_tool_results: Vec<ExpectedToolResult>,
+    },
+    ResponseForRequest {
+        request_contains: String,
+        response: HostManagedModelResponse,
+        expected_tool_results: Vec<ExpectedToolResult>,
+    },
+    DelayedResponse {
+        response: HostManagedModelResponse,
+        delay: Duration,
+        expected_tool_results: Vec<ExpectedToolResult>,
+    },
+    DelayedResponseForRequest {
+        request_contains: String,
+        response: HostManagedModelResponse,
+        delay: Duration,
+        expected_tool_results: Vec<ExpectedToolResult>,
+    },
     ProviderToolCalls {
+        calls: Vec<RebornScriptedProviderToolCall>,
+        expected_tool_results: Vec<ExpectedToolResult>,
+    },
+    ProviderToolCallsForRequest {
+        request_contains: String,
         calls: Vec<RebornScriptedProviderToolCall>,
         expected_tool_results: Vec<ExpectedToolResult>,
     },
@@ -83,6 +111,7 @@ struct ReplayState {
 #[derive(Debug, Clone)]
 struct ReplayStep {
     output: ReplayOutput,
+    request_contains: Option<String>,
     expected_tool_results: Vec<ExpectedToolResult>,
 }
 
@@ -90,6 +119,14 @@ struct ReplayStep {
 #[derive(Debug, Clone)]
 enum ReplayOutput {
     Response(HostManagedModelResponse),
+    AssertProviderToolsThenResponse {
+        capability_ids: Vec<CapabilityId>,
+        response: HostManagedModelResponse,
+    },
+    DelayedResponse {
+        response: HostManagedModelResponse,
+        delay: Duration,
+    },
     ProviderToolCalls(Vec<RebornScriptedProviderToolCall>),
 }
 
@@ -110,6 +147,7 @@ impl RebornTraceReplayModelGateway {
                 .into_iter()
                 .map(|response| ReplayStep {
                     output: ReplayOutput::Response(response),
+                    request_contains: None,
                     expected_tool_results: Vec::new(),
                 })
                 .collect(),
@@ -127,6 +165,47 @@ impl RebornTraceReplayModelGateway {
                         expected_tool_results,
                     } => ReplayStep {
                         output: ReplayOutput::Response(response),
+                        request_contains: None,
+                        expected_tool_results,
+                    },
+                    RebornModelReplayStep::ResponseForRequest {
+                        request_contains,
+                        response,
+                        expected_tool_results,
+                    } => ReplayStep {
+                        output: ReplayOutput::Response(response),
+                        request_contains: Some(request_contains),
+                        expected_tool_results,
+                    },
+                    RebornModelReplayStep::AssertProviderToolsThenResponse {
+                        capability_ids,
+                        response,
+                        expected_tool_results,
+                    } => ReplayStep {
+                        output: ReplayOutput::AssertProviderToolsThenResponse {
+                            capability_ids,
+                            response,
+                        },
+                        request_contains: None,
+                        expected_tool_results,
+                    },
+                    RebornModelReplayStep::DelayedResponse {
+                        response,
+                        delay,
+                        expected_tool_results,
+                    } => ReplayStep {
+                        output: ReplayOutput::DelayedResponse { response, delay },
+                        request_contains: None,
+                        expected_tool_results,
+                    },
+                    RebornModelReplayStep::DelayedResponseForRequest {
+                        request_contains,
+                        response,
+                        delay,
+                        expected_tool_results,
+                    } => ReplayStep {
+                        output: ReplayOutput::DelayedResponse { response, delay },
+                        request_contains: Some(request_contains),
                         expected_tool_results,
                     },
                     RebornModelReplayStep::ProviderToolCalls {
@@ -134,6 +213,16 @@ impl RebornTraceReplayModelGateway {
                         expected_tool_results,
                     } => ReplayStep {
                         output: ReplayOutput::ProviderToolCalls(calls),
+                        request_contains: None,
+                        expected_tool_results,
+                    },
+                    RebornModelReplayStep::ProviderToolCallsForRequest {
+                        request_contains,
+                        calls,
+                        expected_tool_results,
+                    } => ReplayStep {
+                        output: ReplayOutput::ProviderToolCalls(calls),
+                        request_contains: Some(request_contains),
                         expected_tool_results,
                     },
                 })
@@ -180,6 +269,16 @@ impl HostManagedModelGateway for RebornTraceReplayModelGateway {
         let step = self.take_step(request)?;
         match step.output {
             ReplayOutput::Response(response) => Ok(response),
+            ReplayOutput::AssertProviderToolsThenResponse { .. } => {
+                Err(HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    "trace replay provider tool assertions require capability-aware model streaming",
+                ))
+            }
+            ReplayOutput::DelayedResponse { response, delay } => {
+                tokio::time::sleep(delay).await;
+                Ok(response)
+            }
             ReplayOutput::ProviderToolCalls(_) => Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidRequest,
                 "trace replay provider tool calls require capability-aware model streaming",
@@ -195,6 +294,17 @@ impl HostManagedModelGateway for RebornTraceReplayModelGateway {
         let step = self.take_step(request.clone())?;
         match step.output {
             ReplayOutput::Response(response) => Ok(response),
+            ReplayOutput::AssertProviderToolsThenResponse {
+                capability_ids,
+                response,
+            } => {
+                assert_provider_tools(capabilities, &capability_ids).await?;
+                Ok(response)
+            }
+            ReplayOutput::DelayedResponse { response, delay } => {
+                tokio::time::sleep(delay).await;
+                Ok(response)
+            }
             ReplayOutput::ProviderToolCalls(calls) => {
                 provider_tool_calls_response(&request, capabilities, calls).await
             }
@@ -213,17 +323,89 @@ impl RebornTraceReplayModelGateway {
                 "trace replay lock poisoned",
             )
         })?;
-        let Some(step) = state.steps.front().cloned() else {
+        let Some(position) = state
+            .steps
+            .iter()
+            .position(|step| step.matches_request(&request))
+        else {
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::Unavailable,
-                "trace replay exhausted",
+                format!(
+                    "trace replay has no matching step for request messages: {}",
+                    request_message_summary(&request)
+                ),
             ));
         };
+        let step = state
+            .steps
+            .get(position)
+            .expect("matched replay step position")
+            .clone();
         validate_expected_tool_results(&request, &step.expected_tool_results)?;
         state.requests.push(request);
-        state.steps.pop_front();
-        Ok(step)
+        Ok(state
+            .steps
+            .remove(position)
+            .expect("matched replay step remains"))
     }
+}
+
+async fn assert_provider_tools(
+    capabilities: Arc<dyn LoopCapabilityPort>,
+    capability_ids: &[CapabilityId],
+) -> Result<(), HostManagedModelError> {
+    let definitions = provider_tool_definitions(&capabilities).await?;
+    for capability_id in capability_ids {
+        if !definitions
+            .iter()
+            .any(|definition| &definition.capability_id == capability_id)
+        {
+            return Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                format!(
+                    "expected capability {} was not advertised to the model",
+                    capability_id.as_str()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn provider_tool_definitions(
+    capabilities: &Arc<dyn LoopCapabilityPort>,
+) -> Result<Vec<ProviderToolDefinition>, HostManagedModelError> {
+    capabilities
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .map_err(capability_host_error)?;
+    capabilities
+        .tool_definitions()
+        .map_err(capability_host_error)
+}
+
+impl ReplayStep {
+    fn matches_request(&self, request: &HostManagedModelRequest) -> bool {
+        let Some(needle) = &self.request_contains else {
+            return true;
+        };
+        request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(needle))
+    }
+}
+
+fn request_message_summary(request: &HostManagedModelRequest) -> String {
+    request
+        .messages
+        .iter()
+        .map(|message| {
+            let snippet = message.content.chars().take(80).collect::<String>();
+            format!("{:?}:{snippet}", message.role)
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 async fn provider_tool_calls_response(
@@ -231,13 +413,7 @@ async fn provider_tool_calls_response(
     capabilities: Arc<dyn LoopCapabilityPort>,
     calls: Vec<RebornScriptedProviderToolCall>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
-    capabilities
-        .visible_capabilities(VisibleCapabilityRequest)
-        .await
-        .map_err(capability_host_error)?;
-    let definitions = capabilities
-        .tool_definitions()
-        .map_err(capability_host_error)?;
+    let definitions = provider_tool_definitions(&capabilities).await?;
     let mut candidates = Vec::with_capacity(calls.len());
     for call in calls {
         let definition = definitions
@@ -278,7 +454,7 @@ async fn provider_tool_calls_response(
 
 fn capability_host_error(error: AgentLoopHostError) -> HostManagedModelError {
     HostManagedModelError::safe(
-        HostManagedModelErrorKind::InvalidRequest,
+        HostManagedModelErrorKind::InvalidOutput,
         format!("capability trace replay failed: {}", error.safe_summary),
     )
 }
@@ -286,6 +462,7 @@ fn capability_host_error(error: AgentLoopHostError) -> HostManagedModelError {
 fn replay_step(step: TraceStep) -> Result<ReplayStep, RebornTraceReplayError> {
     Ok(ReplayStep {
         output: ReplayOutput::Response(response_from_trace(step.response)?),
+        request_contains: None,
         expected_tool_results: step.expected_tool_results,
     })
 }
@@ -342,6 +519,7 @@ pub(crate) fn capability_call_from_trace_with_surface(
         })?;
     Ok(CapabilityCallCandidate {
         surface_version,
+        effective_capability_ids: vec![capability_id.clone()],
         capability_id,
         input_ref,
         provider_replay: Some(ProviderToolCallReplay {

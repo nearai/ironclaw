@@ -1,6 +1,7 @@
 const LOG_MAX_ENTRIES = 2000;
 let logsPaused = false;
 let logBuffer = []; // buffer while paused
+let downloadLogEntries = []; // entries available for JSONL download
 
 function connectLogSSE() {
   if (logEventSource) logEventSource.close();
@@ -12,6 +13,7 @@ function connectLogSSE() {
 
   logEventSource.addEventListener('log', (e) => {
     const entry = JSON.parse(e.data);
+    rememberLogEntryForDownload(entry);
     if (logsPaused) {
       logBuffer.push(entry);
       return;
@@ -22,6 +24,41 @@ function connectLogSSE() {
   logEventSource.onerror = () => {
     // Silent reconnect
   };
+}
+
+function rememberLogEntryForDownload(entry) {
+  downloadLogEntries.push(entry);
+  while (downloadLogEntries.length > LOG_MAX_ENTRIES) {
+    downloadLogEntries.shift();
+  }
+}
+
+function serializeLogEntriesAsJsonl(entries) {
+  return entries.map(entry => JSON.stringify(entry)).join('\n') + (entries.length ? '\n' : '');
+}
+
+function logsDownloadFilename() {
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\.\d{3}Z$/, 'Z')
+    .replace('T', '-');
+  return 'ironclaw-logs-' + stamp + '.jsonl';
+}
+
+function downloadLogsJsonl() {
+  const blob = new Blob([serializeLogEntriesAsJsonl(downloadLogEntries)], {
+    type: 'application/x-ndjson;charset=utf-8',
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = logsDownloadFilename();
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function prependLogEntry(entry) {
@@ -96,6 +133,7 @@ function clearLogs() {
   if (!confirm(I18n.t('logs.confirmClear'))) return;
   document.getElementById('logs-output').innerHTML = '';
   logBuffer = [];
+  downloadLogEntries = [];
 }
 
 // Re-apply filters when level or target changes

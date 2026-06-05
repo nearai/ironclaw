@@ -9,6 +9,7 @@
 
 mod crypto;
 mod filesystem_store;
+pub mod keychain;
 mod legacy_store;
 
 pub use filesystem_store::{FilesystemCredentialBroker, FilesystemSecretStore};
@@ -383,11 +384,8 @@ pub struct CredentialSession {
 /// stores already use the equivalent `pub(crate)` pattern inline; the
 /// filesystem backend lives in a sibling module and uses this explicit helper
 /// to avoid duplicating that constructor for every backend.
+// arch-exempt: too_many_args, needs CredentialSession reconstruction context, plan #4088
 #[allow(clippy::too_many_arguments)]
-// arch-exempt: too_many_args, all fields are required to reconstruct a
-// CredentialSession; the alternative is to add another helper struct that
-// duplicates the existing struct shape, which is exactly the kind of
-// parallel surface the architecture rule warns against.
 pub(crate) fn __internal_session_for_filesystem_store(
     scope: ResourceScope,
     invocation_id: InvocationId,
@@ -1004,6 +1002,13 @@ pub trait SecretStore: Send + Sync {
         handle: &SecretHandle,
     ) -> Result<Option<SecretMetadata>, SecretStoreError>;
 
+    /// Deletes a scoped secret if it exists. Returns whether a stored secret was removed.
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError>;
+
     /// Creates a one-shot lease for later secret consumption.
     async fn lease_once(
         &self,
@@ -1181,6 +1186,25 @@ where
             Err(SecretError::NotFound(_)) => Ok(None),
             Err(error) => Err(map_legacy_secret_error(error)),
         }
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        let legacy_user_id = scoped_legacy_user_id(scope);
+        let removed = self
+            .inner
+            .delete(&legacy_user_id, handle.as_str())
+            .await
+            .map_err(map_legacy_secret_error)?;
+        if removed {
+            self.lock_leases()?.retain(|key, record| {
+                !(key.matches_scope(scope) && record.lease.handle == *handle)
+            });
+        }
+        Ok(removed)
     }
 
     async fn lease_once(
@@ -1390,6 +1414,14 @@ impl SecretStore for InMemorySecretStore {
         self.inner.metadata(scope, handle).await
     }
 
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        self.inner.delete(scope, handle).await
+    }
+
     async fn lease_once(
         &self,
         scope: &ResourceScope,
@@ -1461,6 +1493,36 @@ mod tests {
             scoped_legacy_user_id(&delimiter_scope)
         );
         assert!(scoped_legacy_user_id(&none_agent).contains("\"agent_id\":null"));
+    }
+
+    #[tokio::test]
+    async fn scoped_secret_delete_removes_only_matching_scope() {
+        let store = InMemorySecretStore::new();
+        let owner = sample_scope("tenant-a", "user-a");
+        let other = sample_scope("tenant-a", "user-b");
+        let handle = SecretHandle::new("google-refresh").unwrap();
+
+        store
+            .put(
+                owner.clone(),
+                handle.clone(),
+                SecretMaterial::from("owner-secret"),
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                other.clone(),
+                handle.clone(),
+                SecretMaterial::from("other-secret"),
+            )
+            .await
+            .unwrap();
+
+        assert!(store.delete(&owner, &handle).await.unwrap());
+        assert!(!store.delete(&owner, &handle).await.unwrap());
+        assert!(store.metadata(&owner, &handle).await.unwrap().is_none());
+        assert!(store.metadata(&other, &handle).await.unwrap().is_some());
     }
 
     #[test]

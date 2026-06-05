@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    CheckpointSchemaId, LoopCheckpointKind, LoopCheckpointStateRef, RunProfileVersion,
+    CheckpointSchemaId, LoopCheckpointKind, LoopCheckpointStateRef, LoopGateRef, RunProfileVersion,
     TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope, TurnTimestamp,
 };
 
@@ -62,6 +62,17 @@ pub struct CheckpointStateRecord {
     pub kind: LoopCheckpointKind,
     pub payload: RedactedCheckpointPayload,
     pub created_at: TurnTimestamp,
+}
+
+#[derive(Clone, Copy)]
+pub struct CheckpointStateMatchMetadata<'a> {
+    pub state_ref: &'a LoopCheckpointStateRef,
+    pub scope: &'a TurnScope,
+    pub turn_id: TurnId,
+    pub run_id: TurnRunId,
+    pub schema_id: &'a CheckpointSchemaId,
+    pub schema_version: RunProfileVersion,
+    pub kind: LoopCheckpointKind,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -159,6 +170,11 @@ pub struct LoopCheckpointRecord {
     pub schema_id: CheckpointSchemaId,
     pub schema_version: RunProfileVersion,
     pub kind: LoopCheckpointKind,
+    /// Gate that triggered this checkpoint. `None` for checkpoint kinds other
+    /// than `BeforeBlock` and for legacy records persisted before this field
+    /// was added.
+    #[serde(default)]
+    pub gate_ref: Option<LoopGateRef>,
     pub created_at: TurnTimestamp,
 }
 
@@ -171,6 +187,8 @@ pub struct PutLoopCheckpointRequest {
     pub schema_id: CheckpointSchemaId,
     pub schema_version: RunProfileVersion,
     pub kind: LoopCheckpointKind,
+    /// Gate identity for `BeforeBlock` checkpoints; `None` for other kinds.
+    pub gate_ref: Option<LoopGateRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,7 +230,7 @@ impl CheckpointStateStore for InMemoryCheckpointStateStore {
     ) -> Result<CheckpointStateRecord, TurnError> {
         validate_checkpoint_payload_len(request.payload.len())
             .map_err(|reason| TurnError::InvalidRequest { reason })?;
-        let state_ref = new_state_ref()?;
+        let state_ref = new_checkpoint_state_ref()?;
         let payload = RedactedCheckpointPayload::new(request.payload)
             .map_err(|reason| TurnError::InvalidRequest { reason })?;
         let record = CheckpointStateRecord {
@@ -268,6 +286,7 @@ impl LoopCheckpointStore for InMemoryLoopCheckpointStore {
             schema_id: request.schema_id,
             schema_version: request.schema_version,
             kind: request.kind,
+            gate_ref: request.gate_ref,
             created_at: Utc::now(),
         };
         let mut records = self.records.lock().map_err(|_| TurnError::Unavailable {
@@ -295,16 +314,35 @@ impl LoopCheckpointStore for InMemoryLoopCheckpointStore {
     }
 }
 
-fn checkpoint_state_record_matches_request(
+pub fn checkpoint_state_record_matches_request(
     record: &CheckpointStateRecord,
     request: &GetCheckpointStateRequest,
 ) -> bool {
-    record.scope == request.scope
-        && record.turn_id == request.turn_id
-        && record.run_id == request.run_id
-        && record.schema_id == request.schema_id
-        && record.schema_version == request.schema_version
-        && record.kind == request.kind
+    checkpoint_state_metadata_matches_request(
+        CheckpointStateMatchMetadata {
+            state_ref: &record.state_ref,
+            scope: &record.scope,
+            turn_id: record.turn_id,
+            run_id: record.run_id,
+            schema_id: &record.schema_id,
+            schema_version: record.schema_version,
+            kind: record.kind,
+        },
+        request,
+    )
+}
+
+pub fn checkpoint_state_metadata_matches_request(
+    metadata: CheckpointStateMatchMetadata<'_>,
+    request: &GetCheckpointStateRequest,
+) -> bool {
+    metadata.state_ref == &request.state_ref
+        && metadata.scope == &request.scope
+        && metadata.turn_id == request.turn_id
+        && metadata.run_id == request.run_id
+        && metadata.schema_id == &request.schema_id
+        && metadata.schema_version == request.schema_version
+        && metadata.kind == request.kind
 }
 
 fn loop_checkpoint_record_matches_request(
@@ -317,7 +355,7 @@ fn loop_checkpoint_record_matches_request(
         && record.checkpoint_id == request.checkpoint_id
 }
 
-fn new_state_ref() -> Result<LoopCheckpointStateRef, TurnError> {
+pub fn new_checkpoint_state_ref() -> Result<LoopCheckpointStateRef, TurnError> {
     LoopCheckpointStateRef::new(format!("checkpoint:{}", Uuid::new_v4())).map_err(|reason| {
         TurnError::Unavailable {
             reason: format!("generated checkpoint state ref was invalid: {reason}"),

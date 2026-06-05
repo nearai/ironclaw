@@ -1864,6 +1864,7 @@ async fn fetch_github_repo_payload(
         install_metadata: Some(ironclaw_skills::registry::InstalledSkillMetadata {
             source_url: Some(source_url.to_string()),
             source_subdir: bundle.bundle_subdir.or(repo.subdir),
+            ..Default::default()
         }),
     })
 }
@@ -1883,6 +1884,7 @@ pub(crate) async fn fetch_skill_payload(url: &str) -> Result<SkillInstallPayload
             install_metadata: Some(ironclaw_skills::registry::InstalledSkillMetadata {
                 source_url: Some(url.to_string()),
                 source_subdir: None,
+                ..Default::default()
             }),
             ..SkillInstallPayload::default()
         });
@@ -2157,6 +2159,7 @@ mod tests {
                 Some(&ironclaw_skills::registry::InstalledSkillMetadata {
                     source_url: Some(source_url.to_string()),
                     source_subdir: None,
+                    ..Default::default()
                 }),
             )
             .await
@@ -2205,6 +2208,7 @@ mod tests {
                 Some(&ironclaw_skills::registry::InstalledSkillMetadata {
                     source_url: Some(source_url.to_string()),
                     source_subdir: None,
+                    ..Default::default()
                 }),
             )
             .await

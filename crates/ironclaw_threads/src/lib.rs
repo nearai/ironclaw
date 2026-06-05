@@ -9,27 +9,43 @@
 //! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 #![warn(unreachable_pub)]
 
+mod capability_display_preview;
 mod contract;
 mod error;
 mod filesystem_service;
 mod identifiers;
 mod in_memory;
 mod service;
+mod summary_artifacts;
+mod title;
 mod tool_result_reference;
 
 pub use filesystem_service::FilesystemSessionThreadService;
+// `title::derive_thread_title` is deliberately NOT re-exported here —
+// it is an internal helper consumed only by the two backend impls in
+// this crate, and keeping it off the public surface avoids committing
+// to it via semver. Sibling modules import directly through
+// `crate::title::derive_thread_title`.
 
+pub use capability_display_preview::{
+    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    CapabilityDisplayPreviewStatus,
+};
 pub use contract::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, ListThreadsForScopeRequest,
-    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadRecord, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+    AppendToolResultReferenceRequest, ContextMessage, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, FinalizedAssistantMessageByRunRequest,
+    GOAL_STATEMENT_MAX_CHARS, GoalStatement, LatestThreadMessageRequest,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadRecord, SummaryArtifact, SummaryKind,
+    SummaryModelContextPolicy, ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageRange,
+    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    UpdateThreadGoalRequest, UpdateToolResultReferenceRequest,
 };
 pub use error::SessionThreadError;
-pub use identifiers::ThreadMessageId;
+pub use identifiers::{SummaryArtifactId, ThreadMessageId};
 pub use in_memory::InMemorySessionThreadService;
 pub use service::SessionThreadService;
 pub use tool_result_reference::{

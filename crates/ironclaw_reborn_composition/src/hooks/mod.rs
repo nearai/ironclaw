@@ -174,17 +174,16 @@ impl HooksActivationConfig {
     /// [`HOOKS_THIRD_PARTY_ENABLED_ENV`] by the same rules; it stays inert
     /// unless the master flag is also on.
     pub fn from_env() -> Self {
-        let enabled = match std::env::var(HOOKS_ENABLED_ENV) {
-            Ok(value) => is_truthy(&value),
-            Err(_) => false,
-        };
-        let third_party_enabled = match std::env::var(HOOKS_THIRD_PARTY_ENABLED_ENV) {
-            Ok(value) => is_truthy(&value),
-            Err(_) => false,
-        };
+        Self::from_env_values(
+            ironclaw_common::env_helpers::env_or_override(HOOKS_ENABLED_ENV),
+            ironclaw_common::env_helpers::env_or_override(HOOKS_THIRD_PARTY_ENABLED_ENV),
+        )
+    }
+
+    fn from_env_values(enabled: Option<String>, third_party_enabled: Option<String>) -> Self {
         Self {
-            enabled,
-            third_party_enabled,
+            enabled: enabled.as_deref().is_some_and(is_truthy),
+            third_party_enabled: third_party_enabled.as_deref().is_some_and(is_truthy),
         }
     }
 

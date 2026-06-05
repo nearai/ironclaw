@@ -14,6 +14,10 @@ pub enum RebornBuildError {
     EmptyProductionTrustPolicy,
     #[error("reborn composition requires live turn scheduler wake notifier")]
     MissingTurnRunWakeNotifier,
+    #[error(
+        "reborn production composition requires a configured or keychain-resolvable secret master key"
+    )]
+    MissingSecretMasterKey,
     #[error("reborn planned run-profile resolver build failed: {reason}")]
     PlannedRunProfileResolver { reason: String },
     #[error("reborn composition failed production validation")]
@@ -40,8 +44,90 @@ pub enum RebornBuildError {
     Mount(#[from] ironclaw_host_api::HostApiError),
 }
 
+impl From<ironclaw_host_runtime::ProductionWiringReport> for crate::RebornCompositionError {
+    fn from(report: ironclaw_host_runtime::ProductionWiringReport) -> Self {
+        Self::ProductionWiring { report }
+    }
+}
+
 impl From<ironclaw_host_runtime::ProductionWiringReport> for RebornBuildError {
     fn from(report: ironclaw_host_runtime::ProductionWiringReport) -> Self {
         Self::ProductionWiring { report }
+    }
+}
+
+impl From<crate::RebornCompositionError> for RebornBuildError {
+    fn from(error: crate::RebornCompositionError) -> Self {
+        match error {
+            crate::RebornCompositionError::MissingSecretMasterKey => Self::MissingSecretMasterKey,
+            crate::RebornCompositionError::Mount(error) => Self::Mount(error),
+            crate::RebornCompositionError::Filesystem(error) => Self::Filesystem(error),
+            crate::RebornCompositionError::Resource(error) => Self::Resource(error),
+            crate::RebornCompositionError::RunState(error) => Self::RunState(error),
+            crate::RebornCompositionError::CapabilityLease(error) => Self::CapabilityLease(error),
+            crate::RebornCompositionError::Secret(error) => Self::Secret(error),
+            crate::RebornCompositionError::EventStore(error) => Self::EventStore(error),
+            crate::RebornCompositionError::Turn(error) => Self::Turn(error),
+            crate::RebornCompositionError::RunProfile(error) => Self::PlannedRunProfileResolver {
+                reason: error.to_string(),
+            },
+            crate::RebornCompositionError::ProductionWiring { report } => {
+                Self::ProductionWiring { report }
+            }
+            error @ crate::RebornCompositionError::MissingTenantSandboxProcessPort
+            | error @ crate::RebornCompositionError::UnexpectedTenantSandboxProcessPort { .. } => {
+                Self::InvalidConfig {
+                    reason: error.to_string(),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RebornBuildError;
+
+    #[test]
+    fn composition_missing_secret_master_key_stays_typed_for_facade_errors() {
+        let error = RebornBuildError::from(crate::RebornCompositionError::MissingSecretMasterKey);
+
+        assert!(matches!(error, RebornBuildError::MissingSecretMasterKey));
+    }
+
+    #[test]
+    fn composition_missing_tenant_sandbox_process_port_becomes_invalid_config() {
+        let error =
+            RebornBuildError::from(crate::RebornCompositionError::MissingTenantSandboxProcessPort);
+
+        assert!(
+            matches!(error, RebornBuildError::InvalidConfig { reason } if reason == "production tenant-sandbox process backend requires a tenant sandbox process binding")
+        );
+    }
+
+    #[test]
+    fn composition_unexpected_tenant_sandbox_process_port_becomes_invalid_config() {
+        let error = RebornBuildError::from(
+            crate::RebornCompositionError::UnexpectedTenantSandboxProcessPort {
+                process_backend: ironclaw_host_api::ProcessBackendKind::LocalHost,
+            },
+        );
+
+        assert!(
+            matches!(error, RebornBuildError::InvalidConfig { reason } if reason == "production runtime policy uses LocalHost but a tenant sandbox process binding was supplied")
+        );
+    }
+
+    #[test]
+    fn composition_run_profile_becomes_planned_run_profile_resolver() {
+        let error = RebornBuildError::from(crate::RebornCompositionError::RunProfile(
+            ironclaw_turns::run_profile::RunProfileRegistryError::InvalidProfile {
+                reason: "broken run profile".to_string(),
+            },
+        ));
+
+        assert!(
+            matches!(error, RebornBuildError::PlannedRunProfileResolver { reason } if reason == "invalid run profile: broken run profile")
+        );
     }
 }

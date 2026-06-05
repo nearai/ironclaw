@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use ironclaw_host_api::NetworkMethod;
 
 use crate::{
@@ -6,16 +7,20 @@ use crate::{
     resolver::{NetworkResolver, SystemNetworkResolver, resolve_public_ips},
     transport::reject_caller_host_header,
     types::{NetworkHttpRequest, NetworkHttpResponse, NetworkRequest, NetworkTransportRequest},
-    url_target::network_target_for_url,
+    url_target::network_target_for_http_url,
 };
 
+#[async_trait]
 pub trait NetworkHttpEgress: Send + Sync {
-    fn execute(&self, request: NetworkHttpRequest)
-    -> Result<NetworkHttpResponse, NetworkHttpError>;
+    async fn execute(
+        &self,
+        request: NetworkHttpRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError>;
 }
 
+#[async_trait]
 pub trait NetworkHttpTransport: Send + Sync {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkTransportRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError>;
@@ -49,14 +54,15 @@ impl<T, R> PolicyNetworkHttpEgress<T, R> {
     }
 }
 
+#[async_trait]
 impl<T, R> NetworkHttpEgress for PolicyNetworkHttpEgress<T, R>
 where
-    T: NetworkHttpTransport,
-    R: NetworkResolver,
+    T: NetworkHttpTransport + Send + Sync,
+    R: NetworkResolver + Clone + Send + Sync + 'static,
 {
-    fn execute(
+    async fn execute(
         &self,
-        request: NetworkHttpRequest,
+        mut request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         let estimated_request_bytes = estimate_http_request_bytes(
             request.method,
@@ -65,10 +71,12 @@ where
             &request.body,
         );
         reject_caller_host_header(&request.headers)?;
-        let target = network_target_for_url(&request.url, estimated_request_bytes)?;
+        let target = network_target_for_http_url(&request.url, estimated_request_bytes)?;
         let permit = StaticNetworkPolicyEnforcer::new(request.policy.clone())
             .authorize_blocking(NetworkRequest {
-                scope: request.scope,
+                // This clone only carries scoped identity metadata; the sensitive
+                // URL/header/body buffers are still moved out below with `mem::take`.
+                scope: request.scope.clone(),
                 target: target.clone(),
                 method: request.method,
                 estimated_bytes: Some(estimated_request_bytes),
@@ -78,22 +86,27 @@ where
                 request_bytes: estimated_request_bytes,
                 response_bytes: 0,
             })?;
-        let resolved_ips = resolve_public_ips(
-            &target,
-            &request.policy,
-            &self.resolver,
-            estimated_request_bytes,
-        )?;
+        let resolver = self.resolver.clone();
+        let policy = request.policy.clone();
+        let resolved_ips = tokio::task::spawn_blocking(move || {
+            resolve_public_ips(&target, &policy, &resolver, estimated_request_bytes)
+        })
+        .await
+        .map_err(|error| NetworkHttpError::Transport {
+            reason: format!("network resolver worker failed: {error}"),
+            request_bytes: estimated_request_bytes,
+            response_bytes: 0,
+        })??;
         let transport_request = NetworkTransportRequest {
             method: permit.method,
-            url: request.url,
-            headers: request.headers,
-            body: request.body,
+            url: std::mem::take(&mut request.url),
+            headers: std::mem::take(&mut request.headers),
+            body: std::mem::take(&mut request.body),
             resolved_ips,
             response_body_limit: request.response_body_limit,
             timeout_ms: request.timeout_ms,
         };
-        self.transport.execute(transport_request)
+        self.transport.execute(transport_request).await
     }
 }
 

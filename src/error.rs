@@ -72,6 +72,19 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
 }
 
+impl From<ironclaw_llm::LlmConfigError> for ConfigError {
+    fn from(err: ironclaw_llm::LlmConfigError) -> Self {
+        match err {
+            ironclaw_llm::LlmConfigError::MissingRequired { key, hint } => {
+                Self::MissingRequired { key, hint }
+            }
+            ironclaw_llm::LlmConfigError::InvalidValue { key, message } => {
+                Self::InvalidValue { key, message }
+            }
+        }
+    }
+}
+
 /// Database-related errors.
 #[derive(Debug, thiserror::Error)]
 pub enum DatabaseError {

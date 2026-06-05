@@ -46,7 +46,7 @@ mod tests {
     use ironclaw_turns::{LoopMessageRef, LoopResultRef};
 
     use super::*;
-    use crate::strategies::{TurnEndKind, TurnSummary};
+    use crate::strategies::{CapabilityBatchTurnSummary, TurnEndKind, TurnSummary};
 
     #[test]
     fn drain_strategy_is_object_safe() {
@@ -168,6 +168,7 @@ mod tests {
                 LoopResultRef::new("result:call-1").unwrap(),
                 LoopResultRef::new("result:call-2").unwrap(),
             ],
+            capability_batch: CapabilityBatchTurnSummary::default(),
         };
 
         let serialized = serde_json::to_string(&summary).unwrap();

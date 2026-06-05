@@ -51,11 +51,12 @@ impl WebUiAuthenticatedCaller {
     }
 
     pub fn turn_scope(&self, thread_id: ThreadId) -> TurnScope {
-        TurnScope::new(
+        TurnScope::new_with_owner(
             self.tenant_id.clone(),
             self.agent_id.clone(),
             self.project_id.clone(),
             thread_id,
+            Some(self.user_id.clone()),
         )
     }
 }
@@ -102,21 +103,25 @@ pub struct WebUiListThreadsRequest {
     pub cursor: Option<String>,
 }
 
+/// Browser query for WebUI automation listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WebUiListAutomationsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
 /// Browser body for WebUI extension-setup interaction.
 ///
 /// This is the v2 entrypoint inventory's "extensions onboarding" row.
 /// The native facade exposes the route surface so callers can
-/// inventory the API without v1 dependency, but the underlying
-/// onboarding controller remains v1 today — concrete impl returns
-/// `RebornSetupExtensionStatus::NotImplemented` until a v2-aware
-/// extension lifecycle lands.
+/// inventory the API without v1 dependency. Concrete implementations return a
+/// product-safe lifecycle projection; auth, approval, and pairing requirements
+/// remain blockers owned by their dedicated Reborn services, not lifecycle
+/// phases.
 ///
-/// `extension_name` is not part of the body — it is bound from the
-/// route path as an [`ironclaw_common::ExtensionName`] and threaded
-/// through the facade as a typed parameter. The handler/facade
-/// boundary validates the path segment so a malformed identifier
-/// never crosses into facade-internal request/response state as a
-/// raw `String`.
+/// The package id is not part of the body — it is bound from the route
+/// path and lifted into a lifecycle package ref by the handler before
+/// it crosses the facade boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WebUiSetupExtensionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]

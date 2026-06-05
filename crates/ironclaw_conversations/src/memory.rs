@@ -17,9 +17,9 @@ use uuid::Uuid;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
     AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind,
-    ConversationBindingResolution, ConversationBindingService, ConversationRouteKind,
-    ExternalActorRef, ExternalConversationIdentity, ExternalConversationRef, InboundTurnError,
-    LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
+    ConversationActorPairingService, ConversationBindingResolution, ConversationBindingService,
+    ConversationRouteKind, ExternalActorRef, ExternalConversationIdentity, ExternalConversationRef,
+    InboundTurnError, LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
     ReplyTargetBinding, ResolveConversationRequest, SessionThreadService, ThreadAccessDecision,
     ThreadMessageRecord, ValidateReplyTargetRequest,
 };
@@ -204,6 +204,27 @@ impl InMemoryConversationServices {
         };
         self.persist_state(old_state, snapshot).await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ConversationActorPairingService for InMemoryConversationServices {
+    async fn pair_external_actor(
+        &self,
+        tenant_id: TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+        user_id: UserId,
+    ) -> Result<(), InboundTurnError> {
+        self.try_pair_external_actor(
+            tenant_id,
+            adapter_kind,
+            adapter_installation_id,
+            external_actor_ref,
+            user_id,
+        )
+        .await
     }
 }
 
