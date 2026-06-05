@@ -37,20 +37,16 @@ impl FakeAuthChallengeProvider {
                 calls.len()
             );
         };
-        assert_eq!(scope.tenant_id.as_str(), TENANT);
-        assert_eq!(scope.agent_id.as_ref().map(AgentId::as_str), Some(AGENT));
-        assert_eq!(
-            scope.project_id.as_ref().map(ProjectId::as_str),
-            Some(PROJECT)
-        );
-        assert_eq!(
-            scope.explicit_owner_user_id().map(UserId::as_str),
-            Some(USER)
-        );
-        assert_eq!(owner_user_id.as_str(), USER);
-        assert!(!run_id.to_string().is_empty());
-        assert_eq!(gate_ref, AUTH_GATE);
-        assert!(credential_requirements.is_empty());
+        assert_eq!(scope.tenant_id.as_str(), TENANT); // safety: test-only fake provider assertion.
+        assert_eq!(scope.agent_id.as_ref().map(AgentId::as_str), Some(AGENT)); // safety: test-only fake provider assertion.
+        let project_id = scope.project_id.as_ref().map(ProjectId::as_str);
+        assert_eq!(project_id, Some(PROJECT)); // safety: test-only fake provider assertion.
+        let explicit_owner_user_id = scope.explicit_owner_user_id().map(UserId::as_str);
+        assert_eq!(explicit_owner_user_id, Some(USER)); // safety: test-only fake provider assertion.
+        assert_eq!(owner_user_id.as_str(), USER); // safety: test-only fake provider assertion.
+        assert!(!run_id.to_string().is_empty()); // safety: test-only fake provider assertion.
+        assert_eq!(gate_ref, AUTH_GATE); // safety: test-only fake provider assertion.
+        assert!(credential_requirements.is_empty()); // safety: test-only fake provider assertion.
     }
 }
 
