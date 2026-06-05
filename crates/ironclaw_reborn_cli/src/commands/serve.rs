@@ -434,7 +434,8 @@ impl ServeCommand {
             if let Some(slack_mounts) = slack_mounts {
                 serve_config = serve_config
                     .with_public_route_mount(slack_mounts.events)
-                    .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing);
+                    .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing)
+                    .with_slack_channel_routes(slack_mounts.channel_routes);
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.

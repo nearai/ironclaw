@@ -32,6 +32,7 @@ use ironclaw_product_workflow::{
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
     PendingAuthInteractionView, ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductCommandName, ProductConversationBindingService, ProductConversationRouteKey,
+    ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
@@ -2488,6 +2489,79 @@ async fn shared_route_uses_conversation_specific_subject_over_installation_defau
 }
 
 #[tokio::test]
+async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_scope() {
+    let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
+    let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
+    let installation_id =
+        ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            tenant_id.clone(),
+            adapter_kind,
+            installation_id,
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations;
+    let subject_resolver = Arc::new(RecordingSubjectRouteResolver::default());
+    let scope = ProductInstallationScope::with_default_scope(
+        tenant_id,
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_conversation_subject_route_resolver(subject_resolver.clone());
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        scope,
+    )]);
+    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+    let envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-route-subject").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-1"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+
+    let error = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect_err("shared binding must require a configured subject");
+    assert!(matches!(
+        error,
+        ProductWorkflowError::BindingRequired { reason }
+            if reason == "shared product route requires a configured subject user"
+    ));
+
+    subject_resolver.set_subject(UserId::new("user:eng-team").expect("route subject"));
+    let resolved = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect("shared binding should resolve after host route update");
+
+    assert_eq!(resolved.actor_user_id.as_str(), "user:alice");
+    assert_eq!(
+        resolved.subject_user_id.as_ref().map(UserId::as_str),
+        Some("user:eng-team")
+    );
+    let calls = subject_resolver.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].route_key.space_id(), Some("T-team"));
+    assert_eq!(calls[0].route_key.conversation_id(), "C-eng");
+}
+
+#[tokio::test]
 async fn concrete_product_workflow_bot_mention_uses_shared_route() {
     let binding = Arc::new(FakeConversationBindingService::new());
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
@@ -3344,6 +3418,46 @@ impl ProductActorUserResolver for RecordingProductActorUserResolver {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request.clone());
         Ok(self.bindings.get(&request.external_actor_ref).cloned())
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingSubjectRouteResolver {
+    subject_user_id: Mutex<Option<UserId>>,
+    calls: Mutex<Vec<ProductConversationSubjectRouteResolutionRequest>>,
+}
+
+impl RecordingSubjectRouteResolver {
+    fn set_subject(&self, subject_user_id: UserId) {
+        *self
+            .subject_user_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(subject_user_id);
+    }
+
+    fn calls(&self) -> Vec<ProductConversationSubjectRouteResolutionRequest> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait]
+impl ProductConversationSubjectRouteResolver for RecordingSubjectRouteResolver {
+    async fn resolve_product_conversation_subject_route(
+        &self,
+        request: ProductConversationSubjectRouteResolutionRequest,
+    ) -> Result<Option<UserId>, ProductWorkflowError> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request);
+        Ok(self
+            .subject_user_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone())
     }
 }
 

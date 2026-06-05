@@ -58,6 +58,10 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::product_auth_serve::{ProductAuthRouteState, product_auth_route_mount};
 #[cfg(feature = "slack-v2-host-beta")]
+use crate::slack_channel_routes::{
+    SlackChannelRouteAdminRouteConfig, slack_channel_route_admin_route_mount,
+};
+#[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_personal_binding_pairing_serve::{
     SlackPersonalBindingPairingRouteConfig, slack_personal_binding_pairing_route_mount,
 };
@@ -191,6 +195,10 @@ pub struct WebuiServeConfig {
     /// Optional Slack personal-binding pairing-code redeem route config.
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_binding_pairing: Option<SlackPersonalBindingPairingRouteConfig>,
+    /// Optional Slack channel route admin surface mounted under the WebUI
+    /// channels settings path.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_channel_routes: Option<SlackChannelRouteAdminRouteConfig>,
 }
 
 /// Async drain hook for public route mounts that schedule work outside the
@@ -282,6 +290,8 @@ impl WebuiServeConfig {
             slack_personal_binding: None,
             #[cfg(feature = "slack-v2-host-beta")]
             slack_personal_binding_pairing: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_channel_routes: None,
         }
     }
 
@@ -303,6 +313,12 @@ impl WebuiServeConfig {
         config: SlackPersonalBindingPairingRouteConfig,
     ) -> Self {
         self.slack_personal_binding_pairing = Some(config);
+        self
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn with_slack_channel_routes(mut self, config: SlackChannelRouteAdminRouteConfig) -> Self {
+        self.slack_channel_routes = Some(config);
         self
     }
 
@@ -511,6 +527,11 @@ pub fn webui_v2_app_with_lifecycle(
         .slack_personal_binding_pairing
         .clone()
         .map(slack_personal_binding_pairing_route_mount);
+    #[cfg(feature = "slack-v2-host-beta")]
+    let slack_channel_routes_mount = config
+        .slack_channel_routes
+        .clone()
+        .map(slack_channel_route_admin_route_mount);
     let public_mounts = config.public_mounts;
     let public_route_drains = PublicRouteDrains::new(
         public_mounts
@@ -533,6 +554,10 @@ pub fn webui_v2_app_with_lifecycle(
     }
     #[cfg(feature = "slack-v2-host-beta")]
     if let Some(mount) = &slack_personal_binding_pairing_mount {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = &slack_channel_routes_mount {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     for mount in &public_mounts {
@@ -574,6 +599,10 @@ pub fn webui_v2_app_with_lifecycle(
     }
     #[cfg(feature = "slack-v2-host-beta")]
     if let Some(mount) = slack_personal_binding_pairing_mount {
+        protected_inner = protected_inner.merge(mount.protected);
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = slack_channel_routes_mount {
         protected_inner = protected_inner.merge(mount.protected);
     }
     for mount in public_mounts {

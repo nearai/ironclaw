@@ -823,7 +823,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 
 ### P1 - High Priority
 
-- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw-reborn serve` with Slack Events API signing, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, host-state-backed personal binding pairing, WebUI v2 Extensions → Channels code entry, and deterministic chat-side connect action metadata; DMs execute as the paired actor, while shared channel turns can route to channel-specific subject users with an installation-level shared subject fallback; production install/setup hardening and fuller E2E coverage remain follow-up.
+- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw-reborn serve` with Slack Events API signing, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, host-state-backed personal binding pairing, WebUI v2 Extensions → Channels code entry, durable WebUI channel-route assignment, and deterministic chat-side connect action metadata; DMs execute as the paired actor, while shared channel turns can route to channel-specific subject users with an installation-level shared subject fallback; production install/setup hardening and fuller E2E coverage remain follow-up.
 - ✅ Telegram channel (WASM, polling-first setup, DM pairing, caption, /start)
 - ❌ WhatsApp channel
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)

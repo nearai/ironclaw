@@ -86,6 +86,8 @@ mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_channel_routes;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_connectable_channel;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_delivery;
@@ -207,6 +209,12 @@ pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 pub use slack_actor_identity::{
     RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
     slack_user_identity_provider_user_id,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_channel_routes::{
+    InMemorySlackChannelRouteStore, SlackChannelRoute, SlackChannelRouteAdminRouteConfig,
+    SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteStore,
+    SlackChannelRouteSubjectResolver, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_connectable_channel::build_webui_services_with_slack_host_beta_mounts;

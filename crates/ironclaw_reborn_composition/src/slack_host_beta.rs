@@ -19,8 +19,8 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InMemoryIdempotencyLedger,
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
-    ProductConversationRouteKey, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, StaticProductInstallationResolver,
+    ProductConversationRouteKey, ProductConversationSubjectRouteResolver, ProductInstallationKey,
+    ProductInstallationScope, ProductWorkflowError, StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
     SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackV2Adapter,
@@ -35,6 +35,9 @@ use thiserror::Error;
 
 use crate::RebornRuntime;
 use crate::slack_actor_identity::SlackUserIdentityActorResolver;
+use crate::slack_channel_routes::{
+    SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
+};
 use crate::slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
@@ -191,6 +194,7 @@ pub enum SlackHostBetaBuildError {
 pub struct SlackHostBetaMounts {
     pub events: PublicRouteMount,
     pub personal_binding_pairing: SlackPersonalBindingPairingRouteConfig,
+    pub channel_routes: SlackChannelRouteAdminRouteConfig,
 }
 
 pub fn build_slack_events_route_mount(
@@ -245,17 +249,35 @@ pub fn build_slack_host_beta_mounts(
         config.slack_actor.clone(),
         config.user_id.clone(),
         Arc::new(SlackUserIdentityActorResolver::new(state.clone())),
-        Arc::new(SlackPairingActorResolver::new(state, pairing.clone())),
+        Arc::new(SlackPairingActorResolver::new(
+            state.clone(),
+            pairing.clone(),
+        )),
     ));
-    let events = build_slack_events_route_mount_with_actor_user_resolver(
+    let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
+    let subject_route_resolver: Arc<dyn ProductConversationSubjectRouteResolver> =
+        Arc::new(SlackChannelRouteSubjectResolver::new(
+            config.tenant_id.clone(),
+            config.installation_id.clone(),
+            Arc::clone(&channel_route_store),
+        ));
+    let events = build_slack_events_route_mount_with_resolvers(
         runtime,
-        config,
+        config.clone(),
         actor_user_resolver,
+        Some(subject_route_resolver),
     )?;
+    let channel_routes = SlackChannelRouteAdminRouteConfig::new(
+        config.tenant_id.clone(),
+        config.installation_id.clone(),
+        config.team_id.clone(),
+        channel_route_store,
+    );
 
     Ok(SlackHostBetaMounts {
         events,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
+        channel_routes,
     })
 }
 
@@ -263,6 +285,15 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
     runtime: &RebornRuntime,
     config: SlackHostBetaConfig,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
+    build_slack_events_route_mount_with_resolvers(runtime, config, actor_user_resolver, None)
+}
+
+fn build_slack_events_route_mount_with_resolvers(
+    runtime: &RebornRuntime,
+    config: SlackHostBetaConfig,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
     // The resolver controls inbound Slack actor binding. `config.user_id`
     // scopes host-mediated Slack bot-token egress and legacy static actor
@@ -292,6 +323,9 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
     );
     if let Some(shared_subject_user_id) = config.shared_subject_user_id.clone() {
         scope = scope.with_default_subject_user_id(shared_subject_user_id);
+    }
+    if let Some(subject_route_resolver) = subject_route_resolver {
+        scope = scope.with_conversation_subject_route_resolver(subject_route_resolver);
     }
     for route in &config.channel_routes {
         let route_key = ProductConversationRouteKey::new(
@@ -535,6 +569,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::slack_channel_routes::{
+        WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, slack_channel_route_admin_route_mount,
+    };
     use crate::slack_personal_binding_pairing_serve::{
         WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
     };
@@ -914,6 +951,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slack_channel_route_admin_assignment_routes_channel_mention_to_subject() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .expect("mounts");
+        let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes);
+        let assign_response = route_mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("content-type", "application/json")
+                    .extension(WebUiAuthenticatedCaller {
+                        tenant_id: TenantId::new(TENANT).expect("tenant"),
+                        user_id: UserId::new(USER).expect("user"),
+                        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                        project_id: Some(ProjectId::new(PROJECT).expect("project")),
+                    })
+                    .body(Body::from(format!(
+                        r#"{{"channel_id":"C0HOST","subject_user_id":"{SHARED_SUBJECT}"}}"#
+                    )))
+                    .expect("assign request builds"),
+            )
+            .await
+            .expect("assign route responds");
+        assert_eq!(assign_response.status(), StatusCode::OK);
+
+        let body = app_mention_event_body_with(
+            "Ev-host-beta-admin-routed-channel-mention",
+            "<@U-BOT> help in channel",
+            "1710000000.000050",
+        );
+        post_signed_slack_event(&mounts.events, &body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+
+        let history = wait_for_slack_thread_history_with_owner(
+            &runtime,
+            Some(UserId::new(SHARED_SUBJECT).expect("shared subject")),
+        )
+        .await;
+        let accepted_message = history
+            .messages
+            .iter()
+            .find(|message| message.content.as_deref() == Some("help in channel"))
+            .expect("accepted Slack app mention message is present under assigned subject");
+        assert_eq!(
+            accepted_message.source_binding_id.as_deref(),
+            Some(
+                "adapter:8:slack_v2;installation:17:install_host_beta;agent:16:agent:slack-host;project:18:project:slack-host;space:6:T0HOST;conversation:6:C0HOST;topic:17:1710000000.000050;"
+            )
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
     async fn build_slack_host_beta_mounts_rejects_team_only_selector_for_pairing() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
@@ -1045,6 +1144,24 @@ mod tests {
             team_id: TEAM.to_string(),
             api_app_id: Some(API_APP.to_string()),
             slack_user_id: None,
+            user_id: UserId::new(USER).expect("user"),
+            shared_subject_user_id: None,
+            channel_routes: Vec::new(),
+            signing_secret: SecretString::from(SECRET),
+            bot_token: SecretString::from("xoxb-host-token"),
+        })
+        .expect("valid config")
+    }
+
+    fn config_without_channel_routes() -> SlackHostBetaConfig {
+        SlackHostBetaConfig::new(SlackHostBetaConfigInput {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            installation_id: INSTALLATION.to_string(),
+            team_id: TEAM.to_string(),
+            api_app_id: Some(API_APP.to_string()),
+            slack_user_id: Some(SLACK_USER.to_string()),
             user_id: UserId::new(USER).expect("user"),
             shared_subject_user_id: None,
             channel_routes: Vec::new(),

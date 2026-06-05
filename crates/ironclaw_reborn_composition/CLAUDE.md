@@ -177,6 +177,13 @@ and currently resolves the supported Slack channel aliases to the Slack
 personal-binding pairing service. The browser must not call provider-specific
 pairing paths directly.
 
+When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
+`GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` inside the same bearer
+auth layer. The browser supplies only `channel_id` and `subject_user_id`;
+tenant, adapter installation, and Slack team come from host configuration. The
+route writes to Slack host state so runtime assignments are durable and are
+resolved before static TOML `channel_routes` fallback.
+
 ### Host-supplied public route mount (#4116 — SSO login surface)
 
 `WebuiServeConfig::with_public_route_mount(PublicRouteMount)`

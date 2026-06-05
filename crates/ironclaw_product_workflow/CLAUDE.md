@@ -18,6 +18,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `ConversationBindingService` | Resolves external adapter refs → canonical Reborn identifiers |
 | `ProductConversationBindingService` | Adapter from product workflow bindings to `ironclaw_conversations` with trusted installation→tenant mapping |
 | `StaticProductInstallationResolver` / `ProductInstallationScope` | Host-owned installation registry used by local-dev/tests to select tenant and default agent/project scope |
+| `ProductConversationSubjectRouteResolver` | Host-owned dynamic shared-route subject resolver; product workflow consults it before static per-installation subject routes |
 | `IdempotencyLedger` | Durable action deduplication port |
 | `InMemoryIdempotencyLedger` | Local-dev/test ledger with in-flight lease recovery semantics |
 | `ProductInboundAction` | Durable ledger record for inbound actions |
