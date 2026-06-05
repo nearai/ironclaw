@@ -21,9 +21,9 @@ use ironclaw_outbound::{
     RunNotificationOrigin, SourceRouteContext, ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
-    DeclaredEgressHost, EgressCredentialHandle, EgressMethod, EgressPath, EgressRequest,
-    EgressResponse, ExternalActorRef, ExternalConversationRef, FinalReplyView, GatePromptView,
-    OutboundDeliverySink, ProductAdapter, ProductAdapterError, ProductInboundAck,
+    DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
+    EgressRequest, EgressResponse, ExternalActorRef, ExternalConversationRef, FinalReplyView,
+    GatePromptView, OutboundDeliverySink, ProductAdapter, ProductAdapterError, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, ProductOutboundPayload, ProductTriggerReason,
     ProtocolHttpEgress, ProtocolHttpEgressError,
 };
@@ -559,6 +559,7 @@ fn slack_web_api_request(
         EgressMethod::post(),
         EgressPath::new(path)?,
     )
+    .with_header(EgressHeader::new("content-type", "application/json")?)
     .with_body(body)
     .with_credential_handle(Some(EgressCredentialHandle::new(SLACK_BOT_TOKEN_HANDLE)?)))
 }
