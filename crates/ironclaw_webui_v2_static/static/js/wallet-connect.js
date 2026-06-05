@@ -21,14 +21,19 @@ function buildNonce() {
   return nonce;
 }
 
-function postToOpener(payload) {
-  if (window.opener) {
-    window.opener.postMessage(payload, window.location.origin);
+const channelName = new URLSearchParams(window.location.search).get("channel");
+
+function postResult(payload) {
+  if (!channelName || typeof BroadcastChannel !== "function") {
+    return;
   }
+  const channel = new BroadcastChannel(channelName);
+  channel.postMessage(payload);
+  channel.close();
 }
 
 async function run() {
-  if (!window.opener) {
+  if (!channelName || typeof BroadcastChannel !== "function") {
     setStatus("Open this from the IronClaw app.", true);
     return;
   }
@@ -51,7 +56,7 @@ async function run() {
 
     // The backend rebuilds NEAR AI's request from these fields; `nonce` goes
     // back as a plain byte array (NEAR AI wants a 32-int JSON array, not base64).
-    postToOpener({
+    postResult({
       type: "nearai-wallet-login",
       ok: true,
       accountId: signed.accountId,
@@ -64,7 +69,7 @@ async function run() {
     setStatus("Signed. You can close this window.");
     window.close();
   } catch (_err) {
-    postToOpener({ type: "nearai-wallet-login", ok: false });
+    postResult({ type: "nearai-wallet-login", ok: false });
     setStatus("Wallet sign-in was cancelled or failed.", true);
   }
 }

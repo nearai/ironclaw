@@ -137,6 +137,9 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         if let Some(session) = runtime.webui_llm_session() {
             llm_config = llm_config.with_nearai_session(session);
         }
+        if let Some(states) = runtime.webui_nearai_login_states() {
+            llm_config = llm_config.with_nearai_login_states(states);
+        }
         api = api.with_llm_config_service(Arc::new(llm_config));
     }
 

@@ -7,9 +7,9 @@
     <!--
       Isolated NEAR-wallet connect popup. Opened by the SPA, it connects a NEAR
       wallet, signs the fixed NEAR AI login message (NEP-413), and posts the
-      signature back to its same-origin opener, which relays it to the backend.
-      Served with a dedicated relaxed CSP (see static/src/router.rs); it holds no
-      session token or app state.
+      signature back over a random same-origin BroadcastChannel. Served with a
+      dedicated relaxed CSP (see static/src/router.rs); it holds no session token
+      or app state.
     -->
     <script type="importmap">
       {

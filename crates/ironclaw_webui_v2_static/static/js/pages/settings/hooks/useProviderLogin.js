@@ -8,13 +8,27 @@ import {
   startNearaiLogin,
 } from "../lib/settings-api.js";
 
+const WALLET_LOGIN_TIMEOUT_MS = 300_000;
+
+function walletLoginChannelName() {
+  const suffix =
+    typeof window.crypto?.randomUUID === "function"
+      ? window.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `nearai-wallet-login:${suffix}`;
+}
+
 // Isolated popup that connects a NEAR wallet and signs the NEAR AI login
-// message. Resolves with the posted signature payload, or null if the user
-// cancels / closes the window. Only same-origin messages are accepted.
-function awaitWalletSignature(popup) {
+// message. Resolves with the BroadcastChannel payload, or null if the user
+// cancels, closes the window, or the deadline passes.
+function awaitWalletSignature(popup, channelName) {
   return new Promise((resolve) => {
+    if (typeof window.BroadcastChannel !== "function") {
+      resolve(null);
+      return;
+    }
+    const channel = new window.BroadcastChannel(channelName);
     const onMessage = (event) => {
-      if (event.origin !== window.location.origin) return;
       const data = event.data;
       if (!data || data.type !== "nearai-wallet-login") return;
       cleanup();
@@ -26,11 +40,17 @@ function awaitWalletSignature(popup) {
         resolve(null);
       }
     }, 500);
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, WALLET_LOGIN_TIMEOUT_MS);
     function cleanup() {
       clearInterval(closedTimer);
-      window.removeEventListener("message", onMessage);
+      clearTimeout(timeout);
+      channel.removeEventListener("message", onMessage);
+      channel.close();
     }
-    window.addEventListener("message", onMessage);
+    channel.addEventListener("message", onMessage);
   });
 }
 
@@ -109,16 +129,13 @@ export function useProviderLogin({ onSuccess } = {}) {
     setNearaiError("");
     setNearaiBusy(true);
     try {
+      const channelName = walletLoginChannelName();
       const popup = window.open(
-        "/v2/wallet/connect",
+        `/v2/wallet/connect?channel=${encodeURIComponent(channelName)}`,
         "_blank",
-        "width=460,height=640"
+        "noopener,noreferrer,width=460,height=640"
       );
-      if (!popup) {
-        setNearaiError(t("onboarding.nearaiFailed"));
-        return;
-      }
-      const signed = await awaitWalletSignature(popup);
+      const signed = await awaitWalletSignature(popup, channelName);
       if (!signed) {
         setNearaiError(t("onboarding.nearaiFailed"));
         return;

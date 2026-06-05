@@ -82,9 +82,10 @@ pub fn mount_at_prefix(prefix: &str) -> Router {
         // hardened SPA shell (the wallet connector loads remote executor code in
         // sandboxed iframes and talks to wallet relays / NEAR RPC), so it gets a
         // dedicated route and a scoped policy instead of widening the app CSP.
-        // The page takes no input and only posts the resulting signature back to
-        // its same-origin opener, so the blast radius of the looser policy is
-        // this one input-less page. Registered before the wildcard so it wins.
+        // The page takes only a random BroadcastChannel name and posts the
+        // resulting signature back on that same-origin channel, so the blast
+        // radius of the looser policy is this one popup page. Registered before
+        // the wildcard so it wins.
         .route(
             &format!("{prefix}/wallet/connect"),
             get(serve_wallet_connect),
@@ -96,8 +97,8 @@ pub fn mount_at_prefix(prefix: &str) -> Router {
 ///
 /// This page is deliberately quarantined from the SPA: it holds no session
 /// bearer and no app state, connects a NEAR wallet, signs the fixed NEAR AI
-/// login message, and `postMessage`s the signature to its same-origin opener.
-/// The opener (the authenticated SPA) is what relays the signature to the
+/// login message, and posts the signature over a random same-origin
+/// `BroadcastChannel`. The authenticated SPA relays the signature to the
 /// backend, so no secret ever lives on this looser-CSP page.
 pub async fn serve_wallet_connect() -> Response {
     let Some(asset) = assets::lookup("wallet-connect.html") else {

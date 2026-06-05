@@ -577,6 +577,17 @@ impl RebornRuntime {
             .map(|parts| Arc::clone(&parts.session))
     }
 
+    /// Shared NEAR AI login-state store. The authenticated start endpoint
+    /// issues states and the public callback consumes them.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn webui_nearai_login_states(
+        &self,
+    ) -> Option<Arc<crate::llm_config_service::NearAiLoginStateStore>> {
+        self.llm_reload
+            .as_ref()
+            .map(|parts| Arc::clone(&parts.nearai_login_states))
+    }
+
     /// Public NEAR AI login callback mount for the host ingress to merge via
     /// [`crate::webui_serve::WebuiServeConfig::with_public_route_mount`]. Built
     /// from the runtime's private session/reload/boot so those stay internal.
@@ -586,7 +597,10 @@ impl RebornRuntime {
         let boot = self.boot.clone()?;
         let session = self.webui_llm_session()?;
         let reload = self.webui_llm_reload_trigger()?;
-        Some(crate::nearai_login_callback_mount(session, reload, boot))
+        let states = self.webui_nearai_login_states()?;
+        Some(crate::nearai_login_serve::nearai_login_callback_mount(
+            session, reload, boot, states,
+        ))
     }
 
     /// Live LLM-provider reload trigger for the settings service. Returns the
@@ -2119,6 +2133,7 @@ struct LlmGatewayBundle {
 pub(crate) struct RebornLlmReloadParts {
     pub(crate) reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
     pub(crate) session: Arc<ironclaw_llm::SessionManager>,
+    pub(crate) nearai_login_states: Arc<crate::llm_config_service::NearAiLoginStateStore>,
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -2128,7 +2143,7 @@ async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, R
     let raw = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
-    wrap_swappable_gateway(raw, model, session)
+    wrap_swappable_gateway(raw, Some(model), session)
 }
 
 /// Cold-boot gateway: no LLM configured yet. Wraps a placeholder provider (which
@@ -2140,7 +2155,7 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
     let raw: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(PlaceholderLlmProvider);
-    wrap_swappable_gateway(raw, "unconfigured".to_string(), session)
+    wrap_swappable_gateway(raw, None, session)
 }
 
 /// Wrap a raw provider in a [`SwappableLlmProvider`] + reload handle and build
@@ -2149,7 +2164,7 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
 #[cfg(feature = "root-llm-provider")]
 fn wrap_swappable_gateway(
     raw: Arc<dyn ironclaw_llm::LlmProvider>,
-    model: String,
+    model: Option<String>,
     session: Arc<ironclaw_llm::SessionManager>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
@@ -2163,7 +2178,7 @@ fn wrap_swappable_gateway(
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
     })?;
-    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, Some(model));
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, model);
     let gateway = LlmProviderModelGateway::new(provider, policy.clone());
     Ok(LlmGatewayBundle {
         gateway: Arc::new(gateway),
@@ -2171,6 +2186,7 @@ fn wrap_swappable_gateway(
         reload: RebornLlmReloadParts {
             reload_handle,
             session,
+            nearai_login_states: Arc::new(crate::llm_config_service::NearAiLoginStateStore::new()),
         },
     })
 }

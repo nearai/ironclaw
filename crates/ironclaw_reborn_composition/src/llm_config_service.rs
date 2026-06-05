@@ -17,7 +17,9 @@
 //! fails the change is still persisted and applies on the next restart, so the
 //! operator is never left with a silently-dropped edit (the failure is logged).
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
@@ -33,6 +35,52 @@ use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::llm_catalog::{apply_stored_api_key, resolve_against_registry};
 use crate::{LlmKeyStore, ProviderRepo, RebornProviderAdmin};
+
+const NEARAI_LOGIN_STATE_TTL: Duration = Duration::from_secs(15 * 60);
+const CODEX_LOGIN_ATTEMPT_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// In-memory CSRF state for NEAR AI browser redirects. The login start endpoint
+/// issues a state token, and the public callback must consume it before any
+/// operator-wide credential write happens.
+#[derive(Debug, Default)]
+pub(crate) struct NearAiLoginStateStore {
+    states: tokio::sync::Mutex<HashMap<String, Instant>>,
+}
+
+impl NearAiLoginStateStore {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) async fn issue(&self) -> String {
+        let state = uuid::Uuid::new_v4().to_string();
+        let mut states = self.states.lock().await;
+        prune_expired(&mut states, Instant::now());
+        states.insert(state.clone(), Instant::now() + NEARAI_LOGIN_STATE_TTL);
+        state
+    }
+
+    pub(crate) async fn consume(&self, state: &str) -> bool {
+        let mut states = self.states.lock().await;
+        let now = Instant::now();
+        prune_expired(&mut states, now);
+        states
+            .remove(state)
+            .is_some_and(|expires_at| expires_at > now)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CodexLoginAttempt {
+    id: uuid::Uuid,
+    user_code: String,
+    verification_uri: String,
+    expires_at: Instant,
+}
+
+fn prune_expired(states: &mut HashMap<String, Instant>, now: Instant) {
+    states.retain(|_, expires_at| *expires_at > now);
+}
 
 /// Live-reload seam. The runtime supplies an impl that re-resolves the LLM
 /// config (including any stored key) and atomically swaps the running
@@ -54,6 +102,8 @@ pub struct RebornLlmConfigService {
     /// provider reads its token from, so a completed login takes effect on
     /// reload. Absent when the runtime has no LLM seam wired.
     nearai_session: Option<Arc<ironclaw_llm::SessionManager>>,
+    nearai_login_states: Arc<NearAiLoginStateStore>,
+    codex_login_attempts: Arc<tokio::sync::Mutex<HashMap<String, CodexLoginAttempt>>>,
 }
 
 impl RebornLlmConfigService {
@@ -65,6 +115,8 @@ impl RebornLlmConfigService {
             keys,
             reload: None,
             nearai_session: None,
+            nearai_login_states: Arc::new(NearAiLoginStateStore::new()),
+            codex_login_attempts: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -77,6 +129,13 @@ impl RebornLlmConfigService {
     /// Attach the runtime's NEAR AI session manager (enables NEAR AI login).
     pub fn with_nearai_session(mut self, session: Arc<ironclaw_llm::SessionManager>) -> Self {
         self.nearai_session = Some(session);
+        self
+    }
+
+    /// Attach the runtime's NEAR AI login-state store. The start endpoint and
+    /// public callback must share the same store.
+    pub(crate) fn with_nearai_login_states(mut self, states: Arc<NearAiLoginStateStore>) -> Self {
+        self.nearai_login_states = states;
         self
     }
 
@@ -534,7 +593,8 @@ impl LlmConfigService for RebornLlmConfigService {
                 reason: "origin must be a bare http(s) origin".to_string(),
             }
         })?;
-        let frontend_callback = format!("{origin}{NEARAI_LOGIN_PREFIX}");
+        let state = self.nearai_login_states.issue().await;
+        let frontend_callback = format!("{origin}{NEARAI_LOGIN_PREFIX}/{state}");
         let mut auth_url = url::Url::parse(&format!(
             "{}/v1/auth/{}",
             session.auth_base_url(),
@@ -552,8 +612,21 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn start_codex_login(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
     ) -> Result<CodexLoginStart, LlmConfigServiceError> {
+        let attempt_key = codex_login_attempt_key(&caller);
+        let now = Instant::now();
+        {
+            let mut attempts = self.codex_login_attempts.lock().await;
+            attempts.retain(|_, attempt| attempt.expires_at > now);
+            if let Some(attempt) = attempts.get(&attempt_key) {
+                return Ok(CodexLoginStart {
+                    user_code: attempt.user_code.clone(),
+                    verification_uri: attempt.verification_uri.clone(),
+                });
+            }
+        }
+
         // Point the login manager at the same session file the live openai_codex
         // provider reads on reload (mirror resolution.rs env precedence). The
         // model is irrelevant to the device-code flow, so leave it defaulted.
@@ -576,6 +649,19 @@ impl LlmConfigService for RebornLlmConfigService {
             user_code: start.user_code.clone(),
             verification_uri: start.verification_uri.clone(),
         };
+        let attempt_id = uuid::Uuid::new_v4();
+        {
+            let mut attempts = self.codex_login_attempts.lock().await;
+            attempts.insert(
+                attempt_key.clone(),
+                CodexLoginAttempt {
+                    id: attempt_id,
+                    user_code: login.user_code.clone(),
+                    verification_uri: login.verification_uri.clone(),
+                    expires_at: Instant::now() + CODEX_LOGIN_ATTEMPT_TTL,
+                },
+            );
+        }
 
         // Poll for authorization off-thread: persist the tokens, make Codex the
         // active provider, and hot-swap the running provider. The frontend polls
@@ -583,9 +669,15 @@ impl LlmConfigService for RebornLlmConfigService {
         // the source of truth, so a reload failure still applies on restart.
         let boot = self.boot.clone();
         let reload = self.reload.clone();
+        let attempts = Arc::clone(&self.codex_login_attempts);
         tokio::spawn(async move {
             if let Err(error) = manager.complete_device_code(&start).await {
                 tracing::debug!(%error, "codex device login did not complete");
+                remove_codex_attempt_if_current(&attempts, &attempt_key, attempt_id).await;
+                return;
+            }
+            if !remove_codex_attempt_if_current(&attempts, &attempt_key, attempt_id).await {
+                tracing::debug!("codex login completed after a newer attempt superseded it");
                 return;
             }
             if let Err(error) = RebornProviderAdmin::new(boot).set_provider("openai_codex", None) {
@@ -671,15 +763,38 @@ fn nonempty_env(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// Server route prefix handed to NEAR AI as `frontend_callback`. NEAR AI
-/// appends `/auth/callback?token=...`, so the public callback route is
-/// `{NEARAI_LOGIN_PREFIX}/auth/callback`.
+fn codex_login_attempt_key(caller: &WebUiAuthenticatedCaller) -> String {
+    format!("{}:{}", caller.tenant_id.as_str(), caller.user_id.as_str())
+}
+
+async fn remove_codex_attempt_if_current(
+    attempts: &tokio::sync::Mutex<HashMap<String, CodexLoginAttempt>>,
+    key: &str,
+    attempt_id: uuid::Uuid,
+) -> bool {
+    let mut attempts = attempts.lock().await;
+    let Some(attempt) = attempts.get(key) else {
+        return false;
+    };
+    if attempt.id != attempt_id {
+        return false;
+    }
+    attempts.remove(key);
+    true
+}
+
+/// Server route prefix handed to NEAR AI as `frontend_callback`, with an issued
+/// state segment appended per login flow. NEAR AI appends
+/// `/auth/callback?token=...`, so the public callback route is
+/// `{NEARAI_LOGIN_PREFIX}/{state}/auth/callback`.
 pub(crate) const NEARAI_LOGIN_PREFIX: &str = "/api/webchat/v2/llm/nearai";
 
-/// The public callback path NEAR AI redirects to (token in the query). Consumed
-/// by the webui public callback mount.
+/// The public callback path NEAR AI redirects to (token in the query). The
+/// `{state}` segment must match an authenticated start request before the
+/// callback can write the operator-wide session.
 #[cfg(feature = "webui-v2-beta")]
-pub(crate) const NEARAI_LOGIN_CALLBACK_PATH: &str = "/api/webchat/v2/llm/nearai/auth/callback";
+pub(crate) const NEARAI_LOGIN_CALLBACK_PATH: &str =
+    "/api/webchat/v2/llm/nearai/{state}/auth/callback";
 
 /// Reduce a browser-supplied origin to a bare `scheme://host[:port]`, rejecting
 /// anything with a path/query or a non-http scheme. NEAR AI redirects the token
@@ -924,6 +1039,19 @@ mod tests {
             model: Some("acme-1".to_string()),
             api_key: api_key.map(SecretString::from),
         }
+    }
+
+    #[tokio::test]
+    async fn nearai_login_state_is_single_use() {
+        let store = NearAiLoginStateStore::new();
+        let state = store.issue().await;
+
+        assert!(store.consume(&state).await);
+        assert!(
+            !store.consume(&state).await,
+            "state must not be reusable after a successful callback"
+        );
+        assert!(!store.consume("missing-state").await);
     }
 
     #[test]

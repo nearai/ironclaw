@@ -122,6 +122,9 @@ pub fn is_webui_v2_llm_config_route_id(route_id: &str) -> bool {
             | WEBUI_V2_ROUTE_SET_ACTIVE_LLM
             | WEBUI_V2_ROUTE_TEST_LLM_CONNECTION
             | WEBUI_V2_ROUTE_LIST_LLM_MODELS
+            | WEBUI_V2_ROUTE_START_NEARAI_LOGIN
+            | WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN
+            | WEBUI_V2_ROUTE_START_CODEX_LOGIN
     )
 }
 
