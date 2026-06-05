@@ -229,11 +229,7 @@ where
             return to_user_id(record.user_id);
         }
 
-        let lower_email = identity
-            .email
-            .as_deref()
-            .filter(|_| identity.email_verified)
-            .map(str::to_ascii_lowercase);
+        let lower_email = verified_email_key(&identity);
 
         // Serialize the create/link race on the IDENTITY KEY (not the email).
         // The in-lock re-check below then catches every same-key race —
@@ -277,6 +273,15 @@ where
         // provider won), it is left unreferenced — a benign orphan user, never
         // an orphan index: no identity and no index point at it, and the
         // principal still converges on the index winner below.
+        //
+        // The orphan is an accepted, bounded leak: it occurs only on a LOST
+        // cold first-contact race (the returning-login fast path never mints),
+        // the record is tiny, and there is no steady-state growth. We mint
+        // first rather than deferring the write until ownership resolves
+        // because writing the user last would, in the rarer divergent-email
+        // cross-process race, leave the verified-email index pointing at an id
+        // with no user record at all (a phantom) — strictly worse than an
+        // unreferenced row. GC of unreferenced user rows is out of scope here.
         let new_user_id = to_user_id(Uuid::new_v4().to_string())?;
         self.write_record(
             &user_path(new_user_id.as_str())?,
@@ -457,13 +462,7 @@ where
         // migrated user rather than minting a second one. First writer wins;
         // an already-present index (another migrated row sharing the email, or
         // a live resolve) is authoritative and left in place.
-        if identity.email_verified
-            && let Some(email) = identity
-                .email
-                .as_deref()
-                .map(str::to_ascii_lowercase)
-                .filter(|email| !email.is_empty())
-        {
+        if let Some(email) = verified_email_key(&identity) {
             let email_path = verified_email_path(tenant, &email)?;
             if self
                 .read_record::<StoredVerifiedEmailIndex>(&email_path)
@@ -487,6 +486,32 @@ where
         }
         Ok(())
     }
+}
+
+/// The verified-email value an identity links and indexes on, normalized in
+/// ONE place so `resolve_or_create` and `adopt_migrated_identity` cannot drift
+/// (`.claude/rules/types.md` — one source of truth for the invariant). This is
+/// the most security-load-bearing value in the crate: it is the
+/// `verified-email/<tenant>/<lower(email)>` index key that decides whether a
+/// later different-provider login collapses onto an existing `UserId`.
+///
+/// Returns `Some(lowercased email)` only when the email is present, non-empty,
+/// provider-verified, AND on the OAuth surface. The surface gate matters
+/// because the verified-email index carries no surface dimension: restricting
+/// linking to the allowlist-gated browser-SSO surface stops a channel actor
+/// that happens to assert a verified email from reading or overwriting an
+/// OAuth user's index (a cross-surface account collapse). The empty-string
+/// guard stops `Some("")` from indexing/locking on the `segment("") == "_"`
+/// sentinel and linking unrelated future logins onto it.
+fn verified_email_key(identity: &ResolveExternalIdentity) -> Option<String> {
+    if identity.surface_kind != SurfaceKind::Oauth || !identity.email_verified {
+        return None;
+    }
+    identity
+        .email
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .filter(|email| !email.is_empty())
 }
 
 fn to_user_id(raw: String) -> Result<UserId, RebornIdentityError> {

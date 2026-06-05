@@ -615,6 +615,18 @@ where
     // login with the same verified email would find no index and mint a
     // second user — a permanent split. `adopt_migrated_identity` preserves
     // both the user id and the verified-email linkage.
+    //
+    // This intentionally GRANDFATHERS each row's `email_verified` as recorded
+    // under the policy in force when the row was written; the one-time fold
+    // does NOT re-validate the legacy email against the CURRENT operator
+    // allowlist. That is safe because admission is enforced per login, not
+    // per index: every live SSO login is gated by `WebuiUserDirectory` against
+    // the current allowed-email-domains BEFORE the resolver is consulted, so a
+    // grandfathered index for a domain the operator has since removed is never
+    // reached (the login is rejected at admission). Re-gating the migration on
+    // the current allowlist would need the allowlist plumbed into this
+    // substrate-level fold; admission already bounds exploitability, so the
+    // migration faithfully preserves prior verified-email links instead.
     let mut legacy = Vec::new();
     let mut rows = conn
         .query(

@@ -576,3 +576,93 @@ async fn bind_is_scoped_per_tenant() {
         "a binding in one tenant is invisible in another"
     );
 }
+
+#[tokio::test]
+async fn concurrent_rebind_converges_and_a_later_bind_repoints() {
+    // bind() reads the current version then writes with CAS::Version, falling
+    // through to a CAS::Any overwrite on VersionMismatch to honor re-point
+    // semantics under a lost race. Two processes (shared backend, independent
+    // lock maps, so the per-key lock does not serialize them) rebind the SAME
+    // channel key concurrently across several rounds to drive that overwrite
+    // branch: every bind must succeed (never surface VersionMismatch) and
+    // lookup must resolve to one of the two writers. A final explicit bind
+    // then re-points deterministically and must be observed.
+    let t = tenant("t");
+    for round in 0..16 {
+        let (p1, p2) = store_pair();
+        let (p1, p2) = (Arc::new(p1), Arc::new(p2));
+        let observer = Arc::clone(&p1);
+        let (a, b) = (Arc::clone(&p1), Arc::clone(&p2));
+        let (ka, kb) = (
+            channel_key(&t, "slack", "U-1"),
+            channel_key(&t, "slack", "U-1"),
+        );
+        let (ra, rb) = tokio::join!(
+            tokio::spawn(async move { a.bind(ka, &UserId::new("user-a").unwrap()).await }),
+            tokio::spawn(async move { b.bind(kb, &UserId::new("user-b").unwrap()).await }),
+        );
+        ra.expect("join")
+            .unwrap_or_else(|err| panic!("round {round}: first concurrent bind errored: {err}"));
+        rb.expect("join")
+            .unwrap_or_else(|err| panic!("round {round}: second concurrent bind errored: {err}"));
+
+        let raced = observer
+            .lookup(channel_key(&t, "slack", "U-1"))
+            .await
+            .expect("lookup after race")
+            .expect("a concurrent bind must leave the key bound");
+        assert!(
+            matches!(raced.as_str(), "user-a" | "user-b"),
+            "round {round}: concurrent rebind must converge on a writer, got {}",
+            raced.as_str()
+        );
+
+        observer
+            .bind(
+                channel_key(&t, "slack", "U-1"),
+                &UserId::new("user-final").unwrap(),
+            )
+            .await
+            .expect("final rebind");
+        let resolved = observer
+            .lookup(channel_key(&t, "slack", "U-1"))
+            .await
+            .expect("lookup after final rebind");
+        assert_eq!(
+            resolved.as_ref().map(UserId::as_str),
+            Some("user-final"),
+            "round {round}: a later explicit bind must re-point the key"
+        );
+    }
+}
+
+#[tokio::test]
+async fn empty_verified_email_does_not_index_or_link() {
+    // A verified but EMPTY email must not create a verified-email index — that
+    // would key on the `segment("") == "_"` sentinel and wrongly collapse
+    // unrelated future logins onto it. Two distinct identities presenting an
+    // empty verified email stay distinct, and no index record exists for it.
+    let store = store();
+    let t = tenant("t");
+    let a = store
+        .resolve_or_create(oauth(&t, "google", "g-1", Some(""), true))
+        .await
+        .expect("resolve");
+    let b = store
+        .resolve_or_create(oauth(&t, "github", "gh-1", Some(""), true))
+        .await
+        .expect("resolve");
+    assert_ne!(
+        a.as_str(),
+        b.as_str(),
+        "an empty verified email must not link two distinct identities"
+    );
+    let index = store
+        .read_record::<StoredVerifiedEmailIndex>(&verified_email_path("t", "").unwrap())
+        .await
+        .expect("read index");
+    assert!(
+        index.is_none(),
+        "an empty verified email must not create a verified-email index"
+    );
+}
