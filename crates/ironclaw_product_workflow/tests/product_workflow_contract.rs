@@ -1522,6 +1522,37 @@ async fn noop_returns_noop_ack() {
 }
 
 #[tokio::test]
+async fn subscription_request_via_accept_inbound_rejects_before_mutating_ledger() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let envelope = sample_envelope_with_payload(
+        "projection-wrong-entrypoint",
+        ProductInboundPayload::SubscriptionRequest(
+            ProjectionSubscriptionPayload::new(None, None).expect("valid subscription"),
+        ),
+    );
+
+    let err = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("subscription requests use the projection resolver, not accept_inbound");
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            ..
+        }
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(binding_service.resolve_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
 async fn projection_subscription_resolves_through_binding_service() {
     let (workflow, inbound, _ledger, binding_service) = build_workflow_with_binding();
     let binding = fake_binding();
