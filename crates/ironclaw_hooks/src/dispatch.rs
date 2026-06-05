@@ -2469,6 +2469,78 @@ mod tests {
         // operator-visible telemetry.
     }
 
+    /// Edge-case regression (henrypark133 LOW on PR #3922): exercise the
+    /// `if let Ok(cap_id)` *else*-arm of `record_capability_block_audit`.
+    /// Every other audit test uses the well-formed `"cap.x"` name, so the
+    /// parse-failure branch — where `CapabilityId::new` rejects the raw name
+    /// and the event records with `capability_id = None` — was untested.
+    ///
+    /// An empty capability name fails `CapabilityId::new` (it requires a
+    /// non-empty, dotted name). The blocked invocation must still record
+    /// exactly one `HookDeny` event with the same boundary/decision/code
+    /// shape, just with no capability id attached.
+    #[tokio::test]
+    async fn hook_deny_with_unparseable_capability_name_records_event_without_capability_id() {
+        use ironclaw_events::{
+            InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
+        };
+
+        // An empty name is not a valid `CapabilityId`, so the best-effort
+        // parse in `record_capability_block_audit` falls through to the
+        // else-arm.
+        assert!(
+            ironclaw_host_api::CapabilityId::new(String::new()).is_err(),
+            "empty capability name must fail to parse for this test to exercise the else-arm"
+        );
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let deny_id = ext_hook_id("deny");
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                deny_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("binding insertable");
+        let mut dispatcher = HookDispatcher::new(registry).with_security_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            deny_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(DenyingInstalledHook)),
+        );
+
+        // Drive the recording path through the caller with an unparseable
+        // (empty) capability name.
+        let ctx = BeforeCapabilityHookContext::new_unresolved(tenant(), String::new(), [0u8; 32]);
+        let outcome = dispatcher.dispatch_before_capability(&ctx).await;
+        assert!(
+            !outcome.decision.permits(),
+            "DenyingInstalledHook must drive a non-permit composed decision"
+        );
+
+        let events = sink.snapshot();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one hook-deny event should have been recorded even with an \
+             unparseable capability name, got {events:?}"
+        );
+        let event = &events[0];
+        // The else-arm leaves `capability_id` unset.
+        assert!(
+            event.capability_id.is_none(),
+            "an unparseable capability name must record the event with no capability id, got {:?}",
+            event.capability_id,
+        );
+        // All other fields remain intact.
+        assert_eq!(event.boundary, SecurityBoundary::HookDeny);
+        assert_eq!(event.decision, SecurityDecision::Blocked);
+        assert_eq!(event.code, HOOK_DENY_PREDICATE_CODE);
+        assert_eq!(event.code, "hook_deny_predicate"); // stability lock
+    }
+
     /// Regression for the telemetry-phase double-emit (serrrfirat MEDIUM on
     /// PR #3922). A Policy-phase `Deny` short-circuits the gate phases, but
     /// `Telemetry`-phase hooks are intentionally exempt and keep running — so
