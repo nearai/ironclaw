@@ -21,12 +21,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
-use ironclaw_llm::{OpenAiCodexConfig, OpenAiCodexSessionManager};
+use ironclaw_llm::{NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager};
 use ironclaw_product_workflow::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
-    NearAiLoginRequest, NearAiLoginStart, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller,
+    NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
+    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -600,6 +600,64 @@ impl LlmConfigService for RebornLlmConfigService {
         });
 
         Ok(login)
+    }
+
+    async fn complete_nearai_wallet_login(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
+        let session = self
+            .nearai_session
+            .as_ref()
+            .ok_or(LlmConfigServiceError::Unavailable)?;
+
+        // Exchange the browser-signed NEP-413 message for a NEAR AI session
+        // token. NEAR AI is the authority on the message/recipient/nonce
+        // constraints, so a bad signature comes back as an error here; surface a
+        // generic failure rather than leaking the provider's reason.
+        let signed = NearWalletSignedMessage {
+            account_id: request.account_id,
+            public_key: request.public_key,
+            signature: request.signature,
+            message: request.message,
+            recipient: request.recipient,
+            nonce: request.nonce,
+            callback_url: request.callback_url,
+        };
+        let token = session.near_wallet_login(&signed).await.map_err(|error| {
+            tracing::debug!(%error, "NEAR AI wallet login exchange failed");
+            LlmConfigServiceError::InvalidRequest {
+                field: None,
+                reason: "NEAR wallet sign-in failed".to_string(),
+            }
+        })?;
+
+        // Apply the token the same way the SSO callback does: persist it, make
+        // NEAR AI active, and hot-swap the running provider. Without a reload
+        // seam the selection still persists and applies on restart.
+        session
+            .save_session_for_renewer(&token, Some("nearai"))
+            .await
+            .map_err(|error| {
+                tracing::debug!(%error, "NEAR AI wallet login: token persist failed");
+                LlmConfigServiceError::Internal
+            })?;
+        self.admin().set_provider("nearai", None).map_err(|error| {
+            tracing::debug!(%error, "NEAR AI wallet login: set active failed");
+            LlmConfigServiceError::Internal
+        })?;
+        let active = match &self.reload {
+            Some(reload) => {
+                reload.reload().await.map_err(|error| {
+                    tracing::debug!(%error, "NEAR AI wallet login: live reload failed");
+                    LlmConfigServiceError::Internal
+                })?;
+                true
+            }
+            None => false,
+        };
+        Ok(NearAiWalletLoginResult { active })
     }
 }
 

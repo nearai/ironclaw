@@ -61,8 +61,8 @@ pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErro
 pub use llm_config::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
-    NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart, SetActiveLlmRequest,
-    UpsertLlmProviderRequest,
+    NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 pub use types::{
     RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
@@ -443,6 +443,16 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: NearAiLoginRequest,
     ) -> Result<NearAiLoginStart, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Complete a NEAR AI wallet (NEP-413) login from a browser-signed message.
+    async fn complete_nearai_wallet_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, RebornServicesError> {
         let _ = (caller, request);
         Err(llm_config::llm_config_unavailable())
     }
@@ -1242,6 +1252,21 @@ impl RebornServicesApi for RebornServices {
             .ok_or_else(llm_config::llm_config_unavailable)?;
         service
             .start_codex_login(caller)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn complete_nearai_wallet_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .complete_nearai_wallet_login(caller, request)
             .await
             .map_err(llm_config::map_llm_config_error)
     }

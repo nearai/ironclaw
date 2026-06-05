@@ -18,7 +18,8 @@ use ironclaw_host_api::ingress::{
 };
 use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
 use ironclaw_webui_v2::{
-    WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_CANCEL_RUN, WEBUI_V2_ROUTE_CREATE_THREAD,
+    WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_CANCEL_RUN,
+    WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_ROUTE_CREATE_THREAD,
     WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER, WEBUI_V2_ROUTE_GET_EXTENSION_SETUP,
     WEBUI_V2_ROUTE_GET_LLM_CONFIG, WEBUI_V2_ROUTE_GET_TIMELINE, WEBUI_V2_ROUTE_INSTALL_EXTENSION,
     WEBUI_V2_ROUTE_LIST_AUTOMATIONS, WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS,
@@ -455,6 +456,23 @@ fn expected_table() -> Vec<Expected> {
             route_id: WEBUI_V2_ROUTE_START_NEARAI_LOGIN,
             method: NetworkMethod::Post,
             pattern: "/api/webchat/v2/llm/nearai/login",
+            listener_class: ListenerClass::LocalGateway,
+            auth_schemes: &[IngressAuthScheme::BearerToken],
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: body_limit_kib(4),
+            rate_limit_max: 60,
+            rate_limit_window_seconds: 60,
+            rate_limit_scope: RateLimitScope::PerCaller,
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProductWorkflow,
+        },
+        Expected {
+            route_id: WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN,
+            method: NetworkMethod::Post,
+            pattern: "/api/webchat/v2/llm/nearai/wallet",
             listener_class: ListenerClass::LocalGateway,
             auth_schemes: &[IngressAuthScheme::BearerToken],
             scope_source: IngressScopeSource::AuthenticatedCaller,

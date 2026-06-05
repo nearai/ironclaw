@@ -2,10 +2,37 @@ import { useQueryClient } from "@tanstack/react-query";
 import { React } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import {
+  completeNearaiWalletLogin,
   fetchLlmProviders,
   startCodexLogin,
   startNearaiLogin,
 } from "../lib/settings-api.js";
+
+// Isolated popup that connects a NEAR wallet and signs the NEAR AI login
+// message. Resolves with the posted signature payload, or null if the user
+// cancels / closes the window. Only same-origin messages are accepted.
+function awaitWalletSignature(popup) {
+  return new Promise((resolve) => {
+    const onMessage = (event) => {
+      if (event.origin !== window.location.origin) return;
+      const data = event.data;
+      if (!data || data.type !== "nearai-wallet-login") return;
+      cleanup();
+      resolve(data.ok ? data : null);
+    };
+    const closedTimer = setInterval(() => {
+      if (popup && popup.closed) {
+        cleanup();
+        resolve(null);
+      }
+    }, 500);
+    function cleanup() {
+      clearInterval(closedTimer);
+      window.removeEventListener("message", onMessage);
+    }
+    window.addEventListener("message", onMessage);
+  });
+}
 
 // How long to keep polling the snapshot for a login to land before giving up.
 // NEAR AI is a quick browser redirect; Codex device codes live ~15 minutes.
@@ -74,6 +101,44 @@ export function useProviderLogin({ onSuccess } = {}) {
     [finishActive, t]
   );
 
+  // NEAR wallet login can't reuse the GitHub/Google redirect: NEP-413 signing
+  // happens in the browser. Open the isolated wallet popup, wait for the signed
+  // message, then relay it to the backend (which exchanges it for a NEAR AI
+  // session token, makes NEAR AI active, and hot-swaps the provider).
+  const startNearaiWallet = React.useCallback(async () => {
+    setNearaiError("");
+    setNearaiBusy(true);
+    try {
+      const popup = window.open(
+        "/v2/wallet/connect",
+        "_blank",
+        "width=460,height=640"
+      );
+      if (!popup) {
+        setNearaiError(t("onboarding.nearaiFailed"));
+        return;
+      }
+      const signed = await awaitWalletSignature(popup);
+      if (!signed) {
+        setNearaiError(t("onboarding.nearaiFailed"));
+        return;
+      }
+      await completeNearaiWalletLogin({
+        account_id: signed.accountId,
+        public_key: signed.publicKey,
+        signature: signed.signature,
+        message: signed.message,
+        recipient: signed.recipient,
+        nonce: signed.nonce,
+      });
+      await finishActive();
+    } catch (_err) {
+      setNearaiError(t("onboarding.nearaiFailed"));
+    } finally {
+      setNearaiBusy(false);
+    }
+  }, [finishActive, t]);
+
   const startCodex = React.useCallback(async () => {
     setCodexError("");
     setCodexCode(null);
@@ -102,6 +167,7 @@ export function useProviderLogin({ onSuccess } = {}) {
     codexError,
     codexCode,
     startNearai,
+    startNearaiWallet,
     startCodex,
   };
 }

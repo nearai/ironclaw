@@ -61,6 +61,16 @@ export function startNearaiLogin(payload) {
   });
 }
 
+// Complete a NEAR AI wallet (NEP-413) login. `payload` carries the browser
+// wallet's signed message; the backend relays it to NEAR AI, stores the session
+// token, and makes NEAR AI active. Returns { active }.
+export function completeNearaiWalletLogin(payload) {
+  return apiFetch("/api/webchat/v2/llm/nearai/wallet", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 // Begin an OpenAI Codex (ChatGPT subscription) device-code login. Returns
 // { user_code, verification_uri } to display; a background task polls for
 // authorization, stores the tokens, and makes Codex active once authorized.

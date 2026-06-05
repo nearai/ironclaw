@@ -23,17 +23,18 @@ use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
     CodexLoginStart, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart, ProductWorkflowError,
-    ProjectionCursor, RebornCancelRunResponse, RebornConnectableChannelListResponse,
-    RebornCreateThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectionCursor,
+    RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -611,6 +612,23 @@ pub async fn start_nearai_login(
     Json(body): Json<NearAiLoginRequest>,
 ) -> Result<Json<NearAiLoginStart>, WebUiV2HttpError> {
     let response = state.services().start_nearai_login(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/nearai/wallet`
+///
+/// Completes a NEAR AI wallet (NEP-413) login from a browser-signed message:
+/// relays the signature to NEAR AI, stores the session token, and makes NEAR AI
+/// active.
+pub async fn complete_nearai_wallet_login(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<NearAiWalletLoginRequest>,
+) -> Result<Json<NearAiWalletLoginResult>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .complete_nearai_wallet_login(caller, body)
+        .await?;
     Ok(Json(response))
 }
 

@@ -9,12 +9,78 @@ import { ProviderDialog } from "../settings/components/provider-dialog.js";
 import { ProviderLoginStatus } from "../settings/components/provider-login-status.js";
 import { useProviderManagementActions } from "../settings/hooks/useProviderManagementActions.js";
 import { useProviderLogin } from "../settings/hooks/useProviderLogin.js";
+import { isProviderConfigured } from "../settings/lib/llm-providers.js";
 import { setActiveLlm } from "../settings/lib/settings-api.js";
+import { ProviderLogo } from "./provider-logos.js";
 
-// First-run "choose your provider" screen. Curated providers are surfaced first,
-// in this order; everything else stays reachable via Settings → Inference. The
-// setup flow reuses the same ProviderDialog + actions as the Inference tab.
-const FEATURED_IDS = ["openai", "anthropic", "openai_codex", "nearai", "ollama"];
+// First-run "choose your provider" list. Curated providers are surfaced in this
+// order; everything else stays reachable via Settings → Inference. `auth` is the
+// editorial signal for how a row authenticates (browser login vs device code vs
+// API key) — the day the backend exposes a credential-kind discriminator on the
+// provider view, this list can key off that instead.
+const FEATURED = [
+  { id: "nearai", auth: "nearai", nameKey: "onboarding.providerNearai", descKey: "onboarding.providerNearaiDesc" },
+  { id: "openai_codex", auth: "codex", nameKey: "onboarding.providerCodex", descKey: "onboarding.providerCodexDesc" },
+  { id: "openai", auth: "key", nameKey: "onboarding.providerOpenai", descKey: "onboarding.providerOpenaiDesc" },
+  { id: "anthropic", auth: "key", nameKey: "onboarding.providerAnthropic", descKey: "onboarding.providerAnthropicDesc" },
+  { id: "ollama", auth: "key", nameKey: "onboarding.providerOllama", descKey: "onboarding.providerOllamaDesc" },
+];
+
+// One provider row: logo + name/subtitle on the left, the auth action(s) on the
+// right. Stacks vertically on mobile (actions wrap onto their own line) and sits
+// on a single line from `sm` up.
+function FeaturedProviderRow({ entry, provider, configured, isBusy, login, t, onUse, onSetUp }) {
+  const name = t(entry.nameKey);
+
+  // Login-based providers (NEAR AI, Codex) always show their sign-in actions —
+  // never a "Use" button. The session/OAuth login is the only way to activate
+  // them, so a separate "Use" would be a dead end.
+  let actions;
+  if (entry.auth === "nearai") {
+    actions = html`
+      <${Button} type="button" variant="secondary" size="sm" disabled=${login.nearaiBusy} onClick=${login.startNearaiWallet}>
+        ${t("onboarding.nearWallet")}
+      <//>
+      <${Button} type="button" variant="secondary" size="sm" disabled=${login.nearaiBusy} onClick=${() => login.startNearai("github")}>
+        GitHub
+      <//>
+      <${Button} type="button" variant="secondary" size="sm" disabled=${login.nearaiBusy} onClick=${() => login.startNearai("google")}>
+        Google
+      <//>
+    `;
+  } else if (entry.auth === "codex") {
+    actions = html`
+      <${Button} type="button" variant="secondary" size="sm" disabled=${login.codexBusy} onClick=${login.startCodex}>
+        ${t("onboarding.signIn")}
+      <//>
+    `;
+  } else if (configured) {
+    actions = html`<${Button} type="button" variant="primary" size="sm" disabled=${isBusy} onClick=${() => onUse(provider)}>
+      ${t("llm.use")}
+    <//>`;
+  } else {
+    actions = html`<${Button} type="button" variant="primary" size="sm" disabled=${isBusy} onClick=${() => onSetUp(provider)}>
+      ${t("onboarding.setUp")}
+    <//>`;
+  }
+
+  return html`
+    <${Card} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:gap-4">
+      <div className="flex min-w-0 flex-1 items-center gap-3">
+        <${ProviderLogo} id=${entry.id} name=${name} />
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-semibold text-[var(--v2-text-strong)]">${name}</span>
+            ${configured &&
+            html`<${Badge} tone="positive" label=${t("onboarding.ready")} size="sm" />`}
+          </div>
+          <div className="mt-0.5 truncate text-xs text-[var(--v2-text-muted)]">${t(entry.descKey)}</div>
+        </div>
+      </div>
+      <div className="flex shrink-0 flex-wrap gap-2 sm:justify-end">${actions}</div>
+    <//>
+  `;
+}
 
 export function OnboardingPage() {
   const t = useT();
@@ -29,15 +95,28 @@ export function OnboardingPage() {
   });
   const state = actions.providerState;
 
-  const featured = FEATURED_IDS.map((id) =>
-    state.providers.find((provider) => provider.id === id)
-  ).filter(Boolean);
+  const featured = FEATURED.map((entry) => ({
+    entry,
+    provider: state.providers.find((provider) => provider.id === entry.id),
+  })).filter((row) => row.provider);
 
   // NEAR AI + Codex login share the same backend flows as the Inference tab; on
   // success here we head straight to chat (the snapshot refresh swaps in the
   // now-active provider).
   const navigateToChat = React.useCallback(() => navigate("/chat"), [navigate]);
   const login = useProviderLogin({ onSuccess: navigateToChat });
+
+  // Make an already-configured provider (env key present, local Ollama, etc.)
+  // the active selection and head to chat without opening the dialog.
+  const handleUse = React.useCallback(
+    async (provider) => {
+      const model = provider.active_model || provider.default_model || "";
+      await setActiveLlm({ provider_id: provider.id, model });
+      await queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
+      navigate("/chat");
+    },
+    [navigate, queryClient]
+  );
 
   const handleOnboardingSave = React.useCallback(
     async ({ form, apiKey, provider }) => {
@@ -65,7 +144,7 @@ export function OnboardingPage() {
 
   return html`
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto flex min-h-full max-w-3xl flex-col justify-center gap-6 p-6">
+      <div className="mx-auto flex min-h-full max-w-2xl flex-col justify-center gap-6 p-6">
         <div className="text-center">
           <h1 className="text-2xl font-semibold text-[var(--v2-text-strong)]">
             ${t("onboarding.title")}
@@ -73,72 +152,20 @@ export function OnboardingPage() {
           <p className="mt-2 text-sm text-[var(--v2-text-muted)]">${t("onboarding.subtitle")}</p>
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="flex flex-col gap-3">
           ${featured.map(
-            (provider) => html`
-              <${Card}
-                key=${provider.id}
-                className="flex items-center justify-between gap-3 p-4"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-sm font-semibold text-[var(--v2-text-strong)]">
-                      ${provider.name || provider.id}
-                    </span>
-                    ${provider.has_api_key &&
-                    html`<${Badge} tone="positive" label=${t("onboarding.ready")} size="sm" />`}
-                  </div>
-                  <div className="mt-1 truncate text-xs text-[var(--v2-text-muted)]">
-                    ${provider.description || provider.id}
-                  </div>
-                </div>
-                ${provider.id === "nearai"
-                  ? html`
-                      <div className="flex shrink-0 gap-2">
-                        <${Button}
-                          type="button"
-                          size="sm"
-                          variant="secondary"
-                          disabled=${login.nearaiBusy}
-                          onClick=${() => login.startNearai("github")}
-                        >
-                          GitHub
-                        <//>
-                        <${Button}
-                          type="button"
-                          size="sm"
-                          variant="secondary"
-                          disabled=${login.nearaiBusy}
-                          onClick=${() => login.startNearai("google")}
-                        >
-                          Google
-                        <//>
-                      </div>
-                    `
-                  : provider.id === "openai_codex"
-                    ? html`
-                        <${Button}
-                          type="button"
-                          size="sm"
-                          variant="secondary"
-                          disabled=${login.codexBusy}
-                          onClick=${login.startCodex}
-                        >
-                          ${t("onboarding.codexSignIn")}
-                        <//>
-                      `
-                    : html`
-                        <${Button}
-                          type="button"
-                          size="sm"
-                          variant="primary"
-                          disabled=${state.isBusy}
-                          onClick=${() => actions.openDialog(provider)}
-                        >
-                          ${t("onboarding.setUp")}
-                        <//>
-                      `}
-              <//>
+            ({ entry, provider }) => html`
+              <${FeaturedProviderRow}
+                key=${entry.id}
+                entry=${entry}
+                provider=${provider}
+                configured=${isProviderConfigured(provider, state.builtinOverrides)}
+                isBusy=${state.isBusy}
+                login=${login}
+                t=${t}
+                onUse=${handleUse}
+                onSetUp=${actions.openDialog}
+              />
             `
           )}
         </div>

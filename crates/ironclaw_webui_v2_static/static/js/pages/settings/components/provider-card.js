@@ -20,6 +20,7 @@ export function ProviderCard({
   onConfigure,
   onDelete,
   onNearaiLogin,
+  onNearaiWallet,
   onCodexLogin,
   loginBusy,
 }) {
@@ -67,14 +68,13 @@ export function ProviderCard({
 
         <div className="flex shrink-0 flex-wrap gap-2">
           ${/* NEAR AI + Codex authenticate via login flows (session / OAuth),
-                not an API-key dialog. When not active, offer the login action
-                (plus a plain "Use" when a session already exists). */
+                not an API-key dialog, so they only ever show their sign-in
+                actions — never a "Use" button, which would be a dead end. */
           !isActive && provider.id === "nearai"
             ? html`
-                ${configured &&
-                html`<${Button} type="button" variant="primary" size="sm" disabled=${isBusy} onClick=${() => onUse(provider)}>
-                  ${t("llm.use")}
-                <//>`}
+                <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${onNearaiWallet}>
+                  ${t("onboarding.nearWallet")}
+                <//>
                 <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${() => onNearaiLogin("github")}>
                   GitHub
                 <//>
@@ -84,10 +84,6 @@ export function ProviderCard({
               `
             : !isActive && provider.id === "openai_codex"
               ? html`
-                  ${configured &&
-                  html`<${Button} type="button" variant="primary" size="sm" disabled=${isBusy} onClick=${() => onUse(provider)}>
-                    ${t("llm.use")}
-                  <//>`}
                   <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${onCodexLogin}>
                     ${t("onboarding.codexSignIn")}
                   <//>

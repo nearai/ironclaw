@@ -103,7 +103,7 @@ pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
 pub use runtime::{LlmReloadHandle, SwappableLlmProvider};
-pub use session::{SessionConfig, SessionManager, create_session_manager};
+pub use session::{NearWalletSignedMessage, SessionConfig, SessionManager, create_session_manager};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
 pub use token_refreshing::TokenRefreshingProvider;
 
