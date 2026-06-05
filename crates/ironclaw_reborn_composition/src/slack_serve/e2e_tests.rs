@@ -166,6 +166,18 @@ impl Harness {
         self.egress
             .requests()
             .into_iter()
+            .filter(|request| request.path().as_str() == "/api/chat.postMessage")
+            .map(|request| {
+                serde_json::from_slice(request.body()).expect("Slack JSON body") // safety: Slack adapter emits JSON request bodies in this test.
+            })
+            .collect()
+    }
+
+    fn slack_deletes(&self) -> Vec<serde_json::Value> {
+        self.egress
+            .requests()
+            .into_iter()
+            .filter(|request| request.path().as_str() == "/api/chat.delete")
             .map(|request| {
                 serde_json::from_slice(request.body()).expect("Slack JSON body") // safety: Slack adapter emits JSON request bodies in this test.
             })
@@ -422,6 +434,7 @@ async fn slack_dm_delivers_approval_prompt_after_immediate_ack() {
             .as_str()
             .is_some_and(|text| text.contains("approve` or `deny"))
     );
+    assert!(harness.slack_deletes().is_empty());
 }
 
 #[tokio::test]
@@ -448,6 +461,7 @@ async fn slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack() {
     let text = messages[0]["text"].as_str().expect("Slack message text");
     assert!(text.contains("Authentication required"));
     assert!(text.contains("Setup link: https://provider.example/oauth"));
+    assert!(harness.slack_deletes().is_empty());
     auth_provider.assert_single_call();
 }
 
@@ -477,6 +491,7 @@ async fn slack_channel_auth_prompt_omits_setup_link_after_immediate_ack() {
     assert!(text.contains("Authentication required"));
     assert!(!text.contains("Setup link:"));
     assert!(!text.contains("https://provider.example/oauth"));
+    assert!(harness.slack_deletes().is_empty());
 }
 
 #[tokio::test]
@@ -512,16 +527,70 @@ async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
 
     harness
         .coordinator
-        .complete_blocked_run("authenticated and finished")
+        .resume_blocked_run_to_running()
         .await
-        .expect("complete auth-blocked run");
+        .expect("resume auth-blocked run");
+    for _ in 0..80 {
+        if harness.slack_messages().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["channel"], CHANNEL);
+    assert_eq!(messages[1]["text"], "Ironclaw is thinking...");
+
+    harness
+        .coordinator
+        .complete_active_run("authenticated and finished")
+        .await
+        .expect("complete resumed auth run");
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[2]["channel"], CHANNEL);
+    assert_eq!(messages[2]["text"], "authenticated and finished");
+    let deletes = harness.slack_deletes();
+    assert_eq!(deletes.len(), 2);
+    assert_eq!(deletes[0]["channel"], CHANNEL);
+    assert_eq!(deletes[1]["channel"], CHANNEL);
+    auth_provider.assert_single_call();
+}
+
+#[tokio::test]
+async fn slack_dm_posts_working_indicator_and_deletes_it_after_final_reply() {
+    let harness = build_harness(TurnMode::Running).await;
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if harness.slack_messages().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], CHANNEL);
+    assert_eq!(messages[0]["text"], "Ironclaw is thinking...");
+
+    harness
+        .coordinator
+        .complete_active_run("done thinking")
+        .await
+        .expect("complete running turn");
     harness.drain().await;
 
     let messages = harness.slack_messages();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[1]["channel"], CHANNEL);
-    assert_eq!(messages[1]["text"], "authenticated and finished");
-    auth_provider.assert_single_call();
+    assert_eq!(messages[1]["text"], "done thinking");
+    let deletes = harness.slack_deletes();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(deletes[0]["channel"], CHANNEL);
 }
 
 #[tokio::test]
@@ -558,6 +627,7 @@ async fn slack_approval_reply_resumes_and_delivers_final_reply() {
 #[derive(Debug, Clone)]
 enum TurnMode {
     Complete { assistant_text: String },
+    Running,
     BlockApproval,
     BlockAuth,
 }
@@ -571,6 +641,7 @@ struct RecordingTurnCoordinator {
 
 struct RecordingTurnState {
     runs: std::collections::HashMap<TurnRunId, TurnRunState>,
+    active_run_id: Option<TurnRunId>,
     blocked_run_id: Option<TurnRunId>,
 }
 
@@ -579,6 +650,7 @@ impl RecordingTurnCoordinator {
         Self {
             state: Arc::new(Mutex::new(RecordingTurnState {
                 runs: std::collections::HashMap::new(),
+                active_run_id: None,
                 blocked_run_id: None,
             })),
             threads,
@@ -591,6 +663,13 @@ impl RecordingTurnCoordinator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .blocked_run_id
+    }
+
+    fn active_run_id(&self) -> Option<TurnRunId> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_run_id
     }
 
     async fn complete_run(
@@ -635,30 +714,60 @@ impl RecordingTurnCoordinator {
         Ok(())
     }
 
-    async fn complete_blocked_run(&self, text: &str) -> Result<(), ProductWorkflowError> {
-        let (scope, actor, run_id) = {
+    async fn resume_blocked_run_to_running(&self) -> Result<(), ProductWorkflowError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let run_id =
+            state
+                .blocked_run_id
+                .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                    reason: "missing blocked run".into(),
+                })?;
+        let run = state.runs.get_mut(&run_id).ok_or_else(|| {
+            ProductWorkflowError::TurnResumeRejected {
+                reason: "missing blocked run state".into(),
+            }
+        })?;
+        run.status = TurnStatus::Running;
+        run.gate_ref = None;
+        state.active_run_id = Some(run_id);
+        state.blocked_run_id = None;
+        Ok(())
+    }
+
+    async fn complete_active_run(&self, text: &str) -> Result<(), ProductWorkflowError> {
+        let run_id =
+            self.active_run_id()
+                .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                    reason: "missing active run".into(),
+                })?;
+        self.complete_existing_run(run_id, text).await
+    }
+
+    async fn complete_existing_run(
+        &self,
+        run_id: TurnRunId,
+        text: &str,
+    ) -> Result<(), ProductWorkflowError> {
+        let (scope, actor) = {
             let state = self
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let run_id =
-                state
-                    .blocked_run_id
-                    .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
-                        reason: "missing blocked run".into(),
-                    })?;
             let run = state.runs.get(&run_id).ok_or_else(|| {
                 ProductWorkflowError::TurnResumeRejected {
-                    reason: "missing blocked run state".into(),
+                    reason: "missing run state".into(),
                 }
             })?;
             let actor =
                 run.actor
                     .clone()
                     .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
-                        reason: "missing blocked run actor".into(),
+                        reason: "missing run actor".into(),
                     })?;
-            (run.scope.clone(), actor, run_id)
+            (run.scope.clone(), actor)
         };
         self.complete_run(scope, actor, run_id, text).await
     }
@@ -689,6 +798,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
                 })?;
                 TurnStatus::Completed
             }
+            TurnMode::Running => TurnStatus::Running,
             TurnMode::BlockApproval => TurnStatus::BlockedApproval,
             TurnMode::BlockAuth => TurnStatus::BlockedAuth,
         };
@@ -724,6 +834,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active_run_id = Some(run_id);
         if matches!(
             status,
             TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
@@ -934,12 +1045,41 @@ impl ProtocolHttpEgress for RecordingEgress {
         &self,
         request: EgressRequest,
     ) -> Result<EgressResponse, ProtocolHttpEgressError> {
+        let response = slack_response_for_request(&request);
         self.requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request);
-        Ok(EgressResponse::new(200, br#"{"ok":true}"#.to_vec()))
+        Ok(response)
     }
+}
+
+fn slack_response_for_request(request: &EgressRequest) -> EgressResponse {
+    if request.path().as_str() == "/api/chat.postMessage" {
+        let body: serde_json::Value =
+            serde_json::from_slice(request.body()).expect("Slack post body is JSON");
+        let channel = body["channel"].as_str().unwrap_or("DTEST");
+        let ts_seed = stable_slack_test_ts(request.body());
+        return EgressResponse::new(
+            200,
+            serde_json::json!({
+                "ok": true,
+                "channel": channel,
+                "ts": ts_seed,
+            })
+            .to_string()
+            .into_bytes(),
+        );
+    }
+    EgressResponse::new(200, br#"{"ok":true}"#.to_vec())
+}
+
+fn stable_slack_test_ts(body: &[u8]) -> String {
+    let mut hash = 0_u64;
+    for byte in body {
+        hash = hash.wrapping_mul(31).wrapping_add(u64::from(*byte));
+    }
+    format!("1710000001.{:06}", hash % 1_000_000)
 }
 
 #[derive(Default)]
@@ -993,6 +1133,7 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         ("Ev-forged", "hello") => DM_FORGED,
         ("Ev-identity", "hello") => DM_IDENTITY,
         ("Ev-auth", "needs auth") => DM_AUTH,
+        ("Ev-working", "think") => DM_WORKING,
         _ => panic!("unknown fixture"),
     }
 }
@@ -1068,6 +1209,14 @@ const DM_AUTH: &str = r#"{
   "api_app_id":"A-slack",
   "event_id":"Ev-auth",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs auth","ts":"1710000000.000007"}
+	}"#;
+
+const DM_WORKING: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-working",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"think","ts":"1710000000.000009"}
 	}"#;
 
 const APP_MENTION_AUTH: &str = r#"{
