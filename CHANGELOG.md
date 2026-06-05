@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.1](https://github.com/nearai/ironclaw/compare/ironclaw-v0.29.0...ironclaw-v0.29.1) - 2026-06-04
+
+### Added
+
+- *(web)* plumb temperature through Responses API ([#3641](https://github.com/nearai/ironclaw/pull/3641))
+
+### Fixed
+
+- *(engine)* scope v1 history for channel conversations ([#4320](https://github.com/nearai/ironclaw/pull/4320))
+
+### CI / Release
+
+- *(release)* add WeCom release artifact ([#4107](https://github.com/nearai/ironclaw/pull/4107))
+- *(ci)* track `nearai/benchmarks` at `main` instead of pinning ([#4217](https://github.com/nearai/ironclaw/pull/4217))
+- *(ci)* grant `id-token: write` to unblock nearai-bench reusable workflow ([#4220](https://github.com/nearai/ironclaw/pull/4220))
+- *(ci)* scope `id-token: write` to the nearai-bench job ([#4221](https://github.com/nearai/ironclaw/pull/4221))
+
 ## [0.29.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.28.2...ironclaw-v0.29.0) - 2026-05-26
 
 ### Added
