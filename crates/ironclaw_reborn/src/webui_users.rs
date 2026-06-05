@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use chrono::{SecondsFormat, Utc};
 use ironclaw_host_api::UserId;
+use libsql::params_from_iter;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -202,33 +203,38 @@ impl RebornLibSqlUserStore {
         &self,
         allowed_email_domains: &[String],
     ) -> Result<Vec<UserId>, RebornUserStoreError> {
-        let allowed: BTreeSet<String> = allowed_email_domains
+        let allowed_patterns: Vec<String> = allowed_email_domains
             .iter()
-            .map(|domain| domain.to_ascii_lowercase())
+            .map(|domain| domain.trim().to_ascii_lowercase())
+            .filter(|domain| !domain.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|domain| format!("%@{}", escape_like_pattern(&domain)))
             .collect();
-        if allowed.is_empty() {
+        if allowed_patterns.is_empty() {
             return Ok(Vec::new());
         }
 
+        let domain_predicates = std::iter::repeat("lower(email) LIKE ? ESCAPE '\\'")
+            .take(allowed_patterns.len())
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let sql = format!(
+            "SELECT id \
+             FROM users \
+             WHERE status = 'active' \
+               AND email IS NOT NULL \
+               AND ({domain_predicates})"
+        );
         let conn = self.conn().await?;
         let mut rows = conn
-            .query(
-                "SELECT id, email FROM users WHERE status = 'active' AND email IS NOT NULL",
-                (),
-            )
+            .query(&sql, params_from_iter(allowed_patterns))
             .await
             .map_err(backend)?;
         let mut users = Vec::new();
         while let Some(row) = rows.next().await.map_err(backend)? {
             let user_id = row.get::<String>(0).map_err(backend)?;
-            let email = row.get::<String>(1).map_err(backend)?;
-            if email
-                .rsplit_once('@')
-                .map(|(_, domain)| allowed.contains(&domain.to_ascii_lowercase()))
-                .unwrap_or(false)
-            {
-                users.push(to_user_id(user_id)?);
-            }
+            users.push(to_user_id(user_id)?);
         }
         Ok(users)
     }
@@ -243,6 +249,17 @@ fn text_or_null(value: Option<&str>) -> libsql::Value {
         Some(text) => libsql::Value::Text(text.to_string()),
         None => libsql::Value::Null,
     }
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 fn to_user_id(raw: String) -> Result<UserId, RebornUserStoreError> {
@@ -475,5 +492,26 @@ mod tests {
             .expect("list active users");
 
         assert!(users.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_active_users_by_allowed_email_domains_treats_like_wildcards_literally() {
+        let store = store().await;
+        store
+            .resolve_or_create(identity("google", "g-1", Some("a@example.com"), true))
+            .await
+            .expect("resolve normal domain");
+        let literal_percent = store
+            .resolve_or_create(identity("google", "g-2", Some("b@%example.com"), true))
+            .await
+            .expect("resolve literal percent domain");
+
+        let users = store
+            .list_active_users_by_allowed_email_domains(&["%example.com".to_string()])
+            .await
+            .expect("list active users");
+
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].as_str(), literal_percent.as_str());
     }
 }

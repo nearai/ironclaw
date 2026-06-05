@@ -8,7 +8,8 @@ use anyhow::Context;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
-    LocalTriggerAccessReconciliation, open_local_trigger_access_store,
+    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
+    open_local_trigger_access_store,
 };
 use ironclaw_reborn_composition::{
     OAuthClientConfig, PollSettings, RebornBuildInput, RebornCompositionProfile,
@@ -26,9 +27,6 @@ mod test_env;
 mod trigger_poller;
 
 use trigger_poller::trigger_poller_settings;
-
-#[cfg(feature = "webui-v2-beta")]
-const LOCAL_DEV_RUN_TRIGGER_ACCESS_SOURCE: &str = "local_dev_run_bootstrap";
 
 pub(crate) fn init_tracing() {
     use tracing_subscriber::EnvFilter;
@@ -151,8 +149,8 @@ async fn with_run_local_trigger_fire_access_checker(
                 user_ids: &user_ids,
                 agent_id: Some(&agent_id),
                 project_id: None,
-                role: "owner",
-                source: LOCAL_DEV_RUN_TRIGGER_ACCESS_SOURCE,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevRunBootstrap,
             })
             .await
             .context("failed to reconcile local trigger-fire access for `run`")?;
@@ -681,11 +679,13 @@ mod tests {
     use std::collections::HashMap;
 
     use ironclaw_reborn_composition::RebornCompositionProfile;
+    #[cfg(feature = "webui-v2-beta")]
+    use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_config::RebornBootConfig;
 
     use super::test_env::{EnvGuard, lock_trigger_env};
     #[cfg(feature = "webui-v2-beta")]
-    use super::{LOCAL_DEV_RUN_TRIGGER_ACCESS_SOURCE, with_run_local_trigger_fire_access_checker};
+    use super::with_run_local_trigger_fire_access_checker;
     use super::{
         RuntimeInputCaller, RuntimeInputOptions, block_on_cli, build_runtime_input,
         build_runtime_input_with_options, resolve_google_oauth_config,
@@ -963,8 +963,8 @@ enabled = true
                 user_id: &stale_user_id,
                 agent_id: Some(&agent_id),
                 project_id: None,
-                role: "owner",
-                source: LOCAL_DEV_RUN_TRIGGER_ACCESS_SOURCE,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevRunBootstrap,
             })
             .await
             .expect("seed stale run trigger access");

@@ -23,14 +23,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
-    LocalTriggerAccessSeed, RebornLibSqlLocalTriggerAccessStore, RebornLibSqlUserStore,
-    ResolveIdentity,
+    LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
+    RebornLibSqlLocalTriggerAccessStore, RebornLibSqlUserStore, ResolveIdentity,
 };
 use ironclaw_reborn_webui_ingress::{
     OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError,
 };
-
-pub(crate) const LOCAL_DEV_SSO_TRIGGER_ACCESS_SOURCE: &str = "local_dev_sso_bootstrap";
 
 /// Admission + persistence adapter implementing the ingress
 /// [`UserDirectory`] seam.
@@ -126,8 +124,8 @@ impl LocalTriggerAccessBootstrap {
                 user_id,
                 agent_id: Some(&self.agent_id),
                 project_id: self.project_id.as_ref(),
-                role: "owner",
-                source: LOCAL_DEV_SSO_TRIGGER_ACCESS_SOURCE,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
             })
             .await
             .map_err(|err| UserDirectoryError::Backend(err.to_string()))

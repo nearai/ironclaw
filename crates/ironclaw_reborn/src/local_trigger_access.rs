@@ -12,6 +12,42 @@ use chrono::{SecondsFormat, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use thiserror::Error;
 
+/// Fixed local-dev access role persisted on trigger-fire access rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalTriggerAccessRole {
+    /// Owner-level local trigger-fire access.
+    Owner,
+}
+
+impl LocalTriggerAccessRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+        }
+    }
+}
+
+/// Local-dev bootstrap path that owns a trigger-fire access row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalTriggerAccessSource {
+    /// Environment-token `serve` bootstrap path.
+    LocalDevEnvBootstrap,
+    /// SSO-admitted WebUI user bootstrap path.
+    LocalDevSsoBootstrap,
+    /// CLI `run` default-owner bootstrap path.
+    LocalDevRunBootstrap,
+}
+
+impl LocalTriggerAccessSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalDevEnvBootstrap => "local_dev_bootstrap",
+            Self::LocalDevSsoBootstrap => "local_dev_sso_bootstrap",
+            Self::LocalDevRunBootstrap => "local_dev_run_bootstrap",
+        }
+    }
+}
+
 /// Failure modes of the libSQL local trigger access store.
 #[derive(Debug, Error)]
 pub enum RebornLocalTriggerAccessStoreError {
@@ -32,10 +68,10 @@ pub struct LocalTriggerAccessSeed<'a> {
     /// Optional project scope. `None` is stored as an exact no-project scope,
     /// not a wildcard.
     pub project_id: Option<&'a ProjectId>,
-    /// Local role label to persist on the access row.
-    pub role: &'a str,
-    /// Source label for the host/operator seed path.
-    pub source: &'a str,
+    /// Local role to persist on the access row.
+    pub role: LocalTriggerAccessRole,
+    /// Source for the host/operator seed path.
+    pub source: LocalTriggerAccessSource,
 }
 
 /// Current trusted local-dev access set for one bootstrap source and exact
@@ -50,10 +86,10 @@ pub struct LocalTriggerAccessReconciliation<'a> {
     /// Optional project scope. `None` is an exact no-project scope, not a
     /// wildcard.
     pub project_id: Option<&'a ProjectId>,
-    /// Local role label for newly inserted rows.
-    pub role: &'a str,
-    /// Source label for this host/operator seed path.
-    pub source: &'a str,
+    /// Local role for newly inserted rows.
+    pub role: LocalTriggerAccessRole,
+    /// Source for this host/operator seed path.
+    pub source: LocalTriggerAccessSource,
 }
 
 /// libSQL-backed local-dev trigger access repository.
@@ -127,8 +163,8 @@ impl RebornLibSqlLocalTriggerAccessStore {
                 seed.user_id.as_str(),
                 optional_scope_key(seed.agent_id.map(AgentId::as_str)),
                 optional_scope_key(seed.project_id.map(ProjectId::as_str)),
-                seed.role,
-                seed.source,
+                seed.role.as_str(),
+                seed.source.as_str(),
                 now.as_str(),
             ],
         )
@@ -173,7 +209,7 @@ impl RebornLibSqlLocalTriggerAccessStore {
                     reconciliation.tenant_id.as_str(),
                     agent_key,
                     project_key,
-                    reconciliation.source,
+                    reconciliation.source.as_str(),
                 ],
             )
             .await
@@ -203,7 +239,7 @@ impl RebornLibSqlLocalTriggerAccessStore {
                     user_id.as_str(),
                     agent_key,
                     project_key,
-                    reconciliation.source,
+                    reconciliation.source.as_str(),
                 ],
             )
             .await
@@ -221,8 +257,8 @@ impl RebornLibSqlLocalTriggerAccessStore {
                     user_id.as_str(),
                     agent_key,
                     project_key,
-                    reconciliation.role,
-                    reconciliation.source,
+                    reconciliation.role.as_str(),
+                    reconciliation.source.as_str(),
                     now.as_str(),
                 ],
             )
@@ -309,8 +345,8 @@ mod tests {
                 user_id: &user_id,
                 agent_id: Some(&agent_id),
                 project_id: Some(&project_id),
-                role: "owner",
-                source: "test",
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevRunBootstrap,
             })
             .await
             .expect("seed local access");
@@ -369,8 +405,8 @@ mod tests {
                 user_id: &user_id,
                 agent_id: Some(&agent_id),
                 project_id: None,
-                role: "owner",
-                source: "test",
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevRunBootstrap,
             })
             .await
             .expect("seed local access");
@@ -405,8 +441,8 @@ mod tests {
                 user_id: &user_id,
                 agent_id: Some(&agent_id),
                 project_id: Some(&project_id),
-                role: "owner",
-                source: "test",
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevRunBootstrap,
             })
             .await
             .expect("seed local access");
@@ -431,8 +467,8 @@ mod tests {
                 user_id: &user_id,
                 agent_id: Some(&agent_id),
                 project_id: Some(&project_id),
-                role: "owner",
-                source: "test",
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevRunBootstrap,
             })
             .await
             .expect("reseed local access");
@@ -457,9 +493,18 @@ mod tests {
         let project_id = ProjectId::new("local-reconcile-project").expect("project id");
 
         for (user_id, source) in [
-            (&keep_user_id, "bootstrap"),
-            (&stale_user_id, "bootstrap"),
-            (&manual_user_id, "manual"),
+            (
+                &keep_user_id,
+                LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            ),
+            (
+                &stale_user_id,
+                LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            ),
+            (
+                &manual_user_id,
+                LocalTriggerAccessSource::LocalDevEnvBootstrap,
+            ),
         ] {
             store
                 .seed_local_access(LocalTriggerAccessSeed {
@@ -467,7 +512,7 @@ mod tests {
                     user_id,
                     agent_id: Some(&agent_id),
                     project_id: Some(&project_id),
-                    role: "owner",
+                    role: LocalTriggerAccessRole::Owner,
                     source,
                 })
                 .await
@@ -480,8 +525,8 @@ mod tests {
                 user_ids: std::slice::from_ref(&keep_user_id),
                 agent_id: Some(&agent_id),
                 project_id: Some(&project_id),
-                role: "owner",
-                source: "bootstrap",
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
             })
             .await
             .expect("reconcile local access");
@@ -537,8 +582,8 @@ mod tests {
                 user_id: &user_id,
                 agent_id: Some(&agent_id),
                 project_id: None,
-                role: "owner",
-                source: "bootstrap",
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
             })
             .await
             .expect("seed local access");
@@ -558,8 +603,8 @@ mod tests {
                 user_ids: std::slice::from_ref(&user_id),
                 agent_id: Some(&agent_id),
                 project_id: None,
-                role: "owner",
-                source: "bootstrap",
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
             })
             .await
             .expect("reconcile local access");

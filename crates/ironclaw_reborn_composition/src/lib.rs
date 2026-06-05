@@ -284,7 +284,8 @@ pub mod host_api {
 /// stays private to this facade and callers never construct one.
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn::local_trigger_access::{
-    LocalTriggerAccessReconciliation, LocalTriggerAccessSeed, RebornLibSqlLocalTriggerAccessStore,
+    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
+    LocalTriggerAccessSource, RebornLibSqlLocalTriggerAccessStore,
     RebornLocalTriggerAccessStoreError,
 };
 #[cfg(feature = "webui-v2-beta")]
@@ -393,8 +394,8 @@ mod webui_user_access_checker_tests {
                 user_id: &user_id,
                 agent_id: Some(&agent_id),
                 project_id: Some(&project_id),
-                role: "owner",
-                source: "test",
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
             })
             .await
             .expect("seed local access");

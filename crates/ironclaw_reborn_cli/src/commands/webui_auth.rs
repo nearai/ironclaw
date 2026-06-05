@@ -15,16 +15,14 @@ use std::sync::Arc;
 use anyhow::Context;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_reborn_composition::{
-    LocalTriggerAccessReconciliation, PublicRouteMount, WebuiAuthenticator,
-    open_local_trigger_access_store, open_webui_user_store,
+    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
+    PublicRouteMount, WebuiAuthenticator, open_local_trigger_access_store, open_webui_user_store,
 };
 use ironclaw_reborn_webui_ingress::{SignedSessionLoginConfig, build_signed_session_login};
 use secrecy::SecretString;
 
 use crate::commands::serve_sso::SsoStartupConfig;
-use crate::commands::user_directory::{
-    LOCAL_DEV_SSO_TRIGGER_ACCESS_SOURCE, LocalTriggerAccessBootstrap, WebuiUserDirectory,
-};
+use crate::commands::user_directory::{LocalTriggerAccessBootstrap, WebuiUserDirectory};
 
 /// The composed WebChat v2 auth surface: the authenticator the protected
 /// routes verify bearers with, plus the optional public login-route mount
@@ -89,8 +87,8 @@ pub(crate) async fn build_webui_auth_surface(
                 user_ids: &admitted_user_ids,
                 agent_id: Some(&agent_id),
                 project_id: project_id.as_ref(),
-                role: "owner",
-                source: LOCAL_DEV_SSO_TRIGGER_ACCESS_SOURCE,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
             })
             .await
             .context("failed to reconcile local trigger access for SSO users")?;
@@ -209,8 +207,8 @@ mod tests {
                 user_id: &stale_user_id,
                 agent_id: Some(&agent_id),
                 project_id: Some(&project_id),
-                role: "owner",
-                source: LOCAL_DEV_SSO_TRIGGER_ACCESS_SOURCE,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
             })
             .await
             .expect("seed stale access");

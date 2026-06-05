@@ -7,11 +7,12 @@ use anyhow::{Context, anyhow};
 use clap::Args;
 #[cfg(not(feature = "slack-v2-host-beta"))]
 use ironclaw_reborn_composition::build_webui_services;
+use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, RebornBuildInput, RebornReadiness,
-    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator,
-    WebuiServeConfig, build_reborn_runtime, open_local_trigger_access_store,
-    webui_v2_app_with_lifecycle,
+    GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
+    LocalTriggerAccessSource, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
+    build_reborn_runtime, open_local_trigger_access_store, webui_v2_app_with_lifecycle,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
@@ -30,7 +31,6 @@ const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVE_PORT: u16 = 3000;
 const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
 const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
-const LOCAL_DEV_ENV_TRIGGER_ACCESS_SOURCE: &str = "local_dev_bootstrap";
 
 #[derive(Debug, Args)]
 pub(crate) struct ServeCommand {
@@ -87,7 +87,7 @@ impl ServeCommand {
             .and_then(|file| file.identity.as_ref())
             .and_then(|identity| identity.tenant.as_deref())
             .unwrap_or("reborn-cli");
-        let tenant_id = ironclaw_reborn_composition::host_api::TenantId::new(tenant_raw)
+        let tenant_id = TenantId::new(tenant_raw)
             .map_err(|err| anyhow!("[identity].tenant `{tenant_raw}` is invalid: {err}"))?;
 
         // Resolve env-bearer authenticator from the env-var names the
@@ -116,7 +116,7 @@ impl ServeCommand {
                 boot_config.home().config_file_path().display(),
             )
         })?;
-        let user_id = ironclaw_reborn_composition::host_api::UserId::new(&user_id_raw)
+        let user_id = UserId::new(&user_id_raw)
             .map_err(|err| anyhow!("{env_user_id_var} value `{user_id_raw}` is invalid: {err}"))?;
 
         // Keep a copy of the operator secret to key the SSO session-token
@@ -155,13 +155,12 @@ impl ServeCommand {
         }
         let default_agent_raw =
             resolve_webui_default_agent(identity_section, &runtime_input.identity);
-        let default_agent_id =
-            ironclaw_reborn_composition::host_api::AgentId::new(&default_agent_raw).map_err(
-                |err| anyhow!("[identity].default_agent `{default_agent_raw}` is invalid: {err}"),
-            )?;
+        let default_agent_id = AgentId::new(&default_agent_raw).map_err(|err| {
+            anyhow!("[identity].default_agent `{default_agent_raw}` is invalid: {err}")
+        })?;
         let default_project_id = identity_section
             .and_then(|identity| identity.default_project.as_deref())
-            .map(ironclaw_reborn_composition::host_api::ProjectId::new)
+            .map(ProjectId::new)
             .transpose()
             .map_err(|err| anyhow!("[identity].default_project is invalid: {err}"))?;
         if let Some(project_id) = default_project_id.clone() {
@@ -575,10 +574,10 @@ fn canonical_host_name(host: &str) -> &str {
 async fn with_local_trigger_fire_access_checker(
     runtime_input: RebornRuntimeInput,
     user_store_path: &std::path::Path,
-    tenant_id: &ironclaw_reborn_composition::host_api::TenantId,
-    user_id: &ironclaw_reborn_composition::host_api::UserId,
-    default_agent_id: &ironclaw_reborn_composition::host_api::AgentId,
-    default_project_id: Option<&ironclaw_reborn_composition::host_api::ProjectId>,
+    tenant_id: &TenantId,
+    user_id: &UserId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
 ) -> anyhow::Result<RebornRuntimeInput> {
     if !runtime_input.trigger_poller.enabled {
         return Ok(runtime_input);
@@ -594,8 +593,8 @@ async fn with_local_trigger_fire_access_checker(
             user_ids: &user_ids,
             agent_id: Some(default_agent_id),
             project_id: default_project_id,
-            role: "owner",
-            source: LOCAL_DEV_ENV_TRIGGER_ACCESS_SOURCE,
+            role: LocalTriggerAccessRole::Owner,
+            source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
         })
         .await
         .context("failed to reconcile local trigger-fire access")?;
@@ -742,19 +741,11 @@ mod tests {
     #[tokio::test]
     async fn trigger_poller_bootstrap_seeds_local_access_checker() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let tenant_id =
-            ironclaw_reborn_composition::host_api::TenantId::new("serve-trigger-tenant")
-                .expect("tenant id");
-        let user_id = ironclaw_reborn_composition::host_api::UserId::new("serve-trigger-user")
-            .expect("user id");
-        let stale_user_id =
-            ironclaw_reborn_composition::host_api::UserId::new("serve-trigger-stale")
-                .expect("stale user id");
-        let agent_id = ironclaw_reborn_composition::host_api::AgentId::new("serve-trigger-agent")
-            .expect("agent id");
-        let project_id =
-            ironclaw_reborn_composition::host_api::ProjectId::new("serve-trigger-project")
-                .expect("project id");
+        let tenant_id = TenantId::new("serve-trigger-tenant").expect("tenant id");
+        let user_id = UserId::new("serve-trigger-user").expect("user id");
+        let stale_user_id = UserId::new("serve-trigger-stale").expect("stale user id");
+        let agent_id = AgentId::new("serve-trigger-agent").expect("agent id");
+        let project_id = ProjectId::new("serve-trigger-project").expect("project id");
         let user_store_path = dir.path().join("reborn-local-dev.db");
         let access_store =
             ironclaw_reborn_composition::open_local_trigger_access_store(&user_store_path)
@@ -766,8 +757,8 @@ mod tests {
                 user_id: &stale_user_id,
                 agent_id: Some(&agent_id),
                 project_id: Some(&project_id),
-                role: "owner",
-                source: LOCAL_DEV_ENV_TRIGGER_ACCESS_SOURCE,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
             })
             .await
             .expect("seed stale local trigger access");
