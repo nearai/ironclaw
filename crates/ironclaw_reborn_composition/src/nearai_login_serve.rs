@@ -30,8 +30,16 @@ use crate::llm_config_service::{
 };
 use crate::webui_serve::PublicRouteMount;
 
-const NEARAI_CALLBACK_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0");
-const NEARAI_CALLBACK_RATE_MAX: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0");
+const NEARAI_CALLBACK_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
+    Some(value) => value,
+    // SAFETY: 60 is a non-zero literal rate-limit window.
+    None => unreachable!(),
+};
+const NEARAI_CALLBACK_RATE_MAX: NonZeroU32 = match NonZeroU32::new(60) {
+    Some(value) => value,
+    // SAFETY: 60 is a non-zero literal rate limit.
+    None => unreachable!(),
+};
 
 #[derive(Clone)]
 struct NearAiCallbackState {
@@ -112,7 +120,7 @@ fn nearai_callback_descriptor() -> IngressRouteDescriptor {
         NEARAI_LOGIN_CALLBACK_PATH.to_string(),
         policy,
     )
-    .expect("nearai login callback descriptor must validate")
+    .expect("nearai login callback descriptor must validate") // safety: route id/path are crate-local literals, and the policy above validates the OAuth callback effect shape.
 }
 
 #[cfg(test)]
