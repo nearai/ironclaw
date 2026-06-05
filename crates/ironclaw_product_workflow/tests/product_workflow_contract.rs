@@ -13,9 +13,11 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
     AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound,
-    ProductAdapterError, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
-    ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind, ProjectionCursor,
+    ProductAdapterError, ProductAdapterId, ProductControlActionPayload, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
+    ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
+    ProductRejectionDisposition, ProductRejectionKind, ProductTriggerReason, ProductWorkflow,
+    ProductWorkflowRejectionKind, ProjectionCursor, ProjectionReadPayload,
     ProjectionSubscriptionPayload, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
     TrustedInboundContext, UserMessagePayload,
 };
@@ -1598,6 +1600,33 @@ async fn noop_returns_noop_ack() {
 }
 
 #[tokio::test]
+async fn typed_cancel_control_action_uses_submit_door_without_command_text() {
+    let (workflow, inbound, ledger) = build_workflow();
+    let envelope = sample_envelope_with_payload(
+        "typed-cancel-control",
+        ProductInboundPayload::ControlAction(ProductControlActionPayload::CancelRun {
+            run_id: TurnRunId::new(),
+        }),
+    );
+
+    let ack = workflow
+        .submit_inbound(envelope)
+        .await
+        .expect("typed control action returns product-safe ack");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Rejected(ProductRejection {
+            kind: ProductRejectionKind::InvalidRequest,
+            disposition: ProductRejectionDisposition::Permanent,
+            ..
+        })
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
 async fn subscription_request_via_accept_inbound_rejects_before_mutating_ledger() {
     let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
     let envelope = sample_envelope_with_payload(
@@ -1629,6 +1658,109 @@ async fn subscription_request_via_accept_inbound_rejects_before_mutating_ledger(
 }
 
 #[tokio::test]
+async fn projection_read_via_submit_inbound_rejects_before_mutating_ledger() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let envelope = sample_envelope_with_payload(
+        "projection-read-wrong-entrypoint",
+        ProductInboundPayload::ProjectionRead(
+            ProjectionReadPayload::new(None, None, Some(25)).expect("valid read"),
+        ),
+    );
+
+    let err = workflow
+        .submit_inbound(envelope)
+        .await
+        .expect_err("projection reads use the read projection door, not submit_inbound");
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            ..
+        }
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(binding_service.resolve_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
+async fn projection_read_resolves_external_refs_through_read_door() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let binding = fake_binding();
+    let cursor = ProjectionCursor::new("cursor:projection-read-1").expect("valid cursor");
+    let envelope = sample_envelope_with_payload(
+        "projection-read-1",
+        ProductInboundPayload::ProjectionRead(
+            ProjectionReadPayload::new(
+                Some(binding.thread_id.as_str().to_string()),
+                Some(cursor.clone()),
+                Some(50),
+            )
+            .expect("valid read"),
+        ),
+    );
+    binding_service.program_binding(envelope.source_binding_key(), binding.clone());
+    let input = ProductProjectionReadInput::from_inbound_envelope(&envelope).expect("read input");
+
+    let read = workflow
+        .read_projection(input)
+        .await
+        .expect("projection read");
+
+    assert_eq!(read.actor.user_id, binding.actor_user_id);
+    assert_eq!(read.scope.tenant_id, binding.tenant_id);
+    assert_eq!(read.scope.agent_id, binding.agent_id);
+    assert_eq!(read.scope.project_id, binding.project_id);
+    assert_eq!(read.scope.thread_id, binding.thread_id);
+    assert_eq!(read.after_cursor, Some(cursor));
+    assert_eq!(read.limit, Some(50));
+    assert_eq!(binding_service.resolve_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
+async fn projection_read_accepts_canonical_subject_without_inbound_envelope() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let binding = fake_binding();
+    let actor = TurnActor::new(binding.actor_user_id.clone());
+    let scope = TurnScope::new(
+        binding.tenant_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+    );
+    let cursor = ProjectionCursor::new("cursor:canonical-read").expect("valid cursor");
+
+    let read = workflow
+        .read_projection(ProductProjectionReadInput::new(
+            ProductProjectionSubject::canonical(actor.clone(), scope.clone()),
+            Some(binding.thread_id.as_str().to_string()),
+            Some(cursor.clone()),
+            Some(10),
+        ))
+        .await
+        .expect("canonical projection read");
+
+    assert_eq!(read.actor, actor);
+    assert_eq!(read.scope, scope);
+    assert_eq!(read.after_cursor, Some(cursor));
+    assert_eq!(read.limit, Some(10));
+    assert_eq!(binding_service.resolve_count(), 0);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
 async fn projection_subscription_resolves_through_binding_service() {
     let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
     let binding = fake_binding();
@@ -1645,8 +1777,10 @@ async fn projection_subscription_resolves_through_binding_service() {
     );
     binding_service.program_binding(envelope.source_binding_key(), binding.clone());
 
+    let input =
+        ProductProjectionSubscribeInput::from_inbound_envelope(&envelope).expect("subscribe input");
     let subscription = workflow
-        .resolve_projection_subscription(envelope)
+        .subscribe_projection(input)
         .await
         .expect("projection subscription");
 
@@ -1657,6 +1791,38 @@ async fn projection_subscription_resolves_through_binding_service() {
     assert_eq!(subscription.scope.thread_id, binding.thread_id);
     assert_eq!(subscription.after_cursor, Some(cursor));
     assert_eq!(binding_service.resolve_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
+async fn projection_subscription_accepts_canonical_subject_without_inbound_envelope() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let binding = fake_binding();
+    let actor = TurnActor::new(binding.actor_user_id.clone());
+    let scope = TurnScope::new(
+        binding.tenant_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+    );
+    let cursor = ProjectionCursor::new("cursor:canonical-subscribe").expect("valid cursor");
+
+    let subscription = workflow
+        .subscribe_projection(ProductProjectionSubscribeInput::new(
+            ProductProjectionSubject::canonical(actor.clone(), scope.clone()),
+            Some(binding.thread_id.as_str().to_string()),
+            Some(cursor.clone()),
+        ))
+        .await
+        .expect("canonical projection subscription");
+
+    assert_eq!(subscription.actor, actor);
+    assert_eq!(subscription.scope, scope);
+    assert_eq!(subscription.after_cursor, Some(cursor));
+    assert_eq!(binding_service.resolve_count(), 0);
     assert_eq!(inbound.accepted_count(), 0);
     assert_eq!(ledger.settled_count(), 0);
     assert_eq!(ledger.in_flight_count(), 0);
