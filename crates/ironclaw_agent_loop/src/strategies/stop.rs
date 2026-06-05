@@ -7,6 +7,10 @@ use ironclaw_turns::{
 
 use crate::state::{LoopExecutionState, StopStrategyState};
 
+use super::repeated_call_guard::{
+    observe_repeated_call_warning, repeated_call_warning_is_terminal_ready,
+};
+
 /// Observes completed turns and decides whether the loop should stop.
 ///
 /// Observation and terminal decision are split so the executor can always
@@ -159,7 +163,9 @@ pub(crate) enum StopKind {
 ///    asked to terminate → `Stop { GracefulStop }`.
 /// 3. **Repetition escape**: the same `CapabilityCallSignature` is observed
 ///    in `repetition_threshold` (default 3) of the last `repetition_window`
-///    (default 5) iterations → `Stop { NoProgressDetected }`.
+///    (default 5) iterations → render a model-visible warning. If the warning
+///    was rendered and the same repeated call then reports no progress →
+///    `Stop { NoProgressDetected }`.
 /// 4. **Failure-run escape**: the same `LoopFailureKind` appears
 ///    `failure_run_threshold` (default 3) times in a row →
 ///    `Stop { NoProgressDetected }`.
@@ -227,7 +233,7 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
             && just_completed.capability_batch.no_progress_count
                 == just_completed.capability_batch.invocation_count;
 
-        StopStrategyState {
+        let stop_state = StopStrategyState {
             turns_completed: state.stop_state.turns_completed.saturating_add(1),
             trailing_rejected_replies: if just_completed.kind == TurnEndKind::ReplyRejected {
                 state.stop_state.trailing_rejected_replies.saturating_add(1)
@@ -242,7 +248,16 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
             } else {
                 0
             },
-        }
+            repeated_call_warning: state.stop_state.repeated_call_warning.clone(),
+        };
+
+        observe_repeated_call_warning(
+            state,
+            just_completed,
+            stop_state,
+            self.repetition_window,
+            self.repetition_threshold,
+        )
     }
 
     async fn should_stop_after_observed_turn(
@@ -281,13 +296,10 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
             };
         }
 
-        // (d) repetition escape — same call signature observed in
-        // `repetition_threshold` of the last `repetition_window` iterations.
-        if state
-            .recent_call_signatures
-            .most_common_count_in(self.repetition_window)
-            >= self.repetition_threshold
-        {
+        // (d) repeated-call warning escape — repeated calls stop only after a
+        // rendered loop-control warning and another same-signature no-progress
+        // batch.
+        if repeated_call_warning_is_terminal_ready(state) {
             return StopOutcome::Stop {
                 kind: StopKind::NoProgressDetected,
             };
@@ -453,7 +465,10 @@ mod tests {
             CapabilityBatchTurnSummary, DefaultStopConditionStrategy, StopConditionStrategy,
             StopKind, StopOutcome, TurnEndKind, TurnSummary,
         };
-        use crate::state::{CapabilityCallSignature, LoopExecutionState, StopStrategyState};
+        use crate::state::{
+            CapabilityCallSignature, LoopExecutionState, RepeatedCallWarningPhase,
+            RepeatedCallWarningState, StopStrategyState,
+        };
 
         fn test_run_context() -> LoopRunContext {
             let scope = TurnScope::new(
@@ -700,7 +715,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn same_signature_three_times_triggers_no_progress() {
+        async fn same_signature_three_times_arms_warning_and_continues() {
             let strategy = DefaultStopConditionStrategy::default();
             let mut state = LoopExecutionState::initial_for_run(&test_run_context());
             let signature = CapabilityCallSignature::from_call(
@@ -712,7 +727,38 @@ mod tests {
                 state.recent_call_signatures.push(signature.clone());
             }
 
-            let (_state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
+            let (state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
+
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
+            let warning = state
+                .stop_state
+                .repeated_call_warning
+                .expect("repeated call warning should be armed");
+            assert_eq!(warning.signature, signature);
+            assert_eq!(warning.phase, RepeatedCallWarningPhase::PendingRender);
+        }
+
+        #[tokio::test]
+        async fn rendered_repeated_signature_warning_and_no_progress_result_triggers_no_progress() {
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            let signature = CapabilityCallSignature::from_call(
+                CapabilityId::new("demo.echo").expect("valid"),
+                &json!({"x": 1}),
+            )
+            .expect("valid call signature");
+            for _ in 0..3 {
+                state.recent_call_signatures.push(signature.clone());
+            }
+            state.stop_state.repeated_call_warning =
+                Some(RepeatedCallWarningState::rendered(signature.clone()));
+            let summary = after_batch_with_capability_summary(CapabilityBatchTurnSummary {
+                invocation_count: 1,
+                terminate_hint_count: 0,
+                no_progress_count: 1,
+            });
+
+            let (state, outcome) = observe_and_decide(&strategy, state, summary).await;
 
             assert!(matches!(
                 outcome,
@@ -720,6 +766,12 @@ mod tests {
                     kind: StopKind::NoProgressDetected
                 }
             ));
+            let warning = state
+                .stop_state
+                .repeated_call_warning
+                .expect("repeated call warning should terminalize");
+            assert_eq!(warning.signature, signature);
+            assert_eq!(warning.phase, RepeatedCallWarningPhase::TerminalReady);
         }
 
         #[tokio::test]

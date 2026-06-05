@@ -43,11 +43,18 @@ impl<T: Clone + Eq, const N: usize> BoundedRing<T, N> {
     }
 
     pub fn most_common_count_in(&self, window: usize) -> usize {
+        self.most_common_in(window)
+            .map(|(_, count)| count)
+            .unwrap_or_default()
+    }
+
+    pub fn most_common_in(&self, window: usize) -> Option<(T, usize)> {
         if window == 0 || self.items.is_empty() {
-            return 0;
+            return None;
         }
         let window = window.min(self.items.len());
         let mut most_common = 0;
+        let mut most_common_item = None;
         for (index, item) in self
             .items
             .iter()
@@ -60,9 +67,12 @@ impl<T: Clone + Eq, const N: usize> BoundedRing<T, N> {
                 .skip(self.items.len() - window + index)
                 .filter(|candidate| *candidate == item)
                 .count();
-            most_common = most_common.max(count);
+            if count > most_common {
+                most_common = count;
+                most_common_item = Some(item.clone());
+            }
         }
-        most_common
+        most_common_item.map(|item| (item, most_common))
     }
 
     pub fn same_run_length(&self) -> usize {
