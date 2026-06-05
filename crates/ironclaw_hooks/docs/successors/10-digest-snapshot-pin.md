@@ -37,7 +37,9 @@ fn invocation_arguments_digest_is_stable_for_known_inputs() {
         input_ref: CapabilityInputRef::new("input:cap.snapshot.fixture").unwrap(),
     };
     let digest = invocation_arguments_digest(&invocation);
-    let hex = hex::encode(digest);
+    // Matches the digest-hex helper in tests/capability_port.rs - the crate
+    // has no `hex` dependency; do not add one for this.
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(
         hex,
         // captured one-time; if you find yourself updating this, ask
