@@ -159,23 +159,39 @@ struct TableStatements {
 }
 
 impl TableStatements {
-    /// Pre-format every statement for one typed table. `insert` differs by
-    /// table (the value table carries a NOT NULL `value` column the
-    /// invocation table lacks), so it is built per kind here.
-    fn new(table: &str, with_value_column: bool) -> Self {
-        let insert = if with_value_column {
-            format!(
-                "INSERT INTO {table} (scope_hash, key_hash, event_id, occurred_at, value)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (key_hash, event_id) DO NOTHING"
-            )
-        } else {
+    /// Statements for the invocation (count) table. The invocation table has
+    /// no `value` column, so its INSERT omits it; the aggregate is `COUNT(*)`.
+    fn for_invocations(table: &str) -> Self {
+        Self::build(
+            table,
             format!(
                 "INSERT INTO {table} (scope_hash, key_hash, event_id, occurred_at)
                  VALUES ($1, $2, $3, $4)
                  ON CONFLICT (key_hash, event_id) DO NOTHING"
-            )
-        };
+            ),
+        )
+    }
+
+    /// Statements for the value (sum) table. The value table carries a NOT
+    /// NULL `value` column the invocation table lacks, so its INSERT includes
+    /// it; the aggregate is `SUM(value)`.
+    fn for_values(table: &str) -> Self {
+        Self::build(
+            table,
+            format!(
+                "INSERT INTO {table} (scope_hash, key_hash, event_id, occurred_at, value)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (key_hash, event_id) DO NOTHING"
+            ),
+        )
+    }
+
+    /// Pre-format every table-agnostic statement around the table-specific
+    /// `insert` SQL the named constructors above supply. The trim / dedup /
+    /// aggregate / scope-quota / reap statements are identical in shape across
+    /// the two typed tables (only the table name is interpolated), so they are
+    /// built once here.
+    fn build(table: &str, insert: String) -> Self {
         Self {
             trim: format!("DELETE FROM {table} WHERE key_hash = $1 AND occurred_at < $2"),
             dedup_precount: format!(
@@ -237,8 +253,8 @@ impl PostgresPredicateStateBackend {
         Self {
             pool,
             evictions: AtomicU64::new(0),
-            invocation_sql: TableStatements::new(INVOCATIONS_TABLE, false),
-            value_sql: TableStatements::new(VALUES_TABLE, true),
+            invocation_sql: TableStatements::for_invocations(INVOCATIONS_TABLE),
+            value_sql: TableStatements::for_values(VALUES_TABLE),
         }
     }
 
@@ -325,7 +341,7 @@ impl PostgresPredicateStateBackend {
         // released automatically at commit/rollback. Collisions across
         // distinct keys (same 64-bit lock key) only cost extra
         // serialization, never correctness.
-        let lock_key = advisory_lock_key(&key);
+        let lock_key = advisory_lock_key_from_bytes(&key);
         tx.execute(
             "SELECT pg_advisory_xact_lock($1, $2)",
             &[&lock_key.0, &lock_key.1],
@@ -749,38 +765,51 @@ impl PredicateStateBackend for PostgresPredicateStateBackend {
     }
 
     async fn evict_older_than(&self, cutoff: DateTime<Utc>) -> Result<u64, PredicateBackendError> {
-        let client = self.client().await?;
-        // Reap both typed tables; return the total rows deleted.
-        let inv = client
+        let mut client = self.client().await?;
+        // Reap both typed tables atomically. Run both DELETEs inside one
+        // transaction so the reap is all-or-nothing: if the value DELETE
+        // fails after the invocation DELETE ran, the transaction rolls back
+        // (no commit) and BOTH tables are left untouched, so a retry reaps a
+        // consistent snapshot rather than finding invocation rows already
+        // gone and value rows still present. READ COMMITTED is sufficient —
+        // the reaper does not interleave with the per-key/scope advisory-lock
+        // protocol the record path uses (it only deletes already-stale rows),
+        // and the two DELETEs touch disjoint tables. Return the total rows
+        // deleted across both.
+        let tx = client
+            .build_transaction()
+            .isolation_level(IsolationLevel::ReadCommitted)
+            .start()
+            .await
+            .map_err(map_pg)?;
+        let inv = tx
             .execute(&self.invocation_sql.reap, &[&cutoff])
             .await
             .map_err(map_pg)?;
-        let val = client
+        let val = tx
             .execute(&self.value_sql.reap, &[&cutoff])
             .await
             .map_err(map_pg)?;
+        tx.commit().await.map_err(map_pg)?;
         Ok(inv + val)
     }
 }
 
-/// Derive the two-`i32` advisory-lock key from a bucket's `key_hash`.
+/// Derive the two-`i32` advisory-lock key from a bucket's `key_hash` bytes.
 /// `pg_advisory_xact_lock(int4, int4)` namespaces the lock by the pair, so
 /// we feed the first four bytes as the classifier and the next four as the
 /// object id. A hash collision across distinct keys merely serializes two
 /// unrelated buckets — a (rare) throughput cost, never a correctness bug.
-fn advisory_lock_key(key: &Digest) -> (i32, i32) {
-    advisory_lock_key_from_bytes(key)
-}
-
-/// Same derivation as [`advisory_lock_key`] but over a raw byte slice — used
-/// by the scope-LRU eviction path, which reads candidate victims' `key_hash`
-/// back from the `BYTEA` column as bytes (not a typed [`Digest`]). It MUST
-/// produce the identical `(i32, i32)` lock key the recording path uses for
-/// the same bucket, otherwise the victim try-lock would guard a different
-/// lock than the recorder holds and the serialization would be defeated.
-/// `key_hash` is always a 32-byte blake3 digest, so the first 8 bytes are
-/// present; a shorter slice (never expected) is zero-padded so the function
-/// is total rather than panicking on an out-of-range index.
+///
+/// Both the recording path (which holds the typed [`Digest`], passed via
+/// slice coercion) and the scope-LRU eviction path (which reads candidate
+/// victims' `key_hash` back from the `BYTEA` column as raw bytes) call this
+/// over the SAME bytes, so they derive the identical `(i32, i32)` lock key
+/// for the same bucket — otherwise the victim try-lock would guard a
+/// different lock than the recorder holds and the serialization would be
+/// defeated. `key_hash` is always a 32-byte blake3 digest, so the first 8
+/// bytes are present; a shorter slice (never expected) is zero-padded so the
+/// function is total rather than panicking on an out-of-range index.
 fn advisory_lock_key_from_bytes(key: &[u8]) -> (i32, i32) {
     let mut buf = [0u8; 8];
     let n = key.len().min(8);
@@ -843,15 +872,17 @@ fn map_pool(e: deadpool_postgres::PoolError) -> PredicateBackendError {
 mod tests {
     use super::*;
 
-    /// The scope-LRU eviction path try-locks each victim key using
-    /// `advisory_lock_key_from_bytes` over the `key_hash` bytes it read back
-    /// from the DB, while the recording path locks via `advisory_lock_key`
-    /// over the typed `Digest`. If these two derivations ever diverged, the
-    /// eviction would guard a DIFFERENT advisory lock than a concurrent
-    /// recorder holds, defeating the per-bucket serialization the fix
-    /// depends on. This pins them equal for the full 32-byte digest — a
-    /// provable-by-inspection guard for the lock-acquisition invariant that
-    /// does not need a live Postgres.
+    /// The scope-LRU eviction path try-locks each victim key over the
+    /// `key_hash` bytes it read back from the DB as an owned `Vec<u8>`, while
+    /// the recording path locks over the typed `Digest` via slice coercion.
+    /// Both go through `advisory_lock_key_from_bytes`, so the derivation is
+    /// the same function — but the inputs reach it by different paths
+    /// (`&digest[..]` slice coercion vs. an owned `Vec<u8>`). If those ever
+    /// produced different keys the eviction would guard a DIFFERENT advisory
+    /// lock than a concurrent recorder holds, defeating the per-bucket
+    /// serialization the fix depends on. This pins them equal for the full
+    /// 32-byte digest — a provable-by-inspection guard for the
+    /// lock-acquisition invariant that does not need a live Postgres.
     #[test]
     fn eviction_and_record_derive_identical_per_key_lock() {
         let digest: Digest = {
@@ -861,8 +892,11 @@ mod tests {
             }
             d
         };
-        let from_digest = advisory_lock_key(&digest);
-        let from_bytes = advisory_lock_key_from_bytes(&digest[..]);
+        // Recorder path: a typed `Digest` coerced to `&[u8]`.
+        let from_digest = advisory_lock_key_from_bytes(&digest);
+        // Eviction path: the same bytes read back from the DB as an owned vec.
+        let victim_bytes: Vec<u8> = digest.to_vec();
+        let from_bytes = advisory_lock_key_from_bytes(&victim_bytes);
         assert_eq!(
             from_digest, from_bytes,
             "victim try-lock key must equal the recorder's lock key for the same bucket"
@@ -894,7 +928,49 @@ mod tests {
         let mut b = [0u8; 32];
         a[0] = 1;
         b[0] = 2;
-        assert_ne!(advisory_lock_key(&a), advisory_lock_key(&b));
+        assert_ne!(
+            advisory_lock_key_from_bytes(&a),
+            advisory_lock_key_from_bytes(&b)
+        );
+    }
+
+    /// The invocation (`b"i"`) and value (`b"v"`) scope-quota passes MUST take
+    /// distinct scope advisory locks for the same tenant, or every value-table
+    /// scope-quota pass would serialize behind invocation-table passes for that
+    /// tenant (they touch disjoint tables and must not block each other). The
+    /// `lock_tag` byte folded into `scope_advisory_lock_key` is what keeps them
+    /// disjoint. This pins that invariant on a pure function with no live
+    /// Postgres: the two tags over the same scope bytes derive different keys.
+    #[test]
+    fn invocation_and_value_scope_lock_keys_are_distinct() {
+        let scope: [u8; 32] = {
+            let mut s = [0u8; 32];
+            for (i, b) in s.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_mul(11).wrapping_add(5);
+            }
+            s
+        };
+        let inv = RecordPlan::Invocation(PlanCommon {
+            scope,
+            key: [0u8; 32],
+            label: String::new(),
+        });
+        let val = RecordPlan::Value {
+            common: PlanCommon {
+                scope,
+                key: [0u8; 32],
+                label: String::new(),
+            },
+            value: Decimal::ZERO,
+        };
+        assert_eq!(inv.lock_tag(), b"i");
+        assert_eq!(val.lock_tag(), b"v");
+        assert_ne!(
+            scope_advisory_lock_key(&scope, inv.lock_tag()),
+            scope_advisory_lock_key(&scope, val.lock_tag()),
+            "invocation and value scope-quota passes must derive disjoint scope \
+             advisory locks for the same tenant"
+        );
     }
 
     /// `advisory_lock_key_from_bytes` is total: a short slice (never

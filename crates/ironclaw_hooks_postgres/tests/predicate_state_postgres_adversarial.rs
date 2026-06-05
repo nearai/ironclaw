@@ -284,6 +284,125 @@ async fn per_key_sample_cap_fails_closed_under_flood() {
     );
 }
 
+/// Per-key sample cap under a flood on the VALUE path: the cap-reject branch
+/// in the shared `record()` body runs identically for `record_value`, but the
+/// value-table INSERT and `SUM(value)` aggregate are variant-specific, so a
+/// regression there (e.g. the value INSERT failing to dedup, or `aggregate_sum`
+/// miscounting) could silently admit over-cap values while the invocation path
+/// stays correct. This mirrors `per_key_sample_cap_fails_closed_under_flood`
+/// against `record_value`: fill exactly to the cap with distinct in-window
+/// ids, assert the next distinct id at `MAX_SAMPLES_PER_KEY+1` fails closed
+/// with `WindowOverflow`, and assert an in-window replay at the cap still
+/// dedups (sum unchanged) rather than overflowing.
+///
+/// Gated on a reachable Postgres via `IRONCLAW_HOOKS_POSTGRES_URL` /
+/// `DATABASE_URL`; skipped (passing) otherwise.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn per_value_key_sample_cap_fails_closed_under_flood() {
+    let (url, _guard) = guarded!();
+    let hs = hosts(&url, 1).await;
+    let backend = &hs[0];
+    let key = val_key("flood-value-tenant", "cap.spend", "amount");
+    let window = Duration::from_secs(86_400);
+
+    // Each sample contributes a fixed amount so the running sum is a direct
+    // multiple of the in-window sample count — lets us assert the sum tracks
+    // the count exactly as we fill to the cap.
+    let per_sample = Decimal::from(2);
+    for i in 0..MAX_SAMPLES_PER_KEY {
+        let ts = base() + chrono::Duration::milliseconds(i as i64);
+        let sum = backend
+            .record_value(&key, &ev(&format!("vflood-{i}")), ts, per_sample, window)
+            .await
+            .expect("value inserts up to the cap succeed");
+        assert_eq!(
+            sum,
+            per_sample * Decimal::from(i + 1),
+            "running sum must track the in-window sample count up to the cap"
+        );
+    }
+
+    // The next distinct in-window id must fail closed, not silent-evict.
+    let overflow_ts = base() + chrono::Duration::milliseconds(MAX_SAMPLES_PER_KEY as i64);
+    let result = backend
+        .record_value(
+            &key,
+            &ev("vflood-overflow"),
+            overflow_ts,
+            per_sample,
+            window,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(PredicateBackendError::WindowOverflow { .. })),
+        "hitting the per-value-key cap must fail closed, got {result:?}"
+    );
+
+    // A replay of an in-window id at the cap dedups to a no-op against the
+    // sum rather than overflowing — replay refusal survives the cap boundary.
+    let replay_ts = base() + chrono::Duration::milliseconds(MAX_SAMPLES_PER_KEY as i64 + 1);
+    let replay = backend
+        .record_value(&key, &ev("vflood-0"), replay_ts, per_sample, window)
+        .await
+        .expect("replay of an in-window value id must dedup, not overflow");
+    assert_eq!(
+        replay,
+        per_sample * Decimal::from(MAX_SAMPLES_PER_KEY),
+        "replay at the cap is a no-op against the sum"
+    );
+}
+
+/// `evictions_observed()` increments only AFTER `tx.commit()`. A per-key cap
+/// overflow rolls the transaction back via `drop(tx)` (it never commits), so
+/// the monitoring counter must NOT advance on that path. A bug crediting an
+/// eviction on rollback would emit spurious telemetry. This drives a single
+/// key to `MAX_SAMPLES_PER_KEY+1` (forcing the `WindowOverflow` rollback) and
+/// asserts `evictions_observed()` is unchanged from the pre-overflow snapshot.
+///
+/// Gated on a reachable Postgres via `IRONCLAW_HOOKS_POSTGRES_URL` /
+/// `DATABASE_URL`; skipped (passing) otherwise.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn evictions_counter_unchanged_on_window_overflow() {
+    let (url, _guard) = guarded!();
+    let hs = hosts(&url, 1).await;
+    let backend = &hs[0];
+    let key = inv_key("overflow-evict-tenant", "cap.hot");
+    let window = Duration::from_secs(86_400);
+
+    // Fill exactly to the cap — these are single-sample-per-key-free inserts
+    // against ONE key, so no scope-LRU eviction fires (one distinct key, well
+    // under MAX_KEYS_PER_TENANT).
+    for i in 0..MAX_SAMPLES_PER_KEY {
+        let ts = base() + chrono::Duration::milliseconds(i as i64);
+        backend
+            .record_invocation(&key, &ev(&format!("ovf-{i}")), ts, window)
+            .await
+            .expect("inserts up to the cap succeed");
+    }
+
+    // Snapshot the eviction counter immediately before the overflow.
+    let before = backend.evictions_observed();
+
+    // Drive the key one past the cap: this must roll back via `drop(tx)`.
+    let overflow_ts = base() + chrono::Duration::milliseconds(MAX_SAMPLES_PER_KEY as i64);
+    let result = backend
+        .record_invocation(&key, &ev("ovf-overflow"), overflow_ts, window)
+        .await;
+    assert!(
+        matches!(result, Err(PredicateBackendError::WindowOverflow { .. })),
+        "the over-cap insert must fail closed, got {result:?}"
+    );
+
+    let after = backend.evictions_observed();
+    assert_eq!(
+        before, after,
+        "evictions_observed() must NOT advance when a per-key cap overflow \
+         rolls the transaction back (counter increments only after commit)"
+    );
+}
+
 /// Per-scope (tenant) LRU quota under concurrent insert pressure across
 /// two hosts: a single tenant's distinct-key footprint must be bounded at
 /// `MAX_KEYS_PER_TENANT`, and the eviction counter must advance.
