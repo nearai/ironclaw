@@ -714,8 +714,8 @@ impl RootFilesystem for PostgresRootFilesystem {
         let from_raw = i64::try_from(from.get()).map_err(|_| {
             backend_error(
                 path.clone(),
-                FilesystemOperation::Tail,
-                "tail cursor exceeds i64",
+                FilesystemOperation::HeadSeq,
+                "head_seq cursor exceeds i64",
             )
         })?;
         let row = client
@@ -728,11 +728,15 @@ impl RootFilesystem for PostgresRootFilesystem {
                 &[&path.as_str(), &from_raw],
             )
             .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::Tail, error))?;
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::HeadSeq, error))?;
         // `MAX(...)` over an empty match set yields SQL NULL.
         let head_raw: Option<i64> = row.get("head");
         match head_raw {
-            Some(id) => Ok(Some(seq_no_from_i64(path, id, FilesystemOperation::Tail)?)),
+            Some(id) => Ok(Some(seq_no_from_i64(
+                path,
+                id,
+                FilesystemOperation::HeadSeq,
+            )?)),
             None => Ok(None),
         }
     }

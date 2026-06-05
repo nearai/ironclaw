@@ -125,7 +125,7 @@ fn config_stub() -> String {
 #
 # Layout:
 #   - This file (config.toml) carries the SELECTION layer:
-#     identity, policy, drivers, runner timing, and LLM-slot
+#     identity, policy, drivers, runner timing, skills, and LLM-slot
 #     selection by id.
 #   - providers.json (next to this file) carries the CATALOG layer:
 #     provider definitions known to the binary. The compiled-in
@@ -143,8 +143,9 @@ fn config_stub() -> String {
 api_version = "{api_version}"
 
 [boot]
-# Composition profile. One of: local-dev, production, migration-dry-run.
-# Today only local-dev is wired end-to-end.
+# Composition profile. One of: local-dev, local-dev-yolo, production, migration-dry-run.
+# Today local-dev and local-dev-yolo are wired end-to-end.
+# local-dev-yolo also requires --confirm-host-access at runtime.
 profile = "local-dev"
 
 [identity]
@@ -179,6 +180,12 @@ default_owner  = "reborn-cli"
 heartbeat_interval_secs = 5
 poll_interval_ms        = 200
 
+[skills]
+# When false, regex activation criteria do not auto-load full skill
+# context. Keyword/tag activation and explicit skill mentions such as
+# `$code-review` still activate skills.
+regex_activation_enabled = true
+
 [llm.default]
 # LLM slot selection. `provider_id` references an entry in
 # providers.json (built-in or user-overlay). `model` / `base_url` /
@@ -192,6 +199,21 @@ api_key_env = "OPENAI_API_KEY"
 # provider_id = "anthropic"
 # model       = "claude-3-5-sonnet-latest"
 # api_key_env = "ANTHROPIC_API_KEY"
+
+# [slack]
+# # Host-beta Slack Events API route for `ironclaw-reborn serve`.
+# # Requires a binary built with `--features slack-v2-host-beta`.
+# enabled = false
+# installation_id = "install-alpha"
+# team_id = "T123"
+# # Required for tenant app-scoped personal-binding pairing.
+# api_app_id = "A123"
+# # Optional legacy static mapping. Omit for the pairing-code flow.
+# slack_user_id = "U123"
+# # Defaults to the WebUI authenticated user when omitted.
+# # user_id = "reborn-cli"
+# signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
+# bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
 "#,
         api_version = REBORN_CONFIG_API_VERSION,
     )

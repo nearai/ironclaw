@@ -68,6 +68,9 @@ pub(crate) fn is_lifecycle_kind(kind: RuntimeEventKind) -> bool {
         | RuntimeEventKind::RuntimeSelected
         | RuntimeEventKind::DispatchSucceeded
         | RuntimeEventKind::DispatchFailed
+        | RuntimeEventKind::CapabilityActivityRequested
+        | RuntimeEventKind::CapabilityActivitySucceeded
+        | RuntimeEventKind::CapabilityActivityFailed
         | RuntimeEventKind::ModelStarted
         | RuntimeEventKind::ModelCompleted
         | RuntimeEventKind::ModelFailed
@@ -236,6 +239,9 @@ mod tests {
             RuntimeEventKind::RuntimeSelected,
             RuntimeEventKind::DispatchSucceeded,
             RuntimeEventKind::DispatchFailed,
+            RuntimeEventKind::CapabilityActivityRequested,
+            RuntimeEventKind::CapabilityActivitySucceeded,
+            RuntimeEventKind::CapabilityActivityFailed,
             RuntimeEventKind::ModelStarted,
             RuntimeEventKind::ModelCompleted,
             RuntimeEventKind::ModelFailed,

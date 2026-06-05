@@ -61,14 +61,10 @@ async fn reborn_http_network_scope_isolation_parity() {
         .submit_text("event-http-network-denied", "denied http request")
         .await
         .expect("submit denied turn");
-    let denied_state = denied
-        .wait_for_submitted_status(&denied_turn, TurnStatus::RecoveryRequired)
+    denied
+        .wait_for_submitted_status(&denied_turn, TurnStatus::Completed)
         .await
-        .expect("denied run enters recovery after scoped network policy rejection");
-    assert!(
-        denied_state.failure.is_some(),
-        "denied network run should record sanitized failure"
-    );
+        .expect("denied run completed after surfacing scoped network policy rejection");
 
     assert!(
         allowed
@@ -92,6 +88,10 @@ async fn reborn_http_network_scope_isolation_parity() {
     );
 
     let denied_results = tool_result_text(&denied);
+    assert!(
+        denied_results.contains("capability failed with network"),
+        "denied scope should surface sanitized network policy failure to the model: {denied_results}"
+    );
     assert!(
         !denied_results.contains("accepted"),
         "denied scope must not inherit allowed scope HTTP response: {denied_results}"
@@ -131,15 +131,6 @@ fn http_gateway(
     ])
 }
 
-fn capability_result_text(harness: &RebornBinaryE2EHarness) -> String {
-    harness
-        .capability_results()
-        .iter()
-        .map(|result| result.output.to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn tool_result_text(harness: &RebornBinaryE2EHarness) -> String {
     harness
         .model_requests()
@@ -147,6 +138,15 @@ fn tool_result_text(harness: &RebornBinaryE2EHarness) -> String {
         .flat_map(|request| request.messages.iter())
         .filter(|message| message.role == HostManagedModelMessageRole::ToolResult)
         .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn capability_result_text(harness: &RebornBinaryE2EHarness) -> String {
+    harness
+        .capability_results()
+        .iter()
+        .map(|result| result.output.to_string())
         .collect::<Vec<_>>()
         .join("\n")
 }

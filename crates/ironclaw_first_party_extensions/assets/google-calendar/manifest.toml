@@ -1,0 +1,127 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "google-calendar"
+name = "Google Calendar"
+version = "0.1.0"
+description = "First-party Google Calendar capabilities for Reborn."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "google-calendar"
+
+[[capabilities]]
+id = "google-calendar.list_calendars"
+description = "List Google calendars."
+effects = ["dispatch_capability", "network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+runtime_credentials = [
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/google-calendar/list_calendars.input.v1.json"
+output_schema_ref = "schemas/google-calendar/list_calendars.output.v1.json"
+prompt_doc_ref = "prompts/google-calendar/list_calendars.md"
+
+[[capabilities]]
+id = "google-calendar.list_events"
+description = "List Google Calendar events."
+effects = ["dispatch_capability", "network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+runtime_credentials = [
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/google-calendar/list_events.input.v1.json"
+output_schema_ref = "schemas/google-calendar/list_events.output.v1.json"
+prompt_doc_ref = "prompts/google-calendar/list_events.md"
+
+[[capabilities]]
+id = "google-calendar.get_event"
+description = "Get a Google Calendar event."
+effects = ["dispatch_capability", "network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+runtime_credentials = [
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/google-calendar/get_event.input.v1.json"
+output_schema_ref = "schemas/google-calendar/get_event.output.v1.json"
+prompt_doc_ref = "prompts/google-calendar/get_event.md"
+
+[[capabilities]]
+id = "google-calendar.find_free_slots"
+description = "Find Google Calendar free slots."
+effects = ["dispatch_capability", "network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+runtime_credentials = [
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/google-calendar/find_free_slots.input.v1.json"
+output_schema_ref = "schemas/google-calendar/find_free_slots.output.v1.json"
+prompt_doc_ref = "prompts/google-calendar/find_free_slots.md"
+
+[[capabilities]]
+id = "google-calendar.create_event"
+description = "Create a Google Calendar event."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+runtime_credentials = [
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.events"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/google-calendar/create_event.input.v1.json"
+output_schema_ref = "schemas/google-calendar/create_event.output.v1.json"
+prompt_doc_ref = "prompts/google-calendar/create_event.md"
+
+[[capabilities]]
+id = "google-calendar.update_event"
+description = "Update a Google Calendar event."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+runtime_credentials = [
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.events"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/google-calendar/update_event.input.v1.json"
+output_schema_ref = "schemas/google-calendar/update_event.output.v1.json"
+prompt_doc_ref = "prompts/google-calendar/update_event.md"
+
+[[capabilities]]
+id = "google-calendar.delete_event"
+description = "Delete a Google Calendar event."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+runtime_credentials = [
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.events"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/google-calendar/delete_event.input.v1.json"
+output_schema_ref = "schemas/google-calendar/delete_event.output.v1.json"
+prompt_doc_ref = "prompts/google-calendar/delete_event.md"
+
+[[capabilities]]
+id = "google-calendar.add_attendees"
+description = "Add attendees to a Google Calendar event."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+runtime_credentials = [
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.events"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/google-calendar/add_attendees.input.v1.json"
+output_schema_ref = "schemas/google-calendar/add_attendees.output.v1.json"
+prompt_doc_ref = "prompts/google-calendar/add_attendees.md"
+
+[[capabilities]]
+id = "google-calendar.set_reminder"
+description = "Set Google Calendar event reminders."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+runtime_credentials = [
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.events"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/google-calendar/set_reminder.input.v1.json"
+output_schema_ref = "schemas/google-calendar/set_reminder.output.v1.json"
+prompt_doc_ref = "prompts/google-calendar/set_reminder.md"

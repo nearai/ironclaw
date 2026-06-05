@@ -26,6 +26,9 @@
 //!   `delivery_id`. An indexed `scope` projection allows
 //!   `list_delivery_attempts(scope)` to filter within the tenant-scoped
 //!   subtree without materializing every row.
+//! - `/outbound/communication-preferences/<sha256(v1-length-prefixed-key)>.json` — tenant/user
+//!   communication preference row keyed by a hashed `CommunicationPreferenceKey`.
+//!   Reply-target refs remain candidates and do not grant send authority.
 
 use std::sync::Arc;
 
@@ -35,18 +38,19 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
     IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId};
+use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId, UserId};
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::validation::{
-    validate_advance_request, validate_delivery_attempt, validate_delivery_identity,
-    validate_delivery_status_request, validate_policy, validate_subscription_identity,
-    validate_subscription_record, validate_subscription_request,
+    validate_advance_request, validate_communication_preference, validate_delivery_attempt,
+    validate_delivery_identity, validate_delivery_status_request, validate_policy,
+    validate_subscription_identity, validate_subscription_record, validate_subscription_request,
 };
 use crate::{
-    AdvanceSubscriptionCursorRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
+    AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
+    CommunicationPreferenceRepository, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
     OutboundDeliveryId, OutboundError, OutboundStateStore, ProjectionSubscriptionId,
     ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
@@ -69,6 +73,7 @@ const MAX_CAS_RETRIES: usize = 5;
 const DELIVERY_SCOPE_INDEX_KEY: &str = "scope";
 const DELIVERY_SCOPE_INDEX_NAME: &str = "outbound_delivery_scope";
 const DELIVERIES_ROOT: &str = "/outbound/deliveries";
+const COMMUNICATION_PREFERENCES_ROOT: &str = "/outbound/communication-preferences";
 
 /// Indexed projection key for the tenant id, written alongside every
 /// outbound write as a defense-in-depth measure beyond path-prefix
@@ -226,6 +231,67 @@ where
             .get_versioned_json::<T>(scope, path)
             .await?
             .map(|(value, _)| value))
+    }
+}
+
+#[async_trait]
+impl<F> CommunicationPreferenceRepository for FilesystemOutboundStateStore<F>
+where
+    F: RootFilesystem,
+{
+    async fn put_communication_preference(
+        &self,
+        record: CommunicationPreferenceRecord,
+    ) -> Result<(), OutboundError> {
+        validate_communication_preference(&record)?;
+        let key = record.key();
+        let path = communication_preference_path(&key)?;
+        let resource_scope = communication_preference_resource_scope(&key.tenant_id, &key.user_id);
+        for _ in 0..MAX_CAS_RETRIES {
+            let (cas, existing) = match self
+                .get_versioned_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
+                .await?
+            {
+                Some((existing, versioned)) => {
+                    (CasExpectation::Version(versioned.version), Some(existing))
+                }
+                None => (CasExpectation::Absent, None),
+            };
+            if let Some(existing) = existing.as_ref()
+                && existing.key() != key
+            {
+                return Err(OutboundError::Backend);
+            }
+            self.ensure_tenant_id_index(&resource_scope, &communication_preferences_root()?)
+                .await?;
+            match self
+                .put_json(&resource_scope, &path, &record, &record.tenant_id, cas)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(OutboundError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(OutboundError::Backend)
+    }
+
+    async fn load_communication_preference(
+        &self,
+        key: CommunicationPreferenceKey,
+    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+        let path = communication_preference_path(&key)?;
+        let resource_scope = communication_preference_resource_scope(&key.tenant_id, &key.user_id);
+        let Some(record) = self
+            .get_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if record.tenant_id != key.tenant_id || record.user_id != key.user_id {
+            return Err(OutboundError::Backend);
+        }
+        Ok(Some(record))
     }
 }
 
@@ -533,8 +599,41 @@ fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<ScopedPath, Outboun
         .map_err(|_| OutboundError::Backend)
 }
 
+fn communication_preference_path(
+    key: &CommunicationPreferenceKey,
+) -> Result<ScopedPath, OutboundError> {
+    let mut hasher = Sha256::new();
+    let tenant = key.tenant_id.as_str();
+    let user = key.user_id.as_str();
+    hasher.update(b"v1:");
+    hasher.update(tenant.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(tenant.as_bytes());
+    hasher.update(b":");
+    hasher.update(user.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(user.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    ScopedPath::new(format!("{COMMUNICATION_PREFERENCES_ROOT}/{digest}.json"))
+        .map_err(|_| OutboundError::Backend)
+}
+
+fn communication_preference_resource_scope(
+    tenant_id: &TenantId,
+    user_id: &UserId,
+) -> ResourceScope {
+    let mut scope = ResourceScope::system();
+    scope.tenant_id = tenant_id.clone();
+    scope.user_id = user_id.clone();
+    scope
+}
+
 fn deliveries_root() -> Result<ScopedPath, OutboundError> {
     ScopedPath::new(DELIVERIES_ROOT).map_err(|_| OutboundError::Backend)
+}
+
+fn communication_preferences_root() -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(COMMUNICATION_PREFERENCES_ROOT).map_err(|_| OutboundError::Backend)
 }
 
 fn policies_root() -> Result<ScopedPath, OutboundError> {

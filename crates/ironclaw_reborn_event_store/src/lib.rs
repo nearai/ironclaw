@@ -846,14 +846,9 @@ impl DurableEventLog for JsonlDurableEventLog {
     ) -> Result<EventReplay<RuntimeEvent>, EventError> {
         let owned_filter = filter.clone();
         self.store
-            .read_after(
-                StreamKind::Runtime,
-                stream,
-                filter,
-                after,
-                limit,
-                move |event| owned_filter.matches_event(event),
-            )
+            .read_runtime_after(StreamKind::Runtime, stream, after, limit, move |event| {
+                owned_filter.matches_event(event)
+            })
             .await
     }
 
@@ -1022,6 +1017,36 @@ impl JsonlStore {
         .map_err(|_| durable_error("jsonl event store failed to read stream"))?
     }
 
+    async fn read_runtime_after(
+        &self,
+        kind: StreamKind,
+        stream: &EventStreamKey,
+        after: Option<EventCursor>,
+        limit: usize,
+        is_match: impl Fn(&RuntimeEvent) -> bool + Send + 'static,
+    ) -> Result<EventReplay<RuntimeEvent>, EventError> {
+        if limit == 0 {
+            return Err(EventError::InvalidReplayRequest {
+                reason: "limit must be greater than zero".to_string(),
+            });
+        }
+        let after = after.unwrap_or_default();
+        let lock = self.stream_lock(kind, stream).await;
+        let _guard = lock.lock().await;
+        let path = self.stream_path(kind, stream);
+        tokio::task::spawn_blocking(move || {
+            stream_read_after_with(
+                &path,
+                after,
+                limit,
+                is_match,
+                trusted_runtime_jsonl_entry_from_str,
+            )
+        })
+        .await
+        .map_err(|_| durable_error("jsonl event store failed to read stream"))?
+    }
+
     /// Atomic head snapshot: read the last assigned cursor directly from the
     /// stream file's tail. `read_last_jsonl_cursor` seeks to EOF and parses
     /// only the final line, so this is O(1) in stream length — never an
@@ -1111,6 +1136,13 @@ struct JsonlEntry<T> {
 }
 
 #[derive(Debug, Deserialize)]
+struct TrustedRuntimeJsonlEntry {
+    cursor: EventCursor,
+    #[serde(deserialize_with = "ironclaw_events::deserialize_trusted_runtime_event")]
+    record: RuntimeEvent,
+}
+
+#[derive(Debug, Deserialize)]
 struct JsonlCursor {
     cursor: EventCursor,
 }
@@ -1184,6 +1216,20 @@ where
     T: DeserializeOwned,
     F: Fn(&T) -> bool,
 {
+    stream_read_after_with(path, after, limit, is_match, parse_jsonl_entry::<T>)
+}
+
+fn stream_read_after_with<T, F, D>(
+    path: &Path,
+    after: EventCursor,
+    limit: usize,
+    is_match: F,
+    decode_entry: D,
+) -> Result<EventReplay<T>, EventError>
+where
+    F: Fn(&T) -> bool,
+    D: Fn(&str) -> Result<JsonlEntry<T>, EventError>,
+{
     use std::io::{BufRead, BufReader};
 
     let file = match std::fs::File::open(path) {
@@ -1250,11 +1296,7 @@ where
         // strictly greater than `after`.
         after_validated = true;
         last_scanned = envelope_cursor;
-        let envelope = serde_json::from_str::<JsonlEntry<T>>(&line).map_err(|error| {
-            EventError::Serialize {
-                reason: error.to_string(),
-            }
-        })?;
+        let envelope = decode_entry(&line)?;
         if !is_match(&envelope.record) {
             continue;
         }
@@ -1288,6 +1330,29 @@ where
     Ok(EventReplay {
         entries: replay_entries,
         next_cursor,
+    })
+}
+
+fn parse_jsonl_entry<T>(line: &str) -> Result<JsonlEntry<T>, EventError>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_str::<JsonlEntry<T>>(line).map_err(|error| EventError::Serialize {
+        reason: error.to_string(),
+    })
+}
+
+fn trusted_runtime_jsonl_entry_from_str(
+    line: &str,
+) -> Result<JsonlEntry<RuntimeEvent>, EventError> {
+    let envelope = serde_json::from_str::<TrustedRuntimeJsonlEntry>(line).map_err(|error| {
+        EventError::Serialize {
+            reason: error.to_string(),
+        }
+    })?;
+    Ok(JsonlEntry {
+        cursor: envelope.cursor,
+        record: envelope.record,
     })
 }
 

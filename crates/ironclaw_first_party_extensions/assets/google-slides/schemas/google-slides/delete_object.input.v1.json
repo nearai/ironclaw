@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Slides delete_object",
+  "description": "Delete a slide or page element.",
+  "type": "object",
+  "required": [
+    "presentation_id",
+    "object_id"
+  ],
+  "properties": {
+    "presentation_id": {
+      "type": "string",
+      "description": "The presentation ID."
+    },
+    "object_id": {
+      "type": "string",
+      "description": "Object ID to delete."
+    }
+  },
+  "additionalProperties": false
+}

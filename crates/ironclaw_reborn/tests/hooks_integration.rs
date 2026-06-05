@@ -98,10 +98,10 @@ use ironclaw_turns::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopHostMilestoneKind, LoopModelPort, LoopModelRequest,
-        LoopPromptPort, LoopRunContext, LoopTranscriptPort, RunScopedHookMilestoneSink,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCapabilityPort,
+        LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopHostMilestoneKind,
+        LoopModelPort, LoopModelRequest, LoopPromptPort, LoopRunContext, LoopTranscriptPort,
+        RunScopedHookMilestoneSink, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -214,6 +214,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
                 .expect("result ref literal is valid"),
             safe_summary: "stub capability completed".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
         }))
     }
@@ -284,6 +285,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
                 .expect("result ref literal is valid"),
             safe_summary: "stub capability completed".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
         }))
     }
@@ -1035,6 +1037,7 @@ impl Fixture {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
         };
@@ -1074,6 +1077,7 @@ impl Fixture {
                 max_messages: 8,
                 require_model_route_snapshot: false,
             },
+            InstructionSafetyContext::local_development_noop(),
         )
     }
 
@@ -3688,6 +3692,7 @@ async fn observer_hook_fires_after_checkpoint_through_factory() {
     host.checkpoint(LoopCheckpointRequest {
         kind: LoopCheckpointKind::BeforeModel,
         state_ref: state_record.state_ref,
+        gate_ref: None,
     })
     .await
     .expect("checkpoint write succeeds through the wrapped checkpoint port");

@@ -36,12 +36,12 @@ pub type MountViewResolver =
 /// [`ScopedFilesystem`] is the *single* per-process FS handle; tenant
 /// isolation comes from the resolver, not from a per-tenant store cache.
 #[derive(Clone)]
-pub struct ScopedFilesystem<F> {
+pub struct ScopedFilesystem<F: ?Sized> {
     root: Arc<F>,
     resolver: Arc<MountViewResolver>,
 }
 
-impl<F> std::fmt::Debug for ScopedFilesystem<F> {
+impl<F: ?Sized> std::fmt::Debug for ScopedFilesystem<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScopedFilesystem")
             .field("root", &"<RootFilesystem>")
@@ -52,7 +52,7 @@ impl<F> std::fmt::Debug for ScopedFilesystem<F> {
 
 impl<F> ScopedFilesystem<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     /// Construct a scope-aware filesystem. `resolver` is invoked on every op
     /// to produce the [`MountView`] that authorizes that op.
@@ -203,7 +203,8 @@ where
         path: &ScopedPath,
         from: SeqNo,
     ) -> Result<Option<SeqNo>, FilesystemError> {
-        let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Tail)?;
+        let virtual_path =
+            self.resolve_with_permission(scope, path, FilesystemOperation::HeadSeq)?;
         self.root.head_seq(&virtual_path, from).await
     }
 
@@ -234,6 +235,29 @@ where
         self.root.write_file(&virtual_path, bytes).await
     }
 
+    /// Write bytes using an already-authorized mount view instead of the
+    /// filesystem's configured resolver.
+    ///
+    /// This is for host adapters that parse a scoped path against the exact
+    /// invocation-visible mounts and need the write to use that same authority.
+    pub async fn write_bytes_with_mount_view(
+        &self,
+        view: &MountView,
+        path: &ScopedPath,
+        bytes: &[u8],
+    ) -> Result<(), FilesystemError> {
+        let virtual_path =
+            resolve_with_permission_view(view, path, FilesystemOperation::WriteFile)?;
+        self.root
+            .put(
+                &virtual_path,
+                Entry::bytes(bytes.to_vec()),
+                CasExpectation::Any,
+            )
+            .await
+            .map(|_| ())
+    }
+
     /// **DEPRECATED — no direct replacement on the unified surface.** Use
     /// `append`/`tail` for log-shaped mounts or `get`+`put` for
     /// read-modify-write.
@@ -256,6 +280,17 @@ where
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
         self.root.list_dir(&virtual_path).await
+    }
+
+    pub async fn list_dir_bounded(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let virtual_path =
+            self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
+        self.root.list_dir_bounded(&virtual_path, max_entries).await
     }
 
     pub async fn stat(
@@ -379,7 +414,7 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
         FilesystemOperation::Delete => permissions.delete,
         FilesystemOperation::MountLocal => false,
         FilesystemOperation::Query => permissions.read && permissions.list,
-        FilesystemOperation::Tail => permissions.read,
+        FilesystemOperation::Tail | FilesystemOperation::HeadSeq => permissions.read,
     }
 }
 

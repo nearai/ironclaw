@@ -1,27 +1,35 @@
-//! First-party userland extensions for IronClaw.
+//! First-party userland extension implementations for IronClaw.
 //!
-//! This crate owns in-process extensions that ship with IronClaw but are not
-//! kernel/runtime authority. Extensions receive explicit scoped handles and
-//! export narrow ports back to Reborn composition.
+//! This crate owns concrete implementation behavior. Host runtime and
+//! composition own declaration, authorization, accounting, lifecycle, and
+//! loop-facing adapter wiring.
 #![forbid(unsafe_code)]
 
-mod activation;
-mod assets;
-mod error;
-mod execution;
-mod skills;
+pub mod coding;
+mod gsuite;
+pub mod skills;
+pub mod web_access;
 
-pub use activation::{
-    DEFAULT_MAX_ACTIVE_SKILLS, DEFAULT_MAX_SKILL_CONTEXT_TOKENS, SelectableSkillContextSource,
-    SkillActivationMode, SkillActivationPlan, SkillActivationRequest, SkillActivationSelection,
-    SkillActivationSelectionError, SkillActivationSelectorConfig,
+pub use gsuite::{
+    CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_CREATE_EVENT_CAPABILITY_ID,
+    CALENDAR_DELETE_EVENT_CAPABILITY_ID, CALENDAR_EXTENSION_ID,
+    CALENDAR_FIND_FREE_SLOTS_CAPABILITY_ID, CALENDAR_GET_EVENT_CAPABILITY_ID,
+    CALENDAR_LIST_CALENDARS_CAPABILITY_ID, CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+    CALENDAR_SET_REMINDER_CAPABILITY_ID, CALENDAR_UPDATE_EVENT_CAPABILITY_ID,
+    GMAIL_CREATE_DRAFT_CAPABILITY_ID, GMAIL_EXTENSION_ID, GMAIL_GET_MESSAGE_CAPABILITY_ID,
+    GMAIL_LIST_MESSAGES_CAPABILITY_ID, GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID,
+    GMAIL_SEND_MESSAGE_CAPABILITY_ID, GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT,
+    GSUITE_PROVIDER_SCOPES, GSUITE_REQUEST_BODY_LIMIT, GSUITE_RESPONSE_BODY_LIMIT,
+    GSUITE_TIMEOUT_MS, GoogleCredential, GoogleCredentialError, GoogleCredentialResolver,
+    GsuiteCapabilityOperation, GsuiteCapabilitySpec, GsuiteCredentialDispatchReason,
+    GsuiteCredentialStageError, GsuiteCredentialStageRequest, GsuiteCredentialStager,
+    GsuiteDispatchError, GsuiteDispatchRequest, GsuiteDispatchResult, GsuiteExecutor,
+    GsuitePackageSpec, calendar_package_spec, find_gsuite_capability, gmail_package_spec,
+    google_api_network_policy, google_provider_id, gsuite_network_policy_for, gsuite_package_specs,
+    gsuite_resource_profile,
 };
-pub use assets::{SkillBundleAsset, SkillBundleAssetReadError, SkillBundleAssetReader};
-pub use error::FirstPartySkillsExtensionError;
-pub use execution::{SkillExecutionAdapter, SkillExecutionAdapterError, SkillExecutionPlan};
-pub use ironclaw_skills::{
-    ManagedSkillSource as SkillSource, SkillInstallRequest, SkillInstallResult,
-    SkillManagementContext, SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest,
-    SkillRemoveResult, SkillSummary, install_skill, list_skills, remove_skill,
+pub use web_access::{
+    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
+    WEB_SEARCH_CAPABILITY_ID, WebAccessDispatchError, WebAccessDispatchRequest,
+    WebAccessDispatchResult, WebAccessExecutor,
 };
-pub use skills::{FirstPartySkillsExtension, FirstPartySkillsExtensionHandles};

@@ -201,7 +201,7 @@ Rules:
 
 1. Use longest alias match for `ScopedPath -> VirtualPath`.
 2. Alias match must be exact or segment-boundary prefixed.
-3. Path normalization rejects `..`, NUL/control characters, URLs, and raw host paths before backend resolution.
+3. Path normalization rejects `..`, NUL/control characters, URLs, and raw host paths before backend resolution, except trusted local single-user `MountView`s may accept an already-authorized raw host prefix that is explicitly present as a mount alias. Hosted and extension-declared mounts must continue to use stable scoped aliases such as `/workspace` or `/host`.
 4. `VirtualPath` must begin with a known root.
 5. Backend mount selection must use longest virtual mount prefix.
 6. If two backend mounts match with the same prefix length, fail closed.

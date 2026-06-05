@@ -81,10 +81,6 @@ async fn reborn_identity_project_scope_isolation_parity() {
         .submit_text_for(ROOM, "alice", "event-project-alpha-identity", "alpha asks")
         .await
         .expect("submit project alpha turn");
-    let beta_turn = beta
-        .submit_text_for(ROOM, "alice", "event-project-beta-identity", "beta asks")
-        .await
-        .expect("submit project beta turn");
 
     identity_source
         .set_identity(
@@ -92,6 +88,18 @@ async fn reborn_identity_project_scope_isolation_parity() {
             PROJECT_ALPHA_IDENTITY,
         )
         .await;
+
+    alpha.start();
+    alpha
+        .wait_for_submitted_status(&alpha_turn, TurnStatus::Completed)
+        .await
+        .expect("project alpha completed");
+    alpha.shutdown().await;
+
+    let beta_turn = beta
+        .submit_text_for(ROOM, "alice", "event-project-beta-identity", "beta asks")
+        .await
+        .expect("submit project beta turn");
     identity_source
         .set_identity(
             &ProjectIdentityKey::from_turn(&beta_turn),
@@ -99,13 +107,7 @@ async fn reborn_identity_project_scope_isolation_parity() {
         )
         .await;
 
-    alpha.start();
     beta.start();
-
-    alpha
-        .wait_for_submitted_status(&alpha_turn, TurnStatus::Completed)
-        .await
-        .expect("project alpha completed");
     beta.wait_for_submitted_status(&beta_turn, TurnStatus::Completed)
         .await
         .expect("project beta completed");
@@ -142,7 +144,6 @@ async fn reborn_identity_project_scope_isolation_parity() {
 
     alpha.assert_model_exhausted();
     beta.assert_model_exhausted();
-    alpha.shutdown().await;
     beta.shutdown().await;
 }
 

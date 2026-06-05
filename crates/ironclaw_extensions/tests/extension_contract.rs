@@ -81,6 +81,45 @@ fn package_trust_policy_input_rejects_mutated_public_descriptors() {
 }
 
 #[test]
+fn registry_rejects_installed_package_with_mutated_parameters_schema() {
+    let mut package = package_from_manifest(parse_manifest(WASM_MANIFEST), "echo");
+    package.capabilities[0].parameters_schema = serde_json::json!({"type": "object"});
+
+    let err = ExtensionRegistry::new().insert(package).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::InvalidManifest { reason } if reason.contains("capability descriptors")
+    ));
+}
+
+#[test]
+fn registry_rejects_host_bundled_package_with_mutated_parameters_schema() {
+    let manifest = ExtensionManifest::parse(
+        WASM_MANIFEST,
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    let mut package = package_from_manifest(manifest, "echo");
+    package.capabilities[0].parameters_schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "message": { "type": "string" }
+        },
+        "required": ["message"],
+        "additionalProperties": false
+    });
+
+    let err = ExtensionRegistry::new().insert(package).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::InvalidManifest { reason } if reason.contains("capability descriptors")
+    ));
+}
+
+#[test]
 fn script_and_mcp_runtime_metadata_stays_declarative() {
     let script = parse_manifest(SCRIPT_MANIFEST);
     assert_eq!(script.runtime_kind(), RuntimeKind::Script);
@@ -360,6 +399,96 @@ fn capability_provider_host_api_contract_accepts_valid_manifest() {
 }
 
 #[test]
+fn capability_provider_host_api_projects_runtime_credentials() {
+    let manifest = CAPABILITY_PROVIDER_MANIFEST.replace(
+        "effects = [\"network\"]",
+        r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "telegram_token", audience = { scheme = "https", host_pattern = "api.telegram.org" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]"#,
+    );
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap();
+
+    let credential = manifest.capabilities[0].runtime_credentials[0].clone();
+    assert_eq!(
+        credential.handle,
+        SecretHandle::new("telegram_token").unwrap()
+    );
+    assert_eq!(
+        credential.audience,
+        NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.telegram.org".to_string(),
+            port: None,
+        }
+    );
+    assert_eq!(
+        credential.target,
+        RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        }
+    );
+    assert!(credential.required);
+
+    let package = package_from_manifest(manifest, "telegram");
+    assert_eq!(package.capabilities[0].runtime_credentials.len(), 1);
+    assert_eq!(package.capabilities[0].runtime_credentials[0], credential);
+}
+
+#[test]
+fn capability_provider_host_api_preserves_runtime_credential_validation_errors() {
+    let cases = [
+        (
+            r#"{ handle = "../telegram_token", audience = { scheme = "https", host_pattern = "api.telegram.org" }, target = { type = "header", name = "authorization" } }"#,
+            "invalid secret",
+        ),
+        (
+            r#"{ handle = "telegram_token", audience = { scheme = "http", host_pattern = "api.telegram.org" }, target = { type = "header", name = "authorization" } }"#,
+            "https scheme",
+        ),
+        (
+            r#"{ handle = "telegram_token", audience = { scheme = "https", host_pattern = "api.telegram.org" }, target = { type = "header", name = "bad header" } }"#,
+            "invalid runtime credential target",
+        ),
+    ];
+
+    for (credential, expected) in cases {
+        let manifest = CAPABILITY_PROVIDER_MANIFEST.replace(
+            "effects = [\"network\"]",
+            &format!(
+                r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  {credential},
+]"#
+            ),
+        );
+        let err = ExtensionManifest::parse_with_host_api_contracts(
+            &manifest,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
+                    if reason.contains(expected)
+            ),
+            "expected reason containing {expected:?}, got {err:?}"
+        );
+    }
+}
+
+#[test]
 fn capability_provider_host_api_fails_without_registered_contract() {
     let err = ExtensionManifest::parse_with_host_api_contracts(
         CAPABILITY_PROVIDER_MANIFEST,
@@ -435,13 +564,6 @@ fn capability_provider_host_api_reuses_capability_validation() {
         ),
         (
             CAPABILITY_PROVIDER_MANIFEST.replace(
-                "prompt_doc_ref = \"prompts/telegram/send_message.md\"\n",
-                "",
-            ),
-            "prompt_doc_ref",
-        ),
-        (
-            CAPABILITY_PROVIDER_MANIFEST.replace(
                 "effects = [\"network\"]",
                 "effects = [\"network\", \"network\"]",
             ),
@@ -466,6 +588,24 @@ fn capability_provider_host_api_reuses_capability_validation() {
             "expected reason containing {expected:?}, got {err:?}"
         );
     }
+}
+
+#[test]
+fn capability_provider_host_api_allows_missing_prompt_doc_ref() {
+    let manifest = CAPABILITY_PROVIDER_MANIFEST.replace(
+        "prompt_doc_ref = \"prompts/telegram/send_message.md\"\n",
+        "",
+    );
+
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .expect("prompt_doc_ref is optional lazy help metadata");
+
+    assert!(manifest.capabilities[0].prompt_doc_ref.is_none());
 }
 
 #[test]

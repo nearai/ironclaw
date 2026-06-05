@@ -1,20 +1,6 @@
 //! Native ProductAdapter runner.
-//!
-//! `NativeProductAdapterRunner` is the integration point that turns a single
-//! webhook request into the full Reborn pipeline:
-//!
-//! 1. Authenticate the protocol payload with a [`WebhookAuthVerifier`].
-//! 2. On success, mint a `Verified` evidence via the public `mark_*_verified`
-//!    helpers in `ironclaw_product_adapters::auth`.
-//! 3. Hand the verified evidence + raw payload to the adapter's
-//!    [`ironclaw_product_adapters::ProductAdapter::parse_inbound`].
-//! 4. Forward the resulting envelope to the [`ironclaw_product_adapters::ProductWorkflow`]
-//!    facade and return the structured outcome.
-//!
-//! The runner is deliberately not wasmtime-bound — the v2 component-model
-//! plumbing lands in a follow-up. Telegram v2 today implements
-//! `ProductAdapter` natively in Rust; the runner enforces the same auth /
-//! dedupe / facade-only contract a wasmtime instance would.
+//! Authenticates native webhook payloads, stamps trusted inbound context, and
+//! forwards envelopes to the Reborn ProductWorkflow facade.
 
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -32,7 +18,8 @@ use ironclaw_product_adapters::{
     ProtocolAuthFailure, TrustedInboundContext,
 };
 use thiserror::Error;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinSet;
 
 use crate::auth_verifier::{
     HmacWebhookAuth, SharedSecretHeaderAuth, VerificationOutcome, WebhookAuthVerifier,
@@ -80,6 +67,11 @@ pub enum WebhookProcessOutcome {
     /// Parsed `ProductInboundPayload::NoOp` events still flow through
     /// `ProductWorkflow` and return `Acknowledged` with a no-op ack.
     Acknowledged { ack: ProductInboundAck },
+    /// Auth succeeded, adapter parsed an envelope, and workflow dispatch was
+    /// scheduled outside the protocol response path. Public webhook protocols
+    /// such as Slack require an immediate 2xx acknowledgement, so callers must
+    /// not wait for a durable workflow ack before replying.
+    AcceptedForAsyncDispatch,
 }
 
 /// Webhook auth strategy.
@@ -159,6 +151,44 @@ fn header_name_matches(configured: &str, required: &str) -> bool {
     configured.eq_ignore_ascii_case(required)
 }
 
+fn auth_requirements_equivalent(left: &AuthRequirement, right: &AuthRequirement) -> bool {
+    match (left, right) {
+        (
+            AuthRequirement::RequestSignature {
+                header_name: left_header,
+                timestamp_header_name: left_timestamp,
+            },
+            AuthRequirement::RequestSignature {
+                header_name: right_header,
+                timestamp_header_name: right_timestamp,
+            },
+        ) => {
+            header_name_matches(left_header, right_header)
+                && match (left_timestamp, right_timestamp) {
+                    (Some(left_timestamp), Some(right_timestamp)) => {
+                        header_name_matches(left_timestamp, right_timestamp)
+                    }
+                    (None, None) => true,
+                    (Some(_), None) | (None, Some(_)) => false,
+                }
+        }
+        (
+            AuthRequirement::SharedSecretHeader {
+                header_name: left_header,
+            },
+            AuthRequirement::SharedSecretHeader {
+                header_name: right_header,
+            },
+        ) => header_name_matches(left_header, right_header),
+        (
+            AuthRequirement::SessionCookie { name: left },
+            AuthRequirement::SessionCookie { name: right },
+        ) => left == right,
+        (AuthRequirement::BearerToken, AuthRequirement::BearerToken) => true,
+        _ => false,
+    }
+}
+
 pub const DEFAULT_WEBHOOK_WORKFLOW_TIMEOUT: Duration = Duration::from_secs(55);
 pub const DEFAULT_MAX_IN_FLIGHT_WEBHOOKS: usize = 64;
 const DEFAULT_MAX_IN_FLIGHT_WEBHOOKS_NONZERO: NonZeroUsize =
@@ -207,10 +237,11 @@ impl Default for NativeProductAdapterRunnerConfig {
 
 pub struct NativeProductAdapterRunner {
     adapter: Arc<dyn ProductAdapter>,
-    workflow: Arc<dyn ProductWorkflow>,
+    pub(crate) workflow: Arc<dyn ProductWorkflow>,
     auth: WebhookAuth,
-    config: NativeProductAdapterRunnerConfig,
+    pub(crate) config: NativeProductAdapterRunnerConfig,
     admission: Arc<Semaphore>,
+    pub(crate) immediate_ack_tasks: Arc<tokio::sync::Mutex<JoinSet<()>>>,
 }
 
 impl NativeProductAdapterRunner {
@@ -238,6 +269,7 @@ impl NativeProductAdapterRunner {
             workflow,
             auth,
             admission: Arc::new(Semaphore::new(config.max_in_flight())),
+            immediate_ack_tasks: Arc::new(tokio::sync::Mutex::new(JoinSet::new())),
             config,
         }
     }
@@ -246,11 +278,15 @@ impl NativeProductAdapterRunner {
         self.config
     }
 
-    pub async fn process_webhook(
+    /// Verify a webhook request against the adapter's declared auth requirement
+    /// and mint host-owned [`ProtocolAuthEvidence`]. Protocol-specific host
+    /// handlers use this when they must inspect a verified payload before the
+    /// normal adapter parse path, e.g. Slack URL-verification challenge echo.
+    pub fn verify_webhook_auth(
         &self,
         headers: &http::HeaderMap,
         body: &[u8],
-    ) -> Result<WebhookProcessOutcome, RunnerError> {
+    ) -> Result<ProtocolAuthEvidence, RunnerError> {
         if !self
             .auth
             .matches_requirement(self.adapter.auth_requirement())
@@ -263,20 +299,41 @@ impl NativeProductAdapterRunner {
                 },
             });
         }
-        let evidence = match self.auth.verify(headers, body) {
-            VerificationOutcome::Verified { subject } => self.auth.mint_evidence(subject),
+        match self.auth.verify(headers, body) {
+            VerificationOutcome::Verified { subject } => Ok(self.auth.mint_evidence(subject)),
             VerificationOutcome::Failed { failure } => {
-                return Err(RunnerError::AuthenticationFailed { failure });
+                Err(RunnerError::AuthenticationFailed { failure })
             }
-        };
-        let _permit = self.admission.clone().try_acquire_owned().map_err(|_| {
+        }
+    }
+
+    pub(crate) async fn prepare_inbound_envelope(
+        &self,
+        body: &[u8],
+        evidence: &ProtocolAuthEvidence,
+    ) -> Result<(ProductInboundEnvelope, OwnedSemaphorePermit), RunnerError> {
+        self.ensure_evidence_matches_adapter_requirement(evidence)?;
+        let permit = self.admission.clone().try_acquire_owned().map_err(|_| {
             RunnerError::TooManyInFlight {
                 max_in_flight: self.config.max_in_flight(),
             }
         })?;
-        let parse_result = catch_unwind(AssertUnwindSafe(|| {
-            self.adapter.parse_inbound(body, &evidence)
-        }));
+        let adapter = Arc::clone(&self.adapter);
+        let body = body.to_vec();
+        let parse_evidence = evidence.clone();
+        let parse_result = tokio::task::spawn_blocking(move || {
+            catch_unwind(AssertUnwindSafe(|| {
+                adapter.parse_inbound(&body, &parse_evidence)
+            }))
+        })
+        .await
+        .map_err(|join_error| {
+            if join_error.is_panic() {
+                RunnerError::AdapterPanicked
+            } else {
+                RunnerError::WorkflowJoinFailed
+            }
+        })?;
         let parsed = match parse_result {
             Ok(result) => result?,
             Err(_) => return Err(RunnerError::AdapterPanicked),
@@ -288,9 +345,44 @@ impl NativeProductAdapterRunner {
             self.adapter.adapter_id().clone(),
             self.adapter.installation_id().clone(),
             chrono::Utc::now(),
-            &evidence,
+            evidence,
         )?;
         let envelope = ProductInboundEnvelope::from_trusted_parse(context, parsed)?;
+        Ok((envelope, permit))
+    }
+
+    fn ensure_evidence_matches_adapter_requirement(
+        &self,
+        evidence: &ProtocolAuthEvidence,
+    ) -> Result<(), RunnerError> {
+        let Some(claim) = evidence.claim() else {
+            return Err(RunnerError::AuthenticationFailed {
+                failure: ProtocolAuthFailure::Other {
+                    detail: RedactedString::new(
+                        "verified webhook dispatch requires host-verified auth evidence",
+                    ),
+                },
+            });
+        };
+        if auth_requirements_equivalent(claim.requirement(), self.adapter.auth_requirement()) {
+            return Ok(());
+        }
+        Err(RunnerError::AuthenticationFailed {
+            failure: ProtocolAuthFailure::Other {
+                detail: RedactedString::new(
+                    "verified webhook dispatch evidence does not match adapter auth requirement",
+                ),
+            },
+        })
+    }
+
+    pub async fn process_webhook(
+        &self,
+        headers: &http::HeaderMap,
+        body: &[u8],
+    ) -> Result<WebhookProcessOutcome, RunnerError> {
+        let evidence = self.verify_webhook_auth(headers, body)?;
+        let (envelope, _permit) = self.prepare_inbound_envelope(body, &evidence).await?;
         let workflow = Arc::clone(&self.workflow);
         let mut workflow_task =
             tokio::spawn(async move { workflow.accept_inbound(envelope).await });
@@ -814,6 +906,36 @@ mod tests {
             .await
             .expect_err("slow workflow should time out");
         assert!(matches!(err, RunnerError::WorkflowTimeout { .. }));
+    }
+
+    #[tokio::test]
+    async fn process_webhook_immediate_ack_times_out_async_dispatch_and_releases_admission() {
+        let runner = NativeProductAdapterRunner::with_config(
+            Arc::new(StaticAdapter::new(sample_parsed())),
+            Arc::new(PendingWorkflow),
+            shared_secret_auth(),
+            test_config(1, Duration::from_millis(5)),
+        );
+
+        let outcome = runner
+            .process_webhook_immediate_ack(&auth_headers(), b"{}")
+            .await
+            .expect("first request should schedule async dispatch");
+        assert_eq!(outcome, WebhookProcessOutcome::AcceptedForAsyncDispatch);
+
+        let err = runner
+            .process_webhook_immediate_ack(&auth_headers(), b"{}")
+            .await
+            .expect_err("second request should hit admission while async dispatch is pending");
+        assert_eq!(err, RunnerError::TooManyInFlight { max_in_flight: 1 });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let outcome = runner
+            .process_webhook_immediate_ack(&auth_headers(), b"{}")
+            .await
+            .expect("timed-out async dispatch should release admission");
+        assert_eq!(outcome, WebhookProcessOutcome::AcceptedForAsyncDispatch);
     }
 
     #[tokio::test]

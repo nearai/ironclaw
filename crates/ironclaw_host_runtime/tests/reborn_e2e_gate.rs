@@ -20,7 +20,7 @@ use ironclaw_events::{
     ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
@@ -50,9 +50,11 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let filesystem = Arc::new(InMemoryBackend::new());
+    seed_script_manifest_assets(filesystem.as_ref()).await;
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        filesystem,
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -595,29 +597,33 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
             required: true,
         }],
         response_body_limit: Some(4096),
+        save_body_to: None,
         timeout_ms: None,
     };
 
     let response = service
         .execute(request.clone())
+        .await
         .expect("host HTTP egress should use staged Reborn policy and secret material");
     assert_eq!(response.status, 200);
-    let recorded = network_recorder.lock().unwrap();
-    assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0].policy, staged_policy);
-    assert_eq!(
-        recorded[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-reborn-e2e-staged-secret".to_string()
-        ))
-    );
-    drop(recorded);
+    {
+        let recorded = network_recorder.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].policy, staged_policy);
+        assert_eq!(
+            recorded[0]
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization"),
+            Some(&(
+                "authorization".to_string(),
+                "Bearer sk-reborn-e2e-staged-secret".to_string()
+            ))
+        );
+    }
     let replay = service
         .execute(request)
+        .await
         .expect_err("consumed staged secret must not be reusable");
     assert!(matches!(replay, RuntimeHttpEgressError::Credential { .. }));
     assert_eq!(
@@ -810,8 +816,9 @@ impl RecordingNetwork {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for RecordingNetwork {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -830,6 +837,28 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     .unwrap();
     registry.insert(package).unwrap();
     registry
+}
+
+async fn seed_script_manifest_assets(filesystem: &InMemoryBackend) {
+    for path in [
+        "/system/extensions/script/schemas/test/input.v1.json",
+        "/system/extensions/script/schemas/test/output.v1.json",
+    ] {
+        filesystem
+            .write_file(
+                &VirtualPath::new(path).unwrap(),
+                br#"{"type":"object","additionalProperties":true}"#,
+            )
+            .await
+            .unwrap();
+    }
+    filesystem
+        .write_file(
+            &VirtualPath::new("/system/extensions/script/prompts/test.md").unwrap(),
+            b"Echo script test capability.",
+        )
+        .await
+        .unwrap();
 }
 
 fn parse_manifest(manifest: &str) -> ExtensionManifest {

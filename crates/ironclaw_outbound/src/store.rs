@@ -96,6 +96,7 @@ fn plan_push_targets_from_policy(
             OutboundPushKind::FinalReply => target.final_replies,
             OutboundPushKind::Progress
             | OutboundPushKind::GateRequired
+            | OutboundPushKind::AuthPrompt
             | OutboundPushKind::DeliveryStatus => target.progress,
         };
         if allowed {
