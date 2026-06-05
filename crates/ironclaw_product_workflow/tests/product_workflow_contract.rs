@@ -1554,7 +1554,7 @@ async fn subscription_request_via_accept_inbound_rejects_before_mutating_ledger(
 
 #[tokio::test]
 async fn projection_subscription_resolves_through_binding_service() {
-    let (workflow, inbound, _ledger, binding_service) = build_workflow_with_binding();
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
     let binding = fake_binding();
     let cursor = ProjectionCursor::new("cursor:projection-1").expect("valid cursor");
     let envelope = sample_envelope_with_payload(
@@ -1582,6 +1582,9 @@ async fn projection_subscription_resolves_through_binding_service() {
     assert_eq!(subscription.after_cursor, Some(cursor));
     assert_eq!(binding_service.resolve_count(), 1);
     assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
 }
 
 #[tokio::test]
