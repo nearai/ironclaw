@@ -345,6 +345,8 @@ fn parse_interaction_resolution(
     source_trigger: ProductTriggerReason,
 ) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
     let text = strip_leading_slack_mentions(text);
+    let text = strip_wrapping_inline_code(text);
+    let text = strip_leading_slack_mentions(text);
     let mut parts = text.split_whitespace();
     let Some(first) = parts.next() else {
         return Ok(None);
@@ -384,6 +386,14 @@ fn parse_interaction_resolution(
         }
         _ => Ok(None),
     }
+}
+
+fn strip_wrapping_inline_code(text: &str) -> &str {
+    let mut rest = text.trim();
+    while rest.len() >= 2 && rest.starts_with('`') && rest.ends_with('`') {
+        rest = rest[1..rest.len() - 1].trim();
+    }
+    rest
 }
 
 fn strip_leading_slack_mentions(text: &str) -> &str {
@@ -934,6 +944,34 @@ mod tests {
                 "user": "U123",
                 "channel": "C123",
                 "text": "<@UBOT> auth deny gate:auth-slack",
+                "ts": "1710000000.000011",
+                "thread_ts": "1710000000.000010"
+            }
+        }));
+
+        match inbound.payload {
+            ProductInboundPayload::AuthResolution(payload) => {
+                assert_eq!(payload.auth_request_ref, "gate:auth-slack");
+                assert_eq!(
+                    payload.source_trigger,
+                    Some(ProductTriggerReason::ReplyToBot)
+                );
+            }
+            other => panic!("expected auth resolution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel_thread_backticked_auth_deny_reply_becomes_auth_resolution() {
+        let inbound = parse(serde_json::json!({
+            "type": "event_callback",
+            "team_id": "T123",
+            "event_id": "EvThreadBacktickedAuthDeny",
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "channel": "C123",
+                "text": "`auth deny gate:auth-slack`",
                 "ts": "1710000000.000011",
                 "thread_ts": "1710000000.000010"
             }

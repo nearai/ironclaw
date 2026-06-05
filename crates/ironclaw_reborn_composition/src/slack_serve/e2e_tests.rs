@@ -676,7 +676,7 @@ async fn slack_dm_thread_auth_deny_cancels_base_dm_auth_gate_without_agent_turn(
     let second = harness
         .post_event(thread_message_event(
             "Ev-dm-auth-cancel",
-            "auth deny gate:auth-slack",
+            "`auth deny gate:auth-slack`",
             "1710000001.123456",
         ))
         .await;
@@ -1339,7 +1339,7 @@ fn thread_message_event(
         ("Ev-auth-cancel", "<@UBOT> auth deny gate:auth-slack", "1710000000.000009") => {
             THREAD_AUTH_CANCEL_WITH_MENTION
         }
-        ("Ev-dm-auth-cancel", "auth deny gate:auth-slack", "1710000001.123456") => {
+        ("Ev-dm-auth-cancel", "`auth deny gate:auth-slack`", "1710000001.123456") => {
             DM_THREAD_AUTH_CANCEL
         }
         _ => panic!("unknown fixture"),
@@ -1449,5 +1449,5 @@ const DM_THREAD_AUTH_CANCEL: &str = r#"{
   "team_id":"T-A",
   "api_app_id":"A-slack",
   "event_id":"Ev-dm-auth-cancel",
-  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"auth deny gate:auth-slack","ts":"1710000001.123457","thread_ts":"1710000001.123456"}
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"`auth deny gate:auth-slack`","ts":"1710000001.123457","thread_ts":"1710000001.123456"}
 }"#;
