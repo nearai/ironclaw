@@ -85,6 +85,7 @@ struct Harness {
     mount: PublicRouteMount,
     state: SlackEventsRouteState,
     egress: RecordingEgress,
+    coordinator: Arc<RecordingTurnCoordinator>,
     approvals: Arc<RecordingApprovalInteractionService>,
 }
 
@@ -263,7 +264,7 @@ async fn build_harness_with_actor_user_resolver_and_auth_challenges(
         SlackFinalReplyDeliveryServices {
             binding_service: Arc::new(binding),
             thread_service: Arc::new(threads),
-            turn_coordinator: Arc::new(coordinator),
+            turn_coordinator: Arc::new(coordinator.clone()),
             outbound_store,
             communication_preferences: preferences,
             adapter,
@@ -294,6 +295,7 @@ async fn build_harness_with_actor_user_resolver_and_auth_challenges(
         mount,
         state,
         egress,
+        coordinator: Arc::new(coordinator),
         approvals,
     }
 }
@@ -478,6 +480,51 @@ async fn slack_channel_auth_prompt_omits_setup_link_after_immediate_ack() {
 }
 
 #[tokio::test]
+async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
+    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
+    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
+    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
+        TurnMode::BlockAuth,
+        static_personal_actor_user_resolver(),
+        Some(auth_challenges),
+    )
+    .await;
+
+    let response = harness
+        .post_event(dm_message("Ev-auth", "needs auth"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if harness.slack_messages().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], CHANNEL);
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Authentication required"))
+    );
+
+    harness
+        .coordinator
+        .complete_blocked_run("authenticated and finished")
+        .await
+        .expect("complete auth-blocked run");
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["channel"], CHANNEL);
+    assert_eq!(messages[1]["text"], "authenticated and finished");
+    auth_provider.assert_single_call();
+}
+
+#[tokio::test]
 async fn slack_approval_reply_resumes_and_delivers_final_reply() {
     let harness = build_harness(TurnMode::BlockApproval).await;
 
@@ -558,6 +605,21 @@ impl RecordingTurnCoordinator {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (reply_target_binding_ref, accepted_message_ref) = state
+            .runs
+            .get(&run_id)
+            .map(|run| {
+                (
+                    run.reply_target_binding_ref.clone(),
+                    run.accepted_message_ref.clone(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    ReplyTargetBindingRef::new("slack:reply-target").expect("reply target"), // safety: static test reply target is valid.
+                    AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref"), // safety: static test accepted ref is valid.
+                )
+            });
         state.runs.insert(
             run_id,
             turn_state(
@@ -566,11 +628,39 @@ impl RecordingTurnCoordinator {
                 run_id,
                 TurnStatus::Completed,
                 None,
-                ReplyTargetBindingRef::new("slack:reply-target").expect("reply target"), // safety: static test reply target is valid.
-                AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref"), // safety: static test accepted ref is valid.
+                reply_target_binding_ref,
+                accepted_message_ref,
             ),
         );
         Ok(())
+    }
+
+    async fn complete_blocked_run(&self, text: &str) -> Result<(), ProductWorkflowError> {
+        let (scope, actor, run_id) = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let run_id =
+                state
+                    .blocked_run_id
+                    .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                        reason: "missing blocked run".into(),
+                    })?;
+            let run = state.runs.get(&run_id).ok_or_else(|| {
+                ProductWorkflowError::TurnResumeRejected {
+                    reason: "missing blocked run state".into(),
+                }
+            })?;
+            let actor =
+                run.actor
+                    .clone()
+                    .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                        reason: "missing blocked run actor".into(),
+                    })?;
+            (run.scope.clone(), actor, run_id)
+        };
+        self.complete_run(scope, actor, run_id, text).await
     }
 }
 
@@ -634,7 +724,10 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if status == TurnStatus::BlockedApproval {
+        if matches!(
+            status,
+            TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
+        ) {
             state.blocked_run_id = Some(run_id);
         }
         state.runs.insert(run_id, run_state);

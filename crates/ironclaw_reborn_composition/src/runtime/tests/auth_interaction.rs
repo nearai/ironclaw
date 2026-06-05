@@ -13,7 +13,7 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope};
+use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
@@ -61,11 +61,13 @@ async fn local_dev_runtime_auth_interactions_use_flow_record_source() {
     .await
     .expect("runtime builds");
     let conversation = runtime.new_conversation().await.expect("conversation");
-    let scope = TurnScope::new(
+    let subject_user_id = UserId::new("team-agent-user").expect("subject user id");
+    let scope = TurnScope::new_with_owner(
         runtime.thread_scope.tenant_id.clone(),
         Some(runtime.thread_scope.agent_id.clone()),
         runtime.thread_scope.project_id.clone(),
         conversation.0,
+        Some(subject_user_id.clone()),
     );
     let actor = TurnActor::new(runtime.actor_user_id.clone());
     let gate_ref = GateRef::new("gate:runtime-auth-read-model").expect("gate");
@@ -84,7 +86,7 @@ async fn local_dev_runtime_auth_interactions_use_flow_record_source() {
     assert_eq!(pending.auth_interactions.len(), 1);
     let view = &pending.auth_interactions[0];
     assert_eq!(view.scope.tenant_id, scope.tenant_id);
-    assert_eq!(view.scope.user_id, actor.user_id);
+    assert_eq!(view.scope.user_id, subject_user_id);
     assert_eq!(view.scope.thread_id, scope.thread_id);
     assert_eq!(view.run_id, run_id);
     assert_eq!(view.auth_request_ref, gate_ref);
@@ -282,7 +284,10 @@ fn auth_scope_for_turn(scope: &TurnScope, actor: &TurnActor) -> AuthProductScope
     AuthProductScope::new(
         ResourceScope {
             tenant_id: scope.tenant_id.clone(),
-            user_id: actor.user_id.clone(),
+            user_id: scope
+                .explicit_owner_user_id()
+                .cloned()
+                .unwrap_or_else(|| actor.user_id.clone()),
             agent_id: scope.agent_id.clone(),
             project_id: scope.project_id.clone(),
             mission_id: None,
