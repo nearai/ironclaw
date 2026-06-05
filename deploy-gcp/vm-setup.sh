@@ -3,11 +3,11 @@
 #
 # Copy deploy-gcp/ to the VM first, then run:
 #   gcloud compute ssh VM --zone=... --project=... --tunnel-through-iap \
-#     -- T3ENV=staging sudo -E bash /var/tmp/deploy/vm-setup.sh
+#     -- T3ENV=staging sudo -E bash /var/tmp/t3claw-deploy/vm-setup.sh
 #
 # T3ENV defaults to "staging". Pass T3ENV=testnet for the testnet VM.
 #
-# Expected files under /var/tmp/deploy/:
+# Expected files under /var/tmp/t3claw-deploy/:
 #   docker-compose.staging.yml  or  docker-compose.testnet.yml
 #   t3claw.service
 
@@ -24,7 +24,7 @@ PROJECT="${PROJECT:-gen-lang-client-0263867259}"
 REPO="t3claw"
 IMAGE_PREFIX="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}"
 SECRET_NAME="t3claw-${T3ENV}-env"
-COMPOSE_SRC="/var/tmp/deploy/docker-compose.${T3ENV}.yml"
+COMPOSE_SRC="/var/tmp/t3claw-deploy/docker-compose.${T3ENV}.yml"
 IMAGE_TAG="latest"
 if [ "${T3ENV}" != "staging" ]; then IMAGE_TAG="${T3ENV}"; fi
 
@@ -75,7 +75,7 @@ chmod 700 /opt/t3claw
 
 if [ ! -f "${COMPOSE_SRC}" ]; then
   echo "ERROR: compose file not found: ${COMPOSE_SRC}"
-  echo "       Re-run: gcloud compute scp --recurse deploy-gcp/ VM:/var/tmp/deploy ..."
+  echo "       Re-run: gcloud compute scp --recurse deploy-gcp/ VM:/var/tmp/t3claw-deploy ..."
   exit 1
 fi
 install -m 644 "${COMPOSE_SRC}" /opt/t3claw/docker-compose.yml
