@@ -27,6 +27,40 @@ export function registerPack(lang, translations) {
   packs[lang] = translations;
 }
 
+// Lazy loaders for every non-default locale. `en` is bundled eagerly in
+// main.js as the fallback (see `translate`), so it has no loader. Each
+// module calls `registerPack` as an import side effect, populating
+// `packs[lang]`. Literal import paths keep the assets statically
+// discoverable. Loaded packs are cached in `packs`, so each fires once.
+const loaders = {
+  es: () => import("../i18n/es.js"),
+  fr: () => import("../i18n/fr.js"),
+  de: () => import("../i18n/de.js"),
+  "pt-BR": () => import("../i18n/pt-BR.js"),
+  ja: () => import("../i18n/ja.js"),
+  ar: () => import("../i18n/ar.js"),
+  hi: () => import("../i18n/hi.js"),
+  uk: () => import("../i18n/uk.js"),
+  "zh-CN": () => import("../i18n/zh-CN.js"),
+  ko: () => import("../i18n/ko.js"),
+};
+
+const pending = {};
+
+// Resolves true once `packs[lang]` is available. Returns false for an
+// unknown locale (no loader, not already registered).
+export function loadPack(lang) {
+  if (packs[lang]) return Promise.resolve(true);
+  const loader = loaders[lang];
+  if (!loader) return Promise.resolve(false);
+  if (!pending[lang]) {
+    pending[lang] = loader()
+      .then(() => !!packs[lang])
+      .catch(() => false);
+  }
+  return pending[lang];
+}
+
 function translate(lang, key, params = {}) {
   const text = packs[lang]?.[key] || packs["en"]?.[key] || key;
   if (!params || typeof text !== "string") return text;
@@ -41,9 +75,12 @@ const I18nContext = React.createContext({
 
 export function I18nProvider({ children }) {
   const [lang, setLangState] = React.useState(detectLanguage);
+  // Bumped when an async pack finishes loading so `t` (and thus the
+  // context value) gets a fresh identity, re-rendering consumers with
+  // the now-available translations.
+  const [version, setVersion] = React.useState(0);
 
-  const setLang = React.useCallback((next) => {
-    if (!packs[next]) return;
+  const applyLang = React.useCallback((next) => {
     setLangState(next);
     try {
       localStorage.setItem(STORAGE_KEY, next);
@@ -51,13 +88,45 @@ export function I18nProvider({ children }) {
     document.documentElement.lang = next;
   }, []);
 
+  const setLang = React.useCallback(
+    (next) => {
+      if (packs[next]) {
+        applyLang(next);
+        return;
+      }
+      // Defer the switch until the pack is loaded so we never flash the
+      // English fallback for an already-selected language.
+      loadPack(next).then((ok) => {
+        if (ok) {
+          setVersion((v) => v + 1);
+          applyLang(next);
+        }
+      });
+    },
+    [applyLang]
+  );
+
+  // The initially-detected language may not be bundled (only `en` is);
+  // load it on mount and re-render once its strings are available.
+  React.useEffect(() => {
+    let cancelled = false;
+    if (!packs[lang]) {
+      loadPack(lang).then((ok) => {
+        if (!cancelled && ok) setVersion((v) => v + 1);
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [lang]);
+
   React.useEffect(() => {
     document.documentElement.lang = lang;
   }, [lang]);
 
   const t = React.useCallback(
     (key, params) => translate(lang, key, params),
-    [lang]
+    [lang, version]
   );
 
   const ctx = React.useMemo(() => ({ lang, setLang, t }), [lang, setLang, t]);
