@@ -11,7 +11,9 @@
 - Reborn-native OpenAI-compatible HTTP route descriptors.
 - Chat Completions and Responses API DTOs used by the migration slices.
 - A sanitized OpenAI-compatible error envelope.
-- Feature-gated fail-closed axum route fragments for host composition to mount.
+- Feature-gated axum route fragments for host composition to mount.
+- The non-streaming Chat Completions adapter into ProductWorkflow when host
+  composition injects the workflow state.
 
 ## Do Not Move In Here
 
@@ -19,6 +21,7 @@
 - v1 gateway handlers, `src/channels/web`, or direct LLM proxy behavior.
 - Direct dispatcher, runtime, DB, secrets, network, or host-runtime access.
 - Execution of client-supplied OpenAI tools as Reborn capabilities.
+- v1 gateway fallbacks or direct `ironclaw_llm` proxy behavior.
 
 ## Validation
 

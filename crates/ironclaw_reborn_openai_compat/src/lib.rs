@@ -4,11 +4,14 @@
 //!
 //! The crate owns DTOs, route descriptors, and a sanitized error envelope for
 //! the OpenAI-compatible Chat Completions and Responses surfaces. The optional
-//! `openai-compat-beta` feature exposes fail-closed axum handlers so host
-//! composition can mount the route fragment without routing through the v1
-//! gateway. Real ProductWorkflow wiring lands in later slices.
+//! `openai-compat-beta` feature exposes axum route fragments for host
+//! composition without routing through the v1 gateway. By default the router is
+//! fail-closed; host composition can inject a ProductWorkflow-backed
+//! non-streaming Chat Completions service for the first wired slice.
 
 mod chat;
+#[cfg(feature = "openai-compat-beta")]
+mod chat_workflow;
 mod descriptors;
 mod error;
 #[cfg(feature = "openai-compat-beta")]
@@ -24,6 +27,11 @@ pub use chat::{
     OpenAiChatMessage, OpenAiChatMessageRole, OpenAiChatStreamChoice, OpenAiChatTool,
     OpenAiChatToolCall, OpenAiChatToolCallDelta, OpenAiChatToolCallFunction,
     OpenAiChatToolCallFunctionDelta, OpenAiChatToolKind, OpenAiUsage,
+};
+#[cfg(feature = "openai-compat-beta")]
+pub use chat_workflow::{
+    OpenAiChatCompletionProjection, OpenAiChatCompletionWaitRequest, OpenAiChatCompletionWaiter,
+    OpenAiChatCompletionsWorkflow, OpenAiCompatAuthenticatedCaller,
 };
 pub use descriptors::{
     OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS, OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,
@@ -61,4 +69,4 @@ pub use responses::{
     OpenAiResponsesMessageRole,
 };
 #[cfg(feature = "openai-compat-beta")]
-pub use router::openai_compat_router;
+pub use router::{OpenAiCompatRouterState, openai_compat_router, openai_compat_router_with_state};

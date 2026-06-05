@@ -14,10 +14,11 @@ publish = false
 default = []
 # Compile the fail-closed axum route fragment. Host composition still owns
 # listener binding, auth middleware, CORS, body/rate limits, and mounting.
-openai-compat-beta = ["dep:axum"]
+openai-compat-beta = ["dep:axum", "dep:tokio"]
 
 [dependencies]
 async-trait = "0.1"
+chrono = { version = "0.4", features = ["clock"] }
 hex = "0.4"
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
@@ -29,11 +30,13 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["time"], optional = true }
 
 [dev-dependencies]
 http = "1"
 http-body-util = "0.1"
-tokio = { version = "1", features = ["macros", "rt"] }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 tower = { version = "0.5", features = ["util"] }
 
 [lints]

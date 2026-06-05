@@ -1,14 +1,14 @@
 # ironclaw_reborn_openai_compat
 
 Reborn-native OpenAI-compatible API contract surface for #3283 / #4442 /
-#4443.
+#4443 / #4444.
 
 ## Boundary
 
 This crate is a product/API route surface, not a host runtime:
 
 - It may define DTOs, route descriptors, sanitized error envelopes, and
-  feature-gated fail-closed axum handlers.
+  feature-gated axum route fragments for host composition.
 - It must not bind sockets, call `axum::serve`, read v1 gateway state, or proxy
   directly to `ironclaw_llm`.
 - Host composition owns listener binding, bearer/session auth, CORS/origin,
@@ -37,6 +37,31 @@ routes are wired to ProductWorkflow:
   this crate defines only the side-effect-free `OpenAiCompatRefStore` port and
   ref vocabulary.
 
+## Chat Completions Workflow
+
+With `openai-compat-beta`, the default router remains fail-closed unless host
+composition injects `OpenAiCompatRouterState::with_chat_completions(...)`.
+The injected `OpenAiChatCompletionsWorkflow` is the non-streaming Chat
+Completions slice:
+
+- `POST /v1/chat/completions` parses the OpenAI-compatible DTO, reserves an
+  opaque `chatcmpl-*` ref with actor-scoped idempotency, and submits the user
+  message through the channel-neutral `ProductWorkflow` surface.
+- The route waits through a composition-supplied `OpenAiChatCompletionWaiter`.
+  Timeout returns a retryable sanitized API error and does not cancel or detach
+  the underlying product turn.
+- The requested public model string is carried as a composition/policy hint for
+  the waiter; do not inject it into the user transcript text.
+- Client-supplied `tools` are model hints only. They are serialized into the
+  product message context but must not execute as Reborn capabilities from this
+  crate.
+- The route requires a verified `OpenAiCompatAuthenticatedCaller` extension
+  minted by host auth middleware. Do not mint auth evidence in this crate's
+  production feature set.
+- This crate still must not call v1 gateway handlers, `ironclaw_llm`,
+  `TurnCoordinator`, projection internals, listener APIs, secrets, DBs, or the
+  host runtime directly.
+
 ## Route Surface
 
 The descriptor table covers:
@@ -53,11 +78,14 @@ All routes require bearer auth and authenticated caller scope. Create routes
 are declared as SSE-capable because the OpenAI-compatible request body may set
 `stream: true`; non-streaming behavior is still handled by the same route.
 
-## Fail-Closed Slice
+## Router Wiring
 
-The `openai-compat-beta` feature exposes an axum router and handlers, but every
-handler currently returns a sanitized `501` OpenAI-compatible error. Do not wire
-real turn submission, retrieval, cancel, or streaming in this slice.
+The `openai-compat-beta` feature exposes an axum router and handlers. The
+default `openai_compat_router()` returns sanitized `501` errors for all route
+families. `openai_compat_router_with_state(...)` may wire the non-streaming
+Chat Completions workflow; Responses create/retrieve/cancel and streaming Chat
+Completions still return fail-closed sanitized errors until their own slices
+land.
 
 ## DTO Policy
 
