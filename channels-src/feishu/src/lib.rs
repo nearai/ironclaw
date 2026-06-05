@@ -289,9 +289,9 @@ struct FeishuConfig {
     /// Feishu Event Subscription verification token.
     verification_token: Option<String>,
 
-    /// Inbound delivery mode: "websocket" (default) or "webhook".
-    #[serde(default = "default_connection_mode")]
-    connection_mode: String,
+    /// Inbound delivery mode.
+    #[serde(default)]
+    connection_mode: ConnectionMode,
 
     /// API base URL. Defaults to "https://open.feishu.cn" (use
     /// "https://open.larksuite.com" for Lark international).
@@ -314,8 +314,31 @@ fn default_api_base() -> String {
     "https://open.feishu.cn".to_string()
 }
 
-fn default_connection_mode() -> String {
-    "websocket".to_string()
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConnectionMode {
+    Webhook,
+    #[serde(other)]
+    Websocket,
+}
+
+impl Default for ConnectionMode {
+    fn default() -> Self {
+        Self::Websocket
+    }
+}
+
+impl ConnectionMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Webhook => "webhook",
+            Self::Websocket => "websocket",
+        }
+    }
+
+    fn uses_webhook_polling(self) -> bool {
+        self == Self::Webhook
+    }
 }
 
 // ============================================================================
@@ -336,13 +359,8 @@ impl Guest for FeishuChannel {
         // Persist config for cross-callback access.
         let api_base = config.api_base.trim_end_matches('/').to_string();
         let _ = channel_host::workspace_write(API_BASE_PATH, &api_base);
-        let connection_mode = config.connection_mode.trim().to_ascii_lowercase();
-        let connection_mode = if connection_mode == "webhook" {
-            "webhook"
-        } else {
-            "websocket"
-        };
-        let _ = channel_host::workspace_write(CONNECTION_MODE_PATH, connection_mode);
+        let connection_mode = config.connection_mode;
+        let _ = channel_host::workspace_write(CONNECTION_MODE_PATH, connection_mode.as_str());
 
         // Persist app credentials for token exchange in later callbacks.
         // These are injected by the host from the secrets store into the
@@ -509,8 +527,8 @@ impl Guest for FeishuChannel {
 // Message Handling
 // ============================================================================
 
-fn poll_config_for_connection_mode(connection_mode: &str) -> Option<PollConfig> {
-    (connection_mode == "webhook").then_some(PollConfig {
+fn poll_config_for_connection_mode(connection_mode: ConnectionMode) -> Option<PollConfig> {
+    connection_mode.uses_webhook_polling().then_some(PollConfig {
         interval_ms: WEBHOOK_POLL_INTERVAL_MS,
         enabled: true,
     })
@@ -1443,6 +1461,7 @@ fn send_reply_response(message_id: &str, response: &AgentResponse) -> Result<(),
         response,
         upload_feishu_image,
         send_reply_payload,
+        channel_host::log,
     )
 }
 
@@ -1459,6 +1478,7 @@ fn send_message_response(
         |receive_id, receive_id_type, msg_type, content| {
             send_message_payload(receive_id, receive_id_type, msg_type, content)
         },
+        channel_host::log,
     )
 }
 
@@ -1496,17 +1516,23 @@ fn send_reply_response_with_upload(
     response: &AgentResponse,
     upload_image: impl FnMut(&Attachment) -> Result<String, String>,
     mut send_payload: impl FnMut(&str, &str, String) -> Result<(), String>,
+    log: impl FnMut(channel_host::LogLevel, &str),
 ) -> Result<(), String> {
-    send_response_images_then_text_with_upload(response, upload_image, |part| match part {
-        FeishuResponsePart::Image(image_key) => {
-            send_payload(message_id, "image", image_message_content(&image_key))
-        }
-        FeishuResponsePart::Text(content) => send_payload(
-            message_id,
-            "text",
-            serde_json::json!({"text": content}).to_string(),
-        ),
-    })
+    send_response_images_then_text_with_upload(
+        response,
+        upload_image,
+        |part| match part {
+            FeishuResponsePart::Image(image_key) => {
+                send_payload(message_id, "image", image_message_content(&image_key))
+            }
+            FeishuResponsePart::Text(content) => send_payload(
+                message_id,
+                "text",
+                serde_json::json!({"text": content}).to_string(),
+            ),
+        },
+        log,
+    )
 }
 
 fn send_message_response_with_upload(
@@ -1515,27 +1541,34 @@ fn send_message_response_with_upload(
     response: &AgentResponse,
     upload_image: impl FnMut(&Attachment) -> Result<String, String>,
     mut send_payload: impl FnMut(&str, &str, &str, String) -> Result<(), String>,
+    log: impl FnMut(channel_host::LogLevel, &str),
 ) -> Result<(), String> {
-    send_response_images_then_text_with_upload(response, upload_image, |part| match part {
-        FeishuResponsePart::Image(image_key) => send_payload(
-            receive_id,
-            receive_id_type,
-            "image",
-            image_message_content(&image_key),
-        ),
-        FeishuResponsePart::Text(content) => send_payload(
-            receive_id,
-            receive_id_type,
-            "text",
-            serde_json::json!({"text": content}).to_string(),
-        ),
-    })
+    send_response_images_then_text_with_upload(
+        response,
+        upload_image,
+        |part| match part {
+            FeishuResponsePart::Image(image_key) => send_payload(
+                receive_id,
+                receive_id_type,
+                "image",
+                image_message_content(&image_key),
+            ),
+            FeishuResponsePart::Text(content) => send_payload(
+                receive_id,
+                receive_id_type,
+                "text",
+                serde_json::json!({"text": content}).to_string(),
+            ),
+        },
+        log,
+    )
 }
 
 fn send_response_images_then_text_with_upload(
     response: &AgentResponse,
     mut upload_image: impl FnMut(&Attachment) -> Result<String, String>,
     mut send_part: impl FnMut(FeishuResponsePart) -> Result<(), String>,
+    mut log: impl FnMut(channel_host::LogLevel, &str),
 ) -> Result<(), String> {
     let mut sent_any = false;
     let mut errors = Vec::new();
@@ -1568,7 +1601,7 @@ fn send_response_images_then_text_with_upload(
 
     if !errors.is_empty() {
         let joined = errors.join("; ");
-        channel_host::log(
+        log(
             channel_host::LogLevel::Warn,
             &format!("Feishu response delivery had errors: {joined}"),
         );
@@ -1807,10 +1840,18 @@ mod tests {
 
     #[test]
     fn webhook_mode_enables_polling_for_deferred_events() {
-        let poll = poll_config_for_connection_mode("webhook").unwrap();
+        let poll = poll_config_for_connection_mode(ConnectionMode::Webhook).unwrap();
         assert!(poll.enabled);
         assert_eq!(poll.interval_ms, WEBHOOK_POLL_INTERVAL_MS);
-        assert!(poll_config_for_connection_mode("websocket").is_none());
+        assert!(poll_config_for_connection_mode(ConnectionMode::Websocket).is_none());
+    }
+
+    #[test]
+    fn connection_mode_defaults_unknown_values_to_websocket() {
+        let config: FeishuConfig = serde_json::from_str(r#"{"connection_mode":"unexpected"}"#)
+            .expect("config should parse with fallback mode");
+
+        assert_eq!(config.connection_mode, ConnectionMode::Websocket);
     }
 
     #[test]
@@ -1961,6 +2002,7 @@ mod tests {
                     .push((message_id.to_string(), msg_type.to_string(), content));
                 Ok(())
             },
+            |_level, _message| {},
         )
         .unwrap();
 
@@ -2113,6 +2155,7 @@ mod tests {
                     Ok(())
                 }
             },
+            |_level, _message| {},
         )
         .expect("partial image delivery should not trigger fallback resend");
 

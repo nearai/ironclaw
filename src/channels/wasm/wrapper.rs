@@ -3959,6 +3959,7 @@ impl Channel for WasmChannel {
             &self.capabilities,
             self.secrets_store.as_deref(),
             &self.owner_scope_id,
+            Some(self.workspace_store.as_ref()),
         )
         .await
         {
@@ -4371,6 +4372,7 @@ const FEISHU_WS_DEFAULT_RECONNECT_COUNT: i32 = -1;
 const FEISHU_WS_DEFAULT_RECONNECT_INTERVAL_SECS: u64 = 120;
 const FEISHU_WS_DEFAULT_RECONNECT_NONCE_SECS: u64 = 30;
 const FEISHU_WS_FRAME_CACHE_TTL_MS: u64 = 10_000;
+const FEISHU_WS_FRAME_CACHE_PRUNE_INTERVAL_MS: u64 = FEISHU_WS_FRAME_CACHE_TTL_MS / 2;
 const FEISHU_WS_MAX_FRAME_FRAGMENTS: usize = 256;
 const FEISHU_WS_MAX_FRAME_CACHE_ENTRIES: usize = 512;
 const FEISHU_WS_MAX_MERGED_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -4734,11 +4736,17 @@ async fn websocket_start_decision(
     capabilities: &ChannelCapabilities,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
     owner_scope_id: &str,
+    workspace_store: Option<&ChannelWorkspaceStore>,
 ) -> WebsocketStartDecision {
     let Some(mut config) = WebsocketRuntimeConfig::from_capabilities(capabilities) else {
         return WebsocketStartDecision::NotConfigured;
     };
     if !config.connect_on_start {
+        return WebsocketStartDecision::NotConfigured;
+    }
+    if let Some(workspace_store) = workspace_store
+        && websocket_runtime_disabled_by_channel_config(&config, capabilities, workspace_store)
+    {
         return WebsocketStartDecision::NotConfigured;
     }
 
@@ -5479,6 +5487,7 @@ struct FeishuEventSessionState {
     _reconnect_nonce_ms: u64,
     service_id: i32,
     frame_cache: HashMap<String, FeishuFrameCacheEntry>,
+    last_frame_cache_prune_ms: u64,
 }
 
 impl FeishuEventSessionState {
@@ -5491,6 +5500,7 @@ impl FeishuEventSessionState {
             _reconnect_nonce_ms: defaults.reconnect_nonce.saturating_mul(1000),
             service_id: 0,
             frame_cache: HashMap::new(),
+            last_frame_cache_prune_ms: 0,
         }
     }
 
@@ -5682,7 +5692,7 @@ impl FeishuEventSessionState {
         &mut self,
         frame: FeishuWsFrame,
     ) -> Result<Option<FeishuMergedFrame>, String> {
-        self.prune_expired_cache();
+        self.prune_expired_cache_if_due();
         let message_id = frame
             .header_value("message_id")
             .filter(|value| !value.is_empty())
@@ -5801,6 +5811,24 @@ impl FeishuEventSessionState {
 
     fn prune_expired_cache(&mut self) {
         let now = current_unix_millis();
+        self.prune_expired_cache_at(now);
+    }
+
+    fn prune_expired_cache_if_due(&mut self) {
+        let now = current_unix_millis();
+        let elapsed = now
+            .checked_sub(self.last_frame_cache_prune_ms)
+            .unwrap_or(FEISHU_WS_FRAME_CACHE_PRUNE_INTERVAL_MS);
+        if self.last_frame_cache_prune_ms != 0 && elapsed < FEISHU_WS_FRAME_CACHE_PRUNE_INTERVAL_MS
+        {
+            return;
+        }
+
+        self.prune_expired_cache_at(now);
+    }
+
+    fn prune_expired_cache_at(&mut self, now: u64) {
+        self.last_frame_cache_prune_ms = now;
         self.frame_cache.retain(|_, entry| {
             now.checked_sub(entry.created_at_ms)
                 .is_some_and(|age| age <= FEISHU_WS_FRAME_CACHE_TTL_MS)
@@ -8337,6 +8365,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_resolve_websocket_auth_feishu_uses_workspace_fallback() {
+        let capabilities = feishu_websocket_capabilities();
+        let config = WebsocketRuntimeConfig::from_capabilities(&capabilities)
+            .expect("feishu websocket config should be parsed");
+        let workspace_store = ChannelWorkspaceStore::new();
+        workspace_store.commit_writes(&[
+            PendingWorkspaceWrite {
+                path: capabilities.prefix_workspace_path("app_id"),
+                content: "cli_workspace".to_string(),
+            },
+            PendingWorkspaceWrite {
+                path: capabilities.prefix_workspace_path("app_secret"),
+                content: "workspace_secret".to_string(),
+            },
+        ]);
+
+        let auth = super::resolve_websocket_auth(
+            &config,
+            None,
+            "owner_42",
+            Some(&workspace_store),
+            Some(&capabilities),
+        )
+        .await;
+
+        assert_eq!(
+            auth,
+            Some(super::ResolvedWebsocketAuth::FeishuEvent {
+                app_id: "cli_workspace".to_string(),
+                app_secret: "workspace_secret".to_string(),
+            })
+        );
+    }
+
     #[test]
     fn test_websocket_runtime_config_requires_allowlisted_host() {
         let tool_capabilities = ToolCapabilities {
@@ -9073,7 +9136,7 @@ mod tests {
         let capabilities = discord_websocket_capabilities();
 
         let decision =
-            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42", None).await;
 
         assert_eq!(
             decision,
@@ -9081,6 +9144,27 @@ mod tests {
                 credential_name: discord_credential_name(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn test_websocket_start_decision_not_configured_for_feishu_webhook_mode() {
+        let store = empty_secrets_store();
+        let capabilities = feishu_websocket_capabilities();
+        let workspace_store = ChannelWorkspaceStore::new();
+        workspace_store.commit_writes(&[PendingWorkspaceWrite {
+            path: capabilities.prefix_workspace_path("connection_mode"),
+            content: "webhook".to_string(),
+        }]);
+
+        let decision = websocket_start_decision(
+            &capabilities,
+            Some(store.as_ref()),
+            "owner_42",
+            Some(&workspace_store),
+        )
+        .await;
+
+        assert_eq!(decision, WebsocketStartDecision::NotConfigured);
     }
 
     /// If `identify_secret_name` on the capability JSON fails
@@ -9105,7 +9189,7 @@ mod tests {
             ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
 
         let decision =
-            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42", None).await;
 
         let WebsocketStartDecision::MalformedConfig { reason } = decision else {
             panic!("expected MalformedConfig, got {decision:?}");
@@ -9134,7 +9218,7 @@ mod tests {
         let capabilities = discord_websocket_capabilities();
 
         let decision =
-            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42", None).await;
 
         assert!(matches!(decision, WebsocketStartDecision::Spawn(_)));
     }
@@ -9157,7 +9241,7 @@ mod tests {
         let capabilities = wecom_websocket_capabilities();
 
         let decision =
-            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42", None).await;
 
         assert_eq!(
             decision,
@@ -9190,7 +9274,7 @@ mod tests {
         let capabilities = wecom_websocket_capabilities();
 
         let decision =
-            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42", None).await;
 
         assert!(matches!(decision, WebsocketStartDecision::Spawn(_)));
     }
@@ -9213,7 +9297,7 @@ mod tests {
         let capabilities = feishu_websocket_capabilities();
 
         let decision =
-            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42", None).await;
 
         assert_eq!(
             decision,
@@ -9246,7 +9330,7 @@ mod tests {
         let capabilities = feishu_websocket_capabilities();
 
         let decision =
-            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42", None).await;
 
         assert!(matches!(decision, WebsocketStartDecision::Spawn(_)));
     }
@@ -9275,7 +9359,7 @@ mod tests {
             ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
 
         let decision =
-            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42", None).await;
 
         let WebsocketStartDecision::MalformedConfig { reason } = decision else {
             panic!("expected MalformedConfig, got {decision:?}");
@@ -9323,7 +9407,7 @@ mod tests {
             ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
 
         let decision =
-            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42", None).await;
 
         let WebsocketStartDecision::Spawn(config) = decision else {
             panic!("expected Spawn, got {decision:?}");
@@ -9346,7 +9430,7 @@ mod tests {
         let capabilities = ChannelCapabilities::for_channel("plain").with_path("/webhook/plain");
 
         let decision =
-            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42", None).await;
 
         assert_eq!(decision, WebsocketStartDecision::NotConfigured);
     }
@@ -9374,7 +9458,7 @@ mod tests {
             ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
 
         let decision =
-            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42", None).await;
 
         assert!(
             matches!(decision, WebsocketStartDecision::MalformedConfig { .. }),
