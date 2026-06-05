@@ -4,9 +4,9 @@
 //! this server's `…/nearai/{state}/auth/callback?token=…`. The route consumes
 //! the state from an authenticated login-start flow, stores the session token on
 //! the live provider, makes NEAR AI active, hot-swaps the running provider, and
-//! bounces the tab to the app. It is PUBLIC (no bearer — the browser arrives
-//! straight from NEAR AI) and is merged via `PublicRouteMount` the same way the
-//! SSO callbacks are, so it inherits the per-route policy middleware.
+//! bounces the tab to the app. It does not require a bearer token — the browser
+//! arrives straight from NEAR AI — but the descriptor still records the
+//! one-time OAuth state guard and host-resolved effect path before mutation.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use axum::response::Redirect;
 use axum::routing::get;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
-    IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
+    IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
@@ -89,16 +89,10 @@ pub(crate) fn nearai_login_callback_mount(
 fn nearai_callback_descriptor() -> IngressRouteDescriptor {
     let policy = IngressPolicy::new(IngressPolicyParts {
         listener_class: ListenerClass::OAuthCallback,
-        auth: IngressAuthPolicy::Public {
-            justification: IngressJustification::new(
-                "webui-v2 nearai login",
-                "NEAR AI redirects the browser here with the session token after \
-                 its own GitHub/Google login; the route has no session yet and \
-                 stores the operator LLM credential",
-            )
-            .expect("nearai login justification must validate"),
+        auth: IngressAuthPolicy::Required {
+            schemes: vec![IngressAuthScheme::OAuthState],
         },
-        scope_source: IngressScopeSource::PublicRoute,
+        scope_source: IngressScopeSource::HostResolved,
         body_limit: BodyLimitPolicy::NoBody,
         rate_limit: RateLimitPolicy::Limited {
             scope: RateLimitScope::PerIp,
@@ -109,9 +103,9 @@ fn nearai_callback_descriptor() -> IngressRouteDescriptor {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::PublicCallback,
-        effect_path: AllowedEffectPath::NoEffect,
+        effect_path: AllowedEffectPath::ProductWorkflow,
     })
-    .expect("nearai login callback policy must validate"); // safety: OAuthCallback + Public + NoEffect is the permitted public-callback shape (same as the SSO callback).
+    .expect("nearai login callback policy must validate"); // safety: OAuthCallback + OAuthState + HostResolved is the host callback shape; handler validation consumes one-time login state before credential/provider mutation.
     IngressRouteDescriptor::new(
         "webui.v2.nearai_login_callback".to_string(),
         NetworkMethod::Get,
@@ -119,4 +113,24 @@ fn nearai_callback_descriptor() -> IngressRouteDescriptor {
         policy,
     )
     .expect("nearai login callback descriptor must validate")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nearai_callback_descriptor_records_state_guarded_effectful_workflow() {
+        let descriptor = nearai_callback_descriptor();
+        let policy = descriptor.policy();
+
+        assert_eq!(policy.listener_class(), ListenerClass::OAuthCallback);
+        assert!(matches!(
+            policy.auth(),
+            IngressAuthPolicy::Required { schemes }
+                if schemes.as_slice() == [IngressAuthScheme::OAuthState]
+        ));
+        assert_eq!(policy.scope_source(), IngressScopeSource::HostResolved);
+        assert_eq!(policy.effect_path(), &AllowedEffectPath::ProductWorkflow);
+    }
 }
