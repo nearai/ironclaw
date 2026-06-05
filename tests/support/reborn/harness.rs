@@ -140,7 +140,6 @@ pub type HarnessWaitConfig = WaitConfig;
 
 const TEST_CAPABILITY_ID: &str = "test.echo";
 const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
-const SPAWN_SUBAGENT_TOOL_NAME: &str = "spawn_subagent";
 const SUBAGENT_ALLOWED_TEST_TOOL_NAME: &str = "test_read_file";
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -2620,6 +2619,10 @@ impl RecordingTestCapabilityPort {
         Self::new(CapabilityMode::ApprovalThenEcho, true, false)
     }
 
+    pub fn approval_then_allowed_tool_with_spawn_subagent() -> Self {
+        Self::new(CapabilityMode::ApprovalThenEcho, true, true)
+    }
+
     pub fn spawn_auth_then_approval_then_echo_with_spawn_subagent() -> Self {
         Self::new(CapabilityMode::SpawnAuthThenApprovalThenEcho, true, false)
     }
@@ -2694,7 +2697,7 @@ impl RecordingTestCapabilityPort {
 #[async_trait]
 impl LoopCapabilityPort for RecordingTestCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-        let mut definitions = vec![ProviderToolDefinition {
+        let definitions = vec![ProviderToolDefinition {
             capability_id: self.primary_capability_id(),
             name: self.primary_tool_name().to_string(),
             description: "Echo a test payload".to_string(),
@@ -2705,23 +2708,6 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 }
             }),
         }];
-        if self.expose_spawn_subagent {
-            definitions.push(ProviderToolDefinition {
-                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-                    .expect("valid capability id"),
-                name: SPAWN_SUBAGENT_TOOL_NAME.to_string(),
-                description: "Spawn a subagent child run".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "flavor_id": {"type": "string"},
-                        "task": {"type": "string"},
-                        "handoff": {"type": "string"}
-                    },
-                    "required": ["flavor_id", "task"]
-                }),
-            });
-        }
         Ok(definitions)
     }
 
@@ -2729,11 +2715,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         &self,
         call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        let capability_id = if self.expose_spawn_subagent && call.name == SPAWN_SUBAGENT_TOOL_NAME {
-            CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id")
-        } else {
-            self.primary_capability_id()
-        };
+        let capability_id = self.primary_capability_id();
         Ok(CapabilityCallCandidate {
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
@@ -2759,7 +2741,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         &self,
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut descriptors = vec![CapabilityDescriptorView {
+        let descriptors = vec![CapabilityDescriptorView {
             capability_id: self.primary_capability_id(),
             provider: Some(ExtensionId::new("test").expect("valid provider")),
             runtime: RuntimeKind::FirstParty,
@@ -2768,18 +2750,6 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: json!({"type": "object"}),
         }];
-        if self.expose_spawn_subagent {
-            descriptors.push(CapabilityDescriptorView {
-                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-                    .expect("valid capability id"),
-                provider: Some(ExtensionId::new("test").expect("valid provider")),
-                runtime: RuntimeKind::FirstParty,
-                safe_name: SPAWN_SUBAGENT_TOOL_NAME.to_string(),
-                safe_description: "Spawn a subagent child run".to_string(),
-                concurrency_hint: ConcurrencyHint::Exclusive,
-                parameters_schema: json!({"type": "object"}),
-            });
-        }
         Ok(VisibleCapabilitySurface {
             version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
