@@ -17,7 +17,7 @@ pub(crate) enum RuntimePayloadCandidate {
 }
 
 pub(crate) enum RuntimePayloadResolution {
-    Payload(ProductOutboundPayload),
+    Payload(Box<ProductOutboundPayload>),
     Pending,
     Empty,
 }
@@ -27,7 +27,7 @@ pub(crate) struct RuntimePayloads {
 }
 
 enum RuntimePayloadSlot {
-    Payload(ProductOutboundPayload),
+    Payload(Box<ProductOutboundPayload>),
     Pending,
 }
 
@@ -71,7 +71,7 @@ impl RuntimePayloads {
             .filter_map(|(index, slot)| match slot {
                 RuntimePayloadSlot::Payload(payload) => Some(DeliveredRuntimePayload {
                     delivered: index + 1,
-                    payload,
+                    payload: *payload,
                 }),
                 RuntimePayloadSlot::Pending => None,
             })

@@ -17,6 +17,13 @@ struct PreviewProjectionFixture {
     snapshot: ProjectionSnapshot,
 }
 
+struct PreviewActivityRefs {
+    run_id: TurnRunId,
+    input_ref: CapabilityInputRef,
+    invocation_id: InvocationId,
+    capability: CapabilityId,
+}
+
 impl PreviewProjectionFixture {
     fn completed(
         label: &str,
@@ -82,25 +89,101 @@ impl PreviewProjectionFixture {
     }
 
     fn record_input(&self, tool_name: &str) {
+        let refs = PreviewActivityRefs {
+            run_id: self.run_id,
+            input_ref: self.input_ref.clone(),
+            invocation_id: self.invocation_id,
+            capability: self.capability.clone(),
+        };
+        self.record_input_for(&refs, tool_name);
+    }
+
+    fn record_input_for(&self, refs: &PreviewActivityRefs, tool_name: &str) {
         self.display_previews.record_input(
-            &self.run_id.to_string(),
-            &self.input_ref,
+            &refs.run_id.to_string(),
+            &refs.input_ref,
             tool_name,
             &serde_json::json!({"path": "src/main.rs"}),
         );
     }
 
     fn record_result(&self, result_ref: &str, output: serde_json::Value) {
+        let refs = PreviewActivityRefs {
+            run_id: self.run_id,
+            input_ref: self.input_ref.clone(),
+            invocation_id: self.invocation_id,
+            capability: self.capability.clone(),
+        };
+        self.record_result_for(&refs, result_ref, output);
+    }
+
+    fn record_result_for(
+        &self,
+        refs: &PreviewActivityRefs,
+        result_ref: &str,
+        output: serde_json::Value,
+    ) {
         self.display_previews
             .record_result(CapabilityDisplayPreviewResult {
-                run_id: &self.run_id.to_string(),
-                input_ref: &self.input_ref,
-                invocation_id: self.invocation_id,
-                capability_id: &self.capability,
+                run_id: &refs.run_id.to_string(),
+                input_ref: &refs.input_ref,
+                invocation_id: refs.invocation_id,
+                capability_id: &refs.capability,
                 result_ref,
                 output: &output,
                 output_bytes: 12,
             });
+    }
+
+    fn add_completed_activity(
+        &mut self,
+        label: &str,
+        capability_name: &str,
+        updated_at: chrono::DateTime<chrono::Utc>,
+        cursor: ironclaw_events::EventCursor,
+    ) -> PreviewActivityRefs {
+        let capability = CapabilityId::new(format!("builtin.{capability_name}")).unwrap();
+        let invocation_id = InvocationId::new();
+        let run_id = TurnRunId::new();
+        self.snapshot.runs.push(RunStatusProjection {
+            invocation_id,
+            capability_id: capability.clone(),
+            thread_id: Some(self.scope.thread_id.clone()),
+            status: RunProjectionStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            error_kind: None,
+            last_cursor: cursor,
+            updated_at,
+        });
+        self.snapshot
+            .capability_activities
+            .push(CapabilityActivityProjection {
+                invocation_id,
+                run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+                capability_id: capability.clone(),
+                thread_id: Some(self.scope.thread_id.clone()),
+                status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+                provider: None,
+                runtime: None,
+                process_id: None,
+                output_bytes: Some(12),
+                error_kind: None,
+                last_cursor: cursor,
+                updated_at,
+            });
+        PreviewActivityRefs {
+            run_id,
+            input_ref: preview_input_ref(&format!("preview-{label}-input")),
+            invocation_id,
+            capability,
+        }
+    }
+
+    fn set_first_activity_updated_at(&mut self, updated_at: chrono::DateTime<chrono::Utc>) {
+        self.snapshot.runs[0].updated_at = updated_at;
+        self.snapshot.capability_activities[0].updated_at = updated_at;
     }
 
     fn item_input(&self) -> RuntimePayloadItemInput {
@@ -297,4 +380,143 @@ async fn webui_projection_advances_stale_completed_activity_without_preview_reco
     assert_eq!(batch.cursor.runtime, Some(fixture.cursor));
     assert_eq!(batch.cursor.runtime_item, None);
     assert_eq!(batch.cursor.runtime_payloads_delivered, 0);
+}
+
+#[tokio::test]
+async fn webui_projection_advances_held_cursor_when_pending_preview_times_out() {
+    let mut fixture =
+        PreviewProjectionFixture::completed("pending-timeout", "write_file", chrono::Utc::now());
+    fixture.record_input("write_file");
+
+    let first = runtime_payloads_for_item(
+        &fixture.scope,
+        &fixture.display_previews,
+        fixture.item_input(),
+        None,
+        0,
+        8,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.total, 3);
+    assert_eq!(first.payloads.len(), 2);
+    assert_eq!(first.payloads[1].delivered, 2);
+
+    fixture.set_first_activity_updated_at(chrono::Utc::now() - chrono::Duration::seconds(11));
+    let timed_out = runtime_payloads_for_item(
+        &fixture.scope,
+        &fixture.display_previews,
+        fixture.item_input(),
+        Some(first.item_cursor.runtime),
+        first.payloads[1].delivered,
+        8,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(timed_out.total, 2);
+    assert!(timed_out.payloads.is_empty());
+
+    let mut batch = WebuiProjectionBatch::new(WebuiProjectionCursor {
+        runtime_item: Some(first.item_cursor.runtime),
+        runtime_payloads_delivered: first.payloads[1].delivered,
+        ..Default::default()
+    });
+    let advanced = batch
+        .push_durable_runtime_payloads(
+            timed_out.final_cursor,
+            timed_out.item_cursor,
+            timed_out.payloads,
+            timed_out.total,
+            timed_out.already_delivered,
+        )
+        .unwrap();
+    assert!(advanced);
+    assert_eq!(batch.cursor.runtime, Some(fixture.cursor));
+    assert_eq!(batch.cursor.runtime_item, None);
+    assert_eq!(batch.cursor.runtime_payloads_delivered, 0);
+    assert_eq!(batch.payloads.len(), 1);
+    assert!(matches!(
+        batch.payloads[0].1,
+        ProductOutboundPayload::KeepAlive
+    ));
+}
+
+#[tokio::test]
+async fn webui_projection_with_pending_preview_on_first_activity_defers_second_activity() {
+    let now = chrono::Utc::now();
+    let mut fixture = PreviewProjectionFixture::completed("multi", "read_file", now);
+    let second = fixture.add_completed_activity(
+        "multi-second",
+        "list_files",
+        now,
+        ironclaw_events::EventCursor::new(2),
+    );
+    fixture.record_input("read_file");
+    fixture.record_input_for(&second, "list_files");
+    fixture.record_result_for(
+        &second,
+        "result:preview-multi-second",
+        serde_json::json!({"content": "src/main.rs\nCargo.toml"}),
+    );
+
+    let first = runtime_payloads_for_item(
+        &fixture.scope,
+        &fixture.display_previews,
+        fixture.item_input(),
+        None,
+        0,
+        8,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.total, 3);
+    assert_eq!(first.payloads.len(), 2);
+    assert!(matches!(
+        first.payloads[0].payload,
+        ProductOutboundPayload::ProjectionSnapshot { .. }
+    ));
+    assert!(matches!(
+        &first.payloads[1].payload,
+        ProductOutboundPayload::CapabilityActivity(activity)
+            if activity.invocation_id == fixture.invocation_id
+    ));
+
+    fixture.record_result(
+        "result:preview-multi-first",
+        serde_json::json!({"content": "fn main() {}"}),
+    );
+    let resumed = runtime_payloads_for_item(
+        &fixture.scope,
+        &fixture.display_previews,
+        fixture.item_input(),
+        Some(first.item_cursor.runtime),
+        first.payloads[1].delivered,
+        8,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(resumed.total, 5);
+    assert_eq!(resumed.payloads.len(), 3);
+    assert_eq!(resumed.payloads[0].delivered, 3);
+    assert_eq!(resumed.payloads[1].delivered, 4);
+    assert_eq!(resumed.payloads[2].delivered, 5);
+    assert!(matches!(
+        &resumed.payloads[0].payload,
+        ProductOutboundPayload::CapabilityDisplayPreview(preview)
+            if preview.result_ref.as_deref() == Some("result:preview-multi-first")
+    ));
+    assert!(matches!(
+        &resumed.payloads[1].payload,
+        ProductOutboundPayload::CapabilityActivity(activity)
+            if activity.invocation_id == second.invocation_id
+    ));
+    assert!(matches!(
+        &resumed.payloads[2].payload,
+        ProductOutboundPayload::CapabilityDisplayPreview(preview)
+            if preview.result_ref.as_deref() == Some("result:preview-multi-second")
+    ));
 }

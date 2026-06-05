@@ -399,11 +399,18 @@ impl WebuiProjectionBatch {
             return Ok(true);
         }
 
-        if already_delivered > 0 && already_delivered >= total {
+        if already_delivered > total {
             return Err(ProductAdapterError::InvalidIdentifier {
                 kind: "projection_cursor",
                 reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
             });
+        }
+        if already_delivered > 0 && already_delivered == total {
+            self.cursor.runtime = Some(max_projection_cursor(final_cursor, item_cursor));
+            self.cursor.runtime_item = None;
+            self.cursor.runtime_payloads_delivered = 0;
+            self.push(ProductOutboundPayload::KeepAlive);
+            return Ok(true);
         }
 
         let remaining_capacity =
@@ -761,7 +768,7 @@ async fn snapshot_payloads(
     let total = all_payloads.total();
     let already_delivered =
         effective_runtime_payload_offset(already_delivered, expected_item, item_cursor.runtime);
-    if already_delivered > 0 && already_delivered >= total {
+    if already_delivered > total {
         return Err(ProductAdapterError::InvalidIdentifier {
             kind: "projection_cursor",
             reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
@@ -801,7 +808,7 @@ async fn replay_payloads(
     let total = all_payloads.total();
     let already_delivered =
         effective_runtime_payload_offset(already_delivered, expected_item, item_cursor.runtime);
-    if already_delivered > 0 && already_delivered >= total {
+    if already_delivered > total {
         return Err(ProductAdapterError::InvalidIdentifier {
             kind: "projection_cursor",
             reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
@@ -865,7 +872,7 @@ async fn runtime_payloads_for_item(
     let total = all_payloads.total();
     let already_delivered =
         effective_runtime_payload_offset(already_delivered, expected_item, item_cursor.runtime);
-    if already_delivered > 0 && already_delivered >= total {
+    if already_delivered > total {
         return Err(ProductAdapterError::InvalidIdentifier {
             kind: "projection_cursor",
             reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
@@ -911,7 +918,7 @@ async fn runtime_payload_from_candidate(
                 StatePayloadKind::Snapshot => ProductOutboundPayload::ProjectionSnapshot { state },
                 StatePayloadKind::Update => ProductOutboundPayload::ProjectionUpdate { state },
             };
-            Ok(RuntimePayloadResolution::Payload(payload))
+            Ok(RuntimePayloadResolution::Payload(Box::new(payload)))
         }
         RuntimePayloadCandidate::CapabilityActivity(activity) => {
             CapabilityActivityView::new(CapabilityActivityViewInput {
@@ -930,14 +937,15 @@ async fn runtime_payload_from_candidate(
                 updated_at: activity.updated_at,
             })
             .map(ProductOutboundPayload::CapabilityActivity)
+            .map(Box::new)
             .map(RuntimePayloadResolution::Payload)
         }
         RuntimePayloadCandidate::CapabilityDisplayPreview(activity) => {
             match display_previews.preview_resolution(&activity).await {
                 Ok(CapabilityDisplayPreviewResolution::Ready(preview)) => {
-                    Ok(RuntimePayloadResolution::Payload(
-                        ProductOutboundPayload::CapabilityDisplayPreview(preview),
-                    ))
+                    Ok(RuntimePayloadResolution::Payload(Box::new(
+                        ProductOutboundPayload::CapabilityDisplayPreview(*preview),
+                    )))
                 }
                 Ok(CapabilityDisplayPreviewResolution::Pending) => {
                     Ok(RuntimePayloadResolution::Pending)
