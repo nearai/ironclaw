@@ -1263,7 +1263,7 @@ mod reborn_support_tests {
             .await
             .expect("tenant-b binding");
         assert_eq!(tenant_b_binding.tenant_id.as_str(), "tenant-b");
-        assert_ne!(tenant_b_binding.user_id, binding.user_id);
+        assert_ne!(tenant_b_binding.actor_user_id, binding.actor_user_id);
         assert_ne!(tenant_b_binding.thread_id, binding.thread_id);
     }
 

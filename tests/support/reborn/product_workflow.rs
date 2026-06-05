@@ -13,8 +13,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_workflow::{
     ActionFingerprintKey, ActionPhase, ConversationBindingService, IdempotencyDecision,
-    IdempotencyLedger, ProductInboundAction, ProductWorkflowError, ResolveBindingRequest,
-    ResolvedBinding,
+    IdempotencyLedger, ProductConversationRouteKind, ProductInboundAction, ProductWorkflowError,
+    ResolveBindingRequest, ResolvedBinding,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -194,9 +194,15 @@ where
             return Ok(stored.binding);
         }
 
+        let actor_user_id = user_id_for_binding(&self.scope.tenant_id, &request)?;
+        let subject_user_id = match request.route_kind {
+            ProductConversationRouteKind::Direct => Some(actor_user_id.clone()),
+            ProductConversationRouteKind::Shared => Some(self.scope.user_id.clone()),
+        };
         let binding = ResolvedBinding {
             tenant_id: self.scope.tenant_id.clone(),
-            user_id: user_id_for_binding(&self.scope.tenant_id, &request)?,
+            actor_user_id,
+            subject_user_id,
             thread_id: thread_id_for_binding(&self.scope, &request)?,
             agent_id: Some(self.agent_id.clone()),
             project_id: self.project_id.clone(),

@@ -804,11 +804,12 @@ impl RebornBinaryE2EHarness {
             &binding,
             route_kind_for_trigger(initial_trigger),
         )?;
-        let turn_scope = TurnScope::new(
+        let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
+            binding.subject_user_id.clone(),
         );
         let thread_harness = if let Some(storage) = shared_storage.as_ref() {
             RebornThreadHarness::filesystem_shared_backend(
@@ -1039,7 +1040,7 @@ impl RebornBinaryE2EHarness {
             binding.project_id.clone(),
             binding.thread_id.clone(),
         );
-        let actor = TurnActor::new(binding.user_id.clone());
+        let actor = TurnActor::new(binding.actor_user_id.clone());
         let ack = self.workflow.accept_inbound(envelope).await?;
         let run_id = match &ack {
             ProductInboundAck::Accepted {
@@ -1090,7 +1091,7 @@ impl RebornBinaryE2EHarness {
     ) -> HarnessResult<()> {
         self.resume_with_gate_as(
             self.turn_scope.clone(),
-            TurnActor::new(self.binding.user_id.clone()),
+            TurnActor::new(self.binding.actor_user_id.clone()),
             run_id,
             gate_ref,
             format!("resume-{run_id}"),
@@ -1128,7 +1129,7 @@ impl RebornBinaryE2EHarness {
     pub async fn cancel_blocked_turn(&self, run_id: TurnRunId) -> HarnessResult<()> {
         self.cancel_run_as(
             self.turn_scope.clone(),
-            TurnActor::new(self.binding.user_id.clone()),
+            TurnActor::new(self.binding.actor_user_id.clone()),
             run_id,
             format!("cancel-{run_id}"),
         )
@@ -2934,7 +2935,7 @@ fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessResult<ThreadS
 
 fn thread_scope_from_binding_with_route_kind(
     binding: &ResolvedBinding,
-    route_kind: ProductConversationRouteKind,
+    _route_kind: ProductConversationRouteKind,
 ) -> HarnessResult<ThreadScope> {
     Ok(ThreadScope {
         tenant_id: binding.tenant_id.clone(),
@@ -2943,10 +2944,7 @@ fn thread_scope_from_binding_with_route_kind(
             .clone()
             .ok_or("resolved binding missing agent id")?,
         project_id: binding.project_id.clone(),
-        owner_user_id: match route_kind {
-            ProductConversationRouteKind::Direct => Some(binding.user_id.clone()),
-            ProductConversationRouteKind::Shared => None,
-        },
+        owner_user_id: binding.subject_user_id.clone(),
         mission_id: None,
     })
 }
@@ -2976,9 +2974,13 @@ fn scoped_turns_fs<F>(
 where
     F: RootFilesystem,
 {
+    let owner_user_id = binding
+        .subject_user_id
+        .as_ref()
+        .unwrap_or(&binding.actor_user_id);
     let target = format!(
         "/engine/tenants/{}/users/{}/turns",
-        binding.tenant_id, binding.user_id
+        binding.tenant_id, owner_user_id
     );
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("valid turns alias"),
