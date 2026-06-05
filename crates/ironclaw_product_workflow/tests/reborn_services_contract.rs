@@ -869,12 +869,13 @@ impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
 }
 
 fn outbound_target_summary(target_id: &str) -> RebornOutboundDeliveryTargetSummary {
-    RebornOutboundDeliveryTargetSummary {
-        target_id: outbound_target_id(target_id),
-        channel: "slack".to_string(),
-        display_name: "Slack DM".to_string(),
-        description: Some("Slack direct message".to_string()),
-    }
+    RebornOutboundDeliveryTargetSummary::new(
+        outbound_target_id(target_id),
+        "slack",
+        "Slack DM",
+        Some("Slack direct message".to_string()),
+    )
+    .expect("valid target summary")
 }
 
 fn outbound_target_id(target_id: &str) -> RebornOutboundDeliveryTargetId {
@@ -4051,8 +4052,7 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
 
 #[tokio::test]
 async fn get_outbound_preferences_unwired_returns_empty_projection() {
-    // large_file: outbound preference tests stay in this caller-level facade
-    // suite so the shared RebornServices fakes keep coverage at the API seam.
+    // arch-exempt: large_file, outbound pref tests belong at API seam, plan docs/plans/2026-06-05-trigger-delivery-default-outbound-e2e-plan.md.
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
@@ -4068,6 +4068,101 @@ async fn get_outbound_preferences_unwired_returns_empty_projection() {
         response.default_modality,
         RebornOutboundDeliveryModality::Text
     );
+}
+
+#[test]
+fn outbound_delivery_modality_text_round_trips_as_text() {
+    let serialized = serde_json::to_value(RebornOutboundDeliveryModality::Text)
+        .expect("serialize text modality");
+    assert_eq!(serialized, json!("text"));
+
+    let deserialized: RebornOutboundDeliveryModality =
+        serde_json::from_value(serialized).expect("deserialize text modality");
+    assert_eq!(deserialized, RebornOutboundDeliveryModality::Text);
+}
+
+#[test]
+fn set_outbound_preferences_empty_json_defaults_final_target_to_none() {
+    let request: RebornSetOutboundPreferencesRequest =
+        serde_json::from_value(json!({})).expect("deserialize empty preferences request");
+
+    assert!(request.final_reply_target_id.is_none());
+}
+
+#[test]
+fn outbound_target_summary_preserves_browser_json_shape() {
+    let summary = outbound_target_summary("slack-dm-alpha");
+
+    let serialized = serde_json::to_value(&summary).expect("serialize target summary");
+    assert_eq!(
+        serialized,
+        json!({
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        })
+    );
+
+    let deserialized: RebornOutboundDeliveryTargetSummary =
+        serde_json::from_value(serialized).expect("deserialize target summary");
+    assert_eq!(deserialized.target_id.as_str(), "slack-dm-alpha");
+    assert_eq!(deserialized.channel.as_str(), "slack");
+    assert_eq!(deserialized.display_name.as_str(), "Slack DM");
+    assert_eq!(
+        deserialized
+            .description
+            .as_ref()
+            .map(|description| description.as_str()),
+        Some("Slack direct message")
+    );
+}
+
+#[test]
+fn outbound_target_summary_rejects_malformed_display_fields() {
+    for (field, invalid_value) in [
+        ("channel", json!("")),
+        ("channel", json!("slack\ninjected")),
+        ("display_name", json!("")),
+        ("display_name", json!("Slack DM\u{0000}")),
+        ("description", json!("Slack direct\rmessage")),
+    ] {
+        let mut payload = json!({
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        });
+        payload[field] = invalid_value;
+
+        serde_json::from_value::<RebornOutboundDeliveryTargetSummary>(payload)
+            .expect_err("malformed target summary display field");
+    }
+
+    for (field, invalid_value) in [
+        ("channel", json!("a".repeat(129))),
+        ("display_name", json!("a".repeat(257))),
+        ("description", json!("a".repeat(1025))),
+    ] {
+        let mut payload = json!({
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        });
+        payload[field] = invalid_value;
+
+        serde_json::from_value::<RebornOutboundDeliveryTargetSummary>(payload)
+            .expect_err("oversized target summary display field");
+    }
+
+    RebornOutboundDeliveryTargetSummary::new(
+        outbound_target_id("slack-dm-alpha"),
+        "slack",
+        "Slack DM\ninjected",
+        None,
+    )
+    .expect_err("constructor rejects malformed display field");
 }
 
 #[tokio::test]
