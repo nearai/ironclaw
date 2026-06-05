@@ -16,11 +16,11 @@ use ironclaw_host_api::{
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_turns::{
-    AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
-    IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef, RunProfileRequest,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnCoordinator, TurnError, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
-    TurnStatus,
+    AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
+    GetRunStateRequest, IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef,
+    RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError, TurnId,
+    TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
     runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
 };
 use secrecy::SecretString;
@@ -59,8 +59,30 @@ impl TurnCoordinator for ErrorTurnCoordinator {
         panic!("cancel_run is not used by auth continuation error mapping tests");
     }
 
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        panic!("get_run_state is not used by auth continuation error mapping tests");
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Ok(auth_error_mapping_run_state(&request))
+    }
+}
+
+fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
+    TurnRunState {
+        scope: request.scope.clone(),
+        actor: Some(TurnActor::new(UserId::new("alice").unwrap())), // safety: fixed test user id literal is valid.
+        turn_id: TurnId::new(),
+        run_id: request.run_id,
+        status: TurnStatus::BlockedAuth,
+        accepted_message_ref: AcceptedMessageRef::new("message-auth-error").unwrap(), // safety: fixed test binding literal is valid.
+        source_binding_ref: SourceBindingRef::new("source-auth-error").unwrap(), // safety: fixed test binding literal is valid.
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-error").unwrap(), // safety: fixed test binding literal is valid.
+        resolved_run_profile_id: RunProfileId::default_profile(),
+        resolved_run_profile_version: RunProfileVersion::new(1),
+        resolved_model_route: None,
+        received_at: Utc::now(),
+        checkpoint_id: None,
+        gate_ref: Some(GateRef::new("gate:auth-error").unwrap()), // safety: fixed test gate literal is valid.
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor::default(),
     }
 }
 
@@ -258,12 +280,9 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
         .expect("run state");
     assert_eq!(state.status, TurnStatus::Queued);
     assert_eq!(state.gate_ref, None);
-    assert!(
-        state
-            .source_binding_ref
-            .as_str()
-            .starts_with("auth-continuation-src:")
-    );
+    assert_eq!(state.source_binding_ref.as_str(), "source-auth-callback"); // safety: verifies fixed test binding literal is preserved.
+    let reply_binding_ref = state.reply_target_binding_ref.as_str();
+    assert_eq!(reply_binding_ref, "reply-auth-callback"); // safety: verifies fixed test binding literal is preserved.
 }
 
 #[tokio::test]
@@ -534,11 +553,12 @@ async fn oauth_callback_continuation_dispatch_maps_turn_error_categories() {
 
 #[cfg(test)]
 fn turn_scope() -> TurnScope {
-    TurnScope::new(
+    TurnScope::new_with_owner(
         TenantId::new("tenant-auth").unwrap(),
         Some(AgentId::new("agent-auth").unwrap()),
         Some(ProjectId::new("project-auth").unwrap()),
         ThreadId::new("thread-auth").unwrap(),
+        Some(UserId::new("alice").unwrap()), // safety: fixed test user id literal is valid.
     )
 }
 
