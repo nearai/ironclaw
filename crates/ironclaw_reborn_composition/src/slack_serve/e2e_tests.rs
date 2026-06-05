@@ -658,8 +658,11 @@ async fn slack_thread_auth_deny_with_bot_mention_cancels_auth_gate_without_agent
     assert_eq!(auths[0].gate_ref.as_str(), AUTH_GATE); // safety: length asserted above.
     let submitted_turn_count = harness.coordinator.submitted_turn_count();
     assert_eq!(submitted_turn_count, 1); // safety: Slack E2E turn routing assertion.
-    let slack_message_count = harness.slack_messages().len();
-    assert_eq!(slack_message_count, 1); // safety: Slack E2E delivery assertion.
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2); // safety: Slack E2E delivery assertion.
+    assert_eq!(messages[1]["channel"], "C123");
+    assert_eq!(messages[1]["thread_ts"], "1710000000.000009");
+    assert_eq!(messages[1]["text"], "Authentication canceled.");
 }
 
 #[tokio::test]
@@ -690,8 +693,11 @@ async fn slack_dm_thread_auth_deny_cancels_base_dm_auth_gate_without_agent_turn(
     assert_eq!(auths[0].gate_ref.as_str(), AUTH_GATE); // safety: length asserted above.
     let submitted_turn_count = harness.coordinator.submitted_turn_count();
     assert_eq!(submitted_turn_count, 1); // safety: Slack E2E turn routing assertion.
-    let slack_message_count = harness.slack_messages().len();
-    assert_eq!(slack_message_count, 1); // safety: Slack E2E delivery assertion.
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2); // safety: Slack E2E delivery assertion.
+    assert_eq!(messages[1]["channel"], CHANNEL);
+    assert_eq!(messages[1]["thread_ts"], "1710000001.123456");
+    assert_eq!(messages[1]["text"], "Authentication canceled.");
 }
 
 #[derive(Debug, Clone)]

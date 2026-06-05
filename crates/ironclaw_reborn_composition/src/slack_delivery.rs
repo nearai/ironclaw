@@ -49,6 +49,7 @@ const SLACK_RUN_POLL_JITTER_BUCKETS: u32 = 5;
 const SLACK_API_HOST: &str = "slack.com";
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_WORKING_MESSAGE: &str = "Ironclaw is thinking...";
+const SLACK_AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockedActionableMarker {
@@ -117,6 +118,15 @@ impl SlackFinalReplyDeliveryObserver {
         envelope: ProductInboundEnvelope,
         ack: ProductInboundAck,
     ) -> Result<(), SlackFinalReplyDeliveryError> {
+        if is_accepted_auth_denial(&envelope, &ack) {
+            post_slack_message(
+                self.services.egress.as_ref(),
+                envelope.external_conversation_ref(),
+                SLACK_AUTH_CANCELED_MESSAGE,
+            )
+            .await?;
+            return Ok(());
+        }
         if !should_deliver_after_ack(&envelope, &ack) {
             return Ok(());
         }
@@ -818,6 +828,18 @@ fn should_deliver_after_ack(envelope: &ProductInboundEnvelope, ack: &ProductInbo
         ProductInboundPayload::ScopedApprovalResolution(payload)
             if payload.decision == ironclaw_product_adapters::ApprovalDecision::Deny
     )
+}
+
+fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInboundAck) -> bool {
+    submitted_run_id(ack).is_some()
+        && matches!(
+            envelope.payload(),
+            ProductInboundPayload::AuthResolution(payload)
+                if matches!(
+                    &payload.result,
+                    ironclaw_product_adapters::AuthResolutionResult::Denied
+                )
+        )
 }
 
 fn turn_scope_from_thread_scope(
