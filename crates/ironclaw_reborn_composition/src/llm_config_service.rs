@@ -213,6 +213,10 @@ impl RebornLlmConfigService {
                     .as_ref()
                     .map(|meta| meta.api_key_required)
                     .unwrap_or(false),
+                accepts_api_key: metadata
+                    .as_ref()
+                    .map(|meta| meta.accepts_api_key)
+                    .unwrap_or(false),
                 api_key_set,
                 can_list_models: metadata
                     .as_ref()
@@ -1290,6 +1294,31 @@ mod tests {
             "overlay edits must not make built-ins custom"
         );
         assert!(openai.api_key_set);
+    }
+
+    #[tokio::test]
+    async fn nearai_snapshot_exposes_api_key_as_supported_but_not_required() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let service = RebornLlmConfigService::new(boot, key_store());
+
+        let snapshot = service.snapshot(caller()).await.expect("snapshot");
+        let nearai = snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.id == "nearai")
+            .expect("nearai provider in snapshot");
+
+        assert!(nearai.builtin);
+        assert!(
+            nearai.accepts_api_key,
+            "NEAR AI supports API-key auth in addition to session-token login"
+        );
+        assert!(
+            !nearai.api_key_required,
+            "NEAR AI session-token login means API key is not the only setup path"
+        );
     }
 
     #[tokio::test]

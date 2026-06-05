@@ -4,6 +4,13 @@ use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
+#[cfg(feature = "webui-v2-beta")]
+use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
+#[cfg(feature = "webui-v2-beta")]
+use ironclaw_reborn_composition::{
+    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
+    open_local_trigger_access_store,
+};
 use ironclaw_reborn_composition::{
     OAuthClientConfig, PollSettings, RebornBuildInput, RebornCompositionProfile,
     RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
@@ -70,13 +77,16 @@ pub(crate) fn execute(
 ) -> anyhow::Result<()> {
     let runtime_input =
         build_runtime_input_with_options(context.boot_config(), RuntimeInputCaller::Run, options)?;
+    let boot_config = context.boot_config().clone();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async move {
+        let runtime_input =
+            with_run_local_trigger_fire_access_checker(runtime_input, &boot_config).await?;
         let runtime = build_reborn_runtime(runtime_input).await?;
-        print_runtime_banner(context.boot_config());
+        print_runtime_banner(&boot_config);
 
         let conversation = runtime.new_conversation().await?;
         let cancellation = install_ctrl_c_cancellation();
@@ -91,6 +101,62 @@ pub(crate) fn execute(
         outcome
     })?;
     Ok(())
+}
+
+async fn with_run_local_trigger_fire_access_checker(
+    runtime_input: RebornRuntimeInput,
+    config: &RebornBootConfig,
+) -> anyhow::Result<RebornRuntimeInput> {
+    #[cfg(not(feature = "webui-v2-beta"))]
+    {
+        let _ = config;
+        return Ok(runtime_input);
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    {
+        if !runtime_input.trigger_poller.enabled {
+            return Ok(runtime_input);
+        }
+
+        let config_file = read_config_file(config)?;
+        let tenant_id = TenantId::new(&runtime_input.identity.tenant_id).with_context(|| {
+            format!(
+                "[identity].tenant `{}` is invalid",
+                runtime_input.identity.tenant_id
+            )
+        })?;
+        let user_id = UserId::new(default_owner_id(config_file.as_ref()))
+            .context("[identity].default_owner is invalid")?;
+        let agent_id = AgentId::new(&runtime_input.identity.agent_id).with_context(|| {
+            format!(
+                "[identity].default_agent `{}` is invalid",
+                runtime_input.identity.agent_id
+            )
+        })?;
+        let user_store_path = config
+            .home()
+            .path()
+            .join("local-dev")
+            .join("reborn-local-dev.db");
+        let access_store = open_local_trigger_access_store(&user_store_path)
+            .await
+            .context("failed to initialize local trigger-fire access store for `run`")?;
+        let user_ids = [user_id];
+        access_store
+            .reconcile_local_access(LocalTriggerAccessReconciliation {
+                tenant_id: &tenant_id,
+                user_ids: &user_ids,
+                agent_id: Some(&agent_id),
+                project_id: None,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevRunBootstrap,
+            })
+            .await
+            .context("failed to reconcile local trigger-fire access for `run`")?;
+
+        Ok(runtime_input.with_trigger_fire_access_checker(access_store))
+    }
 }
 
 fn print_runtime_banner(config: &RebornBootConfig) {
@@ -549,11 +615,11 @@ fn reject_unsupported_runtime_sections(
         return Ok(());
     };
 
-    // `[identity].default_project` is parsed but not yet wired into
-    // the generic runtime slice — `run` / `repl` would silently drop
-    // the value, so we fail-loud. The `serve` subcommand DOES consume
-    // it (stamped onto every `WebUiAuthenticatedCaller`), so for that
-    // caller the field is supported, not "parsed but not wired".
+    // `[identity].default_project` is parsed but not yet wired into the
+    // generic runtime slice — `run` / `repl` would silently drop the value,
+    // so we fail-loud. The `serve` subcommand DOES consume it (stamped onto
+    // every `WebUiAuthenticatedCaller`), so for that caller the field is
+    // supported, not "parsed but not wired".
     if let Some(identity) = file.identity.as_ref()
         && identity.default_project.is_some()
         && caller != RuntimeInputCaller::Serve
@@ -613,9 +679,13 @@ mod tests {
     use std::collections::HashMap;
 
     use ironclaw_reborn_composition::RebornCompositionProfile;
+    #[cfg(feature = "webui-v2-beta")]
+    use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_config::RebornBootConfig;
 
     use super::test_env::{EnvGuard, lock_trigger_env};
+    #[cfg(feature = "webui-v2-beta")]
+    use super::with_run_local_trigger_fire_access_checker;
     use super::{
         RuntimeInputCaller, RuntimeInputOptions, block_on_cli, build_runtime_input,
         build_runtime_input_with_options, resolve_google_oauth_config,
@@ -795,6 +865,172 @@ default_project = "project-alpha"
         assert!(
             err.to_string().contains("default_project"),
             "error must mention the rejected field, got: {err}",
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_for_run_rejects_default_project_when_trigger_poller_enabled() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[identity]
+default_project = "project-alpha"
+
+[trigger_poller]
+enabled = true
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("run must reject default_project even when trigger poller is enabled");
+        assert!(
+            err.to_string().contains("default_project"),
+            "error must mention the rejected field, got: {err}",
+        );
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[allow(clippy::await_holding_lock, reason = "serializes env guards")]
+    #[tokio::test]
+    async fn run_trigger_poller_bootstrap_seeds_local_access_checker() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[identity]
+tenant = "run-trigger-tenant"
+default_owner = "run-trigger-user"
+default_agent = "run-trigger-agent"
+
+[trigger_poller]
+enabled = true
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        let tenant_id = ironclaw_reborn_composition::host_api::TenantId::new("run-trigger-tenant")
+            .expect("tenant id");
+        let user_id = ironclaw_reborn_composition::host_api::UserId::new("run-trigger-user")
+            .expect("user id");
+        let stale_user_id = ironclaw_reborn_composition::host_api::UserId::new("run-trigger-stale")
+            .expect("stale user id");
+        let agent_id = ironclaw_reborn_composition::host_api::AgentId::new("run-trigger-agent")
+            .expect("agent id");
+        let project_id =
+            ironclaw_reborn_composition::host_api::ProjectId::new("run-trigger-project")
+                .expect("project id");
+        let user_store_path = config
+            .home()
+            .path()
+            .join("local-dev")
+            .join("reborn-local-dev.db");
+        let access_store =
+            ironclaw_reborn_composition::open_local_trigger_access_store(&user_store_path)
+                .await
+                .expect("open local trigger access store");
+        access_store
+            .seed_local_access(ironclaw_reborn_composition::LocalTriggerAccessSeed {
+                tenant_id: &tenant_id,
+                user_id: &stale_user_id,
+                agent_id: Some(&agent_id),
+                project_id: None,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevRunBootstrap,
+            })
+            .await
+            .expect("seed stale run trigger access");
+
+        let runtime_input = with_run_local_trigger_fire_access_checker(runtime_input, &config)
+            .await
+            .expect("bootstrap run trigger fire access checker");
+
+        let checker = runtime_input
+            .trigger_fire_access_checker
+            .expect("checker is wired");
+        let allowed = checker
+            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
+                tenant_id: tenant_id.clone(),
+                creator_user_id: user_id,
+                agent_id: Some(agent_id.clone()),
+                project_id: None,
+                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check run trigger fire access");
+        assert_eq!(
+            allowed,
+            ironclaw_reborn_composition::TriggerFireAccessDecision::Allowed
+        );
+
+        let project_scoped_decision = checker
+            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
+                tenant_id: tenant_id.clone(),
+                creator_user_id: ironclaw_reborn_composition::host_api::UserId::new(
+                    "run-trigger-user",
+                )
+                .expect("user id"),
+                agent_id: Some(agent_id.clone()),
+                project_id: Some(project_id.clone()),
+                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check project-scoped run trigger fire access");
+        assert_eq!(
+            project_scoped_decision,
+            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
+                reason: "trigger creator does not have active local access for this scope"
+                    .to_string(),
+            }
+        );
+
+        let stale_decision = checker
+            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id: stale_user_id,
+                agent_id: Some(agent_id),
+                project_id: None,
+                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check stale run trigger fire access");
+        assert_eq!(
+            stale_decision,
+            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
+                reason: "trigger creator does not have active local access for this scope"
+                    .to_string(),
+            }
         );
     }
 

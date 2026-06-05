@@ -779,6 +779,82 @@ async fn auth_callback_and_denied_payloads_route_through_auth_interaction_servic
 }
 
 #[tokio::test]
+async fn auth_deny_from_threaded_direct_prompt_uses_base_direct_binding() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            TenantId::new("tenant:alpha").expect("tenant"),
+            ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+            ironclaw_conversations::AdapterInstallationId::new("install_alpha")
+                .expect("installation"),
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let binding = product_binding_service(
+        conversations,
+        vec![(
+            "test_adapter",
+            "install_alpha",
+            "tenant:alpha",
+            "agent:alpha",
+            Some("project:alpha"),
+        )],
+    );
+    let base_envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:seed-direct").expect("event"),
+        ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+        ExternalConversationRef::new(None, "conv1", None, None).expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("needs auth", vec![], ProductTriggerReason::DirectChat)
+                .expect("message"),
+        ),
+    );
+    let base_binding = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&base_envelope))
+        .await
+        .expect("seed base direct conversation binding");
+    let gate_ref = GateRef::new("gate:auth-direct-thread").expect("auth gate");
+    let auth_service = Arc::new(RecordingAuthInteractionService::new(
+        gate_ref.clone(),
+        TurnRunId::new(),
+    ));
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        Arc::new(binding),
+    )
+    .with_auth_interaction_service(auth_service.clone());
+    let threaded_deny = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:threaded-auth-deny").expect("event"),
+        ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+        ExternalConversationRef::new(None, "conv1", Some("prompt-thread-ts"), Some("reply-ts"))
+            .expect("conversation"),
+        ProductInboundPayload::AuthResolution(
+            AuthResolutionPayload::new(gate_ref.as_str(), AuthResolutionResult::Denied)
+                .expect("auth payload")
+                .with_source_trigger(ProductTriggerReason::DirectChat),
+        ),
+    );
+
+    let ack = workflow
+        .accept_inbound(threaded_deny)
+        .await
+        .expect("threaded direct auth deny should use base binding");
+
+    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
+    let resolutions = auth_service.resolutions();
+    assert_eq!(resolutions.len(), 1);
+    assert_eq!(resolutions[0].gate_ref, gate_ref);
+    assert_eq!(resolutions[0].decision, AuthInteractionDecision::Deny);
+    assert_eq!(resolutions[0].scope.thread_id, base_binding.thread_id);
+}
+
+#[tokio::test]
 async fn approval_resolution_idempotency_key_is_stable_for_same_external_event() {
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
     let build = || {

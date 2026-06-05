@@ -153,6 +153,7 @@ pub use ironclaw_skills::{
     ManagedSkillSource as RebornSkillSource, SkillSummary as RebornSkillSummary,
     skill_summary_json as reborn_skill_summary_json,
 };
+pub use ironclaw_triggers::TriggerId;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
@@ -198,7 +199,8 @@ pub use runtime::{
 pub use runtime_input::ResolvedRebornLlm;
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
-    RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, TurnRunnerSettings,
+    RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck, TriggerFireAccessChecker,
+    TriggerFireAccessDecision, TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "slack-v2-host-beta")]
@@ -276,15 +278,60 @@ pub mod host_api {
     pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 }
 
+/// Reborn-owned local trigger-fire access store, re-exported so host
+/// binaries reach it through this composition facade instead of taking a
+/// direct `ironclaw_reborn` dependency (the
+/// `reborn_cli_binary_crate_stays_separate_from_v1_root` architecture
+/// boundary forbids that). The store is a reborn-owned repository;
+/// [`open_local_trigger_access_store`] opens it so the libSQL substrate handle
+/// stays private to this facade and callers never construct one.
+#[cfg(feature = "webui-v2-beta")]
+pub use ironclaw_reborn::local_trigger_access::{
+    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
+    LocalTriggerAccessSource, RebornLibSqlLocalTriggerAccessStore,
+    RebornLocalTriggerAccessStoreError,
+};
+
+#[cfg(feature = "webui-v2-beta")]
+#[async_trait::async_trait]
+impl runtime_input::TriggerFireAccessChecker for RebornLibSqlLocalTriggerAccessStore {
+    async fn check_trigger_fire_access(
+        &self,
+        request: runtime_input::TriggerFireAccessCheck,
+    ) -> Result<runtime_input::TriggerFireAccessDecision, runtime_input::TriggerFireAccessError>
+    {
+        self.has_active_local_access(
+            &request.tenant_id,
+            &request.creator_user_id,
+            request.agent_id.as_ref(),
+            request.project_id.as_ref(),
+        )
+        .await
+        .map_err(|error| runtime_input::TriggerFireAccessError::Unavailable {
+            reason: error.to_string(),
+        })
+        .map(|allowed| {
+            if allowed {
+                runtime_input::TriggerFireAccessDecision::Allowed
+            } else {
+                runtime_input::TriggerFireAccessDecision::Denied {
+                    reason: "trigger creator does not have active local access for this scope"
+                        .to_string(),
+                }
+            }
+        })
+    }
+}
+
 /// Canonical Reborn identity resolver vocabulary (issue #4381): the one
 /// boundary that maps every external identity — WebUI OAuth logins and
 /// external channel/product actors — to a stable `UserId` before runtime
 /// state is touched. Only the resolver trait, request, surface, and error
 /// types are re-exported so host wiring (`ironclaw-reborn serve`, the CLI
 /// `UserDirectory` adapter) depends on the facade vocabulary, never on
-/// `ironclaw_reborn_identity` directly. The concrete libSQL store and its
-/// persistence record types stay private to this composition layer
-/// (composition CLAUDE.md: "keep lower substrate handles private").
+/// `ironclaw_reborn_identity` directly. The concrete filesystem-backed store
+/// stays private to this composition layer (composition CLAUDE.md: "keep
+/// lower substrate handles private").
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn_identity::{
     ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind, RebornIdentityError,
@@ -328,6 +375,93 @@ pub fn open_reborn_identity_resolver(
             None,
         ),
     )
+}
+
+/// Open the reborn-owned local trigger access store on the substrate DB at
+/// `path`, creating the parent directory and running its idempotent
+/// migrations.
+#[cfg(feature = "webui-v2-beta")]
+pub async fn open_local_trigger_access_store(
+    path: &std::path::Path,
+) -> Result<std::sync::Arc<RebornLibSqlLocalTriggerAccessStore>, RebornLocalTriggerAccessStoreError>
+{
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| RebornLocalTriggerAccessStoreError::Backend(err.to_string()))?;
+    }
+    let db = std::sync::Arc::new(
+        libsql::Builder::new_local(path)
+            .build()
+            .await
+            .map_err(|err| RebornLocalTriggerAccessStoreError::Backend(err.to_string()))?,
+    );
+    Ok(std::sync::Arc::new(
+        RebornLibSqlLocalTriggerAccessStore::open(db).await?,
+    ))
+}
+
+#[cfg(all(test, feature = "webui-v2-beta"))]
+mod webui_user_access_checker_tests {
+    use super::*;
+    use crate::runtime_input::{
+        TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
+    };
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+
+    #[tokio::test]
+    async fn user_store_trigger_fire_checker_uses_exact_seeded_scope() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let store = open_local_trigger_access_store(&root.path().join("reborn-local-dev.db"))
+            .await
+            .expect("open local trigger access store");
+        let tenant_id = TenantId::new("checker-tenant").expect("tenant id");
+        let user_id = UserId::new("checker-user").expect("user id");
+        let other_user_id = UserId::new("checker-other-user").expect("user id");
+        let agent_id = AgentId::new("checker-agent").expect("agent id");
+        let project_id = ProjectId::new("checker-project").expect("project id");
+
+        store
+            .seed_local_access(LocalTriggerAccessSeed {
+                tenant_id: &tenant_id,
+                user_id: &user_id,
+                agent_id: Some(&agent_id),
+                project_id: Some(&project_id),
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
+            })
+            .await
+            .expect("seed local access");
+
+        let allowed = store
+            .check_trigger_fire_access(TriggerFireAccessCheck {
+                tenant_id: tenant_id.clone(),
+                creator_user_id: user_id,
+                agent_id: Some(agent_id.clone()),
+                project_id: Some(project_id.clone()),
+                trigger_id: TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check access");
+        assert_eq!(allowed, TriggerFireAccessDecision::Allowed);
+
+        let denied = store
+            .check_trigger_fire_access(TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id: other_user_id,
+                agent_id: Some(agent_id),
+                project_id: Some(project_id),
+                trigger_id: TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check access");
+        assert!(matches!(
+            denied,
+            TriggerFireAccessDecision::Denied { reason }
+                if reason.contains("does not have active local access")
+        ));
+    }
 }
 
 /// Reborn model purpose slot names exposed for diagnostic callers.

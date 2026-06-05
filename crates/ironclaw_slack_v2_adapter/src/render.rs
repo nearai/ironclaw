@@ -51,7 +51,12 @@ pub fn render_final_reply(
     view: &FinalReplyView,
     credential_handle: EgressCredentialHandle,
 ) -> Result<EgressRequest, SlackRenderError> {
-    render_text_message(target, view.text.clone(), credential_handle)
+    render_text_message(
+        target,
+        render_slack_mrkdwn(&view.text),
+        true,
+        credential_handle,
+    )
 }
 
 pub fn render_gate_prompt(
@@ -67,6 +72,7 @@ pub fn render_gate_prompt(
             view.body,
             gate_prompt_reply_instruction(target, &view.gate_ref)
         ),
+        false,
         credential_handle,
     )
 }
@@ -86,7 +92,7 @@ pub fn render_auth_prompt(
         text.push_str("\n\nSetup link: ");
         text.push_str(url);
     }
-    render_text_message(target, text, credential_handle)
+    render_text_message(target, text, false, credential_handle)
 }
 
 fn gate_prompt_reply_instruction(target: &ProductOutboundTarget, gate_ref: &str) -> String {
@@ -119,13 +125,14 @@ fn requires_app_mention(target: &ProductOutboundTarget) -> bool {
 fn render_text_message(
     target: &ProductOutboundTarget,
     text: String,
+    mrkdwn: bool,
     credential_handle: EgressCredentialHandle,
 ) -> Result<EgressRequest, SlackRenderError> {
     let reply = slack_reply_target(target)?;
     let body = ChatPostMessageRequest {
         channel: reply.channel,
         text,
-        mrkdwn: false,
+        mrkdwn,
         thread_ts: reply.thread_ts,
     };
     let body_bytes = serde_json::to_vec(&body).map_err(|err| SlackRenderError::Serialization {
@@ -137,6 +144,126 @@ fn render_text_message(
         body_bytes,
         credential_handle,
     ))
+}
+
+fn render_slack_mrkdwn(markdown: &str) -> String {
+    let mut rendered = String::with_capacity(markdown.len());
+    let lines = markdown.lines().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < lines.len() {
+        if is_markdown_table_separator(lines[index]) {
+            index += 1;
+            continue;
+        }
+        let line = lines[index];
+        let converted = if is_markdown_table_row(line) {
+            render_table_row(line)
+        } else {
+            render_slack_mrkdwn_line(line)
+        };
+        rendered.push_str(&converted);
+        if index + 1 < lines.len() {
+            rendered.push('\n');
+        }
+        index += 1;
+    }
+    rendered
+}
+
+fn render_slack_mrkdwn_line(line: &str) -> String {
+    let line = strip_heading_marker(line);
+    let line = convert_markdown_links(line);
+    convert_markdown_bold(&line)
+}
+
+fn strip_heading_marker(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return line;
+    }
+    let hash_count = trimmed.chars().take_while(|ch| *ch == '#').count();
+    if !(1..=6).contains(&hash_count) {
+        return line;
+    }
+    let rest = &trimmed[hash_count..];
+    let Some(rest) = rest.strip_prefix(' ') else {
+        return line;
+    };
+    rest
+}
+
+fn convert_markdown_links(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < line.len() {
+        if bytes[index] == b'['
+            && let Some(label_end_rel) = line[index + 1..].find(']')
+        {
+            let label_end = index + 1 + label_end_rel;
+            if line[label_end..].starts_with("](")
+                && let Some(url_end_rel) = line[label_end + 2..].find(')')
+            {
+                let label = &line[index + 1..label_end];
+                let url_end = label_end + 2 + url_end_rel;
+                let url = &line[label_end + 2..url_end];
+                if is_safe_slack_link_url(url) {
+                    out.push('<');
+                    out.push_str(url);
+                    out.push('|');
+                    out.push_str(label);
+                    out.push('>');
+                    index = url_end + 1;
+                    continue;
+                }
+            }
+        }
+        let Some(ch) = line[index..].chars().next() else {
+            break;
+        };
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+fn is_safe_slack_link_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+fn convert_markdown_bold(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    for (index, part) in line.split("**").enumerate() {
+        if index > 0 {
+            out.push('*');
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+fn is_markdown_table_row(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.matches('|').count() >= 2
+}
+
+fn is_markdown_table_separator(line: &str) -> bool {
+    if !is_markdown_table_row(line) {
+        return false;
+    }
+    line.trim().trim_matches('|').split('|').all(|cell| {
+        let cell = cell.trim();
+        !cell.is_empty() && cell.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
+    })
+}
+
+fn render_table_row(line: &str) -> String {
+    line.trim()
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| render_slack_mrkdwn_line(cell.trim()))
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 #[derive(Debug, Serialize)]
@@ -218,8 +345,31 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(request.body()).expect("body json");
         assert_eq!(body["channel"], "C123");
         assert_eq!(body["text"], "hello Slack");
-        assert_eq!(body["mrkdwn"], false);
+        assert_eq!(body["mrkdwn"], true);
         assert_eq!(body["thread_ts"], "1710000000.000001");
+    }
+
+    #[test]
+    fn final_reply_renders_common_markdown_as_slack_mrkdwn() {
+        let view = FinalReplyView {
+            turn_run_id: TurnRunId::new(),
+            text: "Here are your top Notion docs:\n\n### Top Priority Docs\n\n1. **NEAR AI Engineering Weekly Updates** ([link](https://www.notion.com/p/abc))\n   - \"Multi tenancy for migrating from Railway => top priority\"\n\n| Doc | Highlight |\n|---|---|\n| **Priority Agents** | Priority Agents |"
+                .to_string(),
+            generated_at: Utc::now(),
+        };
+
+        let request = render_final_reply(&target("C123", None), &view, handle()).expect("render");
+        let body: serde_json::Value = serde_json::from_slice(request.body()).expect("body json");
+
+        assert_eq!(body["mrkdwn"], true);
+        let text = body["text"].as_str().expect("text");
+        assert!(text.contains("Top Priority Docs"));
+        assert!(!text.contains("###"));
+        assert!(text.contains("*NEAR AI Engineering Weekly Updates*"));
+        assert!(text.contains("<https://www.notion.com/p/abc|link>"));
+        assert!(!text.contains("|---|---|"));
+        assert!(text.contains("Doc | Highlight"));
+        assert!(text.contains("*Priority Agents* | Priority Agents"));
     }
 
     #[test]

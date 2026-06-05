@@ -558,6 +558,7 @@ fn llm_snapshot(provider_id: &str) -> LlmConfigSnapshot {
             active: true,
             active_model: Some("model-a".to_string()),
             api_key_required: true,
+            accepts_api_key: true,
             api_key_set: true,
             can_list_models: true,
         }],
@@ -1321,6 +1322,8 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
         .await
         .expect("oneshot");
     assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = read_json(get_response).await;
+    assert_eq!(get_body["providers"][0]["accepts_api_key"], true);
 
     let upsert_response = router
         .clone()

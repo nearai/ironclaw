@@ -195,6 +195,9 @@ pub struct LlmProviderView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_model: Option<String>,
     pub api_key_required: bool,
+    /// Whether this provider supports API-key auth at all. This can be true
+    /// even when `api_key_required` is false for dual-auth providers.
+    pub accepts_api_key: bool,
     /// Whether an API-key value is stored for this provider (never the value).
     pub api_key_set: bool,
     pub can_list_models: bool,

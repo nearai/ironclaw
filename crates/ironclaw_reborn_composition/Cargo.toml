@@ -42,6 +42,7 @@ webui-v2-beta = [
     "dep:ironclaw_webui_v2_static",
     "ironclaw_webui_v2_static/webui-v2-beta",
     "dep:ironclaw_reborn_identity",
+    "ironclaw_reborn/webui-user-store",
     "libsql",
     "dep:axum",
     "dep:tower",

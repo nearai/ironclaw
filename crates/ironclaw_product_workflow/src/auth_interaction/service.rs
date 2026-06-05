@@ -6,8 +6,8 @@ use ironclaw_auth::{
     CredentialAccountId, CredentialSelectionInput,
 };
 use ironclaw_turns::{
-    CancelRunRequest, GateRef, ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    CancelRunRequest, GateRef, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    SanitizedCancelReason, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
 use super::types::is_pending_auth_status;
@@ -15,9 +15,7 @@ use super::{
     AuthGateRecord, AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionScope,
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, auth_rejected,
-    auth_reply_binding_ref, auth_source_binding_ref,
 };
-use crate::binding_ref::binding_ref_segment;
 use crate::error::ProductWorkflowError;
 use crate::gate_state::{BlockedGateState, BlockedGateStateError, blocked_gate_state};
 
@@ -159,7 +157,14 @@ impl DefaultAuthInteractionService {
             }
         };
         validate_completion_ref(&gate, completion)?;
-        let binding_id = auth_interaction_binding_id(gate.flow().id, &run_id, gate.gate_ref());
+        let state = self
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: request.scope.clone(),
+                run_id,
+            })
+            .await
+            .map_err(map_auth_resume_error)?;
         let response = self
             .turn_coordinator
             .resume_turn(ResumeTurnRequest {
@@ -168,8 +173,8 @@ impl DefaultAuthInteractionService {
                 run_id,
                 gate_resolution_ref: request.gate_ref,
                 precondition: ResumeTurnPrecondition::BlockedAuthGate,
-                source_binding_ref: auth_source_binding_ref(&binding_id)?,
-                reply_target_binding_ref: auth_reply_binding_ref(&binding_id)?,
+                source_binding_ref: state.source_binding_ref,
+                reply_target_binding_ref: state.reply_target_binding_ref,
                 idempotency_key: request.idempotency_key,
             })
             .await
@@ -394,20 +399,6 @@ fn validate_completion_ref(
             Ok(())
         }
     }
-}
-
-fn auth_interaction_binding_id(
-    flow_id: ironclaw_auth::AuthFlowId,
-    run_id: &TurnRunId,
-    gate_ref: &GateRef,
-) -> String {
-    format!(
-        "{}{}{}{}",
-        binding_ref_segment("surface", "auth-interaction"),
-        binding_ref_segment("flow", &flow_id.to_string()),
-        binding_ref_segment("run", &run_id.to_string()),
-        binding_ref_segment("gate", gate_ref.as_str())
-    )
 }
 
 fn map_auth_product_error(error: AuthProductError) -> ProductWorkflowError {
