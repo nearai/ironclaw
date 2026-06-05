@@ -43,8 +43,8 @@ use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetRunStateRequest, LoopGateRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
-    TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
 fn sample_envelope(event_suffix: &str) -> ProductInboundEnvelope {
