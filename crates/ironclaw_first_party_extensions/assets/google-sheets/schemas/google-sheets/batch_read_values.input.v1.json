@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Sheets batch_read_values",
+  "description": "Read values from multiple ranges.",
+  "type": "object",
+  "required": [
+    "spreadsheet_id",
+    "ranges"
+  ],
+  "properties": {
+    "spreadsheet_id": {
+      "type": "string",
+      "description": "The spreadsheet ID."
+    },
+    "ranges": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "description": "A1 notation range."
+      },
+      "description": "A1 notation ranges."
+    }
+  },
+  "additionalProperties": false
+}

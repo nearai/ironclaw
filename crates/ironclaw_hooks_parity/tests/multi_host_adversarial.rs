@@ -144,7 +144,7 @@ mod libsql_cluster {
                 .query(
                     "SELECT count(DISTINCT key_hash) FROM hooks_predicate_invocations \
                      WHERE scope_hash = ?1",
-                    libsql::params![scope],
+                    libsql::params![scope.to_vec()],
                 )
                 .await
                 .expect("query");
@@ -680,12 +680,12 @@ mod postgres_cluster {
     pub(super) async fn distinct_invocation_scopes(url: &str, tenant: &str) -> usize {
         let pool = build_pool(url).expect("pool");
         let client = pool.get().await.expect("pool get");
-        let scope = ironclaw_hooks_postgres::test_support::scope_hash_bytes(tenant).to_vec();
+        let scope = ironclaw_hooks_postgres::test_support::scope_hash_bytes(tenant);
         let row = client
             .query_one(
                 "SELECT count(DISTINCT key_hash) FROM hooks_predicate_invocations \
                  WHERE scope_hash = $1",
-                &[&scope],
+                &[&&scope[..]],
             )
             .await
             .expect("count distinct key_hash");

@@ -122,6 +122,24 @@ pub struct ValueKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PredicateEventId(String);
 
+/// Maximum byte length of a [`PredicateEventId`]. The id is stored verbatim
+/// in the durable backends' `event_id` TEXT column (no DB-level length
+/// constraint), so an attacker who can drive `event_id` through a
+/// `record_invocation` / `record_value` path could otherwise insert
+/// arbitrarily large strings — up to PostgreSQL's 1 GiB row limit — into
+/// durable storage, and with [`MAX_SAMPLES_PER_KEY`] in-window samples per
+/// key the multiplier is large (henrypark133 MEDIUM, PR #3937). The
+/// [`WindowOverflow`] error also embeds a key label in its message, so an
+/// unbounded id amplifies into error-message memory.
+///
+/// `512` is ~4× a 64-char blake3 hex digest (the canonical synth shape) and
+/// matches [`crate::manifest::MAX_MANIFEST_REASON_BYTES`], the other
+/// operator-facing byte cap in this crate. Measured in bytes (not chars) so a
+/// multibyte-UTF-8 id can't slip past a char count.
+///
+/// [`WindowOverflow`]: PredicateBackendError::WindowOverflow
+pub const MAX_EVENT_ID_LEN: usize = 512;
+
 /// Format-validation error for [`PredicateEventId::new`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PredicateEventIdError {
@@ -129,11 +147,14 @@ pub enum PredicateEventIdError {
     Empty,
     #[error("predicate event id must not contain NUL bytes")]
     ContainsNul,
+    #[error("predicate event id is {len} bytes, exceeding the maximum of {max}")]
+    TooLong { len: usize, max: usize },
 }
 
 impl PredicateEventId {
-    /// Construct from any string-like value, validating non-empty and
-    /// NUL-free at the type boundary. Returns
+    /// Construct from any string-like value, validating non-empty,
+    /// within [`MAX_EVENT_ID_LEN`] bytes, and NUL-free at the type
+    /// boundary. Returns
     /// [`PredicateEventIdError`] on rejection. Validation happens HERE
     /// (not at the `BeforeCapabilityHookContext::with_caller_event_id`
     /// setter) because the field on the context is `pub` and a caller
@@ -149,6 +170,12 @@ impl PredicateEventId {
         let value = value.into();
         if value.is_empty() {
             return Err(PredicateEventIdError::Empty);
+        }
+        if value.len() > MAX_EVENT_ID_LEN {
+            return Err(PredicateEventIdError::TooLong {
+                len: value.len(),
+                max: MAX_EVENT_ID_LEN,
+            });
         }
         if value.as_bytes().contains(&0) {
             return Err(PredicateEventIdError::ContainsNul);
@@ -1511,6 +1538,68 @@ mod tests {
             b.as_str(),
             "synth must not be content-addressable: identical inputs would leak \
              argument-shape equality across tenants"
+        );
+    }
+
+    /// henrypark133 MEDIUM on PR #3937: `PredicateEventId::new` must cap
+    /// length so an attacker-driven `event_id` can't insert arbitrarily large
+    /// strings into the durable `event_id` TEXT column. Boundary: exactly
+    /// `MAX_EVENT_ID_LEN` bytes is accepted; one byte over is rejected with
+    /// the typed `TooLong` variant carrying the observed length and cap.
+    #[test]
+    fn predicate_event_id_accepts_max_length() {
+        let at_cap = "a".repeat(MAX_EVENT_ID_LEN);
+        assert!(
+            PredicateEventId::new(at_cap.clone()).is_ok(),
+            "exactly MAX_EVENT_ID_LEN bytes is in-bounds"
+        );
+    }
+
+    #[test]
+    fn predicate_event_id_rejects_too_long() {
+        let over = "a".repeat(MAX_EVENT_ID_LEN + 1);
+        assert_eq!(
+            PredicateEventId::new(over),
+            Err(PredicateEventIdError::TooLong {
+                len: MAX_EVENT_ID_LEN + 1,
+                max: MAX_EVENT_ID_LEN,
+            })
+        );
+    }
+
+    /// Length is measured in BYTES, not chars: a multibyte-UTF-8 id whose
+    /// char count is under the cap but whose byte length is over must still be
+    /// rejected (the durable column is sized in bytes).
+    #[test]
+    fn predicate_event_id_length_cap_is_measured_in_bytes() {
+        // '𝄞' (U+1D11E) is 4 bytes. (MAX/4 + 1) of them exceeds the byte cap
+        // while the char count stays well under it.
+        let multibyte = "𝄞".repeat(MAX_EVENT_ID_LEN / 4 + 1);
+        assert!(multibyte.chars().count() <= MAX_EVENT_ID_LEN);
+        assert!(
+            multibyte.len() > MAX_EVENT_ID_LEN,
+            "fixture must exceed the byte cap"
+        );
+        assert!(matches!(
+            PredicateEventId::new(multibyte),
+            Err(PredicateEventIdError::TooLong { .. })
+        ));
+    }
+
+    /// henrypark133 MEDIUM on PR #3937: pin the `Err(_) => now` overflow branch
+    /// of the canonical `window_cutoff`. A `std::time::Duration` larger than
+    /// `chrono::Duration::MAX` (~292 million years) overflows
+    /// `chrono::Duration::from_std`; the canonical rule trims to `now` (NOT
+    /// nothing — the divergence the rustdoc warns against). No other test
+    /// exercises this branch, so a refactor to a `saturating_sub`/`unwrap_or`
+    /// shortcut would silently regress without it.
+    #[test]
+    fn window_cutoff_oversized_window_trims_to_now() {
+        let now = base();
+        assert_eq!(
+            window_cutoff(now, Duration::MAX),
+            now,
+            "an oversized window overflows from_std and trims to now, not nothing"
         );
     }
 

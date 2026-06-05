@@ -48,7 +48,9 @@ pub use in_memory::{
 pub use jsonl::{parse_jsonl, replay_jsonl};
 pub use runtime_event::{
     RuntimeEvent, RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
-    UNCLASSIFIED_HOOK_LABEL, sanitize_error_kind, sanitize_hook_id, sanitize_hook_label,
+    UNCLASSIFIED_HOOK_LABEL, deserialize_trusted_runtime_event,
+    runtime_event_from_trusted_json_slice, runtime_event_from_trusted_json_str,
+    sanitize_error_kind, sanitize_hook_id, sanitize_hook_label,
 };
 pub use security_audit::{
     InMemorySecurityAuditSink, NoopSecurityAuditSink, SecurityAuditEvent, SecurityAuditSink,

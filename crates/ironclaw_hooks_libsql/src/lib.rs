@@ -34,10 +34,26 @@ pub use backend::LibSqlPredicateStateBackend;
 /// Production code must never depend on this module.
 #[doc(hidden)]
 pub mod test_support {
-    /// `scope_hash` (tenant digest) bytes — see `crate::hashing::tenant_scope_hash`.
-    /// Named to match the Postgres sibling's `scope_hash_bytes` accessor so the
-    /// parity tests reference the same symbol across both backends.
-    pub fn scope_hash_bytes(tenant_id: &str) -> Vec<u8> {
-        crate::hashing::tenant_scope_hash(tenant_id)
+    use ironclaw_hooks::predicate_hash::{self, Digest};
+    use ironclaw_hooks::predicate_state::InvocationKey;
+
+    /// `scope_hash` (tenant digest) bytes — see
+    /// [`ironclaw_hooks::predicate_hash::scope_hash`]. Returns the canonical
+    /// fixed-width [`Digest`] (`[u8; 32]`) so the accessor is byte-for-byte
+    /// symmetric with the Postgres sibling's `scope_hash_bytes`; the libSQL
+    /// `BLOB` param binding accepts a `&[u8]` slice of it without a `.to_vec()`
+    /// asymmetry at the call sites (henrypark133 LOW on PR #3937). Delegates
+    /// directly to the canonical shared hash rather than the crate-internal
+    /// `Vec<u8>` wrapper.
+    pub fn scope_hash_bytes(tenant_id: &str) -> Digest {
+        predicate_hash::scope_hash(tenant_id)
+    }
+
+    /// `key_hash` bytes for an invocation bucket — see
+    /// [`ironclaw_hooks::predicate_hash::invocation_key_hash`]. Mirrors the
+    /// Postgres sibling's `invocation_key_hash_bytes` so a parity test querying
+    /// by key hash has a parallel accessor on both backends.
+    pub fn invocation_key_hash_bytes(key: &InvocationKey) -> Digest {
+        predicate_hash::invocation_key_hash(key)
     }
 }

@@ -28,6 +28,46 @@ pub struct SessionData {
     pub auth_provider: Option<String>,
 }
 
+/// A NEP-413 wallet signature plus the payload it covers, ready to exchange for
+/// a NEAR AI session token via `/v1/auth/near`. The browser produces this with a
+/// connected NEAR wallet; the fields map onto NEAR AI's auth request (note the
+/// nested wire fields are camelCase while the top-level keys are snake_case).
+#[derive(Debug, Clone)]
+pub struct NearWalletSignedMessage {
+    pub account_id: String,
+    pub public_key: String,
+    /// base64-standard encoding of the 64 raw ed25519 signature bytes.
+    pub signature: String,
+    /// The exact message string that was signed (NEAR AI expects a fixed value).
+    pub message: String,
+    /// The NEP-413 recipient that was signed (NEAR AI expects `cloud.near.ai`).
+    pub recipient: String,
+    /// The 32-byte nonce that was signed. NEAR AI requires the first 8 bytes to
+    /// be the big-endian epoch-millis timestamp (validated within a 5-min window).
+    pub nonce: Vec<u8>,
+    pub callback_url: Option<String>,
+}
+
+/// Build the `/v1/auth/near` request body. Kept separate so the wire shape (the
+/// snake_case top-level / camelCase nested split, and the nonce-as-byte-array) is
+/// unit-testable without an HTTP round-trip.
+fn near_auth_request_body(signed: &NearWalletSignedMessage) -> serde_json::Value {
+    serde_json::json!({
+        "signed_message": {
+            "accountId": signed.account_id,
+            "publicKey": signed.public_key,
+            "signature": signed.signature,
+            "state": serde_json::Value::Null,
+        },
+        "payload": {
+            "message": signed.message,
+            "nonce": signed.nonce,
+            "recipient": signed.recipient,
+            "callbackUrl": signed.callback_url,
+        },
+    })
+}
+
 /// Configuration for session management.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
@@ -168,6 +208,55 @@ impl SessionManager {
     /// Read-only access to the configured auth base URL (used by renewer impls).
     pub fn auth_base_url(&self) -> &str {
         &self.config.auth_base_url
+    }
+
+    /// Exchange a NEP-413 wallet signature for a NEAR AI session token.
+    ///
+    /// POSTs the signed message to `{auth_base}/v1/auth/near` and returns the
+    /// `access_token` on success. NEAR AI rejects requests without a
+    /// `User-Agent`, so one is always sent. This does NOT persist the token —
+    /// the caller applies it (e.g. via [`Self::save_session_for_renewer`]) so it
+    /// flows through the same disk/DB/secrets pipeline as the OAuth login.
+    pub async fn near_wallet_login(
+        &self,
+        signed: &NearWalletSignedMessage,
+    ) -> Result<String, LlmError> {
+        let url = format!("{}/v1/auth/near", self.config.auth_base_url);
+        let response = self
+            .client
+            .post(&url)
+            .header(reqwest::header::USER_AGENT, "ironclaw")
+            .json(&near_auth_request_body(signed))
+            .send()
+            .await
+            .map_err(|e| LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: format!("NEAR wallet login request failed: {e}"),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let preview = ironclaw_common::truncate_for_preview(&body, 200);
+            return Err(LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: format!("NEAR wallet login rejected: HTTP {status}: {preview}"),
+            });
+        }
+
+        #[derive(Deserialize)]
+        struct NearAuthResponse {
+            access_token: String,
+        }
+        let parsed: NearAuthResponse =
+            response
+                .json()
+                .await
+                .map_err(|e| LlmError::SessionRenewalFailed {
+                    provider: "nearai".to_string(),
+                    reason: format!("NEAR wallet login response unreadable: {e}"),
+                })?;
+        Ok(parsed.access_token)
     }
 
     /// Returns the persistor most recently set via `attach_key_persistor`.
@@ -522,9 +611,7 @@ pub async fn create_session_manager(config: SessionConfig) -> Arc<SessionManager
     // NEARAI_SESSION_TOKEN env var always takes precedence over file-based
     // tokens. Hosting providers set this env var and expect it to be used
     // directly — no file persistence needed.
-    if let Ok(token) = std::env::var("NEARAI_SESSION_TOKEN")
-        && !token.is_empty()
-    {
+    if let Some(token) = ironclaw_common::env_helpers::env_or_override("NEARAI_SESSION_TOKEN") {
         tracing::info!("Using session token from NEARAI_SESSION_TOKEN env var");
         manager.set_token(SecretString::from(token)).await;
     }
@@ -538,6 +625,37 @@ mod tests {
     use crate::testing::{TEST_SESSION_NEARAI_ABC, TEST_SESSION_NEARAI_XYZ, TEST_SESSION_TOKEN};
     use secrecy::ExposeSecret;
     use tempfile::tempdir;
+
+    #[test]
+    fn near_auth_request_body_uses_camelcase_nested_fields_and_byte_array_nonce() {
+        let signed = NearWalletSignedMessage {
+            account_id: "alice.near".to_string(),
+            public_key: "ed25519:abc".to_string(),
+            signature: "c2ln".to_string(),
+            message: "Sign in to NEAR AI Cloud".to_string(),
+            recipient: "cloud.near.ai".to_string(),
+            nonce: vec![7u8; 32],
+            callback_url: None,
+        };
+        let body = near_auth_request_body(&signed);
+
+        // Top-level keys are snake_case; nested fields are camelCase. NEAR AI
+        // rejects the request otherwise.
+        assert_eq!(body["signed_message"]["accountId"], "alice.near");
+        assert_eq!(body["signed_message"]["publicKey"], "ed25519:abc");
+        assert_eq!(body["signed_message"]["signature"], "c2ln");
+        assert!(body["signed_message"]["state"].is_null());
+        assert_eq!(body["payload"]["message"], "Sign in to NEAR AI Cloud");
+        assert_eq!(body["payload"]["recipient"], "cloud.near.ai");
+        assert!(body["payload"]["callbackUrl"].is_null());
+
+        // Nonce is a 32-element JSON array of bytes, not a base64/hex string.
+        let nonce = body["payload"]["nonce"]
+            .as_array()
+            .expect("nonce serializes as a JSON array");
+        assert_eq!(nonce.len(), 32);
+        assert_eq!(nonce[0], 7);
+    }
 
     #[tokio::test]
     async fn test_session_save_load() {

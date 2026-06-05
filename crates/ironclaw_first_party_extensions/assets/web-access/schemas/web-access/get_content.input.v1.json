@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "properties": {
+    "response_id": {
+      "type": "string",
+      "description": "The response_id from web-access.search"
+    },
+    "query": {
+      "type": "string",
+      "description": "Optional original query selector"
+    },
+    "url": {
+      "type": "string",
+      "description": "Optional source URL selector"
+    },
+    "url_index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Optional source index selector. Defaults to 0."
+    }
+  },
+  "required": ["response_id"],
+  "additionalProperties": false
+}

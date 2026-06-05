@@ -132,4 +132,59 @@ mod tests {
         let b = invocation_key_hash(&inv("tabc", ""));
         assert_ne!(a, b);
     }
+
+    /// henrypark133 MEDIUM on PR #3937: empty-string inputs are a real
+    /// length-prefix boundary — an empty field writes only the 8-byte zero
+    /// prefix. A refactor that skipped zero-length fields would be undetected
+    /// by the non-empty injectivity tests above. `scope_hash("")` must be
+    /// stable and distinct from a non-empty tenant.
+    #[test]
+    fn scope_hash_empty_tenant_is_stable() {
+        assert_eq!(
+            scope_hash(""),
+            scope_hash(""),
+            "empty tenant hash must be deterministic"
+        );
+        assert_ne!(
+            scope_hash(""),
+            scope_hash("alpha"),
+            "the empty-tenant zero prefix must not collide with a non-empty tenant"
+        );
+    }
+
+    /// An empty capability writes only the zero length prefix for that field;
+    /// it must hash distinctly from a non-empty capability (the zero prefix is
+    /// not skipped) — proving the empty field still participates in the digest.
+    #[test]
+    fn invocation_key_hash_empty_capability_is_distinct_from_nonempty() {
+        let empty = invocation_key_hash(&inv("t", ""));
+        let nonempty = invocation_key_hash(&inv("t", "cap.x"));
+        assert_ne!(
+            empty, nonempty,
+            "empty capability must not collide with a non-empty one"
+        );
+        assert_eq!(
+            empty,
+            invocation_key_hash(&inv("t", "")),
+            "empty-capability hash must be deterministic"
+        );
+    }
+
+    /// Value-key variant: an empty numeric field writes only the zero length
+    /// prefix and must hash distinctly from a non-empty field, covering the
+    /// third public hash function at the empty-string boundary.
+    #[test]
+    fn value_key_hash_empty_field_is_distinct_from_nonempty() {
+        let empty = value_key_hash(&val("t", "cap.x", ""));
+        let nonempty = value_key_hash(&val("t", "cap.x", "amount"));
+        assert_ne!(
+            empty, nonempty,
+            "empty field must not collide with a non-empty one"
+        );
+        assert_eq!(
+            empty,
+            value_key_hash(&val("t", "cap.x", "")),
+            "empty-field hash must be deterministic"
+        );
+    }
 }

@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Sheets rename_sheet",
+  "description": "Rename a sheet tab.",
+  "type": "object",
+  "required": [
+    "spreadsheet_id",
+    "sheet_id",
+    "title"
+  ],
+  "properties": {
+    "spreadsheet_id": {
+      "type": "string",
+      "description": "The spreadsheet ID."
+    },
+    "sheet_id": {
+      "type": "integer",
+      "description": "Numeric sheet ID."
+    },
+    "title": {
+      "type": "string",
+      "description": "New sheet title."
+    }
+  },
+  "additionalProperties": false
+}

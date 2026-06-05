@@ -22,9 +22,25 @@ fn policy_denied_failure_kind_serializes_as_snake_case() {
 }
 
 #[test]
-fn validation_policy_named_constructors_keep_fail_closed_default_and_host_verified_evidence_explicit()
- {
-    let default_policy = LoopExitValidationPolicy::recovery_required();
+fn await_dependent_run_blocked_kind_maps_to_dependent_run_reason() {
+    let gate_ref = LoopGateRef::new("gate:dependent-run").unwrap();
+    let reason = LoopBlockedKind::AwaitDependentRun
+        .to_blocked_reason(gate_ref.clone(), Vec::new())
+        .unwrap();
+
+    assert_eq!(
+        reason,
+        BlockedReason::AwaitDependentRun {
+            gate_ref: GateRef::new(gate_ref.as_str()).unwrap()
+        }
+    );
+    assert_eq!(reason.status(), TurnStatus::BlockedDependentRun);
+}
+
+#[test]
+fn validation_policy_named_constructors_keep_terminal_default_and_host_verified_evidence_explicit()
+{
+    let default_policy = LoopExitValidationPolicy::default();
     assert!(!default_policy.completion_refs_verified());
     assert!(!default_policy.blocked_evidence_verified());
     assert!(!default_policy.failure_evidence_verified());
@@ -32,12 +48,8 @@ fn validation_policy_named_constructors_keep_fail_closed_default_and_host_verifi
     assert!(!default_policy.requires_final_checkpoint());
     assert!(!default_policy.allows_no_reply_completion());
     assert!(!default_policy.final_checkpoint_verified());
-    assert_eq!(
-        default_policy.invalid_handling(),
-        LoopExitInvalidHandling::RecoveryRequired
-    );
 
-    let trusted_policy = LoopExitValidationPolicy::fail_terminal()
+    let trusted_policy = LoopExitValidationPolicy::default()
         .require_final_checkpoint()
         .with_allow_no_reply_completion()
         .with_host_verified_final_checkpoint()
@@ -52,10 +64,6 @@ fn validation_policy_named_constructors_keep_fail_closed_default_and_host_verifi
     assert!(trusted_policy.requires_final_checkpoint());
     assert!(trusted_policy.allows_no_reply_completion());
     assert!(trusted_policy.final_checkpoint_verified());
-    assert_eq!(
-        trusted_policy.invalid_handling(),
-        LoopExitInvalidHandling::FailTerminal
-    );
 }
 
 #[test]
@@ -73,7 +81,6 @@ fn loop_exit_validation_policy_deserialization_cannot_mint_host_verified_evidenc
             "allow_no_reply_completion": false,
             "final_checkpoint_verified": false,
             "host_cancellation_observed": false,
-            "invalid_handling": "recovery_required",
             "completion_refs_verified": false,
             "blocked_evidence_verified": false,
             "failure_evidence_verified": false
@@ -85,24 +92,28 @@ fn loop_exit_validation_policy_deserialization_cannot_mint_host_verified_evidenc
         );
     }
 
-    let forged_terminal = json!({
-        "require_final_checkpoint": false,
-        "allow_no_reply_completion": false,
-        "final_checkpoint_verified": false,
-        "host_cancellation_observed": false,
-        "invalid_handling": "fail_terminal",
-        "completion_refs_verified": false,
-        "blocked_evidence_verified": false,
-        "failure_evidence_verified": false
-    });
-    assert!(serde_json::from_value::<LoopExitValidationPolicy>(forged_terminal).is_err());
+    for invalid_handling in ["fail_terminal", "recovery_required"] {
+        let forged_terminal = json!({
+            "require_final_checkpoint": false,
+            "allow_no_reply_completion": false,
+            "final_checkpoint_verified": false,
+            "host_cancellation_observed": false,
+            "invalid_handling": invalid_handling,
+            "completion_refs_verified": false,
+            "blocked_evidence_verified": false,
+            "failure_evidence_verified": false
+        });
+        assert!(
+            serde_json::from_value::<LoopExitValidationPolicy>(forged_terminal).is_err(),
+            "wire payload should not select invalid_handling={invalid_handling}"
+        );
+    }
 
     let strict_fail_closed = json!({
         "require_final_checkpoint": true,
         "allow_no_reply_completion": false,
         "final_checkpoint_verified": false,
         "host_cancellation_observed": false,
-        "invalid_handling": "recovery_required",
         "completion_refs_verified": false,
         "blocked_evidence_verified": false,
         "failure_evidence_verified": false
@@ -111,10 +122,6 @@ fn loop_exit_validation_policy_deserialization_cannot_mint_host_verified_evidenc
     assert!(policy.requires_final_checkpoint());
     assert!(!policy.allows_no_reply_completion());
     assert!(!policy.completion_refs_verified());
-    assert_eq!(
-        policy.invalid_handling(),
-        LoopExitInvalidHandling::RecoveryRequired
-    );
 }
 
 #[test]
@@ -133,7 +140,6 @@ fn completed_ask_user_exit_maps_to_trusted_completed_outcome_without_final_check
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -160,7 +166,6 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -182,7 +187,6 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -190,7 +194,7 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
     assert!(matches!(
         uncertain_decision,
         LoopExitValidationDecision {
-            mapping: LoopExitMapping::RecoveryRequired { .. },
+            mapping: LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { .. }),
             ..
         }
     ));
@@ -212,7 +216,6 @@ fn completed_exit_requires_host_verified_completion_refs_before_trusted_mapping(
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -224,7 +227,7 @@ fn completed_exit_requires_host_verified_completion_refs_before_trusted_mapping(
     );
     assert!(matches!(
         decision.mapping,
-        LoopExitMapping::RecoveryRequired { .. }
+        LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { .. })
     ));
 }
 
@@ -257,7 +260,6 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
             allow_no_reply_completion: false,
             final_checkpoint_verified: false,
             host_cancellation_observed: true,
-            invalid_handling: LoopExitInvalidHandling::FailTerminal,
             completion_refs_verified: true,
             blocked_evidence_verified: false,
             failure_evidence_verified: true,
@@ -311,7 +313,6 @@ fn validation_policy_requires_final_checkpoint_only_when_configured() {
             allow_no_reply_completion: false,
             final_checkpoint_verified: false,
             host_cancellation_observed: false,
-            invalid_handling: LoopExitInvalidHandling::FailTerminal,
             completion_refs_verified: true,
             blocked_evidence_verified: false,
             failure_evidence_verified: false,
@@ -338,6 +339,7 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
     let decision = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
         gate_ref: loop_gate_ref,
+        credential_requirements: Vec::new(),
         checkpoint_id,
         state_ref: state_ref.clone(),
         exit_id: exit_id("exit:blocked"),
@@ -347,7 +349,6 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: false,
         blocked_evidence_verified: true,
         failure_evidence_verified: false,
@@ -370,6 +371,7 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
     let decision = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
         gate_ref: loop_gate_ref("gate:approval-gate"),
+        credential_requirements: Vec::new(),
         checkpoint_id: TurnCheckpointId::new(),
         state_ref: checkpoint_state_ref(),
         exit_id: exit_id("exit:unverified-blocked"),
@@ -379,7 +381,6 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -391,7 +392,7 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
     );
     assert!(matches!(
         decision.mapping,
-        LoopExitMapping::RecoveryRequired { .. }
+        LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { .. })
     ));
 }
 
@@ -404,7 +405,6 @@ fn cancelled_exit_requires_observed_host_cancellation() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -426,7 +426,6 @@ fn cancelled_exit_requires_observed_host_cancellation() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: true,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -466,7 +465,7 @@ fn failed_exit_requires_host_verified_failure_evidence_before_trusted_mapping() 
     );
     assert!(matches!(
         decision.mapping,
-        LoopExitMapping::RecoveryRequired { .. }
+        LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { .. })
     ));
 }
 
@@ -572,7 +571,6 @@ fn no_reply_with_empty_refs_requires_explicit_policy_permission() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -606,7 +604,6 @@ fn no_reply_with_empty_refs_maps_to_completed_when_policy_allows_it() {
         allow_no_reply_completion: true,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -631,7 +628,6 @@ fn delegated_result_with_result_refs_maps_to_trusted_completed() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -656,7 +652,6 @@ fn result_only_with_result_refs_maps_to_trusted_completed() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -673,7 +668,6 @@ fn completion_kind_must_match_durable_reference_shape() {
         allow_no_reply_completion: true,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -742,6 +736,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
         LoopBlockedKind::Approval,
         LoopBlockedKind::Auth,
         LoopBlockedKind::Resource,
+        LoopBlockedKind::AwaitDependentRun,
     ] {
         let checkpoint_id = TurnCheckpointId::new();
         let lg = loop_gate_ref("gate:test-gate");
@@ -751,6 +746,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
         let decision = LoopExit::Blocked(LoopBlocked {
             kind,
             gate_ref: lg,
+            credential_requirements: Vec::new(),
             checkpoint_id,
             state_ref: state_ref.clone(),
             exit_id: exit_id("exit:blocked-variant"),
@@ -762,8 +758,12 @@ fn blocked_variants_map_to_correct_blocked_reason() {
 
         let expected_reason = match kind {
             LoopBlockedKind::Approval => BlockedReason::Approval { gate_ref },
-            LoopBlockedKind::Auth => BlockedReason::Auth { gate_ref },
+            LoopBlockedKind::Auth => BlockedReason::Auth {
+                gate_ref,
+                credential_requirements: Vec::new(),
+            },
             LoopBlockedKind::Resource => BlockedReason::Resource { gate_ref },
+            LoopBlockedKind::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
         };
 
         assert_eq!(decision.violation, None);
@@ -872,6 +872,7 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
         TurnStatus::BlockedApproval,
         TurnStatus::BlockedAuth,
         TurnStatus::BlockedResource,
+        TurnStatus::BlockedDependentRun,
         TurnStatus::CancelRequested,
         TurnStatus::Cancelled,
         TurnStatus::Completed,
@@ -884,11 +885,12 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
             TurnStatus::BlockedApproval => (false, true),
             TurnStatus::BlockedAuth => (false, true),
             TurnStatus::BlockedResource => (false, true),
+            TurnStatus::BlockedDependentRun => (false, true),
             TurnStatus::CancelRequested => (false, true),
             TurnStatus::Cancelled => (true, false),
             TurnStatus::Completed => (true, false),
             TurnStatus::Failed => (true, false),
-            TurnStatus::RecoveryRequired => (false, true),
+            TurnStatus::RecoveryRequired => (true, false),
         };
 
         assert_eq!(

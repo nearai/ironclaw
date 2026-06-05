@@ -2059,8 +2059,20 @@ async fn execute_single_action_with_inline_retry(
         accumulated_events.push(event);
 
         // Refund the lease use this attempt consumed; we'll re-consume
-        // on retry if the user approves.
-        let _ = leases.refund_use(current_lease.id).await;
+        // on retry if the user approves. EXCEPTION: when the gate carries
+        // cached `resume_output`, the action has already executed (post-
+        // execution Authentication gate) and the cached-output branch
+        // below will return without re-consuming. Refunding now would
+        // let a successful side-effecting action consume zero lease
+        // uses. See matching guards in `scripting::resolve_tool_future`
+        // and `structured::execute_with_inline_gate_retry`. Tracked by
+        // the #3559 security review.
+        let gate_carries_resume_output = result_json
+            .get("resume_output")
+            .is_some_and(|v| !v.is_null());
+        if !gate_carries_resume_output {
+            let _ = leases.refund_use(current_lease.id).await;
+        }
 
         // Use the gate-provided parameters from the GatePaused payload,
         // not the original caller `params`: the safety layer may have
@@ -2125,8 +2137,42 @@ async fn execute_single_action_with_inline_retry(
             return (result_json, accumulated_events, denial, current_lease.id);
         }
 
-        // Approved. Re-consume a lease use and mark the next call as
-        // pre-approved.
+        // Approved. If the bridge cached the action's output before raising
+        // this gate (post-execution Authentication gate path — see
+        // `effect_adapter::auth_gate_from_extension_result` and the
+        // `check_tool_readiness` path), the action has already run and we
+        // just needed user-side resolution. Return the cached output
+        // instead of re-executing. Without this shortcut, retrying
+        // `tool_install` re-downloads the WASM and runs through the
+        // `effect_adapter::enforce_tool_permission` approval check a
+        // second time, raising a fresh gate the user has no way to
+        // resolve. Tracked by #3533.
+        if let Some(cached_output) = result_json.get("resume_output").cloned()
+            && !cached_output.is_null()
+        {
+            let event = EventKind::ActionExecuted {
+                step_id: exec_ctx.step_id,
+                action_name: name.to_string(),
+                call_id: call_id.to_string(),
+                duration_ms: 0,
+                params_summary: params_summary.clone(),
+            };
+            accumulated_events.push(event);
+            let result_json = serde_json::json!({
+                "action_name": name,
+                "output": cached_output.clone(),
+                "is_error": false,
+                "duration_ms": 0,
+            });
+            return (
+                result_json,
+                accumulated_events,
+                cached_output,
+                current_lease.id,
+            );
+        }
+
+        // Re-consume a lease use and mark the next call as pre-approved.
         match leases.find_and_consume(thread_id, name).await {
             Ok(new_lease) => {
                 current_lease = new_lease;

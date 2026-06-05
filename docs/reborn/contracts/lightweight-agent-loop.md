@@ -176,7 +176,7 @@ This facade composes lower-level services but does not move ownership into the l
 
 ## 6. Capability tool wrappers
 
-Visible capabilities become model-visible tool schemas for the current run.
+Visible capabilities become compact model-visible tool schemas for the current run.
 
 ```rust
 CapabilityDescriptor
@@ -186,6 +186,12 @@ CapabilityDescriptor
   -> concurrency policy
   -> result shaping hints
 ```
+
+The loop also exposes `capability_info` as a synthetic read-only provider tool.
+Use it for progressive disclosure when the model needs names, required fields,
+effect notes, or the full input schema for a currently visible capability. It
+does not dispatch through `HostRuntime` and cannot inspect capabilities outside
+the current visible surface.
 
 Tool execution is a wrapper around `CapabilityHost`:
 

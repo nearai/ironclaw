@@ -1,12 +1,19 @@
+use chrono::Utc;
 use futures::future::join_all;
-use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId,
+};
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AppendAssistantDraftRequest, AppendToolResultReferenceRequest,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest, SessionThreadError,
-    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    AcceptInboundMessageRequest, AppendAssistantDraftRequest,
+    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest,
+    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    InMemorySessionThreadService, ListThreadsForScopeRequest, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    ProviderToolCallReferenceEnvelope, RedactMessageRequest, SessionThreadError,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
+    ThreadMessageId, ThreadMessageRangeRequest, ThreadScope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest,
 };
 
 fn scope(label: &str) -> ThreadScope {
@@ -38,6 +45,25 @@ fn provider_call_reference() -> ProviderToolCallReferenceEnvelope {
     }
 }
 
+fn preview_envelope(invocation_id: InvocationId) -> CapabilityDisplayPreviewEnvelope {
+    CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
+        invocation_id,
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        status: CapabilityDisplayPreviewStatus::Completed,
+        title: "echo".to_string(),
+        subtitle: None,
+        input_summary: Some("{\"message\":\"hello\"}".to_string()),
+        output_summary: Some("text output".to_string()),
+        output_preview: Some("hello".to_string()),
+        output_kind: Some("text".to_string()),
+        output_bytes: Some(5),
+        result_ref: Some("result:demo-preview".to_string()),
+        truncated: false,
+        updated_at: Utc::now(),
+    })
+    .unwrap()
+}
+
 fn same_tenant_scope(agent_label: &str) -> ThreadScope {
     ThreadScope {
         tenant_id: TenantId::new("tenant-shared").unwrap(),
@@ -46,6 +72,71 @@ fn same_tenant_scope(agent_label: &str) -> ThreadScope {
         owner_user_id: Some(UserId::new(format!("user-{agent_label}")).unwrap()),
         mission_id: None,
     }
+}
+
+fn assert_unknown_thread(error: SessionThreadError, thread_id: &ThreadId) {
+    match error {
+        SessionThreadError::UnknownThread { thread_id: actual } => assert_eq!(actual, *thread_id),
+        other => panic!("expected UnknownThread for {thread_id}, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn delete_thread_removes_owned_thread_and_hides_missing_or_wrong_scope() {
+    let service = InMemorySessionThreadService::default();
+    let owned_scope = scope("delete-owned");
+    let wrong_scope = scope("delete-wrong");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owned_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-delete-owned").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let wrong_scope_error = service
+        .delete_thread(&wrong_scope, &thread.thread_id)
+        .await
+        .expect_err("wrong-scope delete should hide thread existence");
+    assert_unknown_thread(wrong_scope_error, &thread.thread_id);
+
+    service
+        .read_thread(ThreadHistoryRequest {
+            scope: owned_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .expect("wrong-scope delete must not remove owned thread");
+
+    service
+        .delete_thread(&owned_scope, &thread.thread_id)
+        .await
+        .expect("owned delete succeeds");
+
+    let deleted_error = service
+        .read_thread(ThreadHistoryRequest {
+            scope: owned_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .expect_err("deleted thread should no longer be readable");
+    assert_unknown_thread(deleted_error, &thread.thread_id);
+
+    let repeat_error = service
+        .delete_thread(&owned_scope, &thread.thread_id)
+        .await
+        .expect_err("repeat delete should be non-enumerating missing shape");
+    assert_unknown_thread(repeat_error, &thread.thread_id);
+
+    let missing = ThreadId::new("thread-delete-missing").unwrap();
+    let missing_error = service
+        .delete_thread(&owned_scope, &missing)
+        .await
+        .expect_err("missing delete should be non-enumerating");
+    assert_unknown_thread(missing_error, &missing);
 }
 
 #[tokio::test]
@@ -102,6 +193,160 @@ async fn append_tool_result_reference_is_finalized_and_idempotent_per_run_result
 }
 
 #[tokio::test]
+async fn message_range_read_returns_only_requested_sequences() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("range-read");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-range-read").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    for index in 1..=4 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("event-{index}")),
+                content: user_message(&format!("message {index}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    let range = service
+        .list_thread_messages_range(ThreadMessageRangeRequest {
+            scope,
+            thread_id: thread.thread_id,
+            after_sequence: 1,
+            through_sequence: 3,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        range
+            .messages
+            .iter()
+            .map(|message| message.sequence)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(range.messages[0].content.as_deref(), Some("message 2"));
+    assert_eq!(range.messages[1].content.as_deref(), Some("message 3"));
+}
+
+#[tokio::test]
+async fn append_capability_display_preview_is_history_visible_and_model_hidden() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("display-preview");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-display-preview").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("run a tool"),
+        })
+        .await
+        .unwrap();
+
+    let invocation_id = InvocationId::new();
+    let first = service
+        .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            preview: preview_envelope(invocation_id),
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            preview: preview_envelope(invocation_id),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.message_id, duplicate.message_id);
+    assert_eq!(first.kind, MessageKind::CapabilityDisplayPreview);
+    assert_eq!(first.status, MessageStatus::Finalized);
+    assert_eq!(first.sequence, 2);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .map(|message| message.kind)
+            .collect::<Vec<_>>(),
+        vec![MessageKind::User, MessageKind::CapabilityDisplayPreview]
+    );
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("summary must not replace preview range"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            max_messages: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(context.messages.len(), 1);
+    assert_eq!(context.messages[0].kind, MessageKind::User);
+
+    let direct_context = service
+        .load_context_messages(LoadContextMessagesRequest {
+            scope,
+            thread_id: thread.thread_id,
+            message_ids: vec![first.message_id],
+        })
+        .await
+        .unwrap();
+    assert!(direct_context.messages.is_empty());
+}
+
+#[tokio::test]
 async fn duplicate_tool_result_reference_accepts_matching_provider_metadata() {
     let service = InMemorySessionThreadService::default();
     let scope = scope("tool-result-idempotent-provider");
@@ -145,6 +390,42 @@ async fn duplicate_tool_result_reference_accepts_matching_provider_metadata() {
         duplicate.tool_result_ref.as_deref(),
         Some("result:demo-provider")
     );
+}
+
+#[tokio::test]
+async fn append_tool_result_reference_accepts_multiline_provider_arguments() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("tool-result-multiline-provider");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-tool-result-multiline-provider").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let mut provider_call = provider_call_reference();
+    provider_call.capability_id = CapabilityId::new("builtin.skill_install").unwrap();
+    provider_call.provider_tool_name = "builtin__skill_install".to_string();
+    provider_call.arguments = serde_json::json!({
+        "content": "---\nname: pasted-skill\n---\n\nUse multiline Markdown.\n"
+    });
+
+    let record = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-1".into(),
+            result_ref: "result:demo-provider-multiline".into(),
+            safe_summary: ToolResultSafeSummary::new("safe tool result").unwrap(),
+            provider_call: Some(provider_call.clone()),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(record.tool_result_provider_call, Some(provider_call));
 }
 
 #[tokio::test]
@@ -779,9 +1060,9 @@ async fn summaries_are_range_artifacts_and_policy_filtered_context_replacements(
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -856,9 +1137,9 @@ async fn summary_covering_redacted_message_is_not_loaded_into_model_context() {
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary mentions secret token"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1116,9 +1397,9 @@ async fn summary_covering_draft_message_is_not_loaded_into_model_context() {
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary leaks draft secret"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1260,9 +1541,9 @@ async fn overlapping_replacement_summaries_are_rejected() {
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1273,13 +1554,161 @@ async fn overlapping_replacement_summaries_are_rejected() {
             thread_id: thread.thread_id,
             start_sequence: 2,
             end_sequence: 3,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("two and three summarized"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await;
 
     assert!(overlapping.is_err());
+}
+
+#[tokio::test]
+async fn exact_compaction_replacement_summary_replay_is_idempotent() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for text in ["one", "two"] {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope("a"),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: user_message(text),
+            })
+            .await
+            .unwrap();
+    }
+
+    let first = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+    let replay = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+    assert_eq!(replay.summary_id, first.summary_id);
+
+    let changed_content = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("different summary"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await;
+    assert!(matches!(
+        changed_content,
+        Err(SessionThreadError::OverlappingSummaryRange { .. })
+    ));
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.summary_artifacts.len(), 1);
+    assert_eq!(history.summary_artifacts[0].summary_id, first.summary_id);
+}
+
+#[tokio::test]
+async fn policy_none_overlapping_summaries_are_allowed() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for text in ["one", "two", "three"] {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope("a"),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: user_message(text),
+            })
+            .await
+            .unwrap();
+    }
+
+    let first = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: None,
+        })
+        .await
+        .unwrap();
+    let second = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 2,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("two and three summarized"),
+            model_context_policy: None,
+        })
+        .await
+        .unwrap();
+
+    assert_ne!(first.summary_id, second.summary_id);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.summary_artifacts.len(), 2);
+    assert_eq!(history.summary_artifacts[0].start_sequence, 1);
+    assert_eq!(history.summary_artifacts[1].start_sequence, 2);
 }
 
 #[tokio::test]
@@ -1334,9 +1763,9 @@ async fn summary_replacement_still_applies_when_range_starts_with_redacted_messa
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("redacted range summary"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1444,4 +1873,380 @@ async fn read_thread_rejects_cross_scope_lookup_with_unknown_thread() {
 fn message_ids_are_stable_values() {
     let id = ThreadMessageId::new();
     assert_eq!(ThreadMessageId::parse(&id.to_string()).unwrap(), id);
+}
+
+#[tokio::test]
+async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
+    let service = InMemorySessionThreadService::default();
+    let scope_a = scope("a");
+    let scope_b = scope("b");
+
+    // Empty store → empty list, no cursor.
+    let initial = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(initial.threads.is_empty(), "fresh store must be empty");
+    assert!(initial.next_cursor.is_none());
+
+    // Seed: 3 threads in scope A with deterministic ids so the
+    // pagination assertion is stable. 1 thread in scope B that the
+    // scope-A enumeration must not see.
+    for id in ["t-a-001", "t-a-002", "t-a-003"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope_a.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope_b.clone(),
+            thread_id: Some(ThreadId::new("t-b-001").unwrap()),
+            created_by_actor_id: "actor-b".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Scope filter: A sees only A's threads, sorted deterministically.
+    let scope_a_all = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = scope_a_all
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(ids, ["t-a-001", "t-a-002", "t-a-003"]);
+    assert!(
+        scope_a_all.next_cursor.is_none(),
+        "no more pages when page size > total",
+    );
+
+    // Pagination: limit=2 → first page is [001, 002] with cursor=002.
+    let page_1 = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: Some(2),
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let page_1_ids: Vec<&str> = page_1
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(page_1_ids, ["t-a-001", "t-a-002"]);
+    assert_eq!(page_1.next_cursor.as_deref(), Some("t-a-002"));
+
+    // Follow-up: cursor=002 → next page is [003] with no further cursor.
+    let page_2 = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: Some(2),
+            cursor: page_1.next_cursor.clone(),
+        })
+        .await
+        .unwrap();
+    let page_2_ids: Vec<&str> = page_2
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(page_2_ids, ["t-a-003"]);
+    assert!(page_2.next_cursor.is_none());
+
+    // Cross-scope safety: scope B sees only its own thread, never A's.
+    let scope_b_all = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_b,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids_b: Vec<&str> = scope_b_all
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(ids_b, ["t-b-001"]);
+}
+
+#[tokio::test]
+async fn list_threads_for_scope_derives_title_from_first_user_message() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("title-derive");
+
+    // Thread with title=None and a multi-line first user message.
+    // The list should trim and truncate to the first non-empty line.
+    let derived_id = ThreadId::new("thread-derived").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(derived_id.clone()),
+            created_by_actor_id: "user-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: derived_id.clone(),
+            actor_id: "user-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("  ok echo  \nsecond line"),
+        })
+        .await
+        .unwrap();
+    // A second user message must not replace the derived title.
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: derived_id.clone(),
+            actor_id: "user-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("a later message"),
+        })
+        .await
+        .unwrap();
+
+    // Thread with an explicit creator-supplied title must keep it.
+    let explicit_id = ThreadId::new("thread-explicit").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(explicit_id.clone()),
+            created_by_actor_id: "user-a".into(),
+            title: Some("hand-picked".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: explicit_id.clone(),
+            actor_id: "user-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("would have derived another title"),
+        })
+        .await
+        .unwrap();
+
+    // Thread with no messages at all stays `title: None`.
+    let empty_id = ThreadId::new("thread-empty").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(empty_id.clone()),
+            created_by_actor_id: "user-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let response = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let by_id: std::collections::HashMap<&str, Option<&str>> = response
+        .threads
+        .iter()
+        .map(|r| (r.thread_id.as_str(), r.title.as_deref()))
+        .collect();
+    assert_eq!(
+        by_id.get("thread-derived").copied().flatten(),
+        Some("ok echo"),
+        "derived title should be first non-empty line of first user message",
+    );
+    assert_eq!(
+        by_id.get("thread-explicit").copied().flatten(),
+        Some("hand-picked"),
+        "explicit creator title must survive derivation",
+    );
+    assert_eq!(
+        by_id.get("thread-empty").copied().flatten(),
+        None,
+        "thread with no user messages must keep `title: None`",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_for_scope_title_stays_none_for_assistant_only_thread() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("title-assistant-only");
+    let thread_id = ThreadId::new("thread-assistant-only").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "user-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    // Append an assistant draft but never accept a user message. A
+    // bug that picks "the first message regardless of kind" would
+    // surface an assistant string as the title here.
+    service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            content: MessageContent::text("assistant said hello first"),
+        })
+        .await
+        .unwrap();
+
+    let response = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let title = response
+        .threads
+        .iter()
+        .find(|r| r.thread_id == thread_id)
+        .and_then(|r| r.title.as_deref());
+    assert_eq!(
+        title, None,
+        "title derivation must only consider MessageKind::User; assistant-only threads stay None",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_for_scope_truncates_long_first_user_message_to_60_chars() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("title-truncation");
+    let thread_id = ThreadId::new("thread-long").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "user-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    // 80 ASCII chars on a single line — well past the 60-char budget.
+    let long_message = "a".repeat(80);
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: "user-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text(&long_message),
+        })
+        .await
+        .unwrap();
+
+    let response = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let title = response
+        .threads
+        .iter()
+        .find(|r| r.thread_id == thread_id)
+        .and_then(|r| r.title.clone())
+        .expect("title must be derived for a user message");
+    assert_eq!(
+        title.chars().count(),
+        60,
+        "derived title must fit the 60-code-point budget end-to-end",
+    );
+    assert!(
+        title.ends_with('…'),
+        "derived title must signal truncation with a trailing ellipsis",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_for_scope_title_stays_none_when_user_message_is_whitespace_only() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("title-whitespace");
+    let thread_id = ThreadId::new("thread-whitespace").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "user-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: "user-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("   \n\t\n   "),
+        })
+        .await
+        .unwrap();
+
+    let response = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let title = response
+        .threads
+        .iter()
+        .find(|r| r.thread_id == thread_id)
+        .and_then(|r| r.title.as_deref());
+    assert_eq!(
+        title, None,
+        "whitespace-only user message must yield `title: None`, not an empty string",
+    );
 }

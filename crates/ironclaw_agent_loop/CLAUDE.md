@@ -39,6 +39,19 @@ canonical executor, loop execution state, and executor test support.
 - Add executor helpers only when they are part of canonical loop mechanics.
 - Introduce a submodule before a file becomes a mixed bag of unrelated helpers.
 
+## Executor stage ownership
+
+- Keep `src/executor/canonical.rs` as the ordered lifecycle spine.
+- Put lifecycle mechanics in the owning executor stage instead of adding branch
+  logic directly to `canonical.rs`.
+- Keep `CanonicalAgentLoopExecutor` as the public facade; keep
+  `DefaultExecutorPipeline` and stage types crate-internal.
+- Do not pass sibling stages through another stage's input. If a phase needs
+  helper behavior, keep that helper owned inside the stage module.
+- Do not add stages for pure mapping helpers or one-line wrappers.
+- Keep cancellation, checkpoint, and pending-input-ack ordering explicit at the
+  stage boundary that owns the state transition.
+
 ## Common mistakes
 
 - Do not append product-specific logic to the executor.
