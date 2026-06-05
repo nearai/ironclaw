@@ -38,20 +38,7 @@ impl RuntimeProfileApprovalGatePolicy {
     }
 
     fn profile_allows_minimal_bypass(&self) -> bool {
-        match self.resolved_profile {
-            RuntimeProfile::LocalYolo | RuntimeProfile::HostedYoloTenantScoped => true,
-            RuntimeProfile::SecureDefault
-            | RuntimeProfile::LocalSafe
-            | RuntimeProfile::LocalDev
-            | RuntimeProfile::HostedSafe
-            | RuntimeProfile::HostedDev
-            | RuntimeProfile::EnterpriseSafe
-            | RuntimeProfile::EnterpriseDev
-            | RuntimeProfile::EnterpriseYoloDedicated
-            | RuntimeProfile::Sandboxed
-            | RuntimeProfile::Experiment => false,
-            _ => false,
-        }
+        self.resolved_profile.allows_minimal_approval_bypass()
     }
 }
 
