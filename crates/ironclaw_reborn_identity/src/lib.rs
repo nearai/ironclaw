@@ -18,15 +18,18 @@
 //! the same subject id. Verified email may link OAuth providers within a
 //! tenant; an unverified email never links.
 //!
-//! The only backend today is libSQL ([`RebornLibSqlIdentityStore`]); the
-//! Reborn persistence surface is libSQL-only, so there is no Postgres
-//! parity to maintain here.
+//! Persistence ([`FilesystemRebornIdentityStore`]) goes through the host
+//! [`RootFilesystem`](ironclaw_filesystem::RootFilesystem) /
+//! `ScopedFilesystem` abstraction — the same substrate boundary every other
+//! durable Reborn store sits behind — so substrate choice, tenant scoping,
+//! and host ownership stay centralized in the filesystem layer rather than
+//! this crate holding a raw database handle.
 
+mod filesystem_store;
 mod key;
-mod libsql_store;
 
+pub use filesystem_store::FilesystemRebornIdentityStore;
 pub use key::{ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind};
-pub use libsql_store::RebornLibSqlIdentityStore;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, UserId};

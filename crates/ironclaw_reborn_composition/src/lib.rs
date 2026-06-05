@@ -288,38 +288,43 @@ pub use ironclaw_reborn_identity::{
     RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
 };
 
-/// Test-support: open a standalone canonical Reborn identity resolver on the
-/// libSQL substrate DB at `path`, creating the parent directory, running the
-/// store's idempotent schema migrations, and folding any legacy pre-#4381
-/// WebUI `user_identities` rows into the canonical store under `tenant_id`.
+/// Test-support: build a standalone canonical Reborn identity resolver on an
+/// in-memory host filesystem under `tenant_id`.
 ///
 /// This mirrors the production path
 /// [`RebornRuntime::open_reborn_identity_resolver`](crate::RebornRuntime::open_reborn_identity_resolver),
-/// which rides the runtime's *already-open* substrate handle instead of
-/// opening a second handle to the file. Production callers must use that
-/// accessor; this free function exists only so tests (and downstream
-/// integration crates via `test-support`) can build a resolver against a
-/// throwaway temp DB without standing up a full runtime. Gated so it ships
-/// zero bytes in production binaries.
+/// which builds the same filesystem-backed store on the runtime's durable
+/// scoped filesystem. Production callers must use that accessor; this free
+/// function exists only so tests (and downstream integration crates via
+/// `test-support`) can build a resolver without standing up a full runtime.
+/// Gated so it ships zero bytes in production binaries.
 #[cfg(all(feature = "webui-v2-beta", any(test, feature = "test-support")))]
-pub async fn open_reborn_identity_resolver(
-    path: &std::path::Path,
+pub fn open_reborn_identity_resolver(
     tenant_id: &ironclaw_host_api::TenantId,
-) -> Result<std::sync::Arc<dyn RebornIdentityResolver>, RebornIdentityError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| RebornIdentityError::Backend(err.to_string()))?;
-    }
-    let db = std::sync::Arc::new(
-        libsql::Builder::new_local(path)
-            .build()
-            .await
-            .map_err(|err| RebornIdentityError::Backend(err.to_string()))?,
-    );
-    let store = ironclaw_reborn_identity::RebornLibSqlIdentityStore::open(db).await?;
-    store.migrate_legacy_webui_identities(tenant_id).await?;
-    let resolver: std::sync::Arc<dyn RebornIdentityResolver> = std::sync::Arc::new(store);
-    Ok(resolver)
+) -> std::sync::Arc<dyn RebornIdentityResolver> {
+    use ironclaw_host_api::{
+        AgentId, MountAlias, MountGrant, MountPermissions, MountView, UserId, VirtualPath,
+    };
+
+    let root = std::sync::Arc::new(ironclaw_filesystem::InMemoryBackend::default());
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/tenant-shared").expect("mount alias"),
+        VirtualPath::new("/tenants/test/shared").expect("virtual path"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let filesystem = std::sync::Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+        root, view,
+    ));
+    std::sync::Arc::new(
+        ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+            filesystem,
+            tenant_id.clone(),
+            UserId::new("test-owner").expect("user"),
+            AgentId::new("test-agent").expect("agent"),
+            None,
+        ),
+    )
 }
 
 /// Reborn model purpose slot names exposed for diagnostic callers.

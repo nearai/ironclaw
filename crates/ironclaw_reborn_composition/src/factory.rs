@@ -351,11 +351,17 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
-    /// Raw libSQL substrate handle backing `reborn-local-dev.db`. Carried so
-    /// the canonical Reborn identity store
-    /// (`RebornRuntime::open_reborn_identity_resolver`) rides the same DB file
-    /// instead of opening a second handle to it. Only the WebUI v2 SSO surface
+    /// Scoped filesystem backing the canonical Reborn identity store, so it
+    /// rides the host `RootFilesystem` abstraction like every other durable
+    /// Reborn store rather than a raw DB handle. Only the WebUI v2 SSO surface
     /// reads it today, hence `dead_code` when that feature is off.
+    #[cfg(feature = "libsql")]
+    #[allow(dead_code)]
+    pub(crate) identity_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    /// Raw libSQL substrate handle backing `reborn-local-dev.db`. Carried ONLY
+    /// for the one-time legacy WebUI `user_identities` fold (a substrate-level
+    /// read that belongs in this host layer, not the identity crate); the
+    /// steady-state identity store goes through `identity_filesystem` above.
     #[cfg(feature = "libsql")]
     #[allow(dead_code)]
     pub(crate) identity_substrate_db: Arc<libsql::Database>,
@@ -958,6 +964,7 @@ fn build_local_dev_store_graph(
         #[cfg(feature = "slack-v2-host-beta")]
         host_state_filesystem: Arc::clone(&scoped_filesystem),
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
+        identity_filesystem: Arc::clone(&scoped_filesystem),
         identity_substrate_db,
         workspace_mounts,
         local_dev_storage_root,
@@ -2745,6 +2752,8 @@ mod tests {
             workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
             #[cfg(feature = "slack-v2-host-beta")]
             host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
+            #[cfg(feature = "libsql")]
+            identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
             #[cfg(feature = "libsql")]
             identity_substrate_db: Arc::clone(&base_runtime.identity_substrate_db),
             subagent_goal_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(

@@ -155,21 +155,17 @@ mod tests {
     // substrate handle (`RebornRuntime::open_reborn_identity_resolver`); here
     // the opener's tenant only scopes legacy migration (a no-op on this fresh
     // DB), and each directory carries its own tenant for resolution.
-    async fn shared_resolver() -> Arc<dyn RebornIdentityResolver> {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        // Leak the tempdir so the libSQL file outlives the test body.
-        let path = tmp.keep().join("reborn-local-dev.db");
+    fn shared_resolver() -> Arc<dyn RebornIdentityResolver> {
+        // In-memory filesystem-backed resolver via the composition test-support
+        // helper; no durable substrate needed for the admission/tenant tests.
         ironclaw_reborn_composition::open_reborn_identity_resolver(
-            &path,
             &TenantId::new("tenant-test").expect("tenant"),
         )
-        .await
-        .expect("resolver")
     }
 
     async fn directory(domains: &[&str]) -> WebuiUserDirectory {
         WebuiUserDirectory::new(
-            shared_resolver().await,
+            shared_resolver(),
             TenantId::new("tenant-test").expect("tenant"),
             domains.iter().map(|d| d.to_string()).collect(),
         )
@@ -210,7 +206,7 @@ mod tests {
         // yield DIFFERENT users — proving the adapter forwards its own
         // tenant into ResolveExternalIdentity rather than hardcoding or
         // dropping it (either of which would collapse both to one user).
-        let resolver = shared_resolver().await;
+        let resolver = shared_resolver();
         let dir_a = WebuiUserDirectory::new(
             Arc::clone(&resolver),
             TenantId::new("tenant-a").expect("tenant"),

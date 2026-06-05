@@ -551,6 +551,86 @@ fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWork
     }
 }
 
+/// Fold legacy pre-#4381 WebUI `user_identities` rows into the canonical
+/// identity store. The old store wrote those rows into the same libSQL
+/// substrate; reading that SQL table is a substrate-level concern handled
+/// here in the host layer (not the identity crate), then each row is bound
+/// into the filesystem-backed store so an existing SSO user keeps their
+/// `UserId` across upgrade. Idempotent (bind re-points to the same user) and
+/// a no-op when the legacy table is absent (fresh installs).
+#[cfg(feature = "webui-v2-beta")]
+async fn fold_legacy_webui_identities<R>(
+    db: &libsql::Database,
+    tenant_id: &TenantId,
+    store: &R,
+) -> Result<(), ironclaw_reborn_identity::RebornIdentityError>
+where
+    R: ironclaw_reborn_identity::RebornIdentityResolver + ?Sized,
+{
+    use ironclaw_reborn_identity::{
+        ExternalIdentityKey, ExternalSubjectId, ProviderKind, RebornIdentityError, SurfaceKind,
+    };
+
+    fn backend(error: libsql::Error) -> RebornIdentityError {
+        RebornIdentityError::Backend(error.to_string())
+    }
+    fn invalid_key(error: ironclaw_reborn_identity::IdentityKeyError) -> RebornIdentityError {
+        RebornIdentityError::Backend(error.to_string())
+    }
+
+    let conn = db.connect().map_err(backend)?;
+    // Scope the existence-check cursor so it is dropped (read lock released)
+    // before any write; a lingering open cursor would block the
+    // filesystem-backed writes below with `database is locked`.
+    let legacy_table_exists = {
+        let mut table = conn
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'user_identities'",
+                (),
+            )
+            .await
+            .map_err(backend)?;
+        table.next().await.map_err(backend)?.is_some()
+    };
+    if !legacy_table_exists {
+        return Ok(());
+    }
+
+    // Drain the read cursor fully BEFORE writing: the store's writes go
+    // through a different libSQL connection on the same file, and an open
+    // read cursor here would block them with `database is locked`.
+    let mut legacy = Vec::new();
+    let mut rows = conn
+        .query(
+            "SELECT provider, provider_user_id, user_id FROM user_identities",
+            (),
+        )
+        .await
+        .map_err(backend)?;
+    while let Some(row) = rows.next().await.map_err(backend)? {
+        let provider: String = row.get(0).map_err(backend)?;
+        let subject: String = row.get(1).map_err(backend)?;
+        let user: String = row.get(2).map_err(backend)?;
+        legacy.push((provider, subject, user));
+    }
+    drop(rows);
+    drop(conn);
+
+    for (provider, subject, user) in legacy {
+        let key = ExternalIdentityKey {
+            tenant_id: tenant_id.clone(),
+            surface_kind: SurfaceKind::Oauth,
+            provider_kind: ProviderKind::new(provider).map_err(invalid_key)?,
+            provider_instance_id: None,
+            external_subject_id: ExternalSubjectId::new(subject).map_err(invalid_key)?,
+        };
+        let user_id = UserId::new(user)
+            .map_err(|error| RebornIdentityError::InvalidUserId(error.to_string()))?;
+        store.bind(key, &user_id).await?;
+    }
+    Ok(())
+}
+
 impl RebornRuntime {
     /// Snapshot of the substrate facades produced by `build_reborn_services`.
     /// Exposed for diagnostics / readiness reporting; **not** for traffic.
@@ -640,12 +720,24 @@ impl RebornRuntime {
             ironclaw_reborn_identity::RebornIdentityError,
         >,
     > {
-        let db = Arc::clone(&self.services.local_runtime.as_ref()?.identity_substrate_db);
-        let store = match ironclaw_reborn_identity::RebornLibSqlIdentityStore::open(db).await {
-            Ok(store) => store,
-            Err(err) => return Some(Err(err)),
-        };
-        if let Err(err) = store.migrate_legacy_webui_identities(tenant_id).await {
+        let local = self.services.local_runtime.as_ref()?;
+        // Build the store on the host scoped filesystem (same substrate
+        // boundary as every other durable store), scoped by the runtime-owner
+        // caller identity. Data is partitioned by tenant in the record path.
+        let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+            Arc::clone(&local.identity_filesystem),
+            self.thread_scope.tenant_id.clone(),
+            self.actor_user_id.clone(),
+            self.thread_scope.agent_id.clone(),
+            self.thread_scope.project_id.clone(),
+        );
+        // One-time legacy fold: the pre-#4381 WebUI store wrote `user_identities`
+        // rows into the same libSQL substrate. Reading that SQL table is a
+        // substrate-level concern, so it lives here in the host layer (not the
+        // identity crate) and binds each row into the filesystem-backed store.
+        if let Err(err) =
+            fold_legacy_webui_identities(&local.identity_substrate_db, tenant_id, &store).await
+        {
             return Some(Err(err));
         }
         Some(Ok(
@@ -4480,6 +4572,10 @@ mod tests {
         )
         .await
         .expect("seed legacy identity");
+        // Drop the raw seed connection before the fold runs: production never
+        // holds a second raw handle on the substrate, and an idle extra
+        // connection here would contend with the filesystem-backed writes.
+        drop(seed);
 
         // The production accessor `serve` relies on: it opens the resolver on
         // the runtime-owned substrate handle and runs the legacy fold, so the
