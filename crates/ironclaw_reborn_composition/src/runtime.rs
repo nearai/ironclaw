@@ -4765,6 +4765,7 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn open_reborn_identity_resolver_migrates_legacy_verified_email_linking() {
         use ironclaw_reborn_identity::{
