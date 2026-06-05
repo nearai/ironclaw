@@ -1,0 +1,333 @@
+//! Local-dev trigger-fire access store.
+//!
+//! This is a Reborn-owned local bootstrap access store, separate from the
+//! WebChat identity store. It runs on the same libSQL substrate file, but owns
+//! only the local `local_reborn_access` table used to satisfy the fire-time
+//! trigger authorization contract during local development.
+
+use std::sync::Arc;
+
+use chrono::{SecondsFormat, Utc};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use thiserror::Error;
+
+/// Failure modes of the libSQL local trigger access store.
+#[derive(Debug, Error)]
+pub enum RebornLocalTriggerAccessStoreError {
+    /// The libSQL backend (connect / migrate / query / commit) failed.
+    #[error("reborn local trigger access store backend failure: {0}")]
+    Backend(String),
+}
+
+/// Local-dev trigger access row to seed from trusted host/operator input.
+pub struct LocalTriggerAccessSeed<'a> {
+    /// Tenant scope for the local access row.
+    pub tenant_id: &'a TenantId,
+    /// User that is allowed to fire triggers for the exact scope.
+    pub user_id: &'a UserId,
+    /// Optional agent scope. `None` is stored as an exact no-agent scope, not
+    /// a wildcard.
+    pub agent_id: Option<&'a AgentId>,
+    /// Optional project scope. `None` is stored as an exact no-project scope,
+    /// not a wildcard.
+    pub project_id: Option<&'a ProjectId>,
+    /// Local role label to persist on the access row.
+    pub role: &'a str,
+    /// Source label for the host/operator seed path.
+    pub source: &'a str,
+}
+
+/// libSQL-backed local-dev trigger access repository.
+pub struct RebornLibSqlLocalTriggerAccessStore {
+    db: Arc<libsql::Database>,
+}
+
+impl RebornLibSqlLocalTriggerAccessStore {
+    /// Open the store on an existing libSQL substrate handle and run its
+    /// idempotent migrations.
+    pub async fn open(
+        db: Arc<libsql::Database>,
+    ) -> Result<Self, RebornLocalTriggerAccessStoreError> {
+        let store = Self { db };
+        store.run_migrations().await?;
+        Ok(store)
+    }
+
+    /// A connection with a busy timeout set. This store shares the reborn
+    /// substrate DB file with other local-dev stores, so contended writes must
+    /// wait for the lock rather than fail immediately with `SQLITE_BUSY`.
+    async fn conn(&self) -> Result<libsql::Connection, RebornLocalTriggerAccessStoreError> {
+        let conn = self.db.connect().map_err(backend)?;
+        conn.query("PRAGMA busy_timeout = 5000", ())
+            .await
+            .map_err(backend)?;
+        Ok(conn)
+    }
+
+    async fn run_migrations(&self) -> Result<(), RebornLocalTriggerAccessStoreError> {
+        let conn = self.conn().await?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS local_reborn_access (\
+                 tenant_id TEXT NOT NULL, \
+                 user_id TEXT NOT NULL, \
+                 agent_id TEXT NOT NULL, \
+                 project_id TEXT NOT NULL, \
+                 role TEXT NOT NULL, \
+                 status TEXT NOT NULL, \
+                 source TEXT NOT NULL, \
+                 created_at TEXT NOT NULL, \
+                 updated_at TEXT NOT NULL, \
+                 PRIMARY KEY (tenant_id, user_id, agent_id, project_id));",
+        )
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Seed the local-dev trigger access row used by Reborn-owned fire-time
+    /// trigger authorization. Existing rows are left untouched so a local
+    /// operator can revoke or edit access without the next boot or login
+    /// silently re-granting it.
+    pub async fn seed_local_access(
+        &self,
+        seed: LocalTriggerAccessSeed<'_>,
+    ) -> Result<(), RebornLocalTriggerAccessStoreError> {
+        let conn = self.conn().await?;
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        tx.execute(
+            "INSERT INTO local_reborn_access \
+                 (tenant_id, user_id, agent_id, project_id, role, status, source, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?7) \
+                 ON CONFLICT(tenant_id, user_id, agent_id, project_id) DO NOTHING",
+            libsql::params![
+                seed.tenant_id.as_str(),
+                seed.user_id.as_str(),
+                optional_scope_key(seed.agent_id.map(AgentId::as_str)),
+                optional_scope_key(seed.project_id.map(ProjectId::as_str)),
+                seed.role,
+                seed.source,
+                now.as_str(),
+            ],
+        )
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
+        Ok(())
+    }
+
+    /// Return whether a local-dev user has active access for the exact
+    /// tenant/agent/project tuple on a trigger fire request.
+    pub async fn has_active_local_access(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
+    ) -> Result<bool, RebornLocalTriggerAccessStoreError> {
+        let conn = self.conn().await?;
+        let mut rows = conn
+            .query(
+                "SELECT 1 \
+                 FROM local_reborn_access \
+                 WHERE tenant_id = ?1 \
+                   AND user_id = ?2 \
+                   AND agent_id = ?3 \
+                   AND project_id = ?4 \
+                   AND status = 'active' \
+                 LIMIT 1",
+                libsql::params![
+                    tenant_id.as_str(),
+                    user_id.as_str(),
+                    optional_scope_key(agent_id.map(AgentId::as_str)),
+                    optional_scope_key(project_id.map(ProjectId::as_str)),
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(rows.next().await.map_err(backend)?.is_some())
+    }
+}
+
+fn backend(err: impl std::fmt::Display) -> RebornLocalTriggerAccessStoreError {
+    RebornLocalTriggerAccessStoreError::Backend(err.to_string())
+}
+
+fn optional_scope_key(value: Option<&str>) -> &str {
+    value.unwrap_or("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn store() -> RebornLibSqlLocalTriggerAccessStore {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.keep().join("reborn-local-dev.db");
+        let db = Arc::new(
+            libsql::Builder::new_local(&path)
+                .build()
+                .await
+                .expect("open libsql"),
+        );
+        RebornLibSqlLocalTriggerAccessStore::open(db)
+            .await
+            .expect("open store")
+    }
+
+    #[tokio::test]
+    async fn seeded_local_access_allows_exact_scope_only() {
+        let store = store().await;
+        let tenant_id = TenantId::new("local-access-tenant").expect("tenant id");
+        let user_id = UserId::new("local-access-user").expect("user id");
+        let other_user_id = UserId::new("local-access-other-user").expect("user id");
+        let agent_id = AgentId::new("local-access-agent").expect("agent id");
+        let project_id = ProjectId::new("local-access-project").expect("project id");
+        let other_project_id = ProjectId::new("local-access-other-project").expect("project id");
+
+        store
+            .seed_local_access(LocalTriggerAccessSeed {
+                tenant_id: &tenant_id,
+                user_id: &user_id,
+                agent_id: Some(&agent_id),
+                project_id: Some(&project_id),
+                role: "owner",
+                source: "test",
+            })
+            .await
+            .expect("seed local access");
+
+        assert!(
+            store
+                .has_active_local_access(&tenant_id, &user_id, Some(&agent_id), Some(&project_id))
+                .await
+                .expect("check local access"),
+            "the seeded exact tenant/user/agent/project scope is allowed"
+        );
+        assert!(
+            !store
+                .has_active_local_access(
+                    &tenant_id,
+                    &user_id,
+                    Some(&agent_id),
+                    Some(&other_project_id)
+                )
+                .await
+                .expect("check local access"),
+            "a different project is not covered by the seeded row"
+        );
+        assert!(
+            !store
+                .has_active_local_access(&tenant_id, &user_id, Some(&agent_id), None)
+                .await
+                .expect("check local access"),
+            "a no-project request is not covered by a project-scoped row"
+        );
+        assert!(
+            !store
+                .has_active_local_access(
+                    &tenant_id,
+                    &other_user_id,
+                    Some(&agent_id),
+                    Some(&project_id)
+                )
+                .await
+                .expect("check local access"),
+            "a different user is not covered by the seeded row"
+        );
+    }
+
+    #[tokio::test]
+    async fn seeded_local_access_allows_exact_no_project_scope_only() {
+        let store = store().await;
+        let tenant_id = TenantId::new("local-no-project-tenant").expect("tenant id");
+        let user_id = UserId::new("local-no-project-user").expect("user id");
+        let agent_id = AgentId::new("local-no-project-agent").expect("agent id");
+        let project_id = ProjectId::new("local-no-project-project").expect("project id");
+
+        store
+            .seed_local_access(LocalTriggerAccessSeed {
+                tenant_id: &tenant_id,
+                user_id: &user_id,
+                agent_id: Some(&agent_id),
+                project_id: None,
+                role: "owner",
+                source: "test",
+            })
+            .await
+            .expect("seed local access");
+
+        assert!(
+            store
+                .has_active_local_access(&tenant_id, &user_id, Some(&agent_id), None)
+                .await
+                .expect("check local access"),
+            "the seeded no-project scope is allowed"
+        );
+        assert!(
+            !store
+                .has_active_local_access(&tenant_id, &user_id, Some(&agent_id), Some(&project_id))
+                .await
+                .expect("check local access"),
+            "a no-project row is not a wildcard for project-scoped fires"
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_local_access_does_not_reactivate_existing_inactive_row() {
+        let store = store().await;
+        let tenant_id = TenantId::new("local-revoked-tenant").expect("tenant id");
+        let user_id = UserId::new("local-revoked-user").expect("user id");
+        let agent_id = AgentId::new("local-revoked-agent").expect("agent id");
+        let project_id = ProjectId::new("local-revoked-project").expect("project id");
+
+        store
+            .seed_local_access(LocalTriggerAccessSeed {
+                tenant_id: &tenant_id,
+                user_id: &user_id,
+                agent_id: Some(&agent_id),
+                project_id: Some(&project_id),
+                role: "owner",
+                source: "test",
+            })
+            .await
+            .expect("seed local access");
+
+        let conn = store.conn().await.expect("conn");
+        conn.execute(
+            "UPDATE local_reborn_access SET status = 'inactive' \
+             WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 AND project_id = ?4",
+            libsql::params![
+                tenant_id.as_str(),
+                user_id.as_str(),
+                agent_id.as_str(),
+                project_id.as_str(),
+            ],
+        )
+        .await
+        .expect("mark access inactive");
+
+        store
+            .seed_local_access(LocalTriggerAccessSeed {
+                tenant_id: &tenant_id,
+                user_id: &user_id,
+                agent_id: Some(&agent_id),
+                project_id: Some(&project_id),
+                role: "owner",
+                source: "test",
+            })
+            .await
+            .expect("reseed local access");
+
+        assert!(
+            !store
+                .has_active_local_access(&tenant_id, &user_id, Some(&agent_id), Some(&project_id))
+                .await
+                .expect("check local access"),
+            "reseed must not silently reactivate an inactive existing row"
+        );
+    }
+}

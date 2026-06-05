@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime_input::TriggerPollerSettings;
+pub(crate) use crate::trigger_poller_trusted_submit::AccessCheckerTriggerFireAuthorizer;
 pub(crate) use crate::trigger_poller_trusted_submit::ConversationContentRefMaterializer;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;

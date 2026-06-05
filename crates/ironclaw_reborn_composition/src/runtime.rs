@@ -94,9 +94,10 @@ use crate::runtime_input::{
 #[cfg(any(test, feature = "test-support"))]
 use crate::trigger_poller::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::trigger_poller::{
-    ConversationContentRefMaterializer, LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup,
-    TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle,
-    TriggerTurnSnapshotSource, spawn_trigger_poller,
+    AccessCheckerTriggerFireAuthorizer, ConversationContentRefMaterializer,
+    LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT,
+    TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle, TriggerTurnSnapshotSource,
+    spawn_trigger_poller,
 };
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
@@ -275,10 +276,11 @@ async fn build_trigger_poller_services(
     turn_coordinator: Arc<dyn TurnCoordinator>,
     thread_service: Arc<dyn SessionThreadService>,
     authorizer_config: TriggerPollerAuthorizerConfig,
+    access_checker: Option<Arc<dyn crate::runtime_input::TriggerFireAccessChecker>>,
     tenant_id: TenantId,
     default_agent_id: AgentId,
 ) -> Result<TriggerPollerServices, RebornRuntimeError> {
-    let authorizer = build_trigger_fire_authorizer(authorizer_config, tenant_id)?;
+    let authorizer = build_trigger_fire_authorizer(authorizer_config, access_checker, tenant_id)?;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     {
         let conversations = local_runtime
@@ -338,7 +340,8 @@ async fn build_trigger_poller_services(
 
 fn trigger_poller_authorization_required_error() -> RebornRuntimeError {
     RebornRuntimeError::InvalidArgument {
-        reason: "trigger poller cannot be enabled until fire-time creator authorization is backed by the real agent/project membership source of truth".to_string(),
+        reason: "trigger poller cannot be enabled without a fire-time creator access checker"
+            .to_string(),
     }
 }
 
@@ -346,19 +349,21 @@ fn trigger_poller_authorization_required_error() -> RebornRuntimeError {
 /// already decided to enable the poller.
 fn validate_trigger_poller_authorization(
     trigger_poller: &TriggerPollerSettings,
+    access_checker: Option<&Arc<dyn crate::runtime_input::TriggerFireAccessChecker>>,
 ) -> Result<(), RebornRuntimeError> {
     debug_assert!(trigger_poller.enabled);
     match trigger_poller.authorizer {
         #[cfg(any(test, feature = "test-support"))]
         TriggerPollerAuthorizerConfig::TenantScopedPlaceholderForTest => Ok(()),
-        TriggerPollerAuthorizerConfig::CreatorMembershipRequired => {
-            Err(trigger_poller_authorization_required_error())
-        }
+        TriggerPollerAuthorizerConfig::CreatorAccessRequired => access_checker
+            .map(|_| ())
+            .ok_or_else(trigger_poller_authorization_required_error),
     }
 }
 
 fn build_trigger_fire_authorizer(
     authorizer_config: TriggerPollerAuthorizerConfig,
+    access_checker: Option<Arc<dyn crate::runtime_input::TriggerFireAccessChecker>>,
     tenant_id: TenantId,
 ) -> Result<Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>, RebornRuntimeError>
 {
@@ -369,9 +374,12 @@ fn build_trigger_fire_authorizer(
         TriggerPollerAuthorizerConfig::TenantScopedPlaceholderForTest => Ok(Arc::new(
             TenantScopedTrustedTriggerFireAuthorizer::new(tenant_id),
         )),
-        TriggerPollerAuthorizerConfig::CreatorMembershipRequired => {
-            Err(trigger_poller_authorization_required_error())
-        }
+        TriggerPollerAuthorizerConfig::CreatorAccessRequired => access_checker
+            .map(|checker| {
+                Arc::new(AccessCheckerTriggerFireAuthorizer::new(checker))
+                    as Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>
+            })
+            .ok_or_else(trigger_poller_authorization_required_error),
     }
 }
 
@@ -1297,6 +1305,7 @@ pub async fn build_reborn_runtime(
         boot,
         runner,
         trigger_poller,
+        trigger_fire_access_checker,
         poll,
         identity,
         default_project_id,
@@ -1701,12 +1710,16 @@ pub async fn build_reborn_runtime(
         Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     >;
     if trigger_poller.enabled {
-        validate_trigger_poller_authorization(&trigger_poller)?;
+        validate_trigger_poller_authorization(
+            &trigger_poller,
+            trigger_fire_access_checker.as_ref(),
+        )?;
         let trigger_poller_services = build_trigger_poller_services(
             local_runtime,
             Arc::clone(&planned_turn_coordinator),
             Arc::clone(&thread_service),
             trigger_poller.authorizer,
+            trigger_fire_access_checker.clone(),
             thread_scope.tenant_id.clone(),
             validated_identity.agent_id.clone(),
         )
@@ -2207,7 +2220,9 @@ mod tests {
     use crate::RebornReadinessState;
     use crate::input::RebornBuildInput;
     use crate::runtime_input::{
-        PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings,
+        PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
+        TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
+        TriggerPollerSettings,
     };
     use crate::webui::build_webui_services;
 
@@ -2259,9 +2274,22 @@ mod tests {
         candidates: Vec<HostSkillContextCandidate>,
     }
 
+    #[derive(Debug)]
+    struct AllowingTriggerFireAccessChecker;
+
     impl StaticSkillContextSource {
         fn new(candidates: Vec<HostSkillContextCandidate>) -> Self {
             Self { candidates }
+        }
+    }
+
+    #[async_trait]
+    impl TriggerFireAccessChecker for AllowingTriggerFireAccessChecker {
+        async fn check_trigger_fire_access(
+            &self,
+            _request: TriggerFireAccessCheck,
+        ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
+            Ok(TriggerFireAccessDecision::Allowed)
         }
     }
 
@@ -2807,15 +2835,50 @@ mod tests {
                     .await
                     .expect("unexpected runtime shutdown");
                 panic!(
-                    "creator-membership-required setting must not enable trigger poller without real membership backend"
+                    "creator-access-required setting must not enable trigger poller without an access checker"
                 );
             }
             Err(err) => err,
         };
 
         assert!(
-            matches!(err, super::RebornRuntimeError::InvalidArgument { reason } if reason.contains("fire-time creator authorization"))
+            matches!(err, super::RebornRuntimeError::InvalidArgument { reason } if reason.contains("fire-time creator access checker"))
         );
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_accepts_trigger_poller_with_creator_access_checker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "trigger auth supplied".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-trigger-auth-supplied-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trigger-auth-supplied-tenant".to_string(),
+            agent_id: "runtime-trigger-auth-supplied-agent".to_string(),
+            source_binding_id: "runtime-trigger-auth-supplied-source".to_string(),
+            reply_target_binding_id: "runtime-trigger-auth-supplied-reply".to_string(),
+        })
+        .with_trigger_poller_settings(TriggerPollerSettings::enabled())
+        .with_trigger_fire_access_checker(Arc::new(AllowingTriggerFireAccessChecker))
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("runtime builds with creator access checker");
+
+        assert!(runtime.services().readiness.workers.turn_runner);
+        assert!(runtime.services().readiness.workers.trigger_poller);
+
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[tokio::test]

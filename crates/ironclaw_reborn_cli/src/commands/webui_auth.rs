@@ -13,13 +13,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
-use ironclaw_reborn_composition::host_api::TenantId;
-use ironclaw_reborn_composition::{PublicRouteMount, WebuiAuthenticator, open_webui_user_store};
+use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId};
+use ironclaw_reborn_composition::{
+    PublicRouteMount, WebuiAuthenticator, open_local_trigger_access_store, open_webui_user_store,
+};
 use ironclaw_reborn_webui_ingress::{SignedSessionLoginConfig, build_signed_session_login};
 use secrecy::SecretString;
 
 use crate::commands::serve_sso::SsoStartupConfig;
-use crate::commands::user_directory::WebuiUserDirectory;
+use crate::commands::user_directory::{LocalTriggerAccessBootstrap, WebuiUserDirectory};
 
 /// The composed WebChat v2 auth surface: the authenticator the protected
 /// routes verify bearers with, plus the optional public login-route mount
@@ -27,6 +29,12 @@ use crate::commands::user_directory::WebuiUserDirectory;
 pub(crate) struct WebuiAuthSurface {
     pub(crate) authenticator: Arc<dyn WebuiAuthenticator>,
     pub(crate) public_mount: Option<PublicRouteMount>,
+}
+
+pub(crate) struct LocalTriggerAccessBootstrapConfig {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) agent_id: AgentId,
+    pub(crate) project_id: Option<ProjectId>,
 }
 
 /// Build the auth surface from resolved startup config.
@@ -43,6 +51,7 @@ pub(crate) async fn build_webui_auth_surface(
     tenant_id: TenantId,
     session_signing_secret: SecretString,
     env_authenticator: Arc<dyn WebuiAuthenticator>,
+    local_trigger_access: Option<LocalTriggerAccessBootstrapConfig>,
 ) -> anyhow::Result<WebuiAuthSurface> {
     let Some(sso) = sso_startup else {
         return Ok(WebuiAuthSurface {
@@ -58,13 +67,27 @@ pub(crate) async fn build_webui_auth_surface(
     let user_store = open_webui_user_store(user_store_path)
         .await
         .context("failed to initialize WebChat user-identity store")?;
+    let local_trigger_access = if let Some(config) = local_trigger_access {
+        let access_store = open_local_trigger_access_store(user_store_path)
+            .await
+            .context("failed to initialize local trigger access store for SSO")?;
+        Some(LocalTriggerAccessBootstrap::new(
+            access_store,
+            config.tenant_id,
+            config.agent_id,
+            config.project_id,
+        ))
+    } else {
+        None
+    };
+    let mut user_directory = WebuiUserDirectory::new(user_store, sso.allowed_email_domains);
+    if let Some(local_trigger_access) = local_trigger_access {
+        user_directory = user_directory.with_local_trigger_access(local_trigger_access);
+    }
 
     let wiring = build_signed_session_login(SignedSessionLoginConfig {
         tenant_id,
-        user_directory: Arc::new(WebuiUserDirectory::new(
-            user_store,
-            sso.allowed_email_domains,
-        )),
+        user_directory: Arc::new(user_directory),
         operator_secret: session_signing_secret,
         base_url: sso.base_url,
         providers: sso.providers,

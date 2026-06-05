@@ -214,10 +214,16 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   Backend unavailability while checking that policy must be retryable. The
   fire-time authorization request is a host-owned shape over
   `tenant_id`/`creator_user_id`/`agent_id`/`project_id`/`trigger_id`/`fire_slot`;
-  trigger-domain crates must not own the membership policy. Until that request
-  is backed by the real agent/project membership source of truth, a normal
+  trigger-domain crates must not own the access policy. Until that request
+  is backed by the real agent/project access source of truth, a normal
   runtime must fail closed instead of enabling the trigger poller with the
   tenant-scope placeholder.
+- Local-dev `serve` may satisfy that contract by seeding active access rows
+  from trusted operator/env configuration at boot and, when local-dev SSO is
+  enabled, from each admitted SSO identity at login. It wires the same store as
+  the fire-time access checker. The seeded row is exact
+  `tenant_id`/`creator_user_id`/`agent_id`/`project_id` access; a missing
+  project is not a wildcard.
 - The trusted inbound request is a host-owned synthetic inbound shape around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it has no adapter-supplied requested-scope hints before binding resolution.
 - It must not encode delivery targets, notification targets, or any other outbound routing policy.
 
