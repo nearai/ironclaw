@@ -4,6 +4,10 @@
 //! WebChat identity store. It runs on the same libSQL substrate file, but owns
 //! only the local `local_reborn_access` table used to satisfy the fire-time
 //! trigger authorization contract during local development.
+//!
+//! This table is not the production agent/project membership source of truth.
+//! Production and multi-tenant runtimes must wire a real membership-backed
+//! trigger access checker instead of this local bootstrap store.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

@@ -225,6 +225,9 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   scope. `serve` reconciles the env-bearer WebUI user and, when local-dev SSO is
   enabled, existing admitted SSO users at boot plus each admitted SSO identity
   at login. Both paths wire the same store as the fire-time access checker.
+  This local-dev access table is bootstrap authorization state only; it is not
+  the production agent/project membership source of truth and must not be used
+  to justify enabling trigger polling in a production or multi-tenant runtime.
   Bootstrap-owned active rows no longer present in the trusted local admission
   set are marked inactive, while manually inactive rows are not silently
   reactivated. The seeded row is exact
