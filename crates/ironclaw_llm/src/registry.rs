@@ -237,6 +237,10 @@ impl SetupHint {
         }
     }
 
+    pub fn accepts_api_key(&self) -> bool {
+        matches!(self, Self::ApiKey { .. } | Self::OpenAiCompatible { .. })
+    }
+
     pub fn secret_name(&self) -> Option<&str> {
         match self {
             Self::ApiKey { secret_name, .. } => Some(secret_name),
@@ -716,6 +720,31 @@ mod tests {
             can_list_models: false,
         };
         assert!(!without.can_list_models());
+    }
+
+    #[test]
+    fn setup_hint_accepts_api_key_marks_key_based_flows() {
+        let api_key = SetupHint::ApiKey {
+            secret_name: "llm_test_api_key".to_string(),
+            key_url: None,
+            display_name: "API Key".to_string(),
+            can_list_models: false,
+            models_filter: None,
+        };
+        let compatible = SetupHint::OpenAiCompatible {
+            secret_name: "llm_compatible_api_key".to_string(),
+            display_name: "Compatible".to_string(),
+            can_list_models: false,
+        };
+        let session = SetupHint::SessionToken {
+            display_name: "Session".to_string(),
+            key_url: None,
+            can_list_models: false,
+        };
+
+        assert!(api_key.accepts_api_key());
+        assert!(compatible.accepts_api_key());
+        assert!(!session.accepts_api_key());
     }
 
     #[test]

@@ -3,7 +3,9 @@ use std::{path::PathBuf, sync::Arc};
 use crate::local_dev_mounts::skill_management_mount_view;
 use async_trait::async_trait;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
-use ironclaw_host_api::{HostPath, InvocationId, MountView, ResourceScope, UserId, VirtualPath};
+use ironclaw_host_api::{
+    HostPath, InvocationId, MountView, ResourceScope, RuntimeHttpEgress, UserId, VirtualPath,
+};
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
@@ -168,6 +170,7 @@ fn invalid_skill_context(error: impl std::fmt::Display) -> RebornLocalSkillManag
 pub(crate) struct RebornLocalLifecycleFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
 }
 
 impl RebornLocalLifecycleFacade {
@@ -175,6 +178,7 @@ impl RebornLocalLifecycleFacade {
         Self {
             skill_management,
             extension_management: None,
+            runtime_http_egress: None,
         }
     }
 
@@ -186,8 +190,17 @@ impl RebornLocalLifecycleFacade {
         self
     }
 
+    pub(crate) fn with_runtime_http_egress(
+        mut self,
+        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    ) -> Self {
+        self.runtime_http_egress = Some(runtime_http_egress);
+        self
+    }
+
     async fn execute_action(
         &self,
+        context: LifecycleProductContext,
         action: LifecycleProductAction,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         match action {
@@ -251,6 +264,12 @@ impl RebornLocalLifecycleFacade {
                 };
                 extension_management.search(&query).await
             }
+            LifecycleProductAction::ExtensionList => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(None);
+                };
+                extension_management.list_installed().await
+            }
             LifecycleProductAction::ExtensionInstall { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
@@ -261,7 +280,37 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
-                extension_management.activate(package_ref).await
+                if extension_management
+                    .package_requires_hosted_mcp_discovery(&package_ref)
+                    .await?
+                {
+                    let Some(runtime_http_egress) = self.runtime_http_egress.clone() else {
+                        return Err(ProductWorkflowError::InvalidBindingRequest {
+                            reason: format!(
+                                "extension {} requires hosted MCP schema discovery and cannot be activated through the static lifecycle facade",
+                                package_ref.id
+                            ),
+                        });
+                    };
+                    let scope = lifecycle_resource_scope(&context)?;
+                    return extension_management
+                        .activate(
+                            package_ref,
+                            crate::extension_lifecycle::ExtensionActivationMode::HostedMcpDiscovery {
+                                scope,
+                                runtime_http_egress,
+                            },
+                        )
+                        .await;
+                }
+                // This projection facade has no runtime egress services, so it
+                // intentionally only supports static extension activation.
+                extension_management
+                    .activate(
+                        package_ref,
+                        crate::extension_lifecycle::ExtensionActivationMode::Static,
+                    )
+                    .await
             }
             LifecycleProductAction::ExtensionRemove { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
@@ -281,10 +330,10 @@ impl RebornLocalLifecycleFacade {
 impl LifecycleProductFacade for RebornLocalLifecycleFacade {
     async fn execute(
         &self,
-        _context: LifecycleProductContext,
+        context: LifecycleProductContext,
         action: LifecycleProductAction,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        self.execute_action(action).await
+        self.execute_action(context, action).await
     }
 
     async fn project_package(
@@ -292,12 +341,37 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
         _context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        if package_ref.kind == LifecyclePackageKind::Extension {
+            let Some(extension_management) = &self.extension_management else {
+                return unsupported_projection(Some(package_ref));
+            };
+            return extension_management.project(package_ref).await;
+        }
         unsupported_projection(Some(package_ref))
     }
 }
 
 fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductWorkflowError> {
     LifecyclePackageRef::new(LifecyclePackageKind::Skill, name)
+}
+
+fn lifecycle_resource_scope(
+    context: &LifecycleProductContext,
+) -> Result<ResourceScope, ProductWorkflowError> {
+    let LifecycleProductContext::Surface(context) = context else {
+        return Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: "hosted MCP lifecycle activation requires a surface caller".to_string(),
+        });
+    };
+    Ok(ResourceScope {
+        tenant_id: context.tenant_id.clone(),
+        user_id: context.user_id.clone(),
+        agent_id: context.agent_id.clone(),
+        project_id: context.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    })
 }
 
 pub(crate) fn response_with_payload(
@@ -389,14 +463,18 @@ fn map_local_skill_management_error(
 mod tests {
     use super::*;
     use ironclaw_filesystem::LocalFilesystem;
-    use ironclaw_host_api::{HostPath, MountAlias, MountGrant, MountPermissions, VirtualPath};
+    use ironclaw_host_api::{
+        AgentId, HostPath, MountAlias, MountGrant, MountPermissions, ProjectId, TenantId,
+        VirtualPath,
+    };
+    use ironclaw_product_workflow::LifecycleProductSurfaceContext;
 
     #[tokio::test]
     async fn skill_lifecycle_facade_installs_lists_and_removes_via_skill_management() {
         let (_dir, storage_root, facade) = lifecycle_fixture();
 
         let install = facade
-            .execute_action(LifecycleProductAction::SkillInstall {
+            .execute_action(lifecycle_test_context(), LifecycleProductAction::SkillInstall {
                 name: None,
                 content:
                     "---\nname: lifecycle-skill\ndescription: lifecycle test\n---\nUse lifecycle.\n"
@@ -419,9 +497,12 @@ mod tests {
         );
 
         let list = facade
-            .execute_action(LifecycleProductAction::SkillSearch {
-                query: "lifecycle".to_string(),
-            })
+            .execute_action(
+                lifecycle_test_context(),
+                LifecycleProductAction::SkillSearch {
+                    query: "lifecycle".to_string(),
+                },
+            )
             .await
             .expect("list skills");
         assert_eq!(list.phase, LifecyclePhase::Discovered);
@@ -432,7 +513,7 @@ mod tests {
 
         for index in 0..55 {
             facade
-                .execute_action(LifecycleProductAction::SkillInstall {
+                .execute_action(lifecycle_test_context(), LifecycleProductAction::SkillInstall {
                     name: Some(
                         LifecyclePackageId::new(format!("bulk-skill-{index:02}"))
                             .expect("valid skill id"),
@@ -446,9 +527,12 @@ mod tests {
         }
 
         let all_skills = facade
-            .execute_action(LifecycleProductAction::SkillSearch {
-                query: String::new(),
-            })
+            .execute_action(
+                lifecycle_test_context(),
+                LifecycleProductAction::SkillSearch {
+                    query: String::new(),
+                },
+            )
             .await
             .expect("list all skills");
         let Some(LifecycleProductPayload::SkillSearch {
@@ -466,13 +550,16 @@ mod tests {
         assert_eq!(skills.len(), 50);
 
         let wrong_kind = facade
-            .execute_action(LifecycleProductAction::SkillRemove {
-                package_ref: LifecyclePackageRef::new(
-                    LifecyclePackageKind::Extension,
-                    "lifecycle-skill",
-                )
-                .expect("valid extension ref"),
-            })
+            .execute_action(
+                lifecycle_test_context(),
+                LifecycleProductAction::SkillRemove {
+                    package_ref: LifecyclePackageRef::new(
+                        LifecyclePackageKind::Extension,
+                        "lifecycle-skill",
+                    )
+                    .expect("valid extension ref"),
+                },
+            )
             .await
             .expect_err("skill remove must reject non-skill package refs");
         assert!(matches!(
@@ -486,13 +573,16 @@ mod tests {
         );
 
         let remove = facade
-            .execute_action(LifecycleProductAction::SkillRemove {
-                package_ref: LifecyclePackageRef::new(
-                    LifecyclePackageKind::Skill,
-                    "lifecycle-skill",
-                )
-                .expect("valid skill ref"),
-            })
+            .execute_action(
+                lifecycle_test_context(),
+                LifecycleProductAction::SkillRemove {
+                    package_ref: LifecyclePackageRef::new(
+                        LifecyclePackageKind::Skill,
+                        "lifecycle-skill",
+                    )
+                    .expect("valid skill ref"),
+                },
+            )
             .await
             .expect("remove skill");
         assert_eq!(remove.phase, LifecyclePhase::Removed);
@@ -503,33 +593,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lifecycle_resource_scope_uses_surface_caller_identity() {
+        let context = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+            tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+            user_id: UserId::new("user-alpha").expect("user"),
+            agent_id: Some(AgentId::new("agent-alpha").expect("agent")),
+            project_id: Some(ProjectId::new("project-alpha").expect("project")),
+        });
+
+        let scope = lifecycle_resource_scope(&context).expect("surface scope");
+
+        assert_eq!(scope.tenant_id.as_str(), "tenant-alpha");
+        assert_eq!(scope.user_id.as_str(), "user-alpha");
+        assert_eq!(
+            scope.agent_id.as_ref().map(|id| id.as_str()),
+            Some("agent-alpha")
+        );
+        assert_eq!(
+            scope.project_id.as_ref().map(|id| id.as_str()),
+            Some("project-alpha")
+        );
+        assert!(scope.thread_id.is_none());
+    }
+
     #[tokio::test]
     async fn skill_lifecycle_facade_serializes_concurrent_install_and_remove() {
         let (_dir, storage_root, facade) = lifecycle_fixture();
 
         let facade_a = facade.clone();
         let facade_b = facade.clone();
-        let install_a = facade_a.execute_action(LifecycleProductAction::SkillInstall {
-            name: Some(LifecyclePackageId::new("concurrent-a").expect("valid skill id")),
-            content: skill_content("concurrent-a"),
-        });
-        let install_b = facade_b.execute_action(LifecycleProductAction::SkillInstall {
-            name: Some(LifecyclePackageId::new("concurrent-b").expect("valid skill id")),
-            content: skill_content("concurrent-b"),
-        });
+        let install_a = facade_a.execute_action(
+            lifecycle_test_context(),
+            LifecycleProductAction::SkillInstall {
+                name: Some(LifecyclePackageId::new("concurrent-a").expect("valid skill id")),
+                content: skill_content("concurrent-a"),
+            },
+        );
+        let install_b = facade_b.execute_action(
+            lifecycle_test_context(),
+            LifecycleProductAction::SkillInstall {
+                name: Some(LifecyclePackageId::new("concurrent-b").expect("valid skill id")),
+                content: skill_content("concurrent-b"),
+            },
+        );
         let (installed_a, installed_b) = tokio::join!(install_a, install_b);
         installed_a.expect("install concurrent-a");
         installed_b.expect("install concurrent-b");
 
         let facade_a = facade.clone();
-        let remove_a = facade_a.execute_action(LifecycleProductAction::SkillRemove {
-            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Skill, "concurrent-a")
-                .expect("valid skill ref"),
-        });
-        let remove_b = facade.execute_action(LifecycleProductAction::SkillRemove {
-            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Skill, "concurrent-b")
-                .expect("valid skill ref"),
-        });
+        let remove_a = facade_a.execute_action(
+            lifecycle_test_context(),
+            LifecycleProductAction::SkillRemove {
+                package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Skill, "concurrent-a")
+                    .expect("valid skill ref"),
+            },
+        );
+        let remove_b = facade.execute_action(
+            lifecycle_test_context(),
+            LifecycleProductAction::SkillRemove {
+                package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Skill, "concurrent-b")
+                    .expect("valid skill ref"),
+            },
+        );
         let (removed_a, removed_b) = tokio::join!(remove_a, remove_b);
         removed_a.expect("remove concurrent-a");
         removed_b.expect("remove concurrent-b");
@@ -543,10 +669,13 @@ mod tests {
         let (_dir, _storage_root, facade) = lifecycle_fixture();
 
         let invalid_install = facade
-            .execute_action(LifecycleProductAction::SkillInstall {
-                name: Some(LifecyclePackageId::new("broken-skill").expect("valid skill id")),
-                content: "not a skill manifest".to_string(),
-            })
+            .execute_action(
+                lifecycle_test_context(),
+                LifecycleProductAction::SkillInstall {
+                    name: Some(LifecyclePackageId::new("broken-skill").expect("valid skill id")),
+                    content: "---\nname: broken-skill\n\nmissing closing delimiter".to_string(),
+                },
+            )
             .await
             .expect_err("invalid skill content should fail");
         assert!(matches!(
@@ -555,10 +684,16 @@ mod tests {
         ));
 
         let missing_remove = facade
-            .execute_action(LifecycleProductAction::SkillRemove {
-                package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Skill, "missing-skill")
+            .execute_action(
+                lifecycle_test_context(),
+                LifecycleProductAction::SkillRemove {
+                    package_ref: LifecyclePackageRef::new(
+                        LifecyclePackageKind::Skill,
+                        "missing-skill",
+                    )
                     .expect("valid skill ref"),
-            })
+                },
+            )
             .await
             .expect_err("missing skill remove should fail");
         assert!(matches!(
@@ -606,5 +741,14 @@ mod tests {
 
     fn skill_content(name: &str) -> String {
         format!("---\nname: {name}\ndescription: lifecycle test\n---\nUse lifecycle.\n")
+    }
+
+    fn lifecycle_test_context() -> LifecycleProductContext {
+        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+            tenant_id: TenantId::new("lifecycle-tenant").expect("tenant"),
+            user_id: UserId::new("lifecycle-owner").expect("user"),
+            agent_id: None,
+            project_id: None,
+        })
     }
 }

@@ -1,10 +1,12 @@
 use super::common::*;
 use ironclaw_auth::{
-    GOOGLE_AUTHORIZATION_ENDPOINT, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
-    OAuthAuthorizationCode, OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthClientId,
-    OAuthExtraParam, OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceCodeChallenge,
-    PkceVerifierSecret, ProviderScope, build_authorization_url, build_google_authorization_url,
-    opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash, scope_text,
+    AuthFlowId, GOOGLE_AUTHORIZATION_ENDPOINT, GOOGLE_CALENDAR_EVENTS_SCOPE,
+    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE, GoogleOAuthCallbackState,
+    GoogleOAuthRouteConfig, OAuthAuthorizationCode, OAuthAuthorizationEndpoint,
+    OAuthAuthorizeUrlRequest, OAuthClientId, OAuthExtraParam, OAuthRedirectUri, OAuthState,
+    OAuthTokenResponse, PkceCodeChallenge, PkceVerifierSecret, ProviderScope,
+    build_authorization_url, build_google_authorization_url, opaque_state_hash,
+    pkce_s256_challenge, pkce_verifier_hash, scope_text,
 };
 use secrecy::ExposeSecret;
 
@@ -178,6 +180,88 @@ fn google_authorization_url_omits_hd_when_hosted_domain_is_none() {
     let parsed = url::Url::parse(url.as_str()).unwrap();
 
     assert!(!parsed.query_pairs().any(|(name, _)| name == "hd"));
+}
+
+#[test]
+fn google_route_config_validates_and_hides_hosted_domain_hint() {
+    let config = GoogleOAuthRouteConfig::new(
+        "client-id.apps.googleusercontent.com",
+        "http://127.0.0.1:5555/oauth/callback/google",
+    )
+    .unwrap()
+    .with_hosted_domain_hint("near.ai")
+    .unwrap();
+
+    assert_eq!(
+        config.client_id().as_str(),
+        "client-id.apps.googleusercontent.com"
+    );
+    assert_eq!(
+        config.redirect_uri().as_str(),
+        "http://127.0.0.1:5555/oauth/callback/google"
+    );
+    assert_eq!(config.hosted_domain_hint(), Some("near.ai"));
+
+    let debug = format!("{config:?}");
+    assert!(!debug.contains("near.ai"));
+    assert!(debug.contains("[REDACTED]"));
+
+    assert_invalid_request(
+        GoogleOAuthRouteConfig::new(
+            "client-id.apps.googleusercontent.com",
+            "http://127.0.0.1:5555/oauth/callback/google",
+        )
+        .unwrap()
+        .with_hosted_domain_hint("near.ai\nexample.com"),
+    );
+}
+
+#[test]
+fn google_callback_state_round_trips_through_validated_encoded_state() {
+    let flow_id = AuthFlowId::new();
+    let owner_scope = scope("alice");
+    let account_label = label("work google");
+    let requested_scopes =
+        provider_scopes(&[GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_CALENDAR_EVENTS_SCOPE]);
+
+    let state = GoogleOAuthCallbackState::new(
+        flow_id,
+        owner_scope.clone(),
+        account_label.clone(),
+        requested_scopes.clone(),
+    )
+    .unwrap();
+    let encoded = state.encode().unwrap();
+    let decoded = GoogleOAuthCallbackState::decode(encoded.as_str()).unwrap();
+    let mut expected_scope =
+        AuthProductScope::new(owner_scope.resource.clone(), AuthSurface::Callback);
+    if let Some(session_id) = owner_scope.session_id.clone() {
+        expected_scope = expected_scope.with_session_id(session_id);
+    }
+
+    assert_eq!(decoded.flow_id(), flow_id);
+    assert_eq!(decoded.scope(), &expected_scope);
+    assert_eq!(decoded.account_label(), &account_label);
+    assert_eq!(decoded.requested_scopes(), requested_scopes.as_slice());
+    assert!(!format!("{encoded:?}").contains("work google"));
+}
+
+#[test]
+fn google_callback_state_rejects_unapproved_requested_scopes() {
+    let invalid_scope = ProviderScope::new("https://www.googleapis.com/auth/drive").unwrap();
+
+    assert_invalid_request(GoogleOAuthCallbackState::new(
+        AuthFlowId::new(),
+        scope("alice"),
+        label("work google"),
+        Vec::new(),
+    ));
+    assert_invalid_request(GoogleOAuthCallbackState::new(
+        AuthFlowId::new(),
+        scope("alice"),
+        label("work google"),
+        vec![invalid_scope],
+    ));
 }
 
 #[test]

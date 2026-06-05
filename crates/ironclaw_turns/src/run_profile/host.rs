@@ -5,7 +5,9 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind, ThreadId};
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
@@ -16,9 +18,11 @@ use crate::{
 };
 
 use super::{
+    compaction::{CompactionInitiator, LoopCompactionPort},
     instruction_bundle::InstructionBundleFingerprint,
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
     snapshot::ResolvedRunProfile,
+    system_inference::SystemInferenceTaskId,
 };
 
 const FORBIDDEN_MODEL_ROUTE_MARKERS: &[&str] = &[
@@ -646,11 +650,27 @@ impl AgentLoopHostErrorKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLoopHostErrorReasonKind {
+    ModelCreditsExhausted,
+}
+
+impl AgentLoopHostErrorReasonKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelCreditsExhausted => "model_credits_exhausted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 #[error("agent loop host {kind:?}: {safe_summary}")]
 pub struct AgentLoopHostError {
     pub kind: AgentLoopHostErrorKind,
     pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -659,8 +679,14 @@ impl AgentLoopHostError {
         Self {
             kind,
             safe_summary: safe_summary.into(),
+            reason_kind: None,
             diagnostic_ref: None,
         }
+    }
+
+    pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
+        self.reason_kind = Some(reason_kind);
+        self
     }
 
     pub fn with_diagnostic_ref(mut self, diagnostic_ref: LoopDiagnosticRef) -> Self {
@@ -685,42 +711,66 @@ fn default_prompt_mode() -> PromptMode {
     PromptMode::TextOnly
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub const LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES: usize = 64 * 1024;
+pub const LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoopContextBundle {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identity_messages: Vec<LoopContextMessage>,
     pub messages: Vec<LoopContextMessage>,
     pub instruction_snippets: Vec<LoopContextSnippet>,
     pub memory_snippets: Vec<LoopContextSnippet>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopContextMessage {
     /// Reference to the persisted message content.
     ///
     /// `None` means "summary-only entry; prompt port MUST NOT resolve content —
     /// use `safe_summary` verbatim instead." Mirrors the
     /// `SkillTrustLevel::Installed` carrying `prompt_content: None` pattern.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_ref: Option<LoopMessageRef>,
     pub role: String,
     pub safe_summary: String,
+    pub compaction: Option<LoopContextCompactionMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopContextCompactionMetadata {
+    pub sequence: u64,
+    pub kind: LoopContextCompactionKind,
+    pub estimated_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopContextCompactionKind {
+    User,
+    Assistant,
+    System,
+    Summary,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopContextSnippetMetadata {
     pub source_name: String,
     pub trust_level: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopContextSnippet {
     pub snippet_ref: String,
+    /// Full model-visible content for this context snippet.
+    ///
+    /// This is intentionally distinct from `safe_summary`: prompt assembly must
+    /// materialize this field, while summaries remain short metadata for
+    /// fingerprints, transcript displays, and diagnostics.
+    pub model_content: String,
     pub safe_summary: String,
     /// Safe metadata for prompt milestones. Skill snippet producers using the
     /// `skill:` ref namespace must populate this so telemetry can record active
     /// skill name/trust without leaking prompt content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<LoopContextSnippetMetadata>,
 }
 
@@ -948,6 +998,8 @@ pub struct LoopPromptBundle {
     pub bundle_ref: LoopPromptBundleRef,
     pub messages: Vec<LoopModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
     #[serde(default)]
@@ -1075,6 +1127,21 @@ pub struct LoopModelResponse {
     pub safe_reasoning_deltas: Vec<String>,
     pub output: ParentLoopOutput,
     pub effective_model_profile_id: ModelProfileId,
+    /// Provider-reported token usage for this call. `None` when the gateway
+    /// could not surface real numbers (replay test stubs, providers without
+    /// a usage object); downstream budget accounting falls back to the
+    /// reservation estimate in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LoopModelUsage>,
+}
+
+/// Token usage reported by a provider for a single model call. The accountant
+/// uses this to record actual USD spend instead of the conservative
+/// reservation estimate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopModelUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1335,6 +1402,8 @@ pub enum CapabilityOutcome {
     },
     AuthRequired {
         gate_ref: LoopGateRef,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
         safe_summary: String,
     },
     ResourceBlocked {
@@ -1373,11 +1442,33 @@ impl CapabilityOutcome {
 pub struct CapabilityResultMessage {
     pub result_ref: LoopResultRef,
     pub safe_summary: String,
+    /// Typed host signal describing whether this result advanced the loop's
+    /// evidence/state. This lets the loop distinguish deterministic
+    /// no-change outcomes from productive calls without inferring progress
+    /// from prose summaries or token counts.
+    #[serde(default)]
+    pub progress: CapabilityProgress,
     /// Host hint that this completed capability result should end the loop
     /// naturally after the current batch. Defaults to false for compatibility
     /// with older hosts.
     #[serde(default)]
     pub terminate_hint: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityProgress {
+    /// Older hosts, or hosts that cannot classify progress yet.
+    #[default]
+    Unknown,
+    /// The capability produced new evidence or changed host/runtime state.
+    #[serde(alias = "complete")]
+    MadeProgress,
+    /// The capability ran successfully but observed the same state/evidence as
+    /// before.
+    NoChange,
+    /// The capability reached a deterministic non-suspending blocker.
+    Blocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1680,6 +1771,11 @@ pub trait LoopTranscriptPort: Send + Sync {
 pub struct LoopCheckpointRequest {
     pub kind: LoopCheckpointKind,
     pub state_ref: LoopCheckpointStateRef,
+    /// Gate identity for `BeforeBlock` checkpoints; `None` for other kinds.
+    /// Defaults to `None` for backward-compatible deserialization of older
+    /// records that predate this field.
+    #[serde(default)]
+    pub gate_ref: Option<crate::ids::LoopGateRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1780,6 +1876,7 @@ pub trait LoopCheckpointPort: Send + Sync {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopProgressEvent {
@@ -1819,6 +1916,36 @@ pub enum LoopProgressEvent {
         iteration: u32,
         kind: LoopCheckpointKind,
     },
+    CompactionStarted {
+        task_id: SystemInferenceTaskId,
+        initiator: CompactionInitiator,
+    },
+    CompactionCompleted {
+        task_id: SystemInferenceTaskId,
+        compression_ratio_ppm: u32,
+    },
+    CompactionFailed {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    CompactionLeakDetected {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    GoalRefreshStarted {
+        task_id: SystemInferenceTaskId,
+    },
+    GoalRefreshCompleted {
+        task_id: SystemInferenceTaskId,
+    },
+    GoalRefreshFailed {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    GoalRefreshLeakDetected {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
 }
 
 impl LoopProgressEvent {
@@ -1841,6 +1968,14 @@ impl LoopProgressEvent {
             Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
             Self::GateBlocked { .. } => "gate_blocked",
             Self::CheckpointWritten { .. } => "checkpoint_written",
+            Self::CompactionStarted { .. } => "compaction_started",
+            Self::CompactionCompleted { .. } => "compaction_completed",
+            Self::CompactionFailed { .. } => "compaction_failed",
+            Self::CompactionLeakDetected { .. } => "compaction_leak_detected",
+            Self::GoalRefreshStarted { .. } => "goal_refresh_started",
+            Self::GoalRefreshCompleted { .. } => "goal_refresh_completed",
+            Self::GoalRefreshFailed { .. } => "goal_refresh_failed",
+            Self::GoalRefreshLeakDetected { .. } => "goal_refresh_leak_detected",
         }
     }
 }
@@ -1895,20 +2030,22 @@ pub trait LoopProgressPort: Send + Sync {
 /// intentionally synchronous and non-blocking: implementations should expose a
 /// cheap snapshot, usually backed by an atomic flag plus immutable signal data.
 ///
-/// **Cancellation is cooperative and boundary-observation only — it is not
-/// preempted across in-flight host calls.** `build_prompt_bundle`,
-/// `stream_model`, and `invoke_capability` are awaited to completion before
-/// the next observation point is reached. A stuck model stream or long-running
-/// capability call will not observe cancellation until control returns to the
-/// executor. Implementations of those host methods that need finer-grained
-/// cancellation must integrate their own abort signal internally; this port
-/// only covers the between-call boundaries that the executor controls.
+/// Cancellation is cooperative. Most executor stages observe it only at
+/// explicit boundaries via [`LoopCancellationPort::observe_cancellation`].
+/// Executor-owned waits that can safely race host work, such as prompt
+/// compaction, may also wait on
+/// [`LoopCancellationPort::cancellation_requested`] to avoid timer polling.
+#[async_trait]
 pub trait LoopCancellationPort: Send + Sync {
     /// Returns `Some(signal)` once cancellation has been requested for this run.
     ///
     /// Implementations must be idempotent across reads. After the request fires,
     /// repeated calls must keep returning the same signal.
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal>;
+
+    /// Waits until cancellation has been requested for this run and returns the
+    /// same stable signal reported by [`Self::observe_cancellation`].
+    async fn cancellation_requested(&self) -> LoopCancellationSignal;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1927,6 +2064,7 @@ pub trait AgentLoopDriverHost:
     + LoopTranscriptPort
     + LoopCheckpointPort
     + LoopProgressPort
+    + LoopCompactionPort
     + LoopCancellationPort
     + Send
     + Sync
@@ -1943,6 +2081,7 @@ impl<T> AgentLoopDriverHost for T where
         + LoopTranscriptPort
         + LoopCheckpointPort
         + LoopProgressPort
+        + LoopCompactionPort
         + LoopCancellationPort
         + Send
         + Sync

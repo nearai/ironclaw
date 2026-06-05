@@ -4,11 +4,11 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for dependencies and feature shape.
-- Use `docs/reborn/contracts/auth-product.md` and issues #3289 / #3810 / #3883 as the source of truth.
+- Use `docs/reborn/contracts/auth-product.md` and issues #3289 / #3810 / #3883 / #3884 as the source of truth.
 
 ## What This Crate Owns
 
-- Product-facing Reborn auth setup contracts: auth flows, secure manual-token interactions, credential accounts, recovery/account-selection projections, provider exchange, continuations, and cleanup.
+- Product-facing Reborn auth setup contracts: auth flows, secure manual-token interactions, credential accounts, recovery/account-selection projections, provider exchange/refresh, continuations, and cleanup.
 - Fake in-memory services for contract tests and downstream caller tests.
 - Redacted DTOs safe for WebUI, CLI, chat, API, and projection rendering.
 

@@ -10095,11 +10095,12 @@ mod tests {
     #[tokio::test]
     async fn queue_flush_holds_failed_submission_and_still_returns_due_credit_notice() {
         let scope = format!("trace-flush-submit-failure-test-{}", Uuid::new_v4());
-        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let token_env = "TRACE_COMMONS_FLUSH_HOLD_TEST_TOKEN";
+        let _token_guard = EnvVarRestore::set(token_env, "super-secret-token");
         let policy = StandingTraceContributionPolicy {
             enabled: true,
             ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
-            bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+            bearer_token_env: token_env.to_string(),
             auto_submit_high_value_traces: true,
             min_submission_score: 0.0,
             credit_notice_interval_hours: 168,
@@ -10171,11 +10172,12 @@ mod tests {
     #[tokio::test]
     async fn queue_flush_records_typed_retry_state_and_defers_until_backoff_expires() {
         let scope = format!("trace-flush-typed-retry-state-test-{}", Uuid::new_v4());
-        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let token_env = "TRACE_COMMONS_TYPED_RETRY_TEST_TOKEN";
+        let _token_guard = EnvVarRestore::set(token_env, "super-secret-token");
         let policy = StandingTraceContributionPolicy {
             enabled: true,
             ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
-            bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+            bearer_token_env: token_env.to_string(),
             auto_submit_high_value_traces: true,
             min_submission_score: 0.0,
             ..Default::default()
@@ -10359,7 +10361,8 @@ mod tests {
     #[tokio::test]
     async fn queue_flush_classifies_upload_http_rejection_through_submit_call_site() {
         let scope = format!("trace-upload-http-classification-test-{}", Uuid::new_v4());
-        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let token_env = "TRACE_COMMONS_UPLOAD_HTTP_CLASSIFICATION_TOKEN";
+        let _token_guard = EnvVarRestore::set(token_env, "super-secret-token");
         let app = axum::Router::new().route(
             "/v1/traces",
             axum::routing::post(|| async {
@@ -10385,7 +10388,7 @@ mod tests {
             &StandingTraceContributionPolicy {
                 enabled: true,
                 ingestion_endpoint: Some(endpoint),
-                bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+                bearer_token_env: token_env.to_string(),
                 auto_submit_high_value_traces: true,
                 min_submission_score: 0.0,
                 ..Default::default()
@@ -10423,13 +10426,11 @@ mod tests {
     #[tokio::test]
     async fn queue_flush_classifies_status_sync_request_failure_through_call_site() {
         let scope = format!("trace-status-sync-classification-test-{}", Uuid::new_v4());
-        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
         write_trace_policy_for_scope(
             Some(&scope),
             &StandingTraceContributionPolicy {
                 enabled: true,
                 ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
-                bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
                 auto_submit_high_value_traces: true,
                 min_submission_score: 0.0,
                 ..Default::default()
@@ -10442,9 +10443,16 @@ mod tests {
         )
         .expect("local record writes");
 
-        flush_trace_contribution_queue_for_scope(Some(&scope), 10)
-            .await
-            .expect("status sync failure is nonfatal during flush");
+        flush_trace_contribution_queue_for_scope_with_credential_provider(
+            Some(&scope),
+            10,
+            &RefreshingTestUploadCredentialProvider::new(
+                "super-secret-token",
+                "super-secret-token",
+            ),
+        )
+        .await
+        .expect("status sync failure is nonfatal during flush");
         let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
         let failure = diagnostics
             .telemetry
@@ -10468,7 +10476,8 @@ mod tests {
             "trace-status-sync-auth-classification-test-{}",
             Uuid::new_v4()
         );
-        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let token_env = "TRACE_COMMONS_STATUS_SYNC_AUTH_CLASSIFICATION_TOKEN";
+        let _token_guard = EnvVarRestore::set(token_env, "super-secret-token");
         let app = axum::Router::new().route(
             "/v1/contributors/me/submission-status",
             axum::routing::post(|| async {
@@ -10494,7 +10503,7 @@ mod tests {
             &StandingTraceContributionPolicy {
                 enabled: true,
                 ingestion_endpoint: Some(endpoint),
-                bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+                bearer_token_env: token_env.to_string(),
                 auto_submit_high_value_traces: true,
                 min_submission_score: 0.0,
                 ..Default::default()
@@ -10837,7 +10846,8 @@ mod tests {
 
     #[tokio::test]
     async fn policy_aware_submit_rejects_redirects_without_resending_bearer_token() {
-        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let token_env = "TRACE_COMMONS_REDIRECT_TEST_TOKEN";
+        let _token_guard = EnvVarRestore::set(token_env, "super-secret-token");
         let redirected_authorizations = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let redirected_authorizations_for_handler = redirected_authorizations.clone();
         let app = axum::Router::new()
@@ -10902,7 +10912,7 @@ mod tests {
             &StandingTraceContributionPolicy {
                 enabled: true,
                 ingestion_endpoint: Some(endpoint.clone()),
-                bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+                bearer_token_env: token_env.to_string(),
                 ..Default::default()
             },
         )
@@ -10921,7 +10931,8 @@ mod tests {
 
     #[tokio::test]
     async fn policy_aware_submit_uses_bounded_request_timeout() {
-        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let token_env = "TRACE_COMMONS_TIMEOUT_TEST_TOKEN";
+        let _token_guard = EnvVarRestore::set(token_env, "super-secret-token");
         let _timeout_guard = EnvVarRestore::set("IRONCLAW_TRACE_REMOTE_REQUEST_TIMEOUT_MS", "50");
         let app = axum::Router::new().route(
             "/v1/traces",
@@ -10966,7 +10977,7 @@ mod tests {
                 &StandingTraceContributionPolicy {
                     enabled: true,
                     ingestion_endpoint: Some(endpoint.clone()),
-                    bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+                    bearer_token_env: token_env.to_string(),
                     ..Default::default()
                 },
             ),
@@ -11556,13 +11567,14 @@ mod tests {
         );
 
         let network_scope = format!("trace-queue-network-classification-{}", Uuid::new_v4());
-        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let token_env = "TRACE_COMMONS_QUEUE_NETWORK_CLASSIFICATION_TOKEN";
+        let _token_guard = EnvVarRestore::set(token_env, "super-secret-token");
         write_trace_policy_for_scope(
             Some(&network_scope),
             &StandingTraceContributionPolicy {
                 enabled: true,
                 ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
-                bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+                bearer_token_env: token_env.to_string(),
                 auto_submit_high_value_traces: true,
                 min_submission_score: 0.0,
                 ..Default::default()
@@ -11657,11 +11669,12 @@ mod tests {
     #[tokio::test]
     async fn trace_queue_worker_tick_flushes_scopes_and_returns_credit_notices_for_delivery() {
         let scope = format!("trace-worker-tick-test-{}", Uuid::new_v4());
-        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
+        let token_env = "TRACE_COMMONS_WORKER_TICK_TEST_TOKEN";
+        let _token_guard = EnvVarRestore::set(token_env, "super-secret-token");
         let policy = StandingTraceContributionPolicy {
             enabled: true,
             ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
-            bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+            bearer_token_env: token_env.to_string(),
             auto_submit_high_value_traces: true,
             min_submission_score: 0.0,
             credit_notice_interval_hours: 168,

@@ -40,8 +40,9 @@ use std::sync::Arc;
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
     HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode,
-    RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement, RuntimeCredentialTarget,
-    RuntimeKind, SecretHandle, TrustClass,
+    RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
+    TrustClass,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -868,8 +869,15 @@ impl CapabilityDeclV2 {
                     ),
                 })?;
             validate_runtime_credential_audience(&id, &raw_credential.audience)?;
+            let provider_scopes = validate_runtime_credential_provider_scopes(
+                &id,
+                &raw_credential.source,
+                raw_credential.provider_scopes,
+            )?;
             runtime_credentials.push(RuntimeCredentialRequirement {
                 handle,
+                source: raw_credential.source,
+                provider_scopes,
                 audience: raw_credential.audience,
                 target: raw_credential.target,
                 required: raw_credential.required,
@@ -1427,6 +1435,10 @@ pub(crate) struct RawCapabilityV2 {
 #[serde(deny_unknown_fields)]
 struct RawRuntimeCredentialV2 {
     handle: String,
+    #[serde(default)]
+    source: RuntimeCredentialRequirementSource,
+    #[serde(default)]
+    provider_scopes: Vec<String>,
     audience: NetworkTargetPattern,
     target: RuntimeCredentialTarget,
     #[serde(default = "default_runtime_credential_required")]
@@ -1435,4 +1447,98 @@ struct RawRuntimeCredentialV2 {
 
 fn default_runtime_credential_required() -> bool {
     true
+}
+
+fn validate_runtime_credential_provider_scopes(
+    capability_id: &CapabilityId,
+    source: &RuntimeCredentialRequirementSource,
+    raw_scopes: Vec<String>,
+) -> Result<Vec<String>, ManifestV2Error> {
+    if !raw_scopes.is_empty()
+        && !matches!(
+            source,
+            RuntimeCredentialRequirementSource::ProductAuthAccount { .. }
+        )
+    {
+        return Err(ManifestV2Error::Invalid {
+            reason: format!(
+                "capability {capability_id} declares runtime credential provider scopes for a non product-auth credential source"
+            ),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    let mut scopes = Vec::with_capacity(raw_scopes.len());
+    for raw_scope in raw_scopes {
+        if raw_scope.trim() != raw_scope || raw_scope.is_empty() {
+            return Err(ManifestV2Error::Invalid {
+                reason: format!(
+                    "capability {capability_id} declares invalid runtime credential provider scope"
+                ),
+            });
+        }
+        if !seen.insert(raw_scope.clone()) {
+            return Err(ManifestV2Error::Invalid {
+                reason: format!(
+                    "capability {capability_id} declares duplicate runtime credential provider scope {raw_scope}"
+                ),
+            });
+        }
+        scopes.push(raw_scope);
+    }
+    Ok(scopes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn capability_id() -> CapabilityId {
+        CapabilityId::new("acme.echo").unwrap()
+    }
+
+    fn product_auth_source() -> RuntimeCredentialRequirementSource {
+        RuntimeCredentialRequirementSource::ProductAuthAccount {
+            provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        }
+    }
+
+    #[test]
+    fn validate_runtime_credential_provider_scopes_rejects_empty_scope() {
+        let err = validate_runtime_credential_provider_scopes(
+            &capability_id(),
+            &product_auth_source(),
+            vec!["".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn validate_runtime_credential_provider_scopes_rejects_whitespace_padded_scope() {
+        let err = validate_runtime_credential_provider_scopes(
+            &capability_id(),
+            &product_auth_source(),
+            vec![" https://www.googleapis.com/auth/drive".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn validate_runtime_credential_provider_scopes_rejects_duplicate_scope() {
+        let err = validate_runtime_credential_provider_scopes(
+            &capability_id(),
+            &product_auth_source(),
+            vec![
+                "https://www.googleapis.com/auth/drive".to_string(),
+                "https://www.googleapis.com/auth/drive".to_string(),
+            ],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    }
 }

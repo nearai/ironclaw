@@ -165,9 +165,36 @@ pub struct InboundTurnRequest {
     pub requested_run_profile: Option<RunProfileRequest>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrustedInboundTurnRequest {
+    request: InboundTurnRequest,
+    trusted_agent_id: Option<AgentId>,
+    trusted_project_id: Option<ProjectId>,
+}
+
+impl TrustedInboundTurnRequest {
+    pub(crate) fn new(
+        request: InboundTurnRequest,
+        trusted_agent_id: Option<AgentId>,
+        trusted_project_id: Option<ProjectId>,
+    ) -> Self {
+        Self {
+            request,
+            trusted_agent_id,
+            trusted_project_id,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (InboundTurnRequest, Option<AgentId>, Option<ProjectId>) {
+        (self.request, self.trusted_agent_id, self.trusted_project_id)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboundTurnResponse {
     pub resolution: ConversationBindingResolution,
     pub accepted_message: AcceptedInboundMessage,
     pub turn_submission: Option<SubmitTurnResponse>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replayed_turn_submission: bool,
 }

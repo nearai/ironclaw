@@ -52,6 +52,50 @@ async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
     );
 }
 
+#[tokio::test]
+async fn local_yolo_policy_allows_workspace_under_confirmed_host_home() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    let host_home = dir.path().join("home");
+    let workspace_root = host_home.join("repo");
+    std::fs::create_dir_all(&workspace_root).expect("workspace root");
+
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev_with_profile(
+            RebornCompositionProfile::LocalDevYolo,
+            "local-dev-yolo-host-owner",
+            storage_root,
+        )
+        .with_runtime_policy(local_yolo_policy())
+        .with_local_dev_workspace_root(workspace_root)
+        .with_local_dev_confirmed_host_home_root(host_home),
+    )
+    .await
+    .expect("local-dev-yolo services build");
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate");
+
+    let workspace_mount = local_runtime
+        .workspace_mounts
+        .mounts
+        .iter()
+        .find(|mount| mount.alias.as_str() == "/workspace")
+        .expect("workspace mount exists");
+    assert_eq!(workspace_mount.target.as_str(), "/projects/workspace");
+    assert_eq!(workspace_mount.permissions, MountPermissions::read_write());
+
+    let host_mount = local_runtime
+        .workspace_mounts
+        .mounts
+        .iter()
+        .find(|mount| mount.alias.as_str() == "/host")
+        .expect("host mount exists");
+    assert_eq!(host_mount.target.as_str(), "/projects/host");
+    assert_eq!(host_mount.permissions, MountPermissions::read_write());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn local_yolo_policy_keeps_symlinked_host_home_raw_alias() {

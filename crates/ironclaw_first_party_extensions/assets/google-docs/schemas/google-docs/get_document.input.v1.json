@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Docs get_document",
+  "description": "Get document metadata and structure.",
+  "type": "object",
+  "required": [
+    "document_id"
+  ],
+  "properties": {
+    "document_id": {
+      "type": "string",
+      "description": "The document ID."
+    }
+  },
+  "additionalProperties": false
+}

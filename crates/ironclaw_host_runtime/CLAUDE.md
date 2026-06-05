@@ -3,6 +3,8 @@
 - Own host-side composition shared across Reborn runtime lanes.
 - Keep runtime-specific request shapes in the runtime crates; adapters should translate into host API contracts and delegate here.
 - Compose low-level services such as `ironclaw_network` and `ironclaw_secrets`; do not duplicate URL parsing, DNS checks, private-IP filtering, HTTP clients, secret stores, or redaction logic in runtime crates.
+- Host HTTP egress lives under `src/egress/`: keep request validation/sanitization, credential-source resolution, staged network-policy lookup, staged secret injection, transport dispatch, response sanitization, and response-body storage as separate pipeline steps instead of rebuilding a monolithic service method.
+- Production host HTTP egress must be constructed with staged `NetworkObligationPolicyStore` and `RuntimeSecretInjectionStore` handoffs. Request-carried policy and direct `SecretStoreLease` sources are legacy/test compatibility paths only.
 - Preserve the accounting invariant: `network_egress_bytes` is outbound request bytes only, with response bytes tracked separately.
 - Keep raw secret material inside the narrow lease/injection path. Reject runtime-supplied manual credentials, scan raw and percent-decoded URL forms, redact leased values from runtime-visible errors and responses, strip sensitive response headers, and block credential-shaped runtime requests/responses before they reach external services or runtime callers.
 - Do not own product workflow, authorization/approval policy, persistence migrations, or event emission unless a later Reborn contract explicitly moves that composition here.

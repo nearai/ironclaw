@@ -16,9 +16,9 @@ publish = false
 dist = false
 
 [dependencies]
+fs4 = "0.6"
 serde = { version = "1", features = ["derive"] }
+tempfile = "3"
 thiserror = "2"
 toml = "0.8"
-
-[dev-dependencies]
-tempfile = "3"
+toml_edit = "0.22"

@@ -78,7 +78,57 @@ pub fn mount_at_prefix(prefix: &str) -> Router {
     Router::new()
         .route(prefix, get(serve_root))
         .route(&format!("{prefix}/"), get(serve_root))
+        // Isolated NEAR-wallet connect popup. It needs a far looser CSP than the
+        // hardened SPA shell (the wallet connector loads remote executor code in
+        // sandboxed iframes and talks to wallet relays / NEAR RPC), so it gets a
+        // dedicated route and a scoped policy instead of widening the app CSP.
+        // The page takes only a random BroadcastChannel name and posts the
+        // resulting signature back on that same-origin channel, so the blast
+        // radius of the looser policy is this one popup page. Registered before
+        // the wildcard so it wins.
+        .route(
+            &format!("{prefix}/wallet/connect"),
+            get(serve_wallet_connect),
+        )
         .route(&format!("{prefix}/{{*path}}"), get(serve_wildcard))
+}
+
+/// Serve the isolated NEAR-wallet connect popup with its own relaxed CSP.
+///
+/// This page is deliberately quarantined from the SPA: it holds no session
+/// bearer and no app state, connects a NEAR wallet, signs the fixed NEAR AI
+/// login message, and posts the signature over a random same-origin
+/// `BroadcastChannel`. The authenticated SPA relays the signature to the
+/// backend, so no secret ever lives on this looser-CSP page.
+pub async fn serve_wallet_connect() -> Response {
+    let Some(asset) = assets::lookup("wallet-connect.html") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = asset_response(asset.bytes, asset.content_type);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    // Wallet connectors load remote executor code into sandboxed iframes and
+    // reach a range of wallet relays + NEAR RPC endpoints that vary per wallet,
+    // so script/connect/frame sources can't be pinned to a fixed allow-list
+    // without breaking wallets. `'unsafe-inline'` is required because the
+    // connector injects inline bootstrap scripts into its `srcdoc` sandbox
+    // frames (which run as unique opaque origins). This is acceptable only
+    // because the page is input-less and isolated; it must never gain app data.
+    let csp = "default-src 'self'; \
+         script-src 'self' 'unsafe-inline' https:; \
+         script-src-elem 'self' 'unsafe-inline' https:; \
+         style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data: https:; \
+         connect-src 'self' https:; \
+         frame-src 'self' https: data:; \
+         object-src 'none'; \
+         base-uri 'self'";
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(csp),
+    );
+    response
 }
 
 /// Render the SPA shell with a freshly-substituted CSP nonce. Used
@@ -308,6 +358,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wallet_connect_popup_gets_relaxed_csp_and_spa_shell_stays_strict() {
+        let app = mount_at_prefix("/v2");
+
+        // The isolated wallet popup carries a deliberately relaxed CSP so the
+        // wallet connector can load remote executors and reach wallet relays.
+        let wallet = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v2/wallet/connect")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(wallet.status(), StatusCode::OK);
+        let wallet_csp = wallet
+            .headers()
+            .get(axum::http::header::CONTENT_SECURITY_POLICY)
+            .expect("CSP on wallet popup")
+            .to_str()
+            .expect("CSP ASCII")
+            .to_string();
+        assert!(
+            wallet_csp.contains("'unsafe-inline'")
+                && wallet_csp.contains("connect-src 'self' https:"),
+            "wallet popup CSP must be the relaxed policy — got `{wallet_csp}`",
+        );
+
+        // The SPA shell must NOT inherit that looseness: no `'unsafe-inline'`
+        // scripts and connect-src stays same-origin only.
+        let shell = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v2")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        let shell_csp = shell
+            .headers()
+            .get(axum::http::header::CONTENT_SECURITY_POLICY)
+            .expect("CSP on SPA shell")
+            .to_str()
+            .expect("CSP ASCII")
+            .to_string();
+        assert!(
+            shell_csp.contains("connect-src 'self';")
+                && !shell_csp.contains("script-src 'self' 'unsafe-inline'"),
+            "SPA shell CSP must stay strict (nonce-based scripts, same-origin connect) — got `{shell_csp}`",
+        );
+    }
+
+    #[tokio::test]
     async fn standalone_path_traversal_segments_return_not_found() {
         // Defense-in-depth check: the asset table is a closed set built
         // from `static/` so traversal could never escape the embedded
@@ -477,6 +584,7 @@ mod tests {
             "js/main.js",
             "js/lib/api.js",
             "js/app/app.js",
+            "js/app/auth.js",
             "js/pages/chat/chat-page.js",
             "js/pages/extensions/extensions-page.js",
         ] {
@@ -485,5 +593,76 @@ mod tests {
                 "expected `{required}` in the embedded asset table",
             );
         }
+    }
+
+    // Locks the WebChat v2 SSO login-ticket contract documented
+    // in `app/auth.js` (issue #4116 review finding #11). The
+    // user-visible OAuth login path is "callback redirects to
+    // `/v2?login_ticket=<ticket>` → SPA strips the ticket from the
+    // URL → exchanges it via `/auth/session/exchange` → stores the
+    // returned bearer in sessionStorage".
+    //
+    // No JS test runner ships in this workspace and a real
+    // Playwright e2e for the OAuth flow requires Google
+    // credentials. This Rust assertion is the lightweight
+    // regression: it inspects the embedded asset bytes for the
+    // call shapes that implement each invariant. A refactor that
+    // drops any one of them fails loudly here; the deep semantics
+    // belong on a follow-up e2e once the SSO mount is wired into
+    // a real binary.
+    #[test]
+    fn auth_js_carries_login_ticket_contract() {
+        let asset =
+            assets::lookup("js/app/auth.js").expect("auth.js must be in the embedded asset table");
+        let source = std::str::from_utf8(asset.bytes).expect("auth.js is UTF-8");
+
+        // 1. Reads and strips the one-time login ticket from the
+        //    query string before exchanging it for the bearer.
+        assert!(
+            source.contains("consumeLoginTicketFromUrl"),
+            "auth.js must consume login tickets; got:\n{source}",
+        );
+        assert!(
+            source.contains("login_ticket"),
+            "auth.js must read the login_ticket query param",
+        );
+        assert!(
+            source.contains("exchangeLoginTicket"),
+            "auth.js must exchange the login ticket for a bearer",
+        );
+
+        // 2. Strips consumed URL credentials via `history.replaceState`,
+        //    so a copy-pasted address bar does not leak them.
+        assert!(
+            source.contains("history.replaceState"),
+            "auth.js must call history.replaceState to clean the URL",
+        );
+
+        // 3. Refuses to overwrite an existing stored token —
+        //    `consumeTokenFromUrl` must early-return when
+        //    `readStoredToken()` is truthy. This guards against the
+        //    `/v2#token=BAD` lock-out scenario the doc-comment
+        //    calls out.
+        assert!(
+            source.contains("readStoredToken()"),
+            "auth.js must consult sessionStorage before storing a new token",
+        );
+
+        // 4. Logout calls the server-side revoke endpoint —
+        //    locks the regression where `signOut` drops the local
+        //    token without telling the server (which would let the
+        //    bearer roam in other tabs until natural expiry).
+        assert!(
+            source.contains("logoutRequest"),
+            "signOut must fire-and-forget the server-side revoke",
+        );
+
+        // 5. Surfaces the OAuth callback's `?login_error=<code>`
+        //    so users who deny consent or trip a hd / state guard
+        //    see an explanation instead of a blank login page.
+        assert!(
+            source.contains("login_error"),
+            "auth.js must consume the OAuth `?login_error=` redirect",
+        );
     }
 }

@@ -1,0 +1,7 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Raw Google API Output",
+  "description": "Google API response serialized by the WASM tool.",
+  "type": "object",
+  "additionalProperties": true
+}

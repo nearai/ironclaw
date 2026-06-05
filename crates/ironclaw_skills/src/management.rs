@@ -3,7 +3,12 @@ use std::{
     sync::{Arc, LazyLock, Mutex, Weak},
 };
 
-use crate::{MAX_PROMPT_FILE_SIZE, normalize_line_endings, parse_skill_md, validate_skill_name};
+use crate::parser::starts_with_frontmatter_delimiter;
+use crate::validation::normalize_skill_identifier;
+use crate::{
+    MAX_PROMPT_FILE_SIZE, ParsedSkill, SkillParseError, normalize_line_endings, parse_skill_md,
+    validate_skill_name,
+};
 use async_trait::async_trait;
 use ironclaw_filesystem::{
     BackendCapabilities, DirEntry, FileStat, FileType, FilesystemError, RootFilesystem,
@@ -21,8 +26,8 @@ pub use install_bundle::{
 };
 
 use install_bundle::{
-    install_metadata_source, installed_skill_source, publish_skill_install,
-    read_install_metadata_bytes, validate_install_bundle_files,
+    existing_skill_install_matches, install_metadata_source, installed_skill_source,
+    publish_skill_install, read_install_metadata_bytes, validate_install_bundle_files,
 };
 
 pub(super) const USER_SKILLS_ROOT: &str = "/skills";
@@ -203,6 +208,11 @@ pub struct SkillInstallResult {
     pub source: SkillSource,
 }
 
+struct PreparedSkillInstall {
+    content: String,
+    parsed: ParsedSkill,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillRemoveRequest<'a> {
     pub name: &'a str,
@@ -301,29 +311,19 @@ pub async fn install_skill(
         ));
     }
 
-    let normalized = normalize_line_endings(request.content);
-    let parsed = parse_skill_md(&normalized).map_err(|error| {
-        tracing::debug!(%error, "skill install failed to parse SKILL.md content");
-        SkillManagementError::with_reason(
-            SkillManagementErrorKind::InvalidInput,
-            format!("skill content failed to parse: {error}"),
-        )
-    })?;
-    if let Some(requested_name) = request.name
-        && requested_name != parsed.manifest.name
-    {
+    let prepared = prepare_install_content(request.content, request.name)?;
+    if prepared.content.len() as u64 > MAX_PROMPT_FILE_SIZE {
         tracing::debug!(
-            requested_name,
-            parsed_name = %parsed.manifest.name,
-            "skill install rejected name mismatch"
+            max_bytes = MAX_PROMPT_FILE_SIZE,
+            "skill install rejected oversized persisted content"
         );
         return Err(SkillManagementError::new(
-            SkillManagementErrorKind::InvalidInput,
+            SkillManagementErrorKind::Resource,
         ));
     }
     validate_install_bundle_files(request.files)?;
 
-    let skill_name = parsed.manifest.name;
+    let skill_name = prepared.parsed.manifest.name;
     let mutation_lock = skill_mutation_lock(&skill_name);
     let _mutation_guard = mutation_lock.lock().await;
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, &skill_name)?;
@@ -331,6 +331,27 @@ pub async fn install_skill(
 
     log_skill_filesystem_phase("stat_existing_dir", &skill_name, &skill_dir);
     if stat_optional(context, &skill_dir).await?.is_some() {
+        if existing_skill_install_matches(
+            context,
+            &skill_name,
+            &prepared.content,
+            request.files,
+            request.source,
+            request.source_url,
+        )
+        .await?
+        {
+            tracing::debug!(
+                skill_name = %skill_name,
+                scoped_path = %skill_dir,
+                "skill install matched existing skill directory"
+            );
+            return Ok(SkillInstallResult {
+                name: skill_name.clone(),
+                scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
+                source: installed_skill_source(request.source),
+            });
+        }
         tracing::debug!(
             skill_name = %skill_name,
             scoped_path = %skill_dir,
@@ -356,7 +377,7 @@ pub async fn install_skill(
     publish_skill_install(
         context,
         &skill_name,
-        &normalized,
+        &prepared.content,
         request.files,
         request.source,
         request.source_url,
@@ -374,6 +395,86 @@ pub async fn install_skill(
         scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
         source: installed_skill_source(request.source),
     })
+}
+
+fn prepare_install_content(
+    content: &str,
+    requested_name: Option<&str>,
+) -> Result<PreparedSkillInstall, SkillManagementError> {
+    let normalized_content = normalize_line_endings(content);
+    match parse_skill_md(&normalized_content) {
+        Ok(parsed) => {
+            validate_requested_name_matches_manifest(requested_name, &parsed.manifest.name)?;
+            Ok(PreparedSkillInstall {
+                content: normalized_content,
+                parsed,
+            })
+        }
+        Err(SkillParseError::MissingFrontmatter)
+            if !starts_with_frontmatter_delimiter(&normalized_content) =>
+        {
+            let content = synthesize_install_frontmatter(&normalized_content, requested_name)?;
+            let parsed = parse_skill_md(&content).map_err(|error| {
+                tracing::debug!(%error, "skill install failed to parse synthesized SKILL.md content");
+                skill_parse_error(error)
+            })?;
+            Ok(PreparedSkillInstall { content, parsed })
+        }
+        Err(error) => {
+            tracing::debug!(%error, "skill install failed to parse SKILL.md content");
+            Err(skill_parse_error(error))
+        }
+    }
+}
+
+fn validate_requested_name_matches_manifest(
+    requested_name: Option<&str>,
+    manifest_name: &str,
+) -> Result<(), SkillManagementError> {
+    if let Some(requested_name) = requested_name
+        && normalize_skill_identifier(requested_name).as_deref() != Some(manifest_name)
+    {
+        tracing::debug!(
+            requested_name,
+            parsed_name = %manifest_name,
+            "skill install rejected name mismatch"
+        );
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+    Ok(())
+}
+
+fn synthesize_install_frontmatter(
+    normalized_content: &str,
+    requested_name: Option<&str>,
+) -> Result<String, SkillManagementError> {
+    let Some(requested_name) = requested_name else {
+        let error = SkillParseError::MissingFrontmatter;
+        tracing::debug!(%error, "skill install failed to parse SKILL.md content");
+        return Err(skill_parse_error(error));
+    };
+    let Some(skill_name) = normalize_skill_identifier(requested_name) else {
+        tracing::debug!(
+            requested_name,
+            "skill install rejected invalid requested name"
+        );
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    };
+
+    let mut rendered = format!("---\nname: {skill_name}\n---\n\n");
+    rendered.push_str(normalized_content);
+    Ok(rendered)
+}
+
+fn skill_parse_error(error: SkillParseError) -> SkillManagementError {
+    SkillManagementError::with_reason(
+        SkillManagementErrorKind::InvalidInput,
+        format!("skill content failed to parse: {error}"),
+    )
 }
 
 #[tracing::instrument(

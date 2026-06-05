@@ -3,12 +3,102 @@ import {
   createThread as createThreadRequest,
   resolveGate as resolveGateRequest,
   sendMessage,
+  submitManualToken,
 } from "../../../lib/api.js";
+import {
+  listConnectableChannels,
+  looksLikeChannelConnectCommand,
+  resolveChannelConnectCommand,
+} from "../../../lib/channel-connect.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
+import {
+  addPending,
+  recordAcceptedMessageRef,
+  removePending,
+} from "../lib/pending-messages.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
+
+const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
+const AUTH_GATE_CREDENTIAL_STORED_ERROR =
+  "credential_stored_gate_resolution_failed";
+const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
+const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
+const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
+
+async function withAuthTokenTimeout(task) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AUTH_TOKEN_FLOW_TIMEOUT_MS);
+  try {
+    return await task(controller.signal);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function credentialStoredGateResolutionError(cause) {
+  const error = new Error("auth gate resolution failed after credential storage");
+  error.safeAuthGateCode = AUTH_GATE_CREDENTIAL_STORED_ERROR;
+  error.cause = cause;
+  return error;
+}
+
+function threadNeedsSidebarRefresh(threadId) {
+  const cached = queryClient.getQueryData?.(["threads"]);
+  const threads = cached?.threads;
+  if (!Array.isArray(threads)) return true;
+  const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
+  return !thread?.title;
+}
+
+function submitResponseResumedTurnGate(response) {
+  return response?.continuation?.type === "turn_gate_resume";
+}
+
+function isPendingOAuthGate(gate) {
+  return gate?.kind === "auth_required" && gate?.challengeKind === "oauth_url";
+}
+
+function isOAuthCallbackCompletion(payload) {
+  return payload?.type === OAUTH_CALLBACK_MESSAGE_TYPE && payload?.status === "completed";
+}
+
+function oauthCompletionMatchesGate(payload, gate, listeningSince) {
+  if (!isOAuthCallbackCompletion(payload)) return false;
+  const continuation = payload?.continuation;
+  if (!continuation || continuation.type !== "turn_gate_resume") {
+    return Number(payload?.completedAt || 0) >= listeningSince;
+  }
+  if (continuation.turn_run_ref && continuation.turn_run_ref !== gate?.runId) return false;
+  if (continuation.gate_ref && continuation.gate_ref !== gate?.gateRef) return false;
+  return true;
+}
+
+function parseOAuthCallbackStoragePayload(value) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+async function resolveConnectAction(content) {
+  if (!looksLikeChannelConnectCommand(content)) return null;
+  try {
+    const channelsResponse = await queryClient.fetchQuery({
+      queryKey: ["connectable-channels"],
+      queryFn: listConnectableChannels,
+    });
+    const channels = channelsResponse?.channels || [];
+    return resolveChannelConnectCommand(content, channels);
+  } catch (err) {
+    console.error("Failed to resolve connectable channels:", err);
+    return null;
+  }
+}
 
 // v2 chat hook. Differences from the fork's v1 hook:
 // - No image / attachment plumbing — v2 SendMessage carries `content` only.
@@ -21,7 +111,14 @@ export function useChat(threadId) {
   const pendingSeqRef = React.useRef(1);
   const [cooldownUntil, setCooldownUntil] = React.useState(0);
   const [now, setNow] = React.useState(Date.now());
-  const [activeRun, setActiveRun] = React.useState(null);
+  const [activeRun, setActiveRunState] = React.useState(null);
+  const activeRunRef = React.useRef(activeRun);
+  const setActiveRun = React.useCallback((next) => {
+    const value = typeof next === "function" ? next(activeRunRef.current) : next;
+    activeRunRef.current = value;
+    setActiveRunState(value);
+  }, []);
+  const [channelConnectAction, setChannelConnectAction] = React.useState(null);
 
   const getPendingMessages = React.useCallback(
     () => pendingMessagesRef.current.get(threadId || "__new__") || [],
@@ -50,8 +147,31 @@ export function useChat(threadId) {
 
   const [isProcessing, setIsProcessing] = React.useState(false);
   const [pendingGate, setPendingGate] = React.useState(null);
+  const authTokenSubmitRef = React.useRef({
+    gateKey: null,
+    credentialRef: null,
+    inFlight: false,
+  });
+
+  // Per-thread transient state must not leak across thread switches.
+  // Without this reset, clicking "+ New" while the previous thread is
+  // still processing renders the TypingIndicator on the empty new
+  // thread. The SSE subscription for the new thread will set these
+  // back to non-default values if that thread actually has an active
+  // run / gate. `cooldownUntil` is intentionally not reset — it's a
+  // rate-limit timer that applies across threads.
+  React.useEffect(() => {
+    setIsProcessing(false);
+    setPendingGate(null);
+    setActiveRun(null);
+    setChannelConnectAction(null);
+  }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
+  const pendingAuthGateKey =
+    pendingGate?.runId && pendingGate?.gateRef
+      ? `${pendingGate.runId}\n${pendingGate.gateRef}`
+      : null;
 
   React.useEffect(() => {
     if (!cooldownUntil) return;
@@ -59,12 +179,64 @@ export function useChat(threadId) {
     return () => clearInterval(timer);
   }, [cooldownUntil]);
 
+  React.useEffect(() => {
+    if (authTokenSubmitRef.current.gateKey !== pendingAuthGateKey) {
+      authTokenSubmitRef.current = {
+        gateKey: pendingAuthGateKey,
+        credentialRef: null,
+        inFlight: false,
+      };
+    }
+  }, [pendingAuthGateKey]);
+
+  React.useEffect(() => {
+    if (!isPendingOAuthGate(pendingGate)) return;
+    const listeningSince = Date.now();
+
+    const handleCompletion = (payload) => {
+      if (!oauthCompletionMatchesGate(payload, pendingGate, listeningSince)) return;
+      setPendingGate((current) => (isPendingOAuthGate(current) ? null : current));
+      setIsProcessing(true);
+    };
+
+    let channel = null;
+    if (typeof window.BroadcastChannel === "function") {
+      channel = new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
+      channel.onmessage = (event) => handleCompletion(event.data);
+    }
+
+    const onStorage = (event) => {
+      if (event.key !== OAUTH_CALLBACK_STORAGE_KEY) return;
+      handleCompletion(parseOAuthCallbackStoragePayload(event.newValue));
+    };
+
+    window.addEventListener("storage", onStorage);
+    handleCompletion(
+      parseOAuthCallbackStoragePayload(
+        window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+      ),
+    );
+    const timer = window.setInterval(() => {
+      handleCompletion(
+        parseOAuthCallbackStoragePayload(
+          window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+        ),
+      );
+    }, 500);
+    return () => {
+      window.clearInterval(timer);
+      if (channel) channel.close();
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [pendingGate]);
+
   const handleEvent = useChatEvents({
     threadId,
     setMessages,
     setIsProcessing,
     setPendingGate,
     setActiveRun,
+    activeRunRef,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, so the SSE stream only delivers `run_status`.
     // On terminal success, refetch the timeline so the assistant
@@ -98,6 +270,13 @@ export function useChat(threadId) {
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
     async (content, opts = {}) => {
+      const connectable = await resolveConnectAction(content);
+      if (connectable) {
+        setChannelConnectAction(connectable);
+        return { channel_connect_action: connectable };
+      }
+      setChannelConnectAction(null);
+
       const { threadId: targetThreadId } = opts;
       let sendThreadId = targetThreadId || threadId;
 
@@ -113,8 +292,10 @@ export function useChat(threadId) {
       const pendingKey = sendThreadId;
       const pendingRecord = {
         id: `pending-${pendingSeqRef.current++}`,
+        role: "user",
         content,
         timestamp: new Date().toISOString(),
+        isOptimistic: true,
       };
       addPending(pendingMessagesRef.current, pendingKey, pendingRecord);
 
@@ -138,16 +319,35 @@ export function useChat(threadId) {
           threadId: sendThreadId,
           content,
         });
+        // Refresh the sidebar only while the cached entry is missing
+        // or title-less. Once the first-message title has appeared,
+        // repeated sends do not need to refetch the whole thread list.
+        if (threadNeedsSidebarRefresh(sendThreadId)) {
+          queryClient.invalidateQueries({ queryKey: ["threads"] });
+        }
         if (response?.run_id) {
           setActiveRun({
             runId: response.run_id,
             threadId: response.thread_id || sendThreadId,
             status: response.status || null,
+            source: "local",
           });
+        }
+        const timelineMessageId = recordAcceptedMessageRef(
+          pendingMessagesRef.current,
+          pendingKey,
+          optimisticId,
+          response?.accepted_message_ref,
+        );
+        if (timelineMessageId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === optimisticId ? { ...m, timelineMessageId } : m,
+            ),
+          );
         }
         return response;
       } catch (err) {
-        removePending(pendingMessagesRef.current, pendingKey, optimisticId);
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
@@ -165,6 +365,16 @@ export function useChat(threadId) {
         );
         setIsProcessing(false);
         throw err;
+      } finally {
+        // Drop the optimistic from the pending ref unconditionally:
+        // on success the confirmed row arrives via /timeline, and on
+        // failure we mark the optimistic with `status: "error"` in
+        // React state above — neither outcome needs the entry to
+        // linger in `pendingMessagesRef`. Pending ids are `pending-N`
+        // while server ids are `msg-<uuid>`, so id-based dedup in
+        // `messagesFromTimeline` cannot reconcile a stale pending
+        // against the server row that supersedes it.
+        removePending(pendingMessagesRef.current, pendingKey, optimisticId);
       }
     },
     [threadId, setMessages],
@@ -189,8 +399,95 @@ export function useChat(threadId) {
         always: opts.always,
         credentialRef: opts.credentialRef,
       });
+      const shouldContinueProcessing =
+        resolution === "approved" || resolution === "credential_provided";
       setPendingGate(null);
-      setIsProcessing(true);
+      setIsProcessing(shouldContinueProcessing);
+      if (!shouldContinueProcessing) {
+        setActiveRun(null);
+      }
+    },
+    [pendingGate, threadId],
+  );
+
+  const submitAuthToken = React.useCallback(
+    async (token) => {
+      if (!pendingGate) {
+        throw new Error("auth gate is no longer pending");
+      }
+      const { runId, gateRef, provider } = pendingGate;
+      if (!runId || !gateRef || !provider) {
+        throw new Error("auth gate is missing required credential metadata");
+      }
+      // `account_label` is optional on the prompt (gates.js defaults it to
+      // an empty string), so don't gate submission on it — derive a sensible
+      // label when the prompt didn't carry one.
+      const accountLabel = pendingGate.accountLabel || `${provider} credential`;
+      const gateKey = `${runId}\n${gateRef}`;
+      if (authTokenSubmitRef.current.gateKey !== gateKey) {
+        authTokenSubmitRef.current = {
+          gateKey,
+          credentialRef: null,
+          inFlight: false,
+        };
+      }
+      if (authTokenSubmitRef.current.inFlight) {
+        throw new Error("auth token submission already in progress");
+      }
+      authTokenSubmitRef.current.inFlight = true;
+
+      try {
+        let credentialRef = authTokenSubmitRef.current.credentialRef;
+        let submitted = null;
+        if (!credentialRef) {
+          submitted = await withAuthTokenTimeout((signal) =>
+            submitManualToken({
+              provider,
+              accountLabel,
+              token,
+              threadId,
+              runId,
+              gateRef,
+              signal,
+            }),
+          );
+          credentialRef = submitted?.credential_ref;
+          if (!credentialRef) {
+            throw new Error("manual token submit returned no credential_ref");
+          }
+          authTokenSubmitRef.current.credentialRef = credentialRef;
+        }
+
+        if (!submitResponseResumedTurnGate(submitted)) {
+          try {
+            await withAuthTokenTimeout((signal) =>
+              resolveGateRequest({
+                threadId,
+                runId,
+                gateRef,
+                resolution: "credential_provided",
+                credentialRef,
+                signal,
+              }),
+            );
+          } catch (err) {
+            throw credentialStoredGateResolutionError(err);
+          }
+        }
+
+        authTokenSubmitRef.current = {
+          gateKey: null,
+          credentialRef: null,
+          inFlight: false,
+        };
+        setPendingGate(null);
+        setIsProcessing(true);
+      } catch (err) {
+        if (authTokenSubmitRef.current.gateKey === gateKey) {
+          authTokenSubmitRef.current.inFlight = false;
+        }
+        throw err;
+      }
     },
     [pendingGate, threadId],
   );
@@ -199,11 +496,10 @@ export function useChat(threadId) {
     async (reason) => {
       const runId = activeRun?.runId;
       if (!runId || !threadId) return;
-      try {
-        await cancelRunRequest({ threadId, runId, reason });
-      } finally {
-        setIsProcessing(false);
-      }
+      setPendingGate(null);
+      setIsProcessing(false);
+      setActiveRun(null);
+      await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId],
   );
@@ -222,6 +518,7 @@ export function useChat(threadId) {
       let resolution = "approved";
       let always = false;
       if (action === "deny") resolution = "denied";
+      else if (action === "cancel") resolution = "cancelled";
       else if (action === "always") {
         resolution = "approved";
         always = true;
@@ -242,6 +539,7 @@ export function useChat(threadId) {
     messages,
     isProcessing,
     pendingGate,
+    channelConnectAction,
     activeRun,
     sseStatus,
     historyLoading,
@@ -249,8 +547,10 @@ export function useChat(threadId) {
     cooldownSeconds,
     send,
     resolveGate,
+    submitAuthToken,
     cancelRun,
     loadMore,
+    dismissChannelConnectAction: () => setChannelConnectAction(null),
     // fork-shape compatibility — see comments above
     suggestions: [],
     setSuggestions: noop,
@@ -259,17 +559,6 @@ export function useChat(threadId) {
     recoverHistory: noop,
     recoveryNotice: null,
   };
-}
-
-function addPending(store, key, record) {
-  const existing = store.get(key) || [];
-  store.set(key, [...existing, record]);
-}
-
-function removePending(store, key, pendingId) {
-  const next = (store.get(key) || []).filter((r) => r.id !== pendingId);
-  if (next.length > 0) store.set(key, next);
-  else store.delete(key);
 }
 
 function retryAfterMs(err) {

@@ -1,8 +1,7 @@
 // Map v2 `ThreadMessageRecord[]` from RebornTimelineResponse into
 // the message shape the UI components render. Kept narrow: the v2
-// timeline contract has no attachments, no generated images, no
-// turn-grouping metadata — those v1 affordances are out of scope
-// for issue #3886.
+// timeline contract has no attachments or generated images; turn grouping
+// consumes the normalized `turnRunId` carried by records and previews.
 
 export function messagesFromTimeline(records, pendingMessages = []) {
   const seen = new Set();
@@ -36,24 +35,50 @@ export function messagesFromTimeline(records, pendingMessages = []) {
     const id = `msg-${record.message_id}`;
     if (seen.has(id)) continue;
     seen.add(id);
+    const role = roleForRecord(record);
     messages.push({
       id,
-      role: roleForRecord(record),
+      role,
       content: record.content || "",
       timestamp: timestampForRecord(record),
       kind: record.kind,
       status: record.status,
+      isFinalReply: isFinalAssistantRecord(record),
       sequence: record.sequence,
       turnRunId: record.turn_run_id || null,
     });
   }
 
+  // Pending rows are dropped from the ref by the caller as soon as
+  // `sendMessage` returns (server has accepted the message and the
+  // confirmed row will arrive via timeline). The id-based guard
+  // remains as defense-in-depth in case a caller passes a pending
+  // that was already merged into the timeline.
   for (const pending of pendingMessages) {
     if (seen.has(pending.id)) continue;
-    messages.push(pending);
+    const message = pendingMessageForRender(pending);
+    if (message.timelineMessageId && seen.has(`msg-${message.timelineMessageId}`)) {
+      continue;
+    }
+    messages.push(message);
   }
 
   return messages;
+}
+
+function pendingMessageForRender(pending) {
+  return {
+    ...pending,
+    role: pending.role || "user",
+    isOptimistic: pending.isOptimistic !== false,
+  };
+}
+
+function isFinalAssistantRecord(record) {
+  return (
+    (record.kind === "assistant" || record.kind === "assistant_message") &&
+    record.status === "finalized"
+  );
 }
 
 function roleForRecord(record) {
@@ -122,6 +147,7 @@ export function toolCardFromPreview(preview) {
     truncated: Boolean(preview.truncated),
     outputBytes: preview.output_bytes ?? null,
     outputKind: preview.output_kind || null,
+    turnRunId: preview.turn_run_id || null,
   };
 }
 
@@ -145,6 +171,7 @@ export function toolCardFromActivity(activity) {
     truncated: false,
     outputBytes: activity.output_bytes ?? null,
     outputKind: null,
+    turnRunId: activity.turn_run_id || null,
   };
 }
 
@@ -165,4 +192,3 @@ function toolStatusFromActivityStatus(status) {
       return "running";
   }
 }
-

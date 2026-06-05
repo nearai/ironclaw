@@ -4256,7 +4256,7 @@ mod tests {
         let _guard = EnvGuard::clear("OPENAI_API_KEY");
         let models = fetch_models_for("openai", &ModelFetchOptions::default()).await;
         assert!(!models.is_empty());
-        assert_eq!(models[0].0, "gpt-5.3-codex");
+        assert_eq!(models[0].0, "gpt-5.5");
         assert!(
             models.iter().any(|(id, _)| id.contains("gpt")),
             "static defaults should include a GPT model"

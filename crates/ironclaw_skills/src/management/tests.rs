@@ -12,6 +12,8 @@ use ironclaw_host_api::{
 use super::install_bundle::MAX_INSTALL_BUNDLE_FILE_BYTES;
 use super::*;
 
+mod install_name;
+
 #[tokio::test]
 async fn install_list_and_remove_user_skills_through_scoped_mounts() {
     let filesystem = Arc::new(InMemoryBackend::default());
@@ -93,6 +95,179 @@ async fn install_rejects_name_mismatch() {
     .unwrap_err();
 
     assert_eq!(error.kind(), SkillManagementErrorKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn install_accepts_named_plain_markdown_content() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), skill_mounts());
+
+    let installed = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: Some("qa-smoke-skill"),
+            content: "# QA Smoke\n\nSay \"qa skill loaded\" when asked.\n",
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed.name, "qa-smoke-skill");
+    let written = read_file(
+        filesystem.as_ref(),
+        "/projects/skills/qa-smoke-skill/SKILL.md",
+    )
+    .await;
+    assert!(written.starts_with("---\nname: qa-smoke-skill\n---\n\n"));
+    assert!(written.contains("Say \"qa skill loaded\""));
+
+    let listed = list_skills(&context).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "qa-smoke-skill");
+}
+
+#[tokio::test]
+async fn install_matching_existing_skill_is_idempotent() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), skill_mounts());
+    let content = "# QA Smoke\n\nSay \"qa skill loaded\" when asked.\n";
+    let request = SkillInstallRequest {
+        name: Some("qa-smoke-skill"),
+        content,
+        files: &[],
+        source: SkillInstallSource::User,
+        source_url: None,
+    };
+
+    let first = install_skill(&context, request).await.unwrap();
+    let second = install_skill(&context, request).await.unwrap();
+
+    assert_eq!(first.name, "qa-smoke-skill");
+    assert_eq!(second.name, "qa-smoke-skill");
+    let listed = list_skills(&context).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "qa-smoke-skill");
+}
+
+#[tokio::test]
+async fn install_rejects_existing_skill_with_different_content() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem, skill_mounts());
+
+    install_skill(
+        &context,
+        SkillInstallRequest {
+            name: Some("qa-smoke-skill"),
+            content: "# QA Smoke\n\nSay \"qa skill loaded\" when asked.\n",
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    let error = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: Some("qa-smoke-skill"),
+            content: "# QA Smoke\n\nDifferent instructions.\n",
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.kind(), SkillManagementErrorKind::Conflict);
+}
+
+#[tokio::test]
+async fn install_rejects_existing_skill_with_extra_files() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), skill_mounts());
+    let request = SkillInstallRequest {
+        name: Some("qa-smoke-skill"),
+        content: "# QA Smoke\n\nSay \"qa skill loaded\" when asked.\n",
+        files: &[],
+        source: SkillInstallSource::User,
+        source_url: None,
+    };
+
+    install_skill(&context, request).await.unwrap();
+    write_file(
+        filesystem.as_ref(),
+        "/projects/skills/qa-smoke-skill/references/guide.md",
+        "# Keep\n".to_string(),
+    )
+    .await;
+    let error = install_skill(&context, request).await.unwrap_err();
+
+    assert_eq!(error.kind(), SkillManagementErrorKind::Conflict);
+    assert_file_contents(
+        filesystem.as_ref(),
+        "/projects/skills/qa-smoke-skill/references/guide.md",
+        b"# Keep\n",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn install_rejects_malformed_frontmatter_even_with_requested_name() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem, skill_mounts());
+
+    let error = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: Some("qa-smoke-skill"),
+            content: "---\nname: qa-smoke-skill\n\nMissing closing delimiter.\n",
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidInput);
+    assert!(
+        error
+            .reason()
+            .is_some_and(|reason| reason.contains("Missing YAML frontmatter")),
+        "parse context should be preserved in the public error reason: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn install_rejects_plain_markdown_when_synthesized_content_exceeds_prompt_limit() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), skill_mounts());
+    let header = "---\nname: qa-smoke-skill\n---\n\n";
+    let content = "x".repeat(MAX_PROMPT_FILE_SIZE as usize - header.len() + 1);
+
+    let error = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: Some("qa-smoke-skill"),
+            content: &content,
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.kind(), SkillManagementErrorKind::Resource);
+    assert_missing(
+        filesystem.as_ref(),
+        "/projects/skills/qa-smoke-skill/SKILL.md",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -330,18 +505,7 @@ async fn install_serializes_concurrent_same_name_requests() {
     let (first, second) = tokio::join!(first, second);
 
     let results = [first, second];
-    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-    assert_eq!(
-        results
-            .iter()
-            .filter(|result| {
-                result
-                    .as_ref()
-                    .is_err_and(|error| error.kind() == SkillManagementErrorKind::Conflict)
-            })
-            .count(),
-        1
-    );
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 2);
     assert_file_contents(
         &filesystem,
         "/projects/skills/shared-helper/SKILL.md",
@@ -641,6 +805,18 @@ async fn write_file(root: &InMemoryBackend, path: &str, body: String) {
     root.write_file(&VirtualPath::new(path).unwrap(), body.as_bytes())
         .await
         .unwrap();
+}
+
+async fn read_file(root: &InMemoryBackend, path: &str) -> String {
+    let bytes = root
+        .read_file_bounded(
+            &VirtualPath::new(path).unwrap(),
+            MAX_PROMPT_FILE_SIZE as usize,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    String::from_utf8(bytes).unwrap()
 }
 
 async fn assert_missing(root: &InMemoryBackend, path: &str) {

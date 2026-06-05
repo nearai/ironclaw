@@ -331,6 +331,10 @@ impl DurableLoopHostMilestoneSink {
             | LoopHostMilestoneKind::CapabilityBatchCompleted { .. }
             | LoopHostMilestoneKind::GateBlocked { .. }
             | LoopHostMilestoneKind::CheckpointCreated { .. }
+            | LoopHostMilestoneKind::CompactionStarted { .. }
+            | LoopHostMilestoneKind::CompactionCompleted { .. }
+            | LoopHostMilestoneKind::CompactionFailed { .. }
+            | LoopHostMilestoneKind::CompactionLeakDetected { .. }
             | LoopHostMilestoneKind::Blocked { .. }
             | LoopHostMilestoneKind::DriverNote { .. } => return Ok(None),
         };
@@ -404,6 +408,7 @@ mod tests {
         );
         let milestone = LoopHostMilestone {
             scope,
+            actor: None,
             turn_id: TurnId::new(),
             run_id,
             loop_driver_id: LoopDriverId::new("hook-projection-driver").unwrap(),

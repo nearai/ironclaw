@@ -254,6 +254,7 @@ pub fn build_identity_messages_for_run_detailed(
             message_ref: candidate.message_ref.clone(),
             role: LOOP_SYSTEM_ROLE.to_string(),
             safe_summary: candidate.safe_summary.clone(),
+            compaction: None,
         });
     }
     Ok(IdentityMessageBuildOutcome {
@@ -509,10 +510,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            serde_json::to_vec(&first).unwrap(),
-            serde_json::to_vec(&second).unwrap()
-        );
+        assert_eq!(first, second);
         assert_eq!(source.calls.load(Ordering::SeqCst), 2);
     }
 

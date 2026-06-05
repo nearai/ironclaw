@@ -1,13 +1,31 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    future::Future,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{Arc, LazyLock, Mutex, mpsc},
+};
 
 use ironclaw_host_api::{
     CapabilityId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeCredentialInjection,
     RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, is_sensitive_runtime_response_header,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle,
+    is_sensitive_runtime_response_header,
 };
 use serde_json::{Map, Value};
+use tokio::runtime::{Handle, RuntimeFlavor};
 
 use crate::WasmHostError;
+
+static WASM_HTTP_EGRESS_RUNTIME: LazyLock<Result<tokio::runtime::Runtime, WasmHostError>> =
+    LazyLock::new(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("wasm-http-egress")
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                WasmHostError::Failed(format!("WASM HTTP runtime unavailable: {error}"))
+            })
+    });
 
 /// HTTP request shape exposed through the WIT `host.http-request` import.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,7 +317,7 @@ where
 
 impl<E> WasmHostHttp for WasmRuntimeHttpAdapter<E>
 where
-    E: RuntimeHttpEgress,
+    E: RuntimeHttpEgress + Clone + Send + Sync + 'static,
 {
     fn request(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, WasmHostError> {
         let method = match wasm_network_method(&request.method) {
@@ -334,23 +352,27 @@ where
                 }
             };
 
-        let response = self
-            .egress
-            .execute(RuntimeHttpEgressRequest {
-                runtime: RuntimeKind::Wasm,
-                scope: self.scope.clone(),
-                capability_id: self.capability_id.clone(),
-                method,
-                url: request.url,
-                headers,
-                body,
-                network_policy: self.network_policy.clone(),
-                credential_injections,
-                response_body_limit: self.response_body_limit,
-                save_body_to: None,
-                timeout_ms: request.timeout_ms,
-            })
-            .map_err(wasm_http_error)?;
+        let egress = self.egress.clone();
+        let egress_request = RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Wasm,
+            scope: self.scope.clone(),
+            capability_id: self.capability_id.clone(),
+            method,
+            url: request.url,
+            headers,
+            body,
+            network_policy: self.network_policy.clone(),
+            credential_injections,
+            response_body_limit: self.response_body_limit,
+            save_body_to: None,
+            timeout_ms: request.timeout_ms,
+        };
+        let response = block_on_runtime_http_egress(async move {
+            egress
+                .execute(egress_request)
+                .await
+                .map_err(wasm_http_error)
+        })?;
 
         Ok(WasmHttpResponse {
             status: response.status,
@@ -358,6 +380,56 @@ where
             body: response.body,
         })
     }
+}
+
+fn block_on_runtime_http_egress<F>(future: F) -> Result<RuntimeHttpEgressResponse, WasmHostError>
+where
+    F: Future<Output = Result<RuntimeHttpEgressResponse, WasmHostError>> + Send + 'static,
+{
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            catch_unwind(AssertUnwindSafe(|| {
+                tokio::task::block_in_place(|| handle.block_on(future))
+            }))
+            .map_err(|_| runtime_http_egress_panicked())?
+        }
+        Ok(_) => run_runtime_http_egress_on_worker(future),
+        Err(_) => run_runtime_http_egress_future(future),
+    }
+}
+
+fn run_runtime_http_egress_on_worker<F>(
+    future: F,
+) -> Result<RuntimeHttpEgressResponse, WasmHostError>
+where
+    F: Future<Output = Result<RuntimeHttpEgressResponse, WasmHostError>> + Send + 'static,
+{
+    let runtime = WASM_HTTP_EGRESS_RUNTIME
+        .as_ref()
+        .map_err(|error| error.clone())?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    runtime.spawn(async move {
+        let _ = sender.send(future.await);
+    });
+    receiver
+        .recv()
+        .map_err(|_| WasmHostError::Failed("WASM HTTP runtime worker stopped".to_string()))?
+}
+
+fn run_runtime_http_egress_future<F>(future: F) -> Result<RuntimeHttpEgressResponse, WasmHostError>
+where
+    F: Future<Output = Result<RuntimeHttpEgressResponse, WasmHostError>>,
+{
+    let runtime = WASM_HTTP_EGRESS_RUNTIME
+        .as_ref()
+        .map_err(|error| error.clone())?;
+    catch_unwind(AssertUnwindSafe(|| runtime.block_on(future)))
+        .map_err(|_| runtime_http_egress_panicked())?
+}
+
+fn runtime_http_egress_panicked() -> WasmHostError {
+    tracing::error!("WASM runtime HTTP egress future panicked");
+    WasmHostError::Failed("runtime_http_egress_panicked".to_string())
 }
 
 fn wasm_network_method(method: &str) -> Result<NetworkMethod, WasmHostError> {

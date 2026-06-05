@@ -25,11 +25,12 @@ libsql = { version = "0.6", optional = true, default-features = false, features 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "sync"] }
+tokio = { version = "1", features = ["fs", "io-util", "sync", "time"] }
 tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
 tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 uuid = { version = "1", features = ["v4"] }

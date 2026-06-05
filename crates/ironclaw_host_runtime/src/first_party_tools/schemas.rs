@@ -42,40 +42,106 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["operation", "data"],
             "additionalProperties": false
         }),
-        "schemas/builtin/http.input.v1.json" => json!({
+        "schemas/builtin/http.input.v1.json" => http_schema(false),
+        "schemas/builtin/http-save.input.v1.json" => http_schema(true),
+        "schemas/builtin/memory_search.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "url": { "type": "string", "description": "Absolute HTTP or HTTPS URL" },
-                "method": {
+                "query": {
                     "type": "string",
-                    "enum": ["get", "post", "put", "patch", "delete", "head"],
-                    "description": "HTTP method. Defaults to get."
+                    "description": "Preferred natural language search query for persistent memory"
                 },
-                "headers": {
-                    "description": "HTTP headers as an object or array of {name,value} entries"
+                "q": {
+                    "type": "string",
+                    "description": "Alias for query"
                 },
-                "body": { "description": "String or JSON request body" },
-                "body_base64": { "type": "string", "description": "Base64-encoded request body" },
-                "response_body_limit": {
+                "text": {
+                    "type": "string",
+                    "description": "Alias for query"
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Alias for query"
+                },
+                "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 10485760,
-                    "default": 10485760,
-                    "description": "Maximum response body bytes. Defaults to 10 MiB; smaller values are raised to 10 MiB."
-                },
-                "save_to": {
-                    "type": "string",
-                    "description": "Scoped path to save the sanitized response body, e.g. /workspace/response.json"
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 30000,
-                    "default": 10000,
-                    "description": "Request timeout in milliseconds. Defaults to 10s and is capped at 30s."
+                    "maximum": 20,
+                    "default": 5,
+                    "description": "Maximum number of memory results to return"
                 }
             },
-            "required": ["url"],
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/memory_write.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Full content to write or append"
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a relative memory document path.",
+                    "default": "daily_log"
+                },
+                "append": {
+                    "type": "boolean",
+                    "description": "Append to existing content when true; replace when false",
+                    "default": true
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Optional document metadata such as skip_indexing or skip_versioning"
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "Exact text to replace; switches to patch mode"
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "Replacement text for patch mode"
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every old_string occurrence in patch mode",
+                    "default": false
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone used only for daily_log target date resolution"
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/memory_read.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative memory document path to read"
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/memory_tree.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative memory directory path to list; omit for the memory root",
+                    "default": ""
+                },
+                "depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "default": 1,
+                    "description": "Maximum directory depth to include"
+                }
+            },
             "additionalProperties": false
         }),
         "schemas/builtin/shell.input.v1.json" => json!({
@@ -93,7 +159,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "flavor_id": {
                     "type": "string",
-                    "description": "Subagent kind to spawn"
+                    "enum": ["general", "researcher", "coder", "explorer"],
+                    "description": "Subagent flavor. general: read/search only, bounded task. researcher: + web search, prefer evidence over mutation. coder: read/write/shell, file-focused execution. explorer: read/search, deep analysis, no writes."
                 },
                 "task": {
                     "type": "string",
@@ -102,15 +169,6 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "handoff": {
                     "type": "string",
                     "description": "Optional context to pass to the child subagent"
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["blocking", "background"],
-                    "description": "Whether the parent waits for completion"
-                },
-                "run_in_background": {
-                    "type": "boolean",
-                    "description": "Legacy background-mode flag"
                 }
             },
             "required": ["flavor_id", "task"],
@@ -191,9 +249,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/extension_search.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Search query for locally available Reborn extensions" }
+                "query": { "type": "string", "description": "Optional search query for locally available Reborn extensions. Omit to list all extensions." }
             },
-            "required": ["query"],
             "additionalProperties": false
         }),
         "schemas/builtin/extension_install.input.v1.json"
@@ -220,7 +277,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "content": {
                     "type": "string",
-                    "description": "Raw SKILL.md content to install"
+                    "description": "Raw SKILL.md content to install, or plain Markdown when name is provided"
                 },
                 "url": {
                     "type": "string",
@@ -241,6 +298,119 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["name"],
             "additionalProperties": false
         }),
+        "schemas/builtin/trigger_create.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Human-readable trigger name. Runtime validation caps UTF-8 content at 256 bytes."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes."
+                },
+                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" }
+            },
+            "required": ["name", "prompt", "cron"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_list.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Maximum triggers to return. Defaults to 100."
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_remove.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }
+            },
+            "required": ["trigger_id"],
+            "additionalProperties": false
+        }),
         _ => return None,
+    })
+}
+
+fn http_schema(require_save_to: bool) -> Value {
+    let mut properties = json!({
+        "url": { "type": "string", "description": "Absolute HTTP or HTTPS URL" },
+        "method": {
+            "type": "string",
+            "enum": ["get", "post", "put", "patch", "delete", "head"],
+            "description": "HTTP method. Defaults to get."
+        },
+        "headers": {
+            "description": "HTTP headers as an object or array of {name,value} entries",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                },
+                {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "value": { "type": "string" }
+                        },
+                        "required": ["name", "value"],
+                        "additionalProperties": false
+                    }
+                }
+            ]
+        },
+        "body": {
+            "description": "String or JSON request body",
+            "type": ["string", "object", "array", "number", "boolean", "null"]
+        },
+        "body_base64": { "type": "string", "description": "Base64-encoded request body" },
+        "response_body_limit": response_body_limit_schema(require_save_to),
+        "timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30000,
+            "default": 10000,
+            "description": "Request timeout in milliseconds. Defaults to 10s and is capped at 30s."
+        }
+    });
+    let mut required = vec!["url"];
+    if require_save_to {
+        properties["save_to"] = json!({
+            "type": "string",
+            "description": "Scoped path to save the sanitized response body for builtin.http.save instead of inlining body data, e.g. /workspace/response.json"
+        });
+        required.push("save_to");
+    }
+
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false
+    })
+}
+
+fn response_body_limit_schema(require_save_to: bool) -> Value {
+    let default = if require_save_to { 10_485_760 } else { 49_152 };
+    let maximum = if require_save_to { 10_485_760 } else { 262_144 };
+    let description = if require_save_to {
+        "Maximum sanitized response body bytes to fetch and save. Defaults to 10 MiB; smaller values are honored."
+    } else {
+        "Maximum inline response body bytes exposed to the model. Defaults to a small model-visible budget and is capped at 256 KiB; smaller values are honored, and oversized bodies are truncated or summarized with guidance to use builtin.http.save."
+    };
+    json!({
+        "type": "integer",
+        "minimum": 1,
+        "maximum": maximum,
+        "default": default,
+        "description": description
     })
 }

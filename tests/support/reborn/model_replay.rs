@@ -454,7 +454,7 @@ async fn provider_tool_calls_response(
 
 fn capability_host_error(error: AgentLoopHostError) -> HostManagedModelError {
     HostManagedModelError::safe(
-        HostManagedModelErrorKind::InvalidRequest,
+        HostManagedModelErrorKind::InvalidOutput,
         format!("capability trace replay failed: {}", error.safe_summary),
     )
 }

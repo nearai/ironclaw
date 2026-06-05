@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ironclaw_event_projections::{
     ProjectionCursor, ProjectionReplay, ProjectionScope, ProjectionSnapshot,
 };
-use ironclaw_host_api::{InvocationId, MissionId, ProcessId, ThreadId};
+use ironclaw_host_api::{CapabilityId, InvocationId, MissionId, ProcessId, ThreadId};
 use ironclaw_outbound::{OutboundPushKind, ProjectionUpdateRef};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
@@ -168,7 +168,37 @@ pub struct ThreadLiveProjectionUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadLiveProjectionItem {
-    Thinking { id: String, body: String },
+    Thinking {
+        id: String,
+        run_id: TurnRunId,
+        body: String,
+    },
+    CapabilityActivity {
+        run_id: TurnRunId,
+        invocation_id: InvocationId,
+        capability_id: CapabilityId,
+    },
+    WorkSummary {
+        id: String,
+        run_id: TurnRunId,
+        phase: ThreadLiveWorkSummaryPhase,
+        body: String,
+    },
+    SkillActivation {
+        id: String,
+        run_id: TurnRunId,
+        skill_names: Vec<String>,
+        feedback: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadLiveWorkSummaryPhase {
+    Planning,
+    Waiting,
+    Retrying,
+    Context,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

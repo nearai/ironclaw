@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Generated:** 2026-04-25T12:18:38Z
-**Last updated:** 2026-05-06 after conversation-binding semantic slice
+**Last updated:** 2026-06-02 after Reborn trigger worker lifecycle slice
 **Status:** Current docs snapshot / implementation-alignment map
 **Scope:** Reborn host architecture, current implemented slices, and explicit gaps
 
@@ -33,6 +33,7 @@ docs/reborn/contracts/settings-config.md
 docs/reborn/contracts/turns-agent-loop.md
 docs/reborn/contracts/turn-persistence.md
 docs/reborn/contracts/conversation-binding.md
+docs/reborn/contracts/triggers.md
 docs/reborn/contracts/migration-compatibility.md
 ```
 
@@ -43,6 +44,21 @@ https://github.com/nearai/ironclaw/issues/2987
 ```
 
 These docs record the delegation-ready system decisions: kernel as security perimeter, loops/userland running on the kernel surface, first-class optional `AgentId`, hybrid storage placement, typed repositories for structured state, split memory services over shared backends, durable event streams with replay cursors, all built-in obligations for V1, all three runtime lanes as first-class, and schema reuse where viable.
+
+Trigger system status: `[partially implemented]`. The contract is frozen in
+`docs/reborn/contracts/triggers.md`; `ironclaw_triggers` now owns trigger
+records, schedule validation, durable libSQL/PostgreSQL repositories, atomic
+fire claim/update APIs, poller core, and first-party `trigger_*` management
+capabilities. Reborn composition now wires a configurable background trigger
+poller lifecycle for local runtime startup/readiness/shutdown; the poller is
+opt-in by default, uses bounded shutdown for stalled ticks, records trusted
+trigger prompts only after accepted/replayed turn submission, and batches
+active-run lookup snapshots per cleanup page. Trusted trigger submission is
+sealed by trigger-worker-owned request minting, private conversation-owned
+trusted inbound construction, and Reborn architecture dependency tests.
+External trigger result delivery, production
+lifecycle/readiness policy, active-run retention/tombstone semantics, and
+production jitter source selection remain follow-up slices.
 
 ---
 

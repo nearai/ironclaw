@@ -11,6 +11,8 @@ export function EmptyState({
   resetKey,
   context,
   statusText,
+  canCancel,
+  onCancel,
 }) {
   const t = useT();
   const suggestions = [
@@ -57,6 +59,8 @@ export function EmptyState({
           variant="hero"
           context=${context}
           statusText=${statusText}
+          canCancel=${canCancel}
+          onCancel=${onCancel}
         />
       </div>
 

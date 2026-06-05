@@ -3,7 +3,7 @@
 **Date:** 2026-04-25
 **Status:** V1 contract slice
 **Crate:** `crates/ironclaw_approvals`
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/communication-delivery-resolution.md`
 
 ---
 
@@ -12,6 +12,8 @@
 `ironclaw_approvals` resolves durable approval requests into bounded authorization leases.
 
 It is a host control-plane service. It does not prompt users, render UI, execute capabilities, reserve resources, or route runtime work.
+
+Approval notification is separate from approval resolution and lease issuance. `ApprovalResolver` only resolves stored pending approvals into exact scoped leases; it does not choose a delivery target, render a prompt surface, or send the notification.
 
 The intended flow is:
 

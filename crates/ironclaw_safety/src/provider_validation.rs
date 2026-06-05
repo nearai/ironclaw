@@ -192,10 +192,9 @@ fn validate_provider_metadata_text(
     value: &str,
     label: &str,
 ) -> Result<(), ProviderValidationError> {
-    if value
-        .chars()
-        .any(|character| character == '\0' || character.is_control())
-    {
+    if value.chars().any(|character| {
+        character == '\0' || (character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    }) {
         return Err(ProviderValidationError::new(format!(
             "{label} must not contain NUL/control characters"
         )));
@@ -284,18 +283,27 @@ mod tests {
     }
 
     #[test]
-    fn provider_metadata_rejects_text_whitespace_controls() {
+    fn provider_metadata_allows_multiline_text() {
         for value in [
             "line one\nline two",
             "line one\rline two",
             "line one\tline two",
         ] {
-            let error =
-                validate_optional_provider_metadata_text(Some(value), "provider reasoning", 4096)
-                    .expect_err("metadata text whitespace control should fail");
-
-            assert!(error.to_string().contains("NUL/control characters"));
+            validate_optional_provider_metadata_text(Some(value), "provider reasoning", 4096)
+                .expect("metadata text whitespace control should pass");
         }
+    }
+
+    #[test]
+    fn provider_metadata_rejects_non_whitespace_controls() {
+        let error = validate_optional_provider_metadata_text(
+            Some("line one\u{0001}line two"),
+            "provider reasoning",
+            4096,
+        )
+        .expect_err("non-whitespace control character should fail");
+
+        assert!(error.to_string().contains("NUL/control characters"));
     }
 
     #[test]

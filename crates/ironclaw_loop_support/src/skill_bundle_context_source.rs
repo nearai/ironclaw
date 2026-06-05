@@ -472,7 +472,9 @@ mod tests {
         assert_eq!(snippets.len(), 1);
         assert_eq!(snippets[0].snippet_ref, "skill:alpha");
         assert!(snippets[0].safe_summary.contains("safe alpha description"));
-        assert!(snippets[0].safe_summary.contains("trusted alpha prompt"));
+        assert!(!snippets[0].safe_summary.contains("trusted alpha prompt"));
+        assert!(snippets[0].model_content.contains("safe alpha description"));
+        assert!(snippets[0].model_content.contains("trusted alpha prompt"));
     }
 
     #[tokio::test]
@@ -508,7 +510,7 @@ mod tests {
         );
         assert!(
             !snippets[0]
-                .safe_summary
+                .model_content
                 .contains("RAW_INSTALLED_PROMPT_SENTINEL")
         );
     }

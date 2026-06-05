@@ -5,8 +5,8 @@ use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityActivityId, LoopExitId, LoopGateRef, LoopMessageRef, TurnCheckpointId, TurnId,
-    TurnRunId, TurnScope,
+    CapabilityActivityId, LoopExitId, LoopGateRef, LoopMessageRef, TurnActor, TurnCheckpointId,
+    TurnId, TurnRunId, TurnScope,
 };
 
 use super::host::{
@@ -15,11 +15,19 @@ use super::host::{
     LoopPromptBundleRef, LoopRunContext, LoopSafeSummary, PromptMode,
 };
 use super::refs::{LoopDriverId, ModelProfileId};
+use super::{CompactionInitiator, SystemInferenceTaskId};
 use crate::{LoopCompletionKind, LoopFailureKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopHostMilestone {
     pub scope: TurnScope,
+    /// Canonical actor that owns the run this milestone belongs to. Carried
+    /// alongside `scope` (which is owner-agnostic) so live-progress
+    /// projection can be keyed to the per-run caller rather than a fixed
+    /// runtime owner. Optional and `#[serde(default)]` for wire-compat with
+    /// historical milestones and host paths that do not bind an actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<TurnActor>,
     pub turn_id: TurnId,
     pub run_id: TurnRunId,
     pub loop_driver_id: LoopDriverId,
@@ -30,6 +38,7 @@ impl LoopHostMilestone {
     fn from_context(context: &LoopRunContext, kind: LoopHostMilestoneKind) -> Self {
         Self {
             scope: context.scope.clone(),
+            actor: context.actor.clone(),
             turn_id: context.turn_id,
             run_id: context.run_id,
             loop_driver_id: context.loop_driver_id.clone(),
@@ -117,6 +126,22 @@ pub enum LoopHostMilestoneKind {
     CheckpointCreated {
         checkpoint_id: TurnCheckpointId,
         checkpoint_kind: LoopCheckpointKind,
+    },
+    CompactionStarted {
+        task_id: SystemInferenceTaskId,
+        initiator: CompactionInitiator,
+    },
+    CompactionCompleted {
+        task_id: SystemInferenceTaskId,
+        compression_ratio_ppm: u32,
+    },
+    CompactionFailed {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    CompactionLeakDetected {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
     },
     AssistantReplyFinalized {
         message_ref: LoopMessageRef,
@@ -229,6 +254,10 @@ impl LoopHostMilestoneKind {
             Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
             Self::GateBlocked { .. } => "gate_blocked",
             Self::CheckpointCreated { .. } => "checkpoint_created",
+            Self::CompactionStarted { .. } => "compaction_started",
+            Self::CompactionCompleted { .. } => "compaction_completed",
+            Self::CompactionFailed { .. } => "compaction_failed",
+            Self::CompactionLeakDetected { .. } => "compaction_leak_detected",
             Self::AssistantReplyFinalized { .. } => "assistant_reply_finalized",
             Self::Blocked { .. } => "blocked",
             Self::Completed { .. } => "completed",
@@ -532,6 +561,51 @@ where
         self.publish(LoopHostMilestoneKind::CheckpointCreated {
             checkpoint_id,
             checkpoint_kind,
+        })
+        .await
+    }
+
+    pub async fn compaction_started(
+        &self,
+        task_id: SystemInferenceTaskId,
+        initiator: CompactionInitiator,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::CompactionStarted { task_id, initiator })
+            .await
+    }
+
+    pub async fn compaction_completed(
+        &self,
+        task_id: SystemInferenceTaskId,
+        compression_ratio_ppm: u32,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::CompactionCompleted {
+            task_id,
+            compression_ratio_ppm,
+        })
+        .await
+    }
+
+    pub async fn compaction_failed(
+        &self,
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::CompactionFailed {
+            task_id,
+            reason_kind,
+        })
+        .await
+    }
+
+    pub async fn compaction_leak_detected(
+        &self,
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::CompactionLeakDetected {
+            task_id,
+            reason_kind,
         })
         .await
     }

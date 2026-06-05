@@ -226,7 +226,7 @@ where
     ///
     /// This is for host adapters that parse a scoped path against the exact
     /// invocation-visible mounts and need the write to use that same authority.
-    pub async fn write_file_with_mount_view(
+    pub async fn write_bytes_with_mount_view(
         &self,
         view: &MountView,
         path: &ScopedPath,
@@ -234,7 +234,14 @@ where
     ) -> Result<(), FilesystemError> {
         let virtual_path =
             resolve_with_permission_view(view, path, FilesystemOperation::WriteFile)?;
-        self.root.write_file(&virtual_path, bytes).await
+        self.root
+            .put(
+                &virtual_path,
+                Entry::bytes(bytes.to_vec()),
+                CasExpectation::Any,
+            )
+            .await
+            .map(|_| ())
     }
 
     /// **DEPRECATED — no direct replacement on the unified surface.** Use

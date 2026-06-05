@@ -171,6 +171,9 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+      id-token: write       # the called workflow uses OIDC to assume an
+                            # AWS role for S3 persistence; without this it
+                            # fails to start.
     # Concurrency lives on the authorized job, not the workflow root —
     # otherwise an unauthorized commenter typing `/benchmark whatever`
     # would acquire the per-PR group and cancel an in-flight maintainer
@@ -178,10 +181,12 @@ jobs:
     concurrency:
       group: nearai-bench-${{ github.event.issue.number }}
       cancel-in-progress: true
-    # Pinned to a reviewed commit on nearai/benchmarks main — mutable @main
-    # + secrets: inherit was the supply-chain hole. Bump this SHA in a
-    # deliberate PR when nearai/benchmarks ships a new reusable workflow.
-    uses: nearai/benchmarks/.github/workflows/bench-pr-reusable.yml@67effacd8c8a7f6f43b422e30a1810822b9d6d5f
+    # Tracks nearai/benchmarks main. Renderer / workflow changes there
+    # take effect on the next /benchmark without needing a deliberate
+    # SHA bump here. Both repos are under the same org with the same
+    # write-access set, so the supply-chain delta vs. a pinned SHA is
+    # small enough to trade for not stalling out every renderer change.
+    uses: nearai/benchmarks/.github/workflows/bench-pr-reusable.yml@main
     with:
       ironclaw-rev: ${{ needs.parse.outputs.head_sha }}
       pr-repo: ${{ github.repository }}
