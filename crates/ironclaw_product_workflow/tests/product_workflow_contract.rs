@@ -1658,6 +1658,36 @@ async fn subscription_request_via_accept_inbound_rejects_before_mutating_ledger(
 }
 
 #[tokio::test]
+async fn subscription_request_via_submit_inbound_rejects_before_mutating_ledger() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let envelope = sample_envelope_with_payload(
+        "projection-subscribe-wrong-submit-door",
+        ProductInboundPayload::SubscriptionRequest(
+            ProjectionSubscriptionPayload::new(None, None).expect("valid subscription"),
+        ),
+    );
+
+    let err = workflow.submit_inbound(envelope).await.expect_err(
+        "projection subscriptions use the subscribe projection door, not submit_inbound",
+    );
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            ..
+        }
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(binding_service.resolve_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
 async fn projection_read_via_submit_inbound_rejects_before_mutating_ledger() {
     let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
     let envelope = sample_envelope_with_payload(

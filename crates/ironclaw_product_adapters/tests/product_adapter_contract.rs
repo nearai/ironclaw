@@ -275,7 +275,7 @@ async fn workflow_returns_programmed_outcomes() {
 }
 
 #[tokio::test]
-async fn workflow_fake_records_read_and_subscribe_doors_separately() {
+async fn workflow_fake_records_submit_read_and_subscribe_doors_separately() {
     let workflow = FakeProductWorkflow::new();
     let actor = TurnActor::new(ironclaw_host_api::UserId::new("user:alice").expect("valid"));
     let scope = TurnScope::new(
@@ -326,6 +326,15 @@ async fn workflow_fake_records_read_and_subscribe_doors_separately() {
     assert_eq!(workflow.read_inputs(), vec![read_input]);
     assert_eq!(workflow.subscribe_inputs(), vec![subscribe_input]);
     assert_eq!(workflow.accepted_count(), 0);
+
+    let submit = workflow
+        .submit_inbound(sample_envelope("update:projection-doors"))
+        .await
+        .expect("submit");
+    assert!(matches!(submit, ProductInboundAck::Accepted { .. }));
+    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(workflow.read_inputs().len(), 1);
+    assert_eq!(workflow.subscribe_inputs().len(), 1);
 }
 
 #[tokio::test]
