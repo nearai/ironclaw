@@ -608,7 +608,7 @@ mod tests {
             }
         }
 
-        fn allows_operator_llm_config(&self) -> bool {
+        fn allows_operator_webui_config(&self) -> bool {
             true
         }
     }

@@ -105,10 +105,11 @@ pub trait WebuiAuthenticator: Send + Sync + 'static {
     async fn authenticate(&self, token: &str) -> Option<UserId>;
 
     /// Whether bearer tokens accepted by this authenticator represent a
-    /// single trusted operator. Operator-wide LLM config routes mutate shared
-    /// provider catalog, secret, and active model state, so host composition
-    /// only mounts them for authenticators that explicitly opt in.
-    fn allows_operator_llm_config(&self) -> bool {
+    /// single trusted operator. Operator-wide WebUI config routes mutate
+    /// shared host configuration such as provider catalogs, secrets, active
+    /// models, or Slack channel routes, so host composition only mounts them
+    /// for authenticators that explicitly opt in.
+    fn allows_operator_webui_config(&self) -> bool {
         false
     }
 }
@@ -527,8 +528,7 @@ pub fn webui_v2_app_with_lifecycle(
         .slack_personal_binding_pairing
         .clone()
         .map(slack_personal_binding_pairing_route_mount);
-    #[cfg(feature = "slack-v2-host-beta")]
-    let mount_operator_routes = config.authenticator.allows_operator_llm_config();
+    let mount_operator_routes = config.authenticator.allows_operator_webui_config();
     #[cfg(feature = "slack-v2-host-beta")]
     let slack_channel_routes_mount = config
         .slack_channel_routes
@@ -542,9 +542,8 @@ pub fn webui_v2_app_with_lifecycle(
             .filter_map(|mount| mount.drain.clone())
             .collect(),
     );
-    let mount_llm_config_routes = config.authenticator.allows_operator_llm_config();
     let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
-    if !mount_llm_config_routes {
+    if !mount_operator_routes {
         descriptors
             .retain(|descriptor| !is_webui_v2_llm_config_route_id(descriptor.route_id().as_str()));
     }
@@ -577,7 +576,7 @@ pub fn webui_v2_app_with_lifecycle(
     // Inner: the v2 route surface, retagged to `Router<()>` so it can
     // merge into the outer stateless router. `webui_v2_router` has
     // already baked its own `WebUiV2State` into every handler.
-    let route_options = if mount_llm_config_routes {
+    let route_options = if mount_operator_routes {
         WebUiV2RouteOptions::all()
     } else {
         WebUiV2RouteOptions::without_llm_config_routes()

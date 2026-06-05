@@ -292,9 +292,6 @@ impl ProductInstallationScope {
         &self,
         request: &ResolveBindingRequest,
     ) -> Result<Option<UserId>, ProductWorkflowError> {
-        if request.route_kind != ProductConversationRouteKind::Shared {
-            return Ok(None);
-        }
         if let Some(resolver) = &self.conversation_subject_route_resolver
             && let Some(subject_user_id) = resolver
                 .resolve_product_conversation_subject_route(
@@ -312,6 +309,16 @@ impl ProductInstallationScope {
             .get(&route_key)
             .or(self.default_subject_user_id.as_ref())
             .cloned())
+    }
+
+    async fn configured_subject_user_id_for_route(
+        &self,
+        request: &ResolveBindingRequest,
+    ) -> Result<Option<UserId>, ProductWorkflowError> {
+        match request.route_kind {
+            ProductConversationRouteKind::Direct => Ok(None),
+            ProductConversationRouteKind::Shared => self.shared_subject_user_id_for(request).await,
+        }
     }
 }
 
@@ -506,7 +513,7 @@ impl ConversationBindingService for ProductConversationBindingService {
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
         let configured_subject_user_id = installation_scope
-            .shared_subject_user_id_for(&request)
+            .configured_subject_user_id_for_route(&request)
             .await?;
         ensure_shared_route_has_configured_subject(
             request.route_kind,
@@ -539,7 +546,7 @@ impl ConversationBindingService for ProductConversationBindingService {
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
         let configured_subject_user_id = installation_scope
-            .shared_subject_user_id_for(&request)
+            .configured_subject_user_id_for_route(&request)
             .await?;
         ensure_shared_route_has_configured_subject(
             request.route_kind,
