@@ -292,6 +292,9 @@ impl ProductInstallationScope {
         &self,
         request: &ResolveBindingRequest,
     ) -> Result<Option<UserId>, ProductWorkflowError> {
+        if request.route_kind != ProductConversationRouteKind::Shared {
+            return Ok(None);
+        }
         if let Some(resolver) = &self.conversation_subject_route_resolver
             && let Some(subject_user_id) = resolver
                 .resolve_product_conversation_subject_route(

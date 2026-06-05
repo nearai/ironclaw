@@ -200,13 +200,15 @@ where
         ))
     }
 
-    fn channel_route_installation_dir_path(
+    fn channel_route_team_dir_path(
         installation_id: &AdapterInstallationId,
+        team_id: &str,
     ) -> Result<ScopedPath, FilesystemError> {
         scoped_path(&format!(
-            "{}/{}",
+            "{}/{}/{}",
             CHANNEL_ROUTE_ROOT,
-            path_segment(installation_id.as_str())
+            path_segment(installation_id.as_str()),
+            path_segment(team_id)
         ))
     }
 
@@ -492,11 +494,12 @@ where
         &self,
         tenant_id: &TenantId,
         installation_id: &AdapterInstallationId,
+        team_id: &str,
     ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
         if tenant_id != &self.scope.tenant_id {
             return Ok(Vec::new());
         }
-        let dir = Self::channel_route_installation_dir_path(installation_id)
+        let dir = Self::channel_route_team_dir_path(installation_id, team_id)
             .map_err(map_route_fs_error)?;
         let entries = match self.filesystem.list_dir(&self.scope, &dir).await {
             Ok(entries) => entries,
@@ -505,42 +508,25 @@ where
         };
         let mut routes = Vec::new();
         for entry in entries {
-            if entry.file_type != FileType::Directory {
+            if entry.file_type != FileType::File {
                 continue;
             }
-            let team_dir = scoped_path(&format!(
-                "{}/{}/{}",
+            let path = scoped_path(&format!(
+                "{}/{}/{}/{}",
                 CHANNEL_ROUTE_ROOT,
                 path_segment(installation_id.as_str()),
+                path_segment(team_id),
                 entry.name
             ))
             .map_err(map_route_fs_error)?;
-            let channel_entries = match self.filesystem.list_dir(&self.scope, &team_dir).await {
-                Ok(entries) => entries,
-                Err(FilesystemError::NotFound { .. }) => continue,
-                Err(error) => return Err(map_route_fs_error(error)),
+            let Some((record, _)) = self
+                .read_record::<StoredSlackChannelRoute>(&path)
+                .await
+                .map_err(map_route_fs_error)?
+            else {
+                continue;
             };
-            for channel_entry in channel_entries {
-                if channel_entry.file_type != FileType::File {
-                    continue;
-                }
-                let path = scoped_path(&format!(
-                    "{}/{}/{}/{}",
-                    CHANNEL_ROUTE_ROOT,
-                    path_segment(installation_id.as_str()),
-                    entry.name,
-                    channel_entry.name
-                ))
-                .map_err(map_route_fs_error)?;
-                let Some((record, _)) = self
-                    .read_record::<StoredSlackChannelRoute>(&path)
-                    .await
-                    .map_err(map_route_fs_error)?
-                else {
-                    continue;
-                };
-                routes.push(stored_channel_route(record)?);
-            }
+            routes.push(stored_channel_route(record)?);
         }
         routes.sort_by(|left, right| {
             left.team_id
@@ -1121,7 +1107,11 @@ mod tests {
             Some(user("user:eng-team-agent"))
         );
         let routes = second
-            .list_routes(&TenantId::new("tenant-alpha").unwrap(), &installation())
+            .list_routes(
+                &TenantId::new("tenant-alpha").unwrap(),
+                &installation(),
+                "T123",
+            )
             .await
             .expect("list routes");
         assert_eq!(routes.len(), 1);

@@ -528,9 +528,12 @@ pub fn webui_v2_app_with_lifecycle(
         .clone()
         .map(slack_personal_binding_pairing_route_mount);
     #[cfg(feature = "slack-v2-host-beta")]
+    let mount_operator_routes = config.authenticator.allows_operator_llm_config();
+    #[cfg(feature = "slack-v2-host-beta")]
     let slack_channel_routes_mount = config
         .slack_channel_routes
         .clone()
+        .filter(|_| mount_operator_routes)
         .map(slack_channel_route_admin_route_mount);
     let public_mounts = config.public_mounts;
     let public_route_drains = PublicRouteDrains::new(

@@ -1,8 +1,11 @@
 //! Host-owned Slack shared-channel route store and WebUI admin surface.
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::RwLock;
 
 use async_trait::async_trait;
 use axum::{
@@ -38,15 +41,15 @@ const SLACK_CHANNEL_ROUTES_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).unwrap
 const SLACK_CHANNEL_ROUTES_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 is non-zero.
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SlackChannelRouteKey {
-    pub tenant_id: TenantId,
-    pub installation_id: AdapterInstallationId,
-    pub team_id: String,
-    pub channel_id: String,
+pub(crate) struct SlackChannelRouteKey {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) installation_id: AdapterInstallationId,
+    pub(crate) team_id: String,
+    pub(crate) channel_id: String,
 }
 
 impl SlackChannelRouteKey {
-    pub fn new(
+    pub(crate) fn new(
         tenant_id: TenantId,
         installation_id: AdapterInstallationId,
         team_id: String,
@@ -64,12 +67,12 @@ impl SlackChannelRouteKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SlackChannelRoute {
-    pub tenant_id: String,
-    pub installation_id: String,
-    pub team_id: String,
-    pub channel_id: String,
-    pub subject_user_id: String,
+pub(crate) struct SlackChannelRoute {
+    pub(crate) tenant_id: String,
+    pub(crate) installation_id: String,
+    pub(crate) team_id: String,
+    pub(crate) channel_id: String,
+    pub(crate) subject_user_id: String,
 }
 
 impl SlackChannelRoute {
@@ -85,11 +88,12 @@ impl SlackChannelRoute {
 }
 
 #[async_trait]
-pub trait SlackChannelRouteStore: Send + Sync + std::fmt::Debug {
+pub(crate) trait SlackChannelRouteStore: Send + Sync + std::fmt::Debug {
     async fn list_routes(
         &self,
         tenant_id: &TenantId,
         installation_id: &AdapterInstallationId,
+        team_id: &str,
     ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError>;
 
     async fn upsert_route(
@@ -109,35 +113,27 @@ pub trait SlackChannelRouteStore: Send + Sync + std::fmt::Debug {
     ) -> Result<Option<UserId>, SlackChannelRouteError>;
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
-pub struct InMemorySlackChannelRouteStore {
+pub(crate) struct InMemorySlackChannelRouteStore {
     routes: RwLock<HashMap<SlackChannelRouteKey, UserId>>,
 }
 
+#[cfg(test)]
 impl InMemorySlackChannelRouteStore {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
-    }
-
-    pub fn seed_route(
-        &self,
-        key: SlackChannelRouteKey,
-        subject_user_id: UserId,
-    ) -> Result<(), SlackChannelRouteError> {
-        self.routes
-            .write()
-            .map_err(|_| SlackChannelRouteError::StoreUnavailable)?
-            .insert(key, subject_user_id);
-        Ok(())
     }
 }
 
+#[cfg(test)]
 #[async_trait]
 impl SlackChannelRouteStore for InMemorySlackChannelRouteStore {
     async fn list_routes(
         &self,
         tenant_id: &TenantId,
         installation_id: &AdapterInstallationId,
+        team_id: &str,
     ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
         let routes = self
             .routes
@@ -146,7 +142,9 @@ impl SlackChannelRouteStore for InMemorySlackChannelRouteStore {
         let mut result = routes
             .iter()
             .filter(|(key, _)| {
-                &key.tenant_id == tenant_id && &key.installation_id == installation_id
+                &key.tenant_id == tenant_id
+                    && &key.installation_id == installation_id
+                    && key.team_id == team_id
             })
             .map(|(key, subject_user_id)| {
                 SlackChannelRoute::new(key.clone(), subject_user_id.clone())
@@ -194,14 +192,14 @@ impl SlackChannelRouteStore for InMemorySlackChannelRouteStore {
 }
 
 #[derive(Debug, Clone)]
-pub struct SlackChannelRouteSubjectResolver {
+pub(crate) struct SlackChannelRouteSubjectResolver {
     tenant_id: TenantId,
     installation_id: AdapterInstallationId,
     store: Arc<dyn SlackChannelRouteStore>,
 }
 
 impl SlackChannelRouteSubjectResolver {
-    pub fn new(
+    pub(crate) fn new(
         tenant_id: TenantId,
         installation_id: AdapterInstallationId,
         store: Arc<dyn SlackChannelRouteStore>,
@@ -254,7 +252,7 @@ fn map_route_error_to_workflow(error: SlackChannelRouteError) -> ProductWorkflow
 }
 
 #[derive(Debug, Error)]
-pub enum SlackChannelRouteError {
+pub(crate) enum SlackChannelRouteError {
     #[error("invalid Slack channel route")]
     InvalidRoute,
     #[error("Slack channel route store unavailable")]
@@ -266,20 +264,23 @@ pub struct SlackChannelRouteAdminRouteConfig {
     tenant_id: TenantId,
     installation_id: AdapterInstallationId,
     team_id: String,
+    operator_user_id: UserId,
     store: Arc<dyn SlackChannelRouteStore>,
 }
 
 impl SlackChannelRouteAdminRouteConfig {
-    pub fn new(
+    pub(crate) fn new(
         tenant_id: TenantId,
         installation_id: AdapterInstallationId,
         team_id: String,
+        operator_user_id: UserId,
         store: Arc<dyn SlackChannelRouteStore>,
     ) -> Self {
         Self {
             tenant_id,
             installation_id,
             team_id,
+            operator_user_id,
             store,
         }
     }
@@ -393,10 +394,10 @@ async fn list_slack_channel_routes_handler(
     State(config): State<SlackChannelRouteAdminRouteConfig>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<SlackChannelRouteListResponse>, SlackRouteError> {
-    ensure_tenant_matches(&config, &caller)?;
+    ensure_authorized_operator(&config, &caller)?;
     let routes = config
         .store
-        .list_routes(&config.tenant_id, &config.installation_id)
+        .list_routes(&config.tenant_id, &config.installation_id, &config.team_id)
         .await?;
     Ok(Json(SlackChannelRouteListResponse { routes }))
 }
@@ -406,7 +407,7 @@ async fn upsert_slack_channel_route_handler(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(request): Json<SlackChannelRouteUpsertRequest>,
 ) -> Result<Json<SlackChannelRoute>, SlackRouteError> {
-    ensure_tenant_matches(&config, &caller)?;
+    ensure_authorized_operator(&config, &caller)?;
     let subject_user_id =
         UserId::new(request.subject_user_id).map_err(|_| SlackRouteError::BadRequest)?;
     let key = config.key_for_channel(request.channel_id)?;
@@ -419,26 +420,29 @@ async fn delete_slack_channel_route_handler(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(request): Json<SlackChannelRouteDeleteRequest>,
 ) -> Result<Json<SlackChannelRouteDeleteResponse>, SlackRouteError> {
-    ensure_tenant_matches(&config, &caller)?;
+    ensure_authorized_operator(&config, &caller)?;
     let key = config.key_for_channel(request.channel_id)?;
     let deleted = config.store.delete_route(&key).await?;
     Ok(Json(SlackChannelRouteDeleteResponse { deleted }))
 }
 
-fn ensure_tenant_matches(
+fn ensure_authorized_operator(
     config: &SlackChannelRouteAdminRouteConfig,
     caller: &WebUiAuthenticatedCaller,
 ) -> Result<(), SlackRouteError> {
-    if caller.tenant_id == config.tenant_id {
-        Ok(())
-    } else {
-        Err(SlackRouteError::NotFound)
+    if caller.tenant_id != config.tenant_id {
+        return Err(SlackRouteError::NotFound);
     }
+    if caller.user_id != config.operator_user_id {
+        return Err(SlackRouteError::Forbidden);
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
 enum SlackRouteError {
     BadRequest,
+    Forbidden,
     NotFound,
     Unavailable,
 }
@@ -456,6 +460,10 @@ impl IntoResponse for SlackRouteError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             Self::BadRequest => (StatusCode::BAD_REQUEST, "Invalid Slack channel route."),
+            Self::Forbidden => (
+                StatusCode::FORBIDDEN,
+                "Slack channel route configuration requires operator access.",
+            ),
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
                 "Slack channel route configuration not found.",
@@ -502,6 +510,7 @@ mod tests {
             .list_routes(
                 &TenantId::new(TENANT).expect("tenant"),
                 &AdapterInstallationId::new(INSTALLATION).expect("installation"),
+                TEAM,
             )
             .await
             .expect("routes list");
@@ -529,6 +538,7 @@ mod tests {
                 .list_routes(
                     &TenantId::new(TENANT).expect("tenant"),
                     &AdapterInstallationId::new(INSTALLATION).expect("installation"),
+                    TEAM,
                 )
                 .await
                 .expect("routes list")
@@ -555,23 +565,77 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test]
+    async fn route_admin_rejects_same_tenant_non_operator_callers() {
+        let mount = slack_channel_route_admin_route_mount(route_config(Arc::new(
+            InMemorySlackChannelRouteStore::new(),
+        )));
+
+        let response = mount
+            .protected
+            .oneshot(request_for_user(
+                "PUT",
+                r#"{"channel_id":"C0ENG","subject_user_id":"user:eng-team-agent"}"#,
+                TENANT,
+                "user:member",
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn route_admin_rejects_invalid_subject_without_mutating_store() {
+        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
+
+        let response = mount
+            .protected
+            .oneshot(request(
+                "PUT",
+                r#"{"channel_id":"C0ENG","subject_user_id":""}"#,
+                TENANT,
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            store
+                .list_routes(
+                    &TenantId::new(TENANT).expect("tenant"),
+                    &AdapterInstallationId::new(INSTALLATION).expect("installation"),
+                    TEAM,
+                )
+                .await
+                .expect("routes list")
+                .is_empty()
+        );
+    }
+
     fn route_config(store: Arc<dyn SlackChannelRouteStore>) -> SlackChannelRouteAdminRouteConfig {
         SlackChannelRouteAdminRouteConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             AdapterInstallationId::new(INSTALLATION).expect("installation"),
             TEAM.to_string(),
+            UserId::new("user:admin").expect("operator user"),
             store,
         )
     }
 
     fn request(method: &str, body: &str, tenant_id: &str) -> Request<Body> {
+        request_for_user(method, body, tenant_id, "user:admin")
+    }
+
+    fn request_for_user(method: &str, body: &str, tenant_id: &str, user_id: &str) -> Request<Body> {
         let mut builder = Request::builder()
             .method(method)
             .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
             .header("content-type", "application/json")
             .extension(WebUiAuthenticatedCaller {
                 tenant_id: TenantId::new(tenant_id).expect("tenant"),
-                user_id: UserId::new("user:admin").expect("user"),
+                user_id: UserId::new(user_id).expect("user"),
                 agent_id: None,
                 project_id: None,
             });

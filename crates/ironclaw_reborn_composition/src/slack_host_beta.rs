@@ -271,6 +271,7 @@ pub fn build_slack_host_beta_mounts(
         config.tenant_id.clone(),
         config.installation_id.clone(),
         config.team_id.clone(),
+        config.user_id.clone(),
         channel_route_store,
     );
 
@@ -572,12 +573,14 @@ mod tests {
     use crate::slack_channel_routes::{
         WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, slack_channel_route_admin_route_mount,
     };
+    use crate::slack_connectable_channel::build_webui_services_with_slack_host_beta_mounts;
     use crate::slack_personal_binding_pairing_serve::{
         WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
     };
     use crate::{
         RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, SLACK_EVENTS_PATH,
-        build_reborn_runtime, local_dev_runtime_policy,
+        WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime, local_dev_runtime_policy,
+        webui_v2_app,
     };
 
     const TENANT: &str = "tenant:slack-host";
@@ -592,6 +595,23 @@ mod tests {
     const SECRET: &str = "host-signing-secret";
 
     type HmacSha256 = Hmac<sha2::Sha256>;
+
+    struct OperatorTokenAuthenticator;
+
+    #[async_trait]
+    impl WebuiAuthenticator for OperatorTokenAuthenticator {
+        async fn authenticate(&self, token: &str) -> Option<UserId> {
+            if token == "operator-token" {
+                Some(UserId::new(USER).expect("user"))
+            } else {
+                None
+            }
+        }
+
+        fn allows_operator_llm_config(&self) -> bool {
+            true
+        }
+    }
 
     #[tokio::test]
     async fn build_slack_events_route_mount_builds_signed_route_from_reborn_runtime() {
@@ -1008,6 +1028,82 @@ mod tests {
                 "adapter:8:slack_v2;installation:17:install_host_beta;agent:16:agent:slack-host;project:18:project:slack-host;space:6:T0HOST;conversation:6:C0HOST;topic:17:1710000000.000050;"
             )
         );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn slack_channel_route_admin_is_reachable_through_webui_v2_app() {
+        let (runtime, _root) = runtime().await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .expect("mounts");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
+        let app = webui_v2_app(
+            bundle,
+            WebuiServeConfig::new(
+                TenantId::new(TENANT).expect("tenant"),
+                Arc::new(OperatorTokenAuthenticator),
+                Vec::new(),
+            )
+            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+            .with_slack_channel_routes(mounts.channel_routes),
+        )
+        .expect("webui app");
+
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"channel_id":"C0HOST","subject_user_id":"{SHARED_SUBJECT}"}}"#
+                    )))
+                    .expect("unauthenticated request builds"),
+            )
+            .await
+            .expect("unauthenticated route responds");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let upsert = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"channel_id":"C0HOST","subject_user_id":"{SHARED_SUBJECT}"}}"#
+                    )))
+                    .expect("upsert request builds"),
+            )
+            .await
+            .expect("upsert route responds");
+        assert_eq!(upsert.status(), StatusCode::OK);
+
+        let list = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .body(Body::empty())
+                    .expect("list request builds"),
+            )
+            .await
+            .expect("list route responds");
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list.into_body(), 64 * 1024)
+            .await
+            .expect("list body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("list json");
+        assert_eq!(body["routes"][0]["channel_id"], "C0HOST");
+        assert_eq!(body["routes"][0]["subject_user_id"], SHARED_SUBJECT);
 
         runtime.shutdown().await.expect("runtime shuts down");
     }

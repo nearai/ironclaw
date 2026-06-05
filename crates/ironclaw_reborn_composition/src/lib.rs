@@ -212,9 +212,7 @@ pub use slack_actor_identity::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_channel_routes::{
-    InMemorySlackChannelRouteStore, SlackChannelRoute, SlackChannelRouteAdminRouteConfig,
-    SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteStore,
-    SlackChannelRouteSubjectResolver, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+    SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_connectable_channel::build_webui_services_with_slack_host_beta_mounts;
