@@ -55,6 +55,10 @@ pub(crate) async fn build_webui_auth_surface(
     local_trigger_access: Option<LocalTriggerAccessBootstrapConfig>,
 ) -> anyhow::Result<WebuiAuthSurface> {
     let Some(sso) = sso_startup else {
+        debug_assert!(
+            local_trigger_access.is_none(),
+            "local trigger access bootstrap requires SSO startup config"
+        );
         return Ok(WebuiAuthSurface {
             authenticator: env_authenticator,
             public_mount: None,
@@ -175,6 +179,28 @@ mod tests {
         ) -> Result<OAuthUserProfile, OAuthError> {
             unreachable!("provider exchange is not exercised by auth-surface wiring tests")
         }
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "local trigger access bootstrap requires SSO startup config")]
+    async fn env_auth_surface_rejects_local_trigger_access_without_sso_in_debug() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tenant_id = TenantId::new("env-auth-local-access-tenant").expect("tenant id");
+        let agent_id = AgentId::new("env-auth-local-access-agent").expect("agent id");
+
+        let _surface = build_webui_auth_surface(
+            None,
+            &tmp.path().join("reborn-local-dev.db"),
+            tenant_id.clone(),
+            SecretString::from("operator-session-secret".to_string()),
+            Arc::new(OneToken),
+            Some(LocalTriggerAccessBootstrapConfig {
+                tenant_id,
+                agent_id,
+                project_id: None,
+            }),
+        )
+        .await;
     }
 
     #[tokio::test]

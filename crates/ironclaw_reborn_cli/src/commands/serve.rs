@@ -332,7 +332,7 @@ impl ServeCommand {
                 "binding WebChat v2 listener on a non-loopback interface",
             );
         }
-        let trigger_poller_enabled = runtime_input.trigger_poller.enabled;
+        let sso_configured = sso_startup.is_some();
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -384,7 +384,7 @@ impl ServeCommand {
                 tenant_id.clone(),
                 session_signing_secret,
                 env_authenticator,
-                trigger_poller_enabled.then(|| {
+                sso_configured.then(|| {
                     crate::commands::webui_auth::LocalTriggerAccessBootstrapConfig {
                         tenant_id: tenant_id.clone(),
                         agent_id: default_agent_id.clone(),
@@ -736,6 +736,39 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("reborn-cli"), "message: {message}");
         assert!(message.contains("local-user"), "message: {message}");
+    }
+
+    #[tokio::test]
+    async fn trigger_poller_disabled_does_not_wire_local_access_checker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tenant_id = TenantId::new("serve-trigger-disabled-tenant").expect("tenant id");
+        let user_id = UserId::new("serve-trigger-disabled-user").expect("user id");
+        let agent_id = AgentId::new("serve-trigger-disabled-agent").expect("agent id");
+        let runtime_input = RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
+            "serve-trigger-owner",
+            dir.path().join("runtime"),
+        ));
+        let missing_store_path = dir.path().join("missing").join("reborn-local-dev.db");
+
+        let runtime_input = with_local_trigger_fire_access_checker(
+            runtime_input,
+            &missing_store_path,
+            &tenant_id,
+            &user_id,
+            &agent_id,
+            None,
+        )
+        .await
+        .expect("disabled trigger poller skips local access store");
+
+        assert!(
+            runtime_input.trigger_fire_access_checker.is_none(),
+            "disabled trigger poller must not wire a local access checker"
+        );
+        assert!(
+            !missing_store_path.exists(),
+            "disabled trigger poller must not create the local access store"
+        );
     }
 
     #[tokio::test]

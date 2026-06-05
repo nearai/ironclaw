@@ -275,12 +275,12 @@ pub mod host_api {
     pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 }
 
-/// Reborn-owned WebChat user-identity store, re-exported so host
+/// Reborn-owned local trigger-fire access store, re-exported so host
 /// binaries reach it through this composition facade instead of taking a
 /// direct `ironclaw_reborn` dependency (the
 /// `reborn_cli_binary_crate_stays_separate_from_v1_root` architecture
 /// boundary forbids that). The store is a reborn-owned repository;
-/// [`open_webui_user_store`] opens it so the libSQL substrate handle
+/// [`open_local_trigger_access_store`] opens it so the libSQL substrate handle
 /// stays private to this facade and callers never construct one.
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn::local_trigger_access::{
@@ -288,6 +288,9 @@ pub use ironclaw_reborn::local_trigger_access::{
     LocalTriggerAccessSource, RebornLibSqlLocalTriggerAccessStore,
     RebornLocalTriggerAccessStoreError,
 };
+/// Reborn-owned WebChat user-identity store, re-exported so host binaries reach
+/// it through this composition facade. [`open_webui_user_store`] opens it so the
+/// libSQL substrate handle stays private to this facade.
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn::webui_users::{
     RebornLibSqlUserStore, RebornUserStoreError, ResolveIdentity,
