@@ -230,6 +230,69 @@ mod tests {
             .expect("created routine should be listed");
         assert_eq!(listed["id"], created["id"]);
 
+        let enabled_cron = harness
+            .client
+            .post(format!("{}/api/routines", harness.base_url()))
+            .bearer_auth(&harness.auth_token)
+            .json(&serde_json::json!({
+                "name": "wf-api-enabled-cron-create",
+                "prompt": "Prepare a report.",
+                "request": {
+                    "kind": "cron",
+                    "schedule": "0 */5 * * * *",
+                    "timezone": "UTC"
+                }
+            }))
+            .send()
+            .await
+            .expect("create enabled cron request failed");
+        assert_eq!(enabled_cron.status(), reqwest::StatusCode::CREATED);
+        let enabled_cron = enabled_cron
+            .json::<serde_json::Value>()
+            .await
+            .expect("invalid enabled cron response");
+        assert_eq!(enabled_cron["trigger_type"].as_str(), Some("cron"));
+        assert_eq!(enabled_cron["enabled"].as_bool(), Some(true));
+        assert!(
+            enabled_cron["next_fire_at"].is_string(),
+            "enabled cron create should populate next_fire_at, got {enabled_cron}"
+        );
+
+        let explicitly_enabled_cron = harness
+            .client
+            .post(format!("{}/api/routines", harness.base_url()))
+            .bearer_auth(&harness.auth_token)
+            .json(&serde_json::json!({
+                "name": "wf-api-explicit-enabled-cron-create",
+                "prompt": "Prepare a report.",
+                "request": {
+                    "kind": "cron",
+                    "schedule": "0 */5 * * * *",
+                    "timezone": "UTC"
+                },
+                "enabled": true
+            }))
+            .send()
+            .await
+            .expect("create explicitly enabled cron request failed");
+        assert_eq!(
+            explicitly_enabled_cron.status(),
+            reqwest::StatusCode::CREATED
+        );
+        let explicitly_enabled_cron = explicitly_enabled_cron
+            .json::<serde_json::Value>()
+            .await
+            .expect("invalid explicitly enabled cron response");
+        assert_eq!(
+            explicitly_enabled_cron["trigger_type"].as_str(),
+            Some("cron")
+        );
+        assert_eq!(explicitly_enabled_cron["enabled"].as_bool(), Some(true));
+        assert!(
+            explicitly_enabled_cron["next_fire_at"].is_string(),
+            "explicitly enabled cron create should populate next_fire_at, got {explicitly_enabled_cron}"
+        );
+
         let disabled_cron = harness
             .client
             .post(format!("{}/api/routines", harness.base_url()))

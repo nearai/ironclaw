@@ -101,9 +101,14 @@ pub async fn routines_create_handler(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        let engine = { state.routine_engine.read().await.as_ref().cloned() };
-        if let Some(engine) = engine {
-            engine.refresh_event_cache().await;
+        if matches!(
+            routine.trigger,
+            Trigger::Event { .. } | Trigger::SystemEvent { .. }
+        ) {
+            let engine = { state.routine_engine.read().await.as_ref().cloned() };
+            if let Some(engine) = engine {
+                engine.refresh_event_cache().await;
+            }
         }
     }
 
