@@ -662,6 +662,38 @@ async fn slack_thread_auth_deny_with_bot_mention_cancels_auth_gate_without_agent
     assert_eq!(slack_message_count, 1); // safety: Slack E2E delivery assertion.
 }
 
+#[tokio::test]
+async fn slack_dm_thread_auth_deny_cancels_base_dm_auth_gate_without_agent_turn() {
+    let harness = build_harness(TurnMode::BlockAuth).await;
+
+    let first = harness
+        .post_event(dm_message("Ev-auth", "needs auth"))
+        .await;
+    assert_eq!(first.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+    assert_eq!(harness.slack_messages().len(), 1); // safety: Slack E2E delivery assertion.
+
+    let second = harness
+        .post_event(thread_message_event(
+            "Ev-dm-auth-cancel",
+            "auth deny gate:auth-slack",
+            "1710000001.123456",
+        ))
+        .await;
+
+    assert_eq!(second.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+
+    let auths = harness.auths.requests();
+    assert_eq!(auths.len(), 1); // safety: Slack E2E auth routing assertion.
+    assert_eq!(auths[0].decision, AuthInteractionDecision::Deny); // safety: length asserted above.
+    assert_eq!(auths[0].gate_ref.as_str(), AUTH_GATE); // safety: length asserted above.
+    let submitted_turn_count = harness.coordinator.submitted_turn_count();
+    assert_eq!(submitted_turn_count, 1); // safety: Slack E2E turn routing assertion.
+    let slack_message_count = harness.slack_messages().len();
+    assert_eq!(slack_message_count, 1); // safety: Slack E2E delivery assertion.
+}
+
 #[derive(Debug, Clone)]
 enum TurnMode {
     Complete { assistant_text: String },
@@ -1307,6 +1339,9 @@ fn thread_message_event(
         ("Ev-auth-cancel", "<@UBOT> auth deny gate:auth-slack", "1710000000.000009") => {
             THREAD_AUTH_CANCEL_WITH_MENTION
         }
+        ("Ev-dm-auth-cancel", "auth deny gate:auth-slack", "1710000001.123456") => {
+            DM_THREAD_AUTH_CANCEL
+        }
         _ => panic!("unknown fixture"),
     }
 }
@@ -1407,4 +1442,12 @@ const THREAD_AUTH_CANCEL_WITH_MENTION: &str = r#"{
   "api_app_id":"A-slack",
   "event_id":"Ev-auth-cancel",
   "event":{"type":"message","user":"U123","channel":"C123","text":"<@UBOT> auth deny gate:auth-slack","ts":"1710000000.000010","thread_ts":"1710000000.000009"}
+}"#;
+
+const DM_THREAD_AUTH_CANCEL: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-dm-auth-cancel",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"auth deny gate:auth-slack","ts":"1710000001.123457","thread_ts":"1710000001.123456"}
 }"#;
