@@ -22,6 +22,7 @@
 //! the same verified email cannot split into two users or lose the link
 //! (the write lock is taken at `BEGIN`, serializing the callbacks).
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::{SecondsFormat, Utc};
@@ -189,6 +190,47 @@ impl RebornLibSqlUserStore {
         insert_identity(&tx, &identity, &new_user_id, &now).await?;
         tx.commit().await.map_err(backend)?;
         to_user_id(new_user_id)
+    }
+
+    /// List active users whose persisted email domain is currently admitted.
+    ///
+    /// Used by local-dev SSO startup to reconcile trigger-fire access for
+    /// users that were created in an earlier process before the trigger poller
+    /// was enabled. Domain matching is case-insensitive and an empty allowlist
+    /// returns no users.
+    pub async fn list_active_users_by_allowed_email_domains(
+        &self,
+        allowed_email_domains: &[String],
+    ) -> Result<Vec<UserId>, RebornUserStoreError> {
+        let allowed: BTreeSet<String> = allowed_email_domains
+            .iter()
+            .map(|domain| domain.to_ascii_lowercase())
+            .collect();
+        if allowed.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.conn().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, email FROM users WHERE status = 'active' AND email IS NOT NULL",
+                (),
+            )
+            .await
+            .map_err(backend)?;
+        let mut users = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            let user_id = row.get::<String>(0).map_err(backend)?;
+            let email = row.get::<String>(1).map_err(backend)?;
+            if email
+                .rsplit_once('@')
+                .map(|(_, domain)| allowed.contains(&domain.to_ascii_lowercase()))
+                .unwrap_or(false)
+            {
+                users.push(to_user_id(user_id)?);
+            }
+        }
+        Ok(users)
     }
 }
 
@@ -377,5 +419,61 @@ mod tests {
             .expect("count")
             .expect("row");
         assert_eq!(count, "1", "exactly one user row must exist");
+    }
+
+    #[tokio::test]
+    async fn list_active_users_by_allowed_email_domains_filters_current_admission() {
+        let store = store().await;
+        let allowed = store
+            .resolve_or_create(identity("google", "g-1", Some("a@example.com"), true))
+            .await
+            .expect("resolve allowed");
+        let allowed_case = store
+            .resolve_or_create(identity("google", "g-2", Some("b@Example.COM"), true))
+            .await
+            .expect("resolve mixed-case allowed");
+        let inactive = store
+            .resolve_or_create(identity("google", "g-3", Some("c@example.com"), true))
+            .await
+            .expect("resolve inactive");
+        store
+            .resolve_or_create(identity("google", "g-4", Some("d@other.test"), true))
+            .await
+            .expect("resolve disallowed");
+
+        let conn = store.conn().await.expect("conn");
+        conn.execute(
+            "UPDATE users SET status = 'inactive' WHERE id = ?1",
+            libsql::params![inactive.as_str()],
+        )
+        .await
+        .expect("deactivate user");
+
+        let users = store
+            .list_active_users_by_allowed_email_domains(&["EXAMPLE.com".to_string()])
+            .await
+            .expect("list active users");
+        let user_ids: BTreeSet<&str> = users.iter().map(UserId::as_str).collect();
+
+        assert!(user_ids.contains(allowed.as_str()));
+        assert!(user_ids.contains(allowed_case.as_str()));
+        assert!(!user_ids.contains(inactive.as_str()));
+        assert_eq!(user_ids.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_active_users_by_allowed_email_domains_empty_allowlist_fails_closed() {
+        let store = store().await;
+        store
+            .resolve_or_create(identity("google", "g-1", Some("a@example.com"), true))
+            .await
+            .expect("resolve");
+
+        let users = store
+            .list_active_users_by_allowed_email_domains(&[])
+            .await
+            .expect("list active users");
+
+        assert!(users.is_empty());
     }
 }

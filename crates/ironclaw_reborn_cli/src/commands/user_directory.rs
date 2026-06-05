@@ -30,6 +30,8 @@ use ironclaw_reborn_webui_ingress::{
     OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError,
 };
 
+pub(crate) const LOCAL_DEV_SSO_TRIGGER_ACCESS_SOURCE: &str = "local_dev_sso_bootstrap";
+
 /// Admission + persistence adapter implementing the ingress
 /// [`UserDirectory`] seam.
 pub(crate) struct WebuiUserDirectory {
@@ -125,7 +127,7 @@ impl LocalTriggerAccessBootstrap {
                 agent_id: Some(&self.agent_id),
                 project_id: self.project_id.as_ref(),
                 role: "owner",
-                source: "local_dev_sso_bootstrap",
+                source: LOCAL_DEV_SSO_TRIGGER_ACCESS_SOURCE,
             })
             .await
             .map_err(|err| UserDirectoryError::Backend(err.to_string()))

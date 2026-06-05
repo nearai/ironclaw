@@ -284,7 +284,8 @@ pub mod host_api {
 /// stays private to this facade and callers never construct one.
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn::local_trigger_access::{
-    LocalTriggerAccessSeed, RebornLibSqlLocalTriggerAccessStore, RebornLocalTriggerAccessStoreError,
+    LocalTriggerAccessReconciliation, LocalTriggerAccessSeed, RebornLibSqlLocalTriggerAccessStore,
+    RebornLocalTriggerAccessStoreError,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn::webui_users::{

@@ -5,6 +5,7 @@
 //! only the local `local_reborn_access` table used to satisfy the fire-time
 //! trigger authorization contract during local development.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::{SecondsFormat, Utc};
@@ -34,6 +35,24 @@ pub struct LocalTriggerAccessSeed<'a> {
     /// Local role label to persist on the access row.
     pub role: &'a str,
     /// Source label for the host/operator seed path.
+    pub source: &'a str,
+}
+
+/// Current trusted local-dev access set for one bootstrap source and exact
+/// tenant/agent/project scope.
+pub struct LocalTriggerAccessReconciliation<'a> {
+    /// Tenant scope for the local access rows.
+    pub tenant_id: &'a TenantId,
+    /// Users that should keep active access for this bootstrap source/scope.
+    pub user_ids: &'a [UserId],
+    /// Optional agent scope. `None` is an exact no-agent scope, not a wildcard.
+    pub agent_id: Option<&'a AgentId>,
+    /// Optional project scope. `None` is an exact no-project scope, not a
+    /// wildcard.
+    pub project_id: Option<&'a ProjectId>,
+    /// Local role label for newly inserted rows.
+    pub role: &'a str,
+    /// Source label for this host/operator seed path.
     pub source: &'a str,
 }
 
@@ -115,6 +134,102 @@ impl RebornLibSqlLocalTriggerAccessStore {
         )
         .await
         .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
+        Ok(())
+    }
+
+    /// Reconcile bootstrap-owned local-dev access rows for one exact scope.
+    ///
+    /// Active rows from the same `source` and scope that are not in
+    /// `user_ids` are marked inactive, so local-dev boot/login admission
+    /// changes stop authorizing stale creators. Existing inactive rows are
+    /// still left untouched; marking a row inactive remains the local operator
+    /// revocation mechanism and the next reconciliation will not silently
+    /// reactivate it.
+    pub async fn reconcile_local_access(
+        &self,
+        reconciliation: LocalTriggerAccessReconciliation<'_>,
+    ) -> Result<(), RebornLocalTriggerAccessStoreError> {
+        let conn = self.conn().await?;
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let agent_key = optional_scope_key(reconciliation.agent_id.map(AgentId::as_str));
+        let project_key = optional_scope_key(reconciliation.project_id.map(ProjectId::as_str));
+        let allowed: BTreeSet<&str> = reconciliation.user_ids.iter().map(UserId::as_str).collect();
+
+        let mut rows = tx
+            .query(
+                "SELECT user_id \
+                 FROM local_reborn_access \
+                 WHERE tenant_id = ?1 \
+                   AND agent_id = ?2 \
+                   AND project_id = ?3 \
+                   AND source = ?4 \
+                   AND status = 'active'",
+                libsql::params![
+                    reconciliation.tenant_id.as_str(),
+                    agent_key,
+                    project_key,
+                    reconciliation.source,
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        let mut stale_user_ids = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            let user_id = row.get::<String>(0).map_err(backend)?;
+            if !allowed.contains(user_id.as_str()) {
+                stale_user_ids.push(user_id);
+            }
+        }
+        drop(rows);
+
+        for user_id in stale_user_ids {
+            tx.execute(
+                "UPDATE local_reborn_access \
+                 SET status = 'inactive', updated_at = ?1 \
+                 WHERE tenant_id = ?2 \
+                   AND user_id = ?3 \
+                   AND agent_id = ?4 \
+                   AND project_id = ?5 \
+                   AND source = ?6 \
+                   AND status = 'active'",
+                libsql::params![
+                    now.as_str(),
+                    reconciliation.tenant_id.as_str(),
+                    user_id.as_str(),
+                    agent_key,
+                    project_key,
+                    reconciliation.source,
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        }
+
+        for user_id in reconciliation.user_ids {
+            tx.execute(
+                "INSERT INTO local_reborn_access \
+                     (tenant_id, user_id, agent_id, project_id, role, status, source, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?7) \
+                     ON CONFLICT(tenant_id, user_id, agent_id, project_id) DO NOTHING",
+                libsql::params![
+                    reconciliation.tenant_id.as_str(),
+                    user_id.as_str(),
+                    agent_key,
+                    project_key,
+                    reconciliation.role,
+                    reconciliation.source,
+                    now.as_str(),
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        }
+
         tx.commit().await.map_err(backend)?;
         Ok(())
     }
@@ -328,6 +443,133 @@ mod tests {
                 .await
                 .expect("check local access"),
             "reseed must not silently reactivate an inactive existing row"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_local_access_deactivates_stale_source_rows_only() {
+        let store = store().await;
+        let tenant_id = TenantId::new("local-reconcile-tenant").expect("tenant id");
+        let keep_user_id = UserId::new("local-reconcile-keep").expect("user id");
+        let stale_user_id = UserId::new("local-reconcile-stale").expect("user id");
+        let manual_user_id = UserId::new("local-reconcile-manual").expect("user id");
+        let agent_id = AgentId::new("local-reconcile-agent").expect("agent id");
+        let project_id = ProjectId::new("local-reconcile-project").expect("project id");
+
+        for (user_id, source) in [
+            (&keep_user_id, "bootstrap"),
+            (&stale_user_id, "bootstrap"),
+            (&manual_user_id, "manual"),
+        ] {
+            store
+                .seed_local_access(LocalTriggerAccessSeed {
+                    tenant_id: &tenant_id,
+                    user_id,
+                    agent_id: Some(&agent_id),
+                    project_id: Some(&project_id),
+                    role: "owner",
+                    source,
+                })
+                .await
+                .expect("seed local access");
+        }
+
+        store
+            .reconcile_local_access(LocalTriggerAccessReconciliation {
+                tenant_id: &tenant_id,
+                user_ids: std::slice::from_ref(&keep_user_id),
+                agent_id: Some(&agent_id),
+                project_id: Some(&project_id),
+                role: "owner",
+                source: "bootstrap",
+            })
+            .await
+            .expect("reconcile local access");
+
+        assert!(
+            store
+                .has_active_local_access(
+                    &tenant_id,
+                    &keep_user_id,
+                    Some(&agent_id),
+                    Some(&project_id)
+                )
+                .await
+                .expect("check local access"),
+            "current bootstrap user remains active"
+        );
+        assert!(
+            !store
+                .has_active_local_access(
+                    &tenant_id,
+                    &stale_user_id,
+                    Some(&agent_id),
+                    Some(&project_id)
+                )
+                .await
+                .expect("check local access"),
+            "stale bootstrap user is deactivated"
+        );
+        assert!(
+            store
+                .has_active_local_access(
+                    &tenant_id,
+                    &manual_user_id,
+                    Some(&agent_id),
+                    Some(&project_id)
+                )
+                .await
+                .expect("check local access"),
+            "rows from another source are untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_local_access_does_not_reactivate_inactive_allowed_user() {
+        let store = store().await;
+        let tenant_id = TenantId::new("local-reconcile-revoked-tenant").expect("tenant id");
+        let user_id = UserId::new("local-reconcile-revoked-user").expect("user id");
+        let agent_id = AgentId::new("local-reconcile-revoked-agent").expect("agent id");
+
+        store
+            .seed_local_access(LocalTriggerAccessSeed {
+                tenant_id: &tenant_id,
+                user_id: &user_id,
+                agent_id: Some(&agent_id),
+                project_id: None,
+                role: "owner",
+                source: "bootstrap",
+            })
+            .await
+            .expect("seed local access");
+
+        let conn = store.conn().await.expect("conn");
+        conn.execute(
+            "UPDATE local_reborn_access SET status = 'inactive' \
+             WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 AND project_id = ''",
+            libsql::params![tenant_id.as_str(), user_id.as_str(), agent_id.as_str()],
+        )
+        .await
+        .expect("mark access inactive");
+
+        store
+            .reconcile_local_access(LocalTriggerAccessReconciliation {
+                tenant_id: &tenant_id,
+                user_ids: std::slice::from_ref(&user_id),
+                agent_id: Some(&agent_id),
+                project_id: None,
+                role: "owner",
+                source: "bootstrap",
+            })
+            .await
+            .expect("reconcile local access");
+
+        assert!(
+            !store
+                .has_active_local_access(&tenant_id, &user_id, Some(&agent_id), None)
+                .await
+                .expect("check local access"),
+            "reconcile must not silently reactivate an inactive existing row"
         );
     }
 }

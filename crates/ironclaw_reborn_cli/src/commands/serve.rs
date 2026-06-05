@@ -8,7 +8,7 @@ use clap::Args;
 #[cfg(not(feature = "slack-v2-host-beta"))]
 use ironclaw_reborn_composition::build_webui_services;
 use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, LocalTriggerAccessSeed, RebornBuildInput, RebornReadiness,
+    GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, RebornBuildInput, RebornReadiness,
     RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator,
     WebuiServeConfig, build_reborn_runtime, open_local_trigger_access_store,
     webui_v2_app_with_lifecycle,
@@ -30,6 +30,7 @@ const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVE_PORT: u16 = 3000;
 const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
 const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
+const LOCAL_DEV_ENV_TRIGGER_ACCESS_SOURCE: &str = "local_dev_bootstrap";
 
 #[derive(Debug, Args)]
 pub(crate) struct ServeCommand {
@@ -586,17 +587,18 @@ async fn with_local_trigger_fire_access_checker(
     let access_store = open_local_trigger_access_store(user_store_path)
         .await
         .context("failed to initialize local trigger-fire access store")?;
+    let user_ids = [user_id.clone()];
     access_store
-        .seed_local_access(LocalTriggerAccessSeed {
+        .reconcile_local_access(LocalTriggerAccessReconciliation {
             tenant_id,
-            user_id,
+            user_ids: &user_ids,
             agent_id: Some(default_agent_id),
             project_id: default_project_id,
             role: "owner",
-            source: "local_dev_bootstrap",
+            source: LOCAL_DEV_ENV_TRIGGER_ACCESS_SOURCE,
         })
         .await
-        .context("failed to seed local trigger-fire access")?;
+        .context("failed to reconcile local trigger-fire access")?;
     Ok(runtime_input.with_trigger_fire_access_checker(access_store))
 }
 
@@ -745,11 +747,30 @@ mod tests {
                 .expect("tenant id");
         let user_id = ironclaw_reborn_composition::host_api::UserId::new("serve-trigger-user")
             .expect("user id");
+        let stale_user_id =
+            ironclaw_reborn_composition::host_api::UserId::new("serve-trigger-stale")
+                .expect("stale user id");
         let agent_id = ironclaw_reborn_composition::host_api::AgentId::new("serve-trigger-agent")
             .expect("agent id");
         let project_id =
             ironclaw_reborn_composition::host_api::ProjectId::new("serve-trigger-project")
                 .expect("project id");
+        let user_store_path = dir.path().join("reborn-local-dev.db");
+        let access_store =
+            ironclaw_reborn_composition::open_local_trigger_access_store(&user_store_path)
+                .await
+                .expect("open local trigger access store");
+        access_store
+            .seed_local_access(ironclaw_reborn_composition::LocalTriggerAccessSeed {
+                tenant_id: &tenant_id,
+                user_id: &stale_user_id,
+                agent_id: Some(&agent_id),
+                project_id: Some(&project_id),
+                role: "owner",
+                source: LOCAL_DEV_ENV_TRIGGER_ACCESS_SOURCE,
+            })
+            .await
+            .expect("seed stale local trigger access");
         let runtime_input =
             RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
                 "serve-trigger-owner",
@@ -761,7 +782,7 @@ mod tests {
 
         let runtime_input = with_local_trigger_fire_access_checker(
             runtime_input,
-            &dir.path().join("reborn-local-dev.db"),
+            &user_store_path,
             &tenant_id,
             &user_id,
             &agent_id,
@@ -775,10 +796,10 @@ mod tests {
             .expect("checker is wired");
         let decision = checker
             .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id,
+                tenant_id: tenant_id.clone(),
                 creator_user_id: user_id,
-                agent_id: Some(agent_id),
-                project_id: Some(project_id),
+                agent_id: Some(agent_id.clone()),
+                project_id: Some(project_id.clone()),
                 trigger_id: ironclaw_reborn_composition::TriggerId::new(),
                 fire_slot: chrono::Utc::now(),
             })
@@ -788,6 +809,26 @@ mod tests {
         assert_eq!(
             decision,
             ironclaw_reborn_composition::TriggerFireAccessDecision::Allowed
+        );
+
+        let stale_decision = checker
+            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id: stale_user_id,
+                agent_id: Some(agent_id),
+                project_id: Some(project_id),
+                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check stale trigger fire access");
+
+        assert_eq!(
+            stale_decision,
+            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
+                reason: "trigger creator does not have active local access for this scope"
+                    .to_string(),
+            }
         );
     }
 
