@@ -24,24 +24,25 @@ Create an env file outside git, then run:
 ```bash
 docker run --rm \
   --env-file .env.reborn \
-  -p 3000:3000 \
+  -p 127.0.0.1:3000:3000 \
   ironclaw-reborn:local
 ```
 
 Minimum local env shape:
 
 ```bash
-IRONCLAW_REBORN_SERVE_HOST=127.0.0.1
+IRONCLAW_REBORN_SERVE_HOST=0.0.0.0
 IRONCLAW_REBORN_SERVE_PORT=3000
-IRONCLAW_REBORN_PROFILE=local-dev-yolo
-IRONCLAW_REBORN_CONFIRM_HOST_ACCESS=1
+IRONCLAW_REBORN_PROFILE=local-dev
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
 IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
-LLM_BACKEND=nearai
 NEARAI_BASE_URL=https://cloud-api.near.ai
 NEARAI_API_KEY=<nearai-api-key>
-NEARAI_MODEL=anthropic/claude-sonnet-4-5
 ```
+
+The bundled Docker config selects NearAI in `[llm.default]`; set
+`NEARAI_API_KEY` for that provider. To change provider or model, mount a custom
+config and point `IRONCLAW_REBORN_DEFAULT_CONFIG` at it for the first start.
 
 Google product-auth setup:
 
@@ -53,10 +54,22 @@ IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=http://127.0.0.1:3000/api/reborn/produ
 
 WebUI Google login setup:
 
+For normal Docker bridge networking, put HTTPS in front of the container and
+set the public base URL. Plain `http://127.0.0.1` SSO is only valid when the
+Reborn listener itself is bound to loopback, such as a non-Docker local run or a
+host-network run.
+
 ```bash
 IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID=<google-client-id>
 IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET=<google-client-secret>
 IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS=near.ai
+IRONCLAW_REBORN_WEBUI_BASE_URL=https://<public-host>
+```
+
+Register this WebUI login callback in the Google OAuth client:
+
+```text
+https://<public-host>/auth/callback/google
 ```
 
 ## Railway
@@ -73,11 +86,34 @@ Set `IRONCLAW_REBORN_HOME` to a mounted volume path if state should survive
 redeploys. The image default is `/data/ironclaw-reborn`; without a Railway
 volume, that path is ephemeral.
 
-For public WebUI Google login, use HTTPS callback URLs that match the deployed
-Railway domain:
+To seed a custom config instead of the bundled default, set
+`IRONCLAW_REBORN_DEFAULT_CONFIG` to a mounted TOML path. On first start, the
+entrypoint copies that file into `$IRONCLAW_REBORN_HOME/config.toml`; later
+starts preserve the existing home config.
+
+For public WebUI Google login, use the Reborn WebUI SSO variables and an HTTPS
+base URL that matches the deployed Railway domain:
 
 ```bash
 IRONCLAW_REBORN_WEBUI_BASE_URL=https://<railway-domain>
+IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID=<google-client-id>
+IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET=<google-client-secret>
+IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS=near.ai
+IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
+IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
+```
+
+Register this WebUI login callback in the Google OAuth client:
+
+```text
+https://<railway-domain>/auth/callback/google
+```
+
+Product-auth Google credentials are a separate flow. Configure
+`IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI` only when the deployment should let
+the agent connect a Google credential:
+
+```bash
 IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://<railway-domain>/api/reborn/product-auth/oauth/google/callback
 ```
 
