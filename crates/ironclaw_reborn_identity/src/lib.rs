@@ -117,20 +117,6 @@ pub struct UserRecord {
     pub updated_at: String,
 }
 
-/// A persisted external identity linked to a canonical user.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalIdentityRecord {
-    pub tenant_id: TenantId,
-    pub surface_kind: SurfaceKind,
-    pub provider_kind: String,
-    pub provider_instance_id: String,
-    pub external_subject_id: String,
-    pub user_id: UserId,
-    pub email: Option<String>,
-    pub email_verified: bool,
-    pub created_at: String,
-}
-
 /// Failure modes of the canonical identity layer.
 #[derive(Debug, thiserror::Error)]
 pub enum RebornIdentityError {
@@ -176,6 +162,25 @@ pub trait RebornIdentityResolver: Send + Sync {
         key: ExternalIdentityKey,
         user_id: &UserId,
     ) -> Result<(), RebornIdentityError>;
+
+    /// Adopt a pre-existing external identity carried over from a legacy
+    /// store, preserving BOTH its canonical `user_id` and its
+    /// verified-email linkage.
+    ///
+    /// Unlike [`bind`](Self::bind) (channel actors, no email), this records
+    /// the identity's `email` / `email_verified` and — for a verified email
+    /// — seeds the canonical verified-email index so a *later* login through
+    /// a different provider with the same verified email converges on the
+    /// migrated user instead of minting a second one. Unlike
+    /// [`resolve_or_create`](Self::resolve_or_create) it never mints: the
+    /// supplied `user_id` is authoritative. Idempotent — re-running the
+    /// migration must not clobber records a returning user already created,
+    /// so existing identity / index records win.
+    async fn adopt_migrated_identity(
+        &self,
+        identity: ResolveExternalIdentity,
+        user_id: &UserId,
+    ) -> Result<(), RebornIdentityError>;
 }
 
 #[async_trait]
@@ -203,5 +208,15 @@ where
         user_id: &UserId,
     ) -> Result<(), RebornIdentityError> {
         self.as_ref().bind(key, user_id).await
+    }
+
+    async fn adopt_migrated_identity(
+        &self,
+        identity: ResolveExternalIdentity,
+        user_id: &UserId,
+    ) -> Result<(), RebornIdentityError> {
+        self.as_ref()
+            .adopt_migrated_identity(identity, user_id)
+            .await
     }
 }

@@ -249,7 +249,9 @@ where
             }
         }
 
-        // New user.
+        // New user (or adopt the cross-process winner of this verified
+        // email). Mint a candidate user record first so the verified-email
+        // index and identity record below always point at a user that exists.
         let new_user_id = to_user_id(Uuid::new_v4().to_string())?;
         self.write_record(
             &Self::user_path(new_user_id.as_str())?,
@@ -263,31 +265,56 @@ where
         )
         .await
         .map_err(backend)?;
-        let user_id = self
-            .put_identity_reconciling(&id_path, &new_user_id, &identity, &now)
-            .await?;
-        if user_id == new_user_id
-            && let Some(email) = &lower_email
-        {
-            // Best-effort verified-email index; we hold the email lock, so an
-            // existing index here means another tenant-distinct writer, which
-            // CAS rejects. Ignore an already-present index (link already won).
-            let email_path = Self::verified_email_path(tenant, email)?;
-            match self
-                .write_record(
-                    &email_path,
-                    &StoredVerifiedEmailIndex {
-                        user_id: new_user_id.as_str().to_string(),
-                    },
-                    CasExpectation::Absent,
-                )
-                .await
-            {
-                Ok(()) | Err(FilesystemError::VersionMismatch { .. }) => {}
-                Err(error) => return Err(backend(error)),
+
+        // Establish the verified-email index BEFORE the identity record. Two
+        // invariants follow, each closing a split-principal hole:
+        //
+        //  1. The per-key/per-email lock is process-local, so a second
+        //     runtime process can mint the canonical user for this email
+        //     first. `CasExpectation::Absent` makes exactly one writer win
+        //     the index; the loser adopts the winner's user (re-reading the
+        //     index) instead of returning its own freshly-minted user and
+        //     permanently splitting the principal.
+        //  2. "A verified-email identity record exists" now always implies
+        //     "its index exists" (index is written first), so the read-only
+        //     fast path above never returns an identity whose email index is
+        //     missing — a partial first write self-heals through the
+        //     email-link branch on retry rather than minting a second user.
+        let owner_user_id = match &lower_email {
+            Some(email) => {
+                let email_path = Self::verified_email_path(tenant, email)?;
+                match self
+                    .write_record(
+                        &email_path,
+                        &StoredVerifiedEmailIndex {
+                            user_id: new_user_id.as_str().to_string(),
+                        },
+                        CasExpectation::Absent,
+                    )
+                    .await
+                {
+                    Ok(()) => new_user_id.clone(),
+                    Err(FilesystemError::VersionMismatch { .. }) => {
+                        let Some(winner) = self
+                            .read_record::<StoredVerifiedEmailIndex>(&email_path)
+                            .await?
+                        else {
+                            return Err(RebornIdentityError::Backend(
+                                "verified-email index vanished after CAS conflict".to_string(),
+                            ));
+                        };
+                        to_user_id(winner.user_id)?
+                    }
+                    Err(error) => return Err(backend(error)),
+                }
             }
-        }
-        Ok(user_id)
+            None => new_user_id.clone(),
+        };
+
+        // Identity record points at the resolved owner (ours, or the adopted
+        // cross-process winner). Reconcile if a same-key racer beat us to it.
+        self.put_identity_reconciling(&id_path, &owner_user_id, &identity, &now)
+            .await
     }
 
     async fn lookup(
@@ -356,6 +383,84 @@ where
             }
             Err(error) => Err(backend(error)),
         }
+    }
+
+    async fn adopt_migrated_identity(
+        &self,
+        identity: ResolveExternalIdentity,
+        user_id: &UserId,
+    ) -> Result<(), RebornIdentityError> {
+        let tenant = identity.tenant_id.as_str();
+        let surface = identity.surface_kind.as_str();
+        let provider = identity.provider_kind.as_str();
+        let instance = identity
+            .provider_instance_id
+            .as_ref()
+            .map(|value| value.as_str())
+            .unwrap_or("");
+        let subject = identity.external_subject_id.as_str();
+        let id_path = Self::identity_path(tenant, surface, provider, instance, subject)?;
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+
+        // Idempotent: a returning user may have already resolved (creating the
+        // canonical record) before the one-time fold ran. Never clobber an
+        // existing identity — only seed the absent one.
+        if self
+            .read_record::<StoredExternalIdentity>(&id_path)
+            .await?
+            .is_none()
+        {
+            let record = StoredExternalIdentity {
+                user_id: user_id.as_str().to_string(),
+                email: identity.email.clone(),
+                email_verified: identity.email_verified,
+                created_at: now,
+            };
+            match self
+                .write_record(&id_path, &record, CasExpectation::Absent)
+                .await
+            {
+                // A concurrent writer (returning login) created it first; the
+                // canonical record wins, migration leaves it untouched.
+                Ok(()) | Err(FilesystemError::VersionMismatch { .. }) => {}
+                Err(error) => return Err(backend(error)),
+            }
+        }
+
+        // Seed the canonical verified-email index so a later login through a
+        // DIFFERENT provider with the same verified email links to the
+        // migrated user rather than minting a second one. First writer wins;
+        // an already-present index (another migrated row sharing the email, or
+        // a live resolve) is authoritative and left in place.
+        if identity.email_verified
+            && let Some(email) = identity
+                .email
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .filter(|email| !email.is_empty())
+        {
+            let email_path = Self::verified_email_path(tenant, &email)?;
+            if self
+                .read_record::<StoredVerifiedEmailIndex>(&email_path)
+                .await?
+                .is_none()
+            {
+                match self
+                    .write_record(
+                        &email_path,
+                        &StoredVerifiedEmailIndex {
+                            user_id: user_id.as_str().to_string(),
+                        },
+                        CasExpectation::Absent,
+                    )
+                    .await
+                {
+                    Ok(()) | Err(FilesystemError::VersionMismatch { .. }) => {}
+                    Err(error) => return Err(backend(error)),
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -449,8 +554,7 @@ mod tests {
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-    fn store() -> FilesystemRebornIdentityStore<InMemoryBackend> {
-        let root = Arc::new(InMemoryBackend::default());
+    fn store_on(root: Arc<InMemoryBackend>) -> FilesystemRebornIdentityStore<InMemoryBackend> {
         let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
             root,
             MountView::new(vec![MountGrant::new(
@@ -467,6 +571,21 @@ mod tests {
             AgentId::new("agent:host").unwrap(),
             Some(ProjectId::new("project:host").unwrap()),
         )
+    }
+
+    fn store() -> FilesystemRebornIdentityStore<InMemoryBackend> {
+        store_on(Arc::new(InMemoryBackend::default()))
+    }
+
+    /// Two stores over ONE shared backend with independent in-memory lock
+    /// maps — the in-test stand-in for two runtime processes whose per-email
+    /// locks do not serialize each other across the durable substrate.
+    fn store_pair() -> (
+        FilesystemRebornIdentityStore<InMemoryBackend>,
+        FilesystemRebornIdentityStore<InMemoryBackend>,
+    ) {
+        let root = Arc::new(InMemoryBackend::default());
+        (store_on(Arc::clone(&root)), store_on(root))
     }
 
     fn tenant(id: &str) -> TenantId {
@@ -742,6 +861,131 @@ mod tests {
             user_a.as_str(),
             user_b.as_str(),
             "concurrent first-logins for the same identity key must share a user"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_process_first_logins_for_one_email_resolve_to_one_user() {
+        // Two processes (separate lock maps, shared substrate) race a first
+        // login for the same verified email through different providers. The
+        // per-email lock is process-local, so both may pass the index read and
+        // reach the create path; the verified-email index CAS is the
+        // cross-process arbiter, and the loser must adopt the winner's user
+        // rather than returning its own freshly minted one (a permanent
+        // split). Repeated rounds widen the race window this guards.
+        for round in 0..16 {
+            let (p1, p2) = store_pair();
+            let (p1, p2) = (Arc::new(p1), Arc::new(p2));
+            let email = format!("dup{round}@x.com");
+            let (e1, e2) = (email.clone(), email);
+            let (r1, r2) = tokio::join!(
+                tokio::spawn(async move {
+                    let t = tenant("t");
+                    p1.resolve_or_create(oauth(&t, "google", "g-1", Some(&e1), true))
+                        .await
+                }),
+                tokio::spawn(async move {
+                    let t = tenant("t");
+                    p2.resolve_or_create(oauth(&t, "github", "gh-1", Some(&e2), true))
+                        .await
+                }),
+            );
+            let user_1 = r1.expect("join").expect("resolve");
+            let user_2 = r2.expect("join").expect("resolve");
+            assert_eq!(
+                user_1.as_str(),
+                user_2.as_str(),
+                "round {round}: cross-process first-logins for one verified email must not split"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_writes_verified_email_index_before_returning() {
+        // The index is written before the identity record, so a verified
+        // resolve always leaves a readable index — the invariant the fast
+        // path relies on to never return an identity with a missing index.
+        let store = store();
+        let t = tenant("t");
+        store
+            .resolve_or_create(oauth(&t, "google", "g-1", Some("Indexed@X.com"), true))
+            .await
+            .expect("resolve");
+        let index = store
+            .read_record::<StoredVerifiedEmailIndex>(
+                &FilesystemRebornIdentityStore::<InMemoryBackend>::verified_email_path(
+                    "t",
+                    "indexed@x.com",
+                )
+                .unwrap(),
+            )
+            .await
+            .expect("read index");
+        assert!(
+            index.is_some(),
+            "a verified resolve must persist the canonical verified-email index"
+        );
+    }
+
+    #[tokio::test]
+    async fn adopt_migrated_identity_preserves_user_and_links_verified_email() {
+        let store = store();
+        let t = tenant("t");
+        // A legacy verified Google identity migrated with its original user id.
+        store
+            .adopt_migrated_identity(
+                oauth(&t, "google", "g-legacy", Some("Legacy@X.com"), true),
+                &UserId::new("legacy-user").unwrap(),
+            )
+            .await
+            .expect("adopt");
+
+        // Returning through the SAME legacy identity keeps the original id.
+        let returning = store
+            .resolve_or_create(oauth(&t, "google", "g-legacy", Some("legacy@x.com"), true))
+            .await
+            .expect("resolve");
+        assert_eq!(returning.as_str(), "legacy-user");
+
+        // A LATER login through a different provider with the same verified
+        // email links to the migrated user via the seeded canonical index.
+        let via_github = store
+            .resolve_or_create(oauth(&t, "github", "gh-9", Some("legacy@x.com"), true))
+            .await
+            .expect("resolve");
+        assert_eq!(
+            via_github.as_str(),
+            "legacy-user",
+            "a migrated verified email must link a later different-provider login"
+        );
+    }
+
+    #[tokio::test]
+    async fn adopt_migrated_identity_does_not_clobber_a_live_record() {
+        let store = store();
+        let t = tenant("t");
+        // A user resolved live first, minting their canonical record.
+        let live = store
+            .resolve_or_create(oauth(&t, "google", "g-1", Some("live@x.com"), true))
+            .await
+            .expect("resolve");
+        // A one-time fold then runs for the same key with a stale legacy id;
+        // the live canonical record must win.
+        store
+            .adopt_migrated_identity(
+                oauth(&t, "google", "g-1", Some("live@x.com"), true),
+                &UserId::new("stale-legacy-user").unwrap(),
+            )
+            .await
+            .expect("adopt");
+        let again = store
+            .resolve_or_create(oauth(&t, "google", "g-1", Some("live@x.com"), true))
+            .await
+            .expect("resolve");
+        assert_eq!(
+            again.as_str(),
+            live.as_str(),
+            "migration must not clobber a record a returning user already created"
         );
     }
 

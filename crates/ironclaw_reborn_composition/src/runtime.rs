@@ -568,7 +568,7 @@ where
     R: ironclaw_reborn_identity::RebornIdentityResolver + ?Sized,
 {
     use ironclaw_reborn_identity::{
-        ExternalIdentityKey, ExternalSubjectId, ProviderKind, RebornIdentityError, SurfaceKind,
+        ExternalSubjectId, ProviderKind, RebornIdentityError, ResolveExternalIdentity, SurfaceKind,
     };
 
     fn backend(error: libsql::Error) -> RebornIdentityError {
@@ -599,10 +599,19 @@ where
     // Drain the read cursor fully BEFORE writing: the store's writes go
     // through a different libSQL connection on the same file, and an open
     // read cursor here would block them with `database is locked`.
+    //
+    // Carry the verified-email fields too: the legacy WebUI store recorded
+    // `email` / `email_verified`, and dropping them on migration would leave
+    // the canonical verified-email index unseeded. A migrated Google user
+    // would keep their id for the same provider/subject, but a later GitHub
+    // login with the same verified email would find no index and mint a
+    // second user — a permanent split. `adopt_migrated_identity` preserves
+    // both the user id and the verified-email linkage.
     let mut legacy = Vec::new();
     let mut rows = conn
         .query(
-            "SELECT provider, provider_user_id, user_id FROM user_identities",
+            "SELECT provider, provider_user_id, user_id, email, email_verified \
+             FROM user_identities",
             (),
         )
         .await
@@ -611,22 +620,29 @@ where
         let provider: String = row.get(0).map_err(backend)?;
         let subject: String = row.get(1).map_err(backend)?;
         let user: String = row.get(2).map_err(backend)?;
-        legacy.push((provider, subject, user));
+        let email: Option<String> = row.get(3).map_err(backend)?;
+        // Legacy column is an INTEGER (0/1); read as i64 so a NULL or odd
+        // encoding fails loud rather than silently coercing to unverified.
+        let email_verified: i64 = row.get(4).map_err(backend)?;
+        legacy.push((provider, subject, user, email, email_verified != 0));
     }
     drop(rows);
     drop(conn);
 
-    for (provider, subject, user) in legacy {
-        let key = ExternalIdentityKey {
+    for (provider, subject, user, email, email_verified) in legacy {
+        let identity = ResolveExternalIdentity {
             tenant_id: tenant_id.clone(),
             surface_kind: SurfaceKind::Oauth,
             provider_kind: ProviderKind::new(provider).map_err(invalid_key)?,
             provider_instance_id: None,
             external_subject_id: ExternalSubjectId::new(subject).map_err(invalid_key)?,
+            email,
+            email_verified,
+            display_name: None,
         };
         let user_id = UserId::new(user)
             .map_err(|error| RebornIdentityError::InvalidUserId(error.to_string()))?;
-        store.bind(key, &user_id).await?;
+        store.adopt_migrated_identity(identity, &user_id).await?;
     }
     Ok(())
 }
@@ -4603,6 +4619,102 @@ mod tests {
             resolved.as_str(),
             "legacy-runtime-user",
             "a returning legacy SSO user keeps their UserId through the runtime accessor"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn open_reborn_identity_resolver_migrates_legacy_verified_email_linking() {
+        use ironclaw_reborn_identity::{
+            ExternalSubjectId, ProviderKind, ResolveExternalIdentity, SurfaceKind,
+        };
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-identity-link-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-identity-link-tenant".to_string(),
+            agent_id: "runtime-identity-link-agent".to_string(),
+            source_binding_id: "runtime-identity-link-source".to_string(),
+            reply_target_binding_id: "runtime-identity-link-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let tenant = TenantId::new("runtime-identity-link-tenant").expect("tenant");
+
+        // Seed a legacy pre-#4381 WebUI Google identity with a VERIFIED email.
+        let substrate = Arc::clone(
+            &runtime
+                .services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime substrate")
+                .identity_substrate_db,
+        );
+        let seed = substrate.connect().expect("substrate connection");
+        seed.execute_batch(
+            "CREATE TABLE user_identities (\
+                 provider TEXT NOT NULL, provider_user_id TEXT NOT NULL, \
+                 user_id TEXT NOT NULL, email TEXT, email_verified INTEGER NOT NULL, \
+                 created_at TEXT NOT NULL, \
+                 PRIMARY KEY (provider, provider_user_id));",
+        )
+        .await
+        .expect("seed legacy schema");
+        seed.execute(
+            "INSERT INTO user_identities \
+                 (provider, provider_user_id, user_id, email, email_verified, created_at) \
+                 VALUES ('google', 'g-legacy', 'legacy-link-user', 'shared@x.com', 1, \
+                     '2026-01-01T00:00:00Z')",
+            (),
+        )
+        .await
+        .expect("seed legacy identity");
+        drop(seed);
+
+        // The fold must seed the canonical verified-email index from the
+        // migrated row's verified email — not just preserve the per-subject id.
+        let resolver = runtime
+            .open_reborn_identity_resolver(&tenant)
+            .await
+            .expect("runtime carries a local-runtime substrate")
+            .expect("resolver opens");
+
+        // The upgrade case: a LATER login through a DIFFERENT OAuth provider
+        // with the SAME verified email must link to the migrated user instead
+        // of minting a second one.
+        let via_github = resolver
+            .resolve_or_create(ResolveExternalIdentity {
+                tenant_id: tenant.clone(),
+                surface_kind: SurfaceKind::Oauth,
+                provider_kind: ProviderKind::new("github").expect("provider"),
+                provider_instance_id: None,
+                external_subject_id: ExternalSubjectId::new("gh-new").expect("subject"),
+                email: Some("shared@x.com".to_string()),
+                email_verified: true,
+                display_name: None,
+            })
+            .await
+            .expect("resolve");
+        assert_eq!(
+            via_github.as_str(),
+            "legacy-link-user",
+            "a migrated verified legacy email must link a later different-provider login"
         );
 
         runtime.shutdown().await.expect("runtime shutdown");

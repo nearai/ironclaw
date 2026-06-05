@@ -13,6 +13,7 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Rejection reason when constructing an identity key part.
@@ -42,7 +43,16 @@ fn validate(field: &'static str, value: &str) -> Result<(), IdentityKeyError> {
 macro_rules! identity_key_newtype {
     ($(#[$doc:meta])* $name:ident, $field:literal) => {
         $(#[$doc])*
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        ///
+        /// Follows the canonical validated-newtype shape from
+        /// `.claude/rules/types.md`: wire deserialization (`try_from =
+        /// "String"`) runs the same `validate` as `::new`, so the invariant
+        /// holds across construction and serialization, and the only
+        /// boundary crossings are the explicit `as_str` / `as_ref` /
+        /// `into_inner` accessors (no `From<String>` / `Deref<str>`, which
+        /// would silently bypass validation).
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(try_from = "String")]
         pub struct $name(String);
 
         impl $name {
@@ -56,6 +66,32 @@ macro_rules! identity_key_newtype {
             /// Borrow the underlying string for storage / query binding.
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+
+            /// Consume the newtype, returning the owned underlying string.
+            pub fn into_inner(self) -> String {
+                self.0
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = IdentityKeyError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                validate($field, &value)?;
+                Ok(Self(value))
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0
             }
         }
 
@@ -102,5 +138,27 @@ mod tests {
                 .as_str(),
             "install-1"
         );
+    }
+
+    #[test]
+    fn serde_round_trips_and_revalidates_on_the_wire() {
+        let provider = ProviderKind::new("google").expect("valid");
+        let json = serde_json::to_string(&provider).expect("serialize");
+        assert_eq!(json, "\"google\"", "serializes as the bare inner string");
+        let back: ProviderKind = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, provider);
+
+        // Wire deserialization runs the same validator as `::new`, so an
+        // invalid persisted value is rejected rather than silently admitted.
+        assert!(serde_json::from_str::<ProviderKind>("\"\"").is_err());
+        assert!(serde_json::from_str::<ExternalSubjectId>("\"with\\nnewline\"").is_err());
+    }
+
+    #[test]
+    fn into_inner_and_as_ref_expose_the_value() {
+        let subject = ExternalSubjectId::new("sub-7").expect("valid");
+        let borrowed: &str = subject.as_ref();
+        assert_eq!(borrowed, "sub-7");
+        assert_eq!(subject.into_inner(), "sub-7");
     }
 }

@@ -89,3 +89,74 @@ pub(crate) async fn build_webui_auth_surface(
         public_mount: Some(wiring.mount),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_reborn_composition::host_api::UserId;
+
+    /// Bearer verifier that accepts nothing — stands in for the env-bearer
+    /// authenticator without pulling in its construction requirements.
+    struct RejectingAuth;
+
+    #[async_trait::async_trait]
+    impl WebuiAuthenticator for RejectingAuth {
+        async fn authenticate(&self, _token: &str) -> Option<UserId> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn sso_without_identity_resolver_fails_closed() {
+        // SSO providers configured but the runtime exposes no identity
+        // resolver (no local-runtime substrate). Admitting logins against a
+        // missing user source would silently mint users into nothing, so the
+        // surface must refuse to start rather than fall back or panic.
+        let sso = SsoStartupConfig {
+            providers: Vec::new(),
+            base_url: "https://app.example.com".to_string(),
+            allowed_email_domains: vec!["example.com".to_string()],
+        };
+
+        let result = build_webui_auth_surface(
+            Some(sso),
+            None, // no resolver — the fail-closed branch under test
+            TenantId::new("tenant-host").expect("tenant"),
+            SecretString::from("session-signing-secret".to_string()),
+            Arc::new(RejectingAuth),
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("configured SSO with no identity resolver must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("no identity"),
+            "startup error must name the missing identity resolver, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_sso_keeps_env_authenticator_and_mounts_no_public_routes() {
+        // With no SSO configured the surface is the plain env-bearer
+        // authenticator and no public login routes — the absent-resolver
+        // check must not fire on this path.
+        let result = build_webui_auth_surface(
+            None,
+            None,
+            TenantId::new("tenant-host").expect("tenant"),
+            SecretString::from("session-signing-secret".to_string()),
+            Arc::new(RejectingAuth),
+        )
+        .await;
+
+        match result {
+            Ok(surface) => assert!(
+                surface.public_mount.is_none(),
+                "no SSO must mount no public login routes"
+            ),
+            Err(error) => panic!("no SSO is a valid configuration, got error: {error}"),
+        }
+    }
+}
