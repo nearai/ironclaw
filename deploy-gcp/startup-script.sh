@@ -73,14 +73,14 @@ cat > /opt/t3claw/docker-compose.yml << COMPOSE
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    profiles: ["app"]
-    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
     environment:
-      POSTGRES_USER: t3claw
-      POSTGRES_PASSWORD: \${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       POSTGRES_DB: t3claw
+      POSTGRES_USER: t3claw
+      POSTGRES_PASSWORD: \${POSTGRES_PASSWORD:-t3claw}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U t3claw"]
       interval: 5s
@@ -99,20 +99,18 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgres://t3claw:\${POSTGRES_PASSWORD}@postgres:5432/t3claw
+      DATABASE_URL: postgres://t3claw:\${POSTGRES_PASSWORD:-t3claw}@postgres:5432/t3claw
       GATEWAY_ENABLED: "true"
       GATEWAY_HOST: "0.0.0.0"
       GATEWAY_PORT: "3000"
       CLI_ENABLED: "false"
       ONBOARD_COMPLETED: "true"
       T3CLAW_IN_DOCKER: "true"
-      SANDBOX_ENABLED: \${SANDBOX_ENABLED:-false}
-      SANDBOX_POLICY: \${SANDBOX_POLICY:-readonly}
+      SANDBOX_ENABLED: "false"
       T3N_MCP_SOCKET_PATH: /var/run/t3n-mcp/t3n-mcp.sock
     volumes:
-      - t3claw-data:/home/t3claw/.t3claw
-      - t3n-mcp-socket:/var/run/t3n-mcp
-      - /var/run/docker.sock:/var/run/docker.sock
+      - t3claw_data:/home/t3claw/.t3claw
+      - t3n_mcp_socket:/var/run/t3n-mcp
 
   t3n-mcp-sidecar:
     profiles: ["app"]
@@ -120,20 +118,19 @@ services:
     image: ${IMAGE_PREFIX}/t3n-mcp-sidecar:${IMAGE_TAG}
     restart: unless-stopped
     environment:
-      T3N_SDK_ENV: \${T3N_SDK_ENV:-${T3ENV}}
+      T3N_SDK_ENV: \${T3N_MCP_ENV:-${T3ENV}}
       T3N_MCP_RPC_URL: \${T3N_MCP_RPC_URL:-}
       T3N_MCP_DASHBOARD_URL: \${T3N_MCP_DASHBOARD_URL:-}
       PRIVATE_KEY: \${T3N_MCP_PRIVATE_KEY:-}
       T3N_MCP_AGENT_SECRET_HEX: \${T3N_MCP_AGENT_SECRET_HEX:-}
-      T3N_RPC_EXTRA_HEADERS: \${T3N_RPC_EXTRA_HEADERS:-}
       MCP_SOCKET_PATH: /var/run/t3n-mcp/t3n-mcp.sock
     volumes:
-      - t3n-mcp-socket:/var/run/t3n-mcp
+      - t3n_mcp_socket:/var/run/t3n-mcp
 
 volumes:
-  postgres-data:
-  t3claw-data:
-  t3n-mcp-socket:
+  pgdata:
+  t3claw_data:
+  t3n_mcp_socket:
 COMPOSE
 
 echo "==> [5/6] Installing fetch-env.sh and t3claw.service"
