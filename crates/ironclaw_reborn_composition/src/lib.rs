@@ -23,6 +23,7 @@ use std::sync::Arc;
 mod auth;
 #[cfg(test)]
 mod auth_dcr_tests;
+mod auth_prompt;
 mod automation;
 mod available_extensions;
 mod budget;
@@ -71,7 +72,7 @@ mod product_live_adapters;
 mod production_runtime_policy;
 mod profile;
 mod projection;
-pub use projection::{AuthChallengeProvider, AuthChallengeView};
+pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin;
 #[cfg(feature = "root-llm-provider")]

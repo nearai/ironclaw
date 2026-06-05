@@ -37,8 +37,6 @@ use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
     SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
-#[cfg(all(test, feature = "slack-v2-host-beta"))]
-use ironclaw_host_api::RuntimeHttpEgress;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId, ResourceScope,
@@ -619,26 +617,6 @@ impl RebornRuntime {
         )))
     }
 
-    /// Test-only override for the runtime HTTP egress handle that mirrors the
-    /// local runtime service slot populated by build_reborn_runtime.
-    #[cfg(all(test, feature = "slack-v2-host-beta"))]
-    #[allow(dead_code)]
-    /// Test-only mutator for the local runtime HTTP egress binding used by
-    /// production capability policy wiring during runtime construction.
-    pub(crate) fn set_local_runtime_http_egress_for_test(
-        &mut self,
-        runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
-    ) {
-        let local_runtime = self
-            .services
-            .local_runtime
-            .as_mut()
-            .expect("test runtime must include local runtime services");
-        Arc::get_mut(local_runtime)
-            .expect("test must mutate local runtime services before cloning the service Arc")
-            .runtime_http_egress = runtime_http_egress;
-    }
-
     /// Diagnostic id for the no-profile run profile selected by this runtime.
     pub fn default_run_profile_id(&self) -> &str {
         &self.default_run_profile_id
@@ -697,6 +675,14 @@ impl RebornRuntime {
 
     pub(crate) fn webui_auth_interaction_service(&self) -> Arc<dyn AuthInteractionService> {
         self.auth_interaction_service.clone()
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
+        self.services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
     }
 
     #[cfg(test)]
@@ -1357,6 +1343,7 @@ pub async fn build_reborn_runtime(
         trigger_poller,
         poll,
         identity,
+        default_project_id,
         regex_skill_activation_enabled,
         skill_context_source: configured_skill_context_source,
         budget_defaults,
@@ -1432,7 +1419,7 @@ pub async fn build_reborn_runtime(
     let thread_scope = ThreadScope {
         tenant_id,
         agent_id,
-        project_id: None,
+        project_id: default_project_id,
         // Keep local-dev runtime threads aligned with WebUI's owner-scoped
         // facade so both entrypoints drive the same runner/evidence path.
         owner_user_id: Some(actor_user_id.clone()),
@@ -5030,9 +5017,10 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let webui_user_id = UserId::new("runtime-webui-skill-user").unwrap();
         let caller = WebUiAuthenticatedCaller::new(
             TenantId::new("runtime-webui-skill-tenant").unwrap(),
-            UserId::new("runtime-webui-skill-user").unwrap(),
+            webui_user_id.clone(),
             Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
             None,
         );
@@ -5074,16 +5062,21 @@ mod tests {
         let source = runtime
             .webui_skill_activation_source()
             .expect("webui skill activation source");
+        let turn_scope = TurnScope::new_with_owner(
+            TenantId::new("runtime-webui-skill-tenant").unwrap(),
+            Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
+            None,
+            thread_id.clone(),
+            Some(webui_user_id.clone()),
+        );
         let context = LoopRunContext::new(
-            runtime.turn_scope_for(&thread_id),
+            turn_scope,
             TurnId::new(),
             TurnRunId::new(),
             resolved_run_profile,
         )
         .with_accepted_message_ref(accepted_message_ref)
-        .with_actor(TurnActor::new(
-            UserId::new("runtime-webui-skill-user").unwrap(),
-        ));
+        .with_actor(TurnActor::new(webui_user_id));
         let selected = source
             .load_skill_context_candidates(&context)
             .await

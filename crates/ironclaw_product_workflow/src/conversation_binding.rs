@@ -121,6 +121,7 @@ pub struct ProductInstallationScope {
     pub tenant_id: TenantId,
     pub default_agent_id: Option<AgentId>,
     pub default_project_id: Option<ProjectId>,
+    pub default_subject_user_id: Option<UserId>,
     pub actor_binding_policy: ProductActorBindingPolicy,
 }
 
@@ -130,6 +131,7 @@ impl ProductInstallationScope {
             tenant_id,
             default_agent_id: None,
             default_project_id: None,
+            default_subject_user_id: None,
             actor_binding_policy: ProductActorBindingPolicy::default(),
         }
     }
@@ -143,8 +145,14 @@ impl ProductInstallationScope {
             tenant_id,
             default_agent_id: Some(default_agent_id),
             default_project_id,
+            default_subject_user_id: None,
             actor_binding_policy: ProductActorBindingPolicy::default(),
         }
+    }
+
+    pub fn with_default_subject_user_id(mut self, subject_user_id: UserId) -> Self {
+        self.default_subject_user_id = Some(subject_user_id);
+        self
     }
 
     pub fn with_actor_binding_policy(mut self, policy: ProductActorBindingPolicy) -> Self {
@@ -390,7 +398,11 @@ impl ConversationBindingService for ProductConversationBindingService {
             .map_err(map_conversation_error)?;
         ensure_resolved_actor_matches_expected_user(expected_user_id.as_ref(), &resolution)?;
 
-        Ok(resolved_binding_from_resolution(resolution))
+        Ok(resolved_binding_from_resolution(
+            resolution,
+            request.route_kind,
+            installation_scope.default_subject_user_id.as_ref(),
+        ))
     }
 
     async fn lookup_binding(
@@ -400,27 +412,37 @@ impl ConversationBindingService for ProductConversationBindingService {
         let installation_scope = self
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
-        let expected_user_id = resolve_actor_user(&installation_scope, &request).await?;
         let resolution = self
             .conversations
             .lookup_binding(conversation_request(
                 &request,
-                installation_scope.tenant_id,
+                installation_scope.tenant_id.clone(),
             )?)
             .await
             .map_err(map_conversation_error)?;
-        ensure_resolved_actor_matches_expected_user(expected_user_id.as_ref(), &resolution)?;
 
-        Ok(resolved_binding_from_resolution(resolution))
+        Ok(resolved_binding_from_resolution(
+            resolution,
+            request.route_kind,
+            installation_scope.default_subject_user_id.as_ref(),
+        ))
     }
 }
 
 fn resolved_binding_from_resolution(
     resolution: ironclaw_conversations::ConversationBindingResolution,
+    route_kind: ProductConversationRouteKind,
+    configured_subject_user_id: Option<&UserId>,
 ) -> ResolvedBinding {
+    let actor_user_id = resolution.actor.user_id;
+    let subject_user_id = match route_kind {
+        ProductConversationRouteKind::Direct => Some(actor_user_id.clone()),
+        ProductConversationRouteKind::Shared => configured_subject_user_id.cloned(),
+    };
     ResolvedBinding {
         tenant_id: resolution.tenant_id,
-        user_id: resolution.actor.user_id,
+        actor_user_id,
+        subject_user_id,
         thread_id: resolution.turn_scope.thread_id,
         agent_id: resolution.turn_scope.agent_id,
         project_id: resolution.turn_scope.project_id,

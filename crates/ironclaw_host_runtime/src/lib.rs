@@ -60,7 +60,10 @@ pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
     publish_hot_capability_catalog,
 };
-pub use egress::HostHttpEgressService;
+pub use egress::{
+    HostHttpEgressService, HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort,
+    HostRuntimeHttpEgressRequest, RuntimeSecretMaterialStager, RuntimeSecretStageError,
+};
 pub use extension_contracts::{
     default_host_api_contract_registry, default_host_port_catalog,
     discover_extensions_with_default_host_api_contracts,
@@ -89,7 +92,7 @@ pub use first_party_tools::{
 pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
 pub use invocation_services::{
     InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
-    InvocationServicesResolver, LocalInvocationServicesResolver,
+    InvocationServicesResolver, LocalInvocationServicesResolver, ToolCallHttpEgress,
 };
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,

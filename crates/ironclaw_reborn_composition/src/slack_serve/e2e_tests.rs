@@ -58,8 +58,13 @@ use crate::slack_delivery::{
     SlackFinalReplyDeliverySettings,
 };
 use crate::{
-    RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
+    AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError,
+    SlackUserIdentityActorResolver,
 };
+
+#[path = "e2e_auth_challenge.rs"]
+mod e2e_auth_challenge;
+use e2e_auth_challenge::FakeAuthChallengeProvider;
 
 const TENANT: &str = "tenant:slack";
 const AGENT: &str = "agent:slack";
@@ -74,6 +79,7 @@ const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
 const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
 const SECRET: &str = "topsecret";
 const GATE: &str = "gate:approve-slack";
+const AUTH_GATE: &str = "gate:auth-slack";
 
 struct Harness {
     mount: PublicRouteMount,
@@ -174,6 +180,15 @@ async fn build_harness_with_actor_user_resolver(
     mode: TurnMode,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
 ) -> Harness {
+    build_harness_with_actor_user_resolver_and_auth_challenges(mode, actor_user_resolver, None)
+        .await
+}
+
+async fn build_harness_with_actor_user_resolver_and_auth_challenges(
+    mode: TurnMode,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
+) -> Harness {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations.clone();
@@ -254,6 +269,7 @@ async fn build_harness_with_actor_user_resolver(
             adapter,
             egress: Arc::new(egress.clone()),
             delivery_sink: Arc::new(sink),
+            auth_challenges,
         },
         SlackFinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
@@ -407,6 +423,61 @@ async fn slack_dm_delivers_approval_prompt_after_immediate_ack() {
 }
 
 #[tokio::test]
+async fn slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack() {
+    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
+    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
+    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
+        TurnMode::BlockAuth,
+        static_personal_actor_user_resolver(),
+        Some(auth_challenges),
+    )
+    .await;
+
+    let response = harness
+        .post_event(dm_message("Ev-auth", "needs auth"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], CHANNEL);
+    let text = messages[0]["text"].as_str().expect("Slack message text");
+    assert!(text.contains("Authentication required"));
+    assert!(text.contains("Setup link: https://provider.example/oauth"));
+    auth_provider.assert_single_call();
+}
+
+#[tokio::test]
+async fn slack_channel_auth_prompt_omits_setup_link_after_immediate_ack() {
+    let auth_challenges: Arc<dyn AuthChallengeProvider> =
+        Arc::new(FakeAuthChallengeProvider::default());
+    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
+        TurnMode::BlockAuth,
+        static_personal_actor_user_resolver(),
+        Some(auth_challenges),
+    )
+    .await;
+
+    let response = harness
+        .post_event(app_mention_message("Ev-auth-channel", "needs auth"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], "C123");
+    assert_eq!(messages[0]["thread_ts"], "1710000000.000008");
+    let text = messages[0]["text"].as_str().expect("Slack message text");
+    assert!(text.contains("Authentication required"));
+    assert!(!text.contains("Setup link:"));
+    assert!(!text.contains("https://provider.example/oauth"));
+}
+
+#[tokio::test]
 async fn slack_approval_reply_resumes_and_delivers_final_reply() {
     let harness = build_harness(TurnMode::BlockApproval).await;
 
@@ -441,6 +512,7 @@ async fn slack_approval_reply_resumes_and_delivers_final_reply() {
 enum TurnMode {
     Complete { assistant_text: String },
     BlockApproval,
+    BlockAuth,
 }
 
 #[derive(Clone)]
@@ -528,11 +600,16 @@ impl TurnCoordinator for RecordingTurnCoordinator {
                 TurnStatus::Completed
             }
             TurnMode::BlockApproval => TurnStatus::BlockedApproval,
+            TurnMode::BlockAuth => TurnStatus::BlockedAuth,
         };
-        let gate_ref = if status == TurnStatus::BlockedApproval {
-            Some(GateRef::new(GATE).expect("gate ref")) // safety: static test gate ref is valid
-        } else {
-            None
+        let gate_ref = match status {
+            TurnStatus::BlockedApproval => {
+                Some(GateRef::new(GATE).expect("gate ref")) // safety: static test gate ref is valid.
+            }
+            TurnStatus::BlockedAuth => {
+                Some(GateRef::new(AUTH_GATE).expect("auth gate ref")) // safety: static test gate ref is valid.
+            }
+            _ => None,
         };
         let response = SubmitTurnResponse::Accepted {
             turn_id: TurnId::new(),
@@ -822,6 +899,14 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         ("Ev-approve", "approve") => DM_APPROVE,
         ("Ev-forged", "hello") => DM_FORGED,
         ("Ev-identity", "hello") => DM_IDENTITY,
+        ("Ev-auth", "needs auth") => DM_AUTH,
+        _ => panic!("unknown fixture"),
+    }
+}
+
+fn app_mention_message(event_id: &'static str, text: &'static str) -> &'static str {
+    match (event_id, text) {
+        ("Ev-auth-channel", "needs auth") => APP_MENTION_AUTH,
         _ => panic!("unknown fixture"),
     }
 }
@@ -883,3 +968,19 @@ const DM_IDENTITY: &str = r#"{
 	  "event_id":"Ev-identity",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"hello","ts":"1710000000.000006"}
 	}"#;
+
+const DM_AUTH: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-auth",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs auth","ts":"1710000000.000007"}
+	}"#;
+
+const APP_MENTION_AUTH: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-auth-channel",
+  "event":{"type":"app_mention","user":"U123","channel":"C123","text":"<@UBOT> needs auth","ts":"1710000000.000008"}
+}"#;

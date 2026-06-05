@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
+use ironclaw_host_api::ThreadId;
 use ironclaw_product_adapters::{
     ApprovalDecision, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
     ProductInboundPayload, ProductRejection, ProductRejectionKind, ProductWorkflow,
@@ -245,13 +246,8 @@ impl ProductWorkflow for DefaultProductWorkflow {
             projection_thread_id_from_binding(&binding, payload.thread_id_hint.as_deref())?;
 
         Ok(ProjectionSubscriptionRequest {
-            actor: TurnActor::new(binding.user_id.clone()),
-            scope: TurnScope::new(
-                binding.tenant_id.clone(),
-                binding.agent_id.clone(),
-                binding.project_id.clone(),
-                thread_id,
-            ),
+            actor: TurnActor::new(binding.actor_user_id.clone()),
+            scope: turn_scope_for_thread(&binding, thread_id),
             after_cursor: payload.after_cursor.clone(),
         })
     }
@@ -416,7 +412,7 @@ async fn dispatch_approval_resolution(
         .lookup_binding(resolve_binding_request(envelope))
         .await?;
     let scope = turn_scope_from_binding(&binding);
-    let actor = TurnActor::new(binding.user_id.clone());
+    let actor = TurnActor::new(binding.actor_user_id.clone());
     let gate_ref = GateRef::new(payload.gate_ref.clone()).map_err(|_| {
         ProductWorkflowError::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::InvalidGateRef,
@@ -455,7 +451,7 @@ async fn dispatch_scoped_approval_resolution(
         .lookup_binding(resolve_binding_request(envelope))
         .await?;
     let scope = turn_scope_from_binding(&binding);
-    let actor = TurnActor::new(binding.user_id.clone());
+    let actor = TurnActor::new(binding.actor_user_id.clone());
     let pending = approval_interaction_service
         .list_pending(ListPendingApprovalsRequest {
             scope: scope.clone(),
@@ -533,7 +529,7 @@ async fn dispatch_auth_resolution(
         .lookup_binding(resolve_binding_request(envelope))
         .await?;
     let scope = turn_scope_from_binding(&binding);
-    let actor = TurnActor::new(binding.user_id.clone());
+    let actor = TurnActor::new(binding.actor_user_id.clone());
     let gate_ref = GateRef::new(payload.auth_request_ref.clone()).map_err(|_| {
         ProductWorkflowError::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::InvalidGateRef,
@@ -672,11 +668,16 @@ fn interaction_resolution_idempotency_key(
 }
 
 fn turn_scope_from_binding(binding: &ResolvedBinding) -> TurnScope {
-    TurnScope::new(
+    turn_scope_for_thread(binding, binding.thread_id.clone())
+}
+
+fn turn_scope_for_thread(binding: &ResolvedBinding, thread_id: ThreadId) -> TurnScope {
+    TurnScope::new_with_owner(
         binding.tenant_id.clone(),
         binding.agent_id.clone(),
         binding.project_id.clone(),
-        binding.thread_id.clone(),
+        thread_id,
+        binding.subject_user_id.clone(),
     )
 }
 

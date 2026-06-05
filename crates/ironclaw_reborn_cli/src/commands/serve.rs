@@ -162,6 +162,9 @@ impl ServeCommand {
             .map(ironclaw_reborn_composition::host_api::ProjectId::new)
             .transpose()
             .map_err(|err| anyhow!("[identity].default_project is invalid: {err}"))?;
+        if let Some(project_id) = default_project_id.clone() {
+            runtime_input = runtime_input.with_default_project_id(project_id);
+        }
         let slack_host_beta_config = crate::commands::serve_slack::resolve_slack_config_for_serve(
             config_file.as_ref().and_then(|file| file.slack.as_ref()),
             &tenant_id,

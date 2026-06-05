@@ -153,10 +153,12 @@ fn parse_message_event(
 /// Fixed user-message routing strategies in this first slice.
 /// `AppMention`: public channel, strip leading `@mention`, thread fallback to `ts`.
 /// `Dm`: direct-message channel required, keep text verbatim, no thread fallback.
+/// `ThreadReply`: channel thread reply, keep text verbatim, require `thread_ts`.
 #[derive(Debug, Clone, Copy)]
 enum SlackMessageKind {
     AppMention,
     Dm,
+    ThreadReply,
 }
 
 fn try_parse_user_message(
@@ -179,6 +181,9 @@ fn try_parse_user_message(
     {
         return noop_parsed_inbound(event_id, team_id, Some(event));
     }
+    if matches!(kind, SlackMessageKind::ThreadReply) && event.thread_ts.is_none() {
+        return noop_parsed_inbound(event_id, team_id, Some(event));
+    }
     let Some(ts) = event.ts.as_deref() else {
         return noop_parsed_inbound(event_id, team_id, Some(event));
     };
@@ -194,6 +199,11 @@ fn try_parse_user_message(
             raw_text.to_string(),
             event.thread_ts.as_deref(),
             ProductTriggerReason::DirectChat,
+        ),
+        SlackMessageKind::ThreadReply => (
+            raw_text.to_string(),
+            event.thread_ts.as_deref(),
+            ProductTriggerReason::ReplyToBot,
         ),
     };
 
@@ -223,7 +233,7 @@ fn parse_thread_interaction(
         ProductTriggerReason::ReplyToBot,
     )?
     else {
-        return noop_parsed_inbound(event_id, team_id, Some(event));
+        return try_parse_user_message(event_id, team_id, event, SlackMessageKind::ThreadReply);
     };
     Ok(parsed)
 }
@@ -802,6 +812,40 @@ mod tests {
         }));
 
         assert!(matches!(inbound.payload, ProductInboundPayload::NoOp));
+    }
+
+    #[test]
+    fn channel_thread_message_becomes_reply_to_bot_user_message() {
+        let inbound = parse(serde_json::json!({
+            "type": "event_callback",
+            "team_id": "T123",
+            "event_id": "EvThreadReply",
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "channel": "C123",
+                "text": "continue without mentioning the bot",
+                "ts": "1710000000.000011",
+                "thread_ts": "1710000000.000010"
+            }
+        }));
+
+        assert_eq!(inbound.external_conversation_ref.conversation_id(), "C123");
+        assert_eq!(
+            inbound.external_conversation_ref.topic_id(),
+            Some("1710000000.000010")
+        );
+        assert_eq!(
+            inbound.external_conversation_ref.reply_target_message_id(),
+            Some("1710000000.000011")
+        );
+        match inbound.payload {
+            ProductInboundPayload::UserMessage(payload) => {
+                assert_eq!(payload.text, "continue without mentioning the bot");
+                assert_eq!(payload.trigger, ProductTriggerReason::ReplyToBot);
+            }
+            other => panic!("expected user message, got {other:?}"),
+        }
     }
 
     #[test]

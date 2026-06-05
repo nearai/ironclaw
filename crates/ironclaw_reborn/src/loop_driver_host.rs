@@ -891,7 +891,11 @@ where
     /// owner-agnostic flows and runs without an actor (background tasks,
     /// triggers) are unaffected.
     fn effective_thread_scope(&self, run_context: &LoopRunContext) -> ThreadScope {
-        crate::thread_scope::ThreadScopeResolver::resolve(&self.thread_scope, run_context.actor())
+        crate::thread_scope::ThreadScopeResolver::resolve_for_turn(
+            &self.thread_scope,
+            &run_context.scope,
+            run_context.actor(),
+        )
     }
 
     fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
@@ -1990,11 +1994,18 @@ fn validate_thread_scope(
     }
     // The thread store keys threads by `owner_user_id` (via the MountView in
     // `ThreadScope::to_resource_scope`), but that axis is not part of the
-    // on-disk thread path, so a wrong owner silently reads an empty subtree
-    // and surfaces as `UnknownThread` deep in the Prompt stage. When the run
-    // carries an authenticated actor and the thread scope declares an owner,
-    // require them to agree so the divergence fails loud here instead.
-    if let (Some(thread_owner), Some(actor)) =
+    // on-disk thread path, so a wrong owner silently reads an empty subtree.
+    // Actor-fallback turns still require owner=actor. Explicit-owner turns
+    // intentionally allow actor/subject divergence for shared Slack/team
+    // routes, but the explicit subject must match the resolved thread owner.
+    if run_context.scope.has_explicit_thread_owner() {
+        if run_context.scope.explicit_owner_user_id() != thread_scope.owner_user_id.as_ref() {
+            return Err(RebornLoopDriverHostError::ScopeMismatch {
+                reason: "thread scope owner does not match the explicit loop run subject"
+                    .to_string(),
+            });
+        }
+    } else if let (Some(thread_owner), Some(actor)) =
         (thread_scope.owner_user_id.as_ref(), run_context.actor())
         && thread_owner != &actor.user_id
     {

@@ -5,14 +5,19 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
+use ironclaw_capabilities::{
+    CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationHandler,
+    CapabilityObligationRequest,
+};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, DispatchError, EffectKind, HostPortCatalog, InvocationId,
-    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PermissionMode,
-    ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
-    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind, RuntimeHttpEgress,
-    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
+    CapabilityDescriptor, CapabilityId, DispatchError, EffectKind, ExtensionId, HostPortCatalog,
+    InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
+    PermissionMode, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
+    RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+    RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeKind,
+    SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -24,19 +29,20 @@ use ironclaw_resources::{
 use ironclaw_secrets::{
     InMemorySecretStore, SecretLeaseId, SecretMaterial, SecretStore, SecretStoreError,
 };
+use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
 use super::{
     CapabilitySurfaceVersion, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
-    FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostRuntimeServices,
-    LocalHostProcessPort, LocalInvocationServicesResolver, McpRuntimeAdapter, NetworkMode,
-    ProcessBackendKind, ProcessResultStore, ProcessStore, ProductionWiringComponent,
+    FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostRuntimeHttpEgressPort,
+    HostRuntimeServices, LocalHostProcessPort, LocalInvocationServicesResolver, McpRuntimeAdapter,
+    NetworkMode, ProcessBackendKind, ProcessResultStore, ProcessStore, ProductionWiringComponent,
     ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem, RuntimeAdapter,
     RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeProfile, SecretMode,
     ServiceResolvedRuntimeAdapter,
 };
-use crate::CommandExecutionRequest;
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
+use crate::{CommandExecutionRequest, HostRuntimeCredentialMaterial, HostRuntimeHttpEgressRequest};
 
 mod first_party_runtime_adapter;
 mod mcp_runtime_adapter;
@@ -142,6 +148,134 @@ async fn product_auth_ports_stage_secret_from_source_scope_into_target_scope() {
 }
 
 #[tokio::test]
+async fn runtime_secret_material_stager_stages_secret_material_into_target_scope() {
+    let services = test_services()
+        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .try_with_host_http_egress(RecordingNetwork::ok())
+        .expect("host HTTP egress should wire with graph secret store");
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("config-secret").unwrap();
+
+    services
+        .runtime_secret_material_stager()
+        .stage_secret_material_once(
+            &scope,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("config-secret-material"),
+        )
+        .await
+        .expect("runtime stager should stage provided secret material");
+
+    let staged = services
+        .secret_injection_store
+        .take(&scope, &capability_id, &handle)
+        .expect("staged secret should be readable for target scope")
+        .expect("provided material should be staged");
+    assert_eq!(staged.expose_secret(), "config-secret-material");
+}
+
+#[tokio::test]
+async fn host_runtime_http_egress_port_executes_with_host_staged_credentials() {
+    let network = RecordingNetwork::ok();
+    let recorded_requests = Arc::clone(&network.requests);
+    let services = test_services()
+        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .try_with_host_http_egress(network)
+        .expect("host HTTP egress should wire with graph secret store");
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("host-token").unwrap();
+    let port = services
+        .host_runtime_http_egress_port()
+        .expect("host runtime egress port should be configured");
+
+    port.execute(HostRuntimeHttpEgressRequest {
+        extension_id: ExtensionId::new("test-extension").unwrap(),
+        trust: TrustClass::System,
+        request: request_without_credentials(scope.clone(), capability_id.clone()),
+        credentials: vec![HostRuntimeCredentialMaterial {
+            handle: handle.clone(),
+            material: SecretMaterial::from("host-staged-token"),
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        }],
+    })
+    .await
+    .expect("host egress port should stage credentials and execute");
+
+    {
+        let requests = recorded_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization"),
+            Some(&(
+                "authorization".to_string(),
+                "Bearer host-staged-token".to_string()
+            ))
+        );
+    }
+
+    let error = port
+        .execute(HostRuntimeHttpEgressRequest {
+            extension_id: ExtensionId::new("test-extension").unwrap(),
+            trust: TrustClass::System,
+            request: request_with_staged_credential(scope, capability_id, handle),
+            credentials: Vec::new(),
+        })
+        .await
+        .expect_err("caller-provided credential injections must be rejected");
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert_eq!(recorded_requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn host_runtime_http_egress_port_denies_before_network_when_obligation_fails() {
+    let network = RecordingNetwork::ok();
+    let recorded_requests = Arc::clone(&network.requests);
+    let runtime_http_egress = Arc::new(crate::HostHttpEgressService::production(
+        network,
+        InMemorySecretStore::new(),
+        Arc::new(NetworkObligationPolicyStore::new()),
+        Arc::new(RuntimeSecretInjectionStore::new()),
+        Arc::new(crate::http_body::UnsupportedRuntimeHttpBodyStore),
+    ));
+    let secret_stager =
+        super::RuntimeSecretMaterialStager::new(Arc::new(RuntimeSecretInjectionStore::new()));
+    let port = HostRuntimeHttpEgressPort::new(
+        runtime_http_egress,
+        Arc::new(DenyingObligationHandler),
+        secret_stager,
+    );
+
+    let error = port
+        .execute(HostRuntimeHttpEgressRequest {
+            extension_id: ExtensionId::new("test-extension").unwrap(),
+            trust: TrustClass::System,
+            request: request_without_credentials(sample_scope(), sample_capability_id()),
+            credentials: Vec::new(),
+        })
+        .await
+        .expect_err("obligation denial should reject before network dispatch");
+
+    assert_eq!(
+        error.reason_code(),
+        ironclaw_host_api::RuntimeHttpEgressReasonCode::RequestDenied
+    );
+    assert!(recorded_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
@@ -221,7 +355,7 @@ async fn host_http_egress_helper_injects_staged_credentials_from_handoff_store()
 }
 
 #[tokio::test]
-async fn host_http_egress_helper_reuses_staged_credentials_during_same_dispatch() {
+async fn host_http_egress_helper_consumes_staged_credentials_after_first_egress() {
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
@@ -254,19 +388,23 @@ async fn host_http_egress_helper_reuses_staged_credentials_during_same_dispatch(
         ))
         .await
         .expect("first request should inject staged credential");
-    egress
+    let replay = egress
         .execute(request_with_staged_credential(scope, capability_id, handle))
         .await
-        .expect("second request in same dispatch should reuse staged credential");
+        .expect_err("consumed staged credential must not be reusable");
+    assert!(matches!(
+        replay,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
 
     let requests = recorded_requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert!(requests.iter().all(|request| {
-        request
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
             .headers
             .iter()
             .any(|(name, value)| name == "authorization" && value == "Bearer staged-secret")
-    }));
+    );
 }
 
 #[tokio::test]
@@ -1059,6 +1197,20 @@ impl NetworkHttpEgress for RecordingNetwork {
                 response_bytes: 11,
                 resolved_ip: None,
             },
+        })
+    }
+}
+
+struct DenyingObligationHandler;
+
+#[async_trait]
+impl CapabilityObligationHandler for DenyingObligationHandler {
+    async fn satisfy(
+        &self,
+        _request: CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        Err(CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Network,
         })
     }
 }

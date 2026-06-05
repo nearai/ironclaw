@@ -1,4 +1,5 @@
 mod credential;
+mod host_port;
 mod pipeline;
 mod sanitize;
 
@@ -12,8 +13,13 @@ use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::SecretStore;
 use std::{fmt, sync::Arc};
 
-use crate::http_body::RuntimeHttpBodyStore;
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
+use crate::{ToolCallHttpEgress, http_body::RuntimeHttpBodyStore};
+
+pub use host_port::{
+    HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
+    RuntimeSecretMaterialStager, RuntimeSecretStageError,
+};
 
 #[derive(Clone)]
 pub struct HostHttpEgressService<N, S> {
@@ -167,6 +173,34 @@ where
         let scope = request.scope.clone();
         let capability_id = request.capability_id.clone();
         let result = pipeline::execute(self, request).await;
+        match result {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                if error.should_discard_staged_policy() {
+                    self.discard_staged_policy(&scope, &capability_id);
+                }
+                if error.should_discard_staged_secret_injections() {
+                    self.discard_staged_secret_injections(&scope, &capability_id);
+                }
+                Err(error.into_inner())
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl<N, S> ToolCallHttpEgress for HostHttpEgressService<N, S>
+where
+    N: NetworkHttpEgress + Send + Sync,
+    S: SecretStore + Send + Sync,
+{
+    async fn execute_for_model_visible_output(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let scope = request.scope.clone();
+        let capability_id = request.capability_id.clone();
+        let result = pipeline::execute_for_model_visible_output(self, request).await;
         match result {
             Ok(response) => Ok(response),
             Err(error) => {
