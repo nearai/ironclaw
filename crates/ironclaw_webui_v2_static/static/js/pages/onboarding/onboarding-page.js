@@ -30,14 +30,22 @@ const FEATURED = [
 function NearAiSetupMenu({ provider, isBusy, login, t, onSetUp }) {
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef(null);
+  const setupBusy = isBusy || login.nearaiBusy;
 
   React.useEffect(() => {
     if (!open) return undefined;
     const onDoc = (event) => {
       if (ref.current && !ref.current.contains(event.target)) setOpen(false);
     };
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") setOpen(false);
+    };
     document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKeyDown);
+    };
   }, [open]);
 
   const menuItems = [
@@ -76,6 +84,7 @@ function NearAiSetupMenu({ provider, isBusy, login, t, onSetUp }) {
         className="gap-1.5"
         aria-haspopup="true"
         aria-expanded=${open ? "true" : "false"}
+        disabled=${setupBusy}
         onClick=${() => setOpen((v) => !v)}
       >
         ${t("onboarding.setUp")}

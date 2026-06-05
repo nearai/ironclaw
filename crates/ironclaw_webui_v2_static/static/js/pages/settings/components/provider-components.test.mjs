@@ -307,8 +307,13 @@ function createNearAiSetupMenuHarness() {
     Icon: "Icon",
     React: createReactMenuStateStub(state),
     document: {
-      addEventListener: () => {},
-      removeEventListener: () => {},
+      addEventListener: (type, handler) => {
+        state.listeners ??= {};
+        state.listeners[type] = handler;
+      },
+      removeEventListener: (type, handler) => {
+        if (state.listeners?.[type] === handler) delete state.listeners[type];
+      },
     },
     globalThis: {},
     html,
@@ -530,6 +535,7 @@ test("NearAiSetupMenu keeps NEAR onboarding SSO choices behind setup dropdown", 
 
   let rendered = harness.render();
   assert.equal(valueAfter(rendered, "aria-expanded="), "false");
+  assert.equal(firstButtonProps(rendered).disabled, false);
   let labels = collectScalars(rendered);
   assert.ok(labels.includes("onboarding.setUp"));
   assert.ok(!labels.includes("llm.addApiKey"));
@@ -541,6 +547,7 @@ test("NearAiSetupMenu keeps NEAR onboarding SSO choices behind setup dropdown", 
 
   rendered = harness.render();
   assert.equal(valueAfter(rendered, "aria-expanded="), "true");
+  assert.equal(typeof harness.state.listeners.keydown, "function");
   labels = collectScalars(rendered);
   assert.ok(labels.includes("llm.addApiKey"));
   assert.ok(labels.includes("onboarding.nearWallet"));
@@ -555,4 +562,35 @@ test("NearAiSetupMenu keeps NEAR onboarding SSO choices behind setup dropdown", 
   rendered = harness.render();
   deepValuesAfter(rendered, "onClick=")[3]();
   assert.deepEqual(harness.calls.at(-1), ["sso", "github"]);
+});
+
+test("NearAiSetupMenu disables setup trigger while setup or login is busy", () => {
+  const harness = createNearAiSetupMenuHarness();
+
+  assert.equal(firstButtonProps(harness.render({ isBusy: true })).disabled, true);
+  assert.equal(
+    firstButtonProps(
+      harness.render({
+        login: {
+          nearaiBusy: true,
+          startNearai: () => {},
+          startNearaiWallet: () => {},
+        },
+      })
+    ).disabled,
+    true
+  );
+});
+
+test("NearAiSetupMenu closes the setup dropdown on Escape", () => {
+  const harness = createNearAiSetupMenuHarness();
+
+  firstButtonProps(harness.render()).onClick();
+  harness.render();
+
+  harness.state.listeners.keydown({ key: "Enter" });
+  assert.equal(harness.state.open, true);
+
+  harness.state.listeners.keydown({ key: "Escape" });
+  assert.equal(harness.state.open, false);
 });
