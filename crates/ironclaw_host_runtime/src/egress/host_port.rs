@@ -13,7 +13,7 @@ use ironclaw_secrets::SecretMaterial;
 
 use crate::obligations::RuntimeSecretInjectionStore;
 
-/// Canonical host-runtime one-shot secret material staging port.
+/// Canonical host-runtime secret material staging port.
 ///
 /// This is for host-owned adapters that already hold trusted secret material
 /// and need the shared runtime HTTP egress to inject it without exposing the

@@ -46,3 +46,7 @@ updates:
       actions:
         patterns:
           - "*"
+    ignore:
+      # This action is SHA-pinned and manually bumped with cargo-component.
+      # Dependabot currently fails the main updater run when refreshing it.
+      - dependency-name: taiki-e/install-action

@@ -168,7 +168,7 @@ where
 /// Canonical host-runtime ports used by product-auth provider adapters.
 ///
 /// This intentionally exposes only the already-composed egress, obligation
-/// handler, and scoped one-shot secret staging operation. Product/auth adapters
+/// handler, and scoped secret material staging operation. Product/auth adapters
 /// must not receive the mutable handoff stores that back those ports.
 #[derive(Clone)]
 pub struct ProductAuthProviderRuntimePorts {
@@ -453,13 +453,13 @@ where
         Arc::new(self.builtin_obligation_handler())
     }
 
-    /// Returns the canonical host-runtime one-shot secret material stager.
+    /// Returns the canonical host-runtime secret material stager.
     pub fn runtime_secret_material_stager(&self) -> RuntimeSecretMaterialStager {
         RuntimeSecretMaterialStager::new(Arc::clone(&self.secret_injection_store))
     }
 
     /// Returns a host-mediated HTTP egress port that owns network-obligation
-    /// authorization and one-shot host-held credential staging.
+    /// authorization and scoped host-held credential staging.
     pub fn host_runtime_http_egress_port(&self) -> Option<HostRuntimeHttpEgressPort> {
         Some(HostRuntimeHttpEgressPort::new(
             self.runtime_http_egress()?,

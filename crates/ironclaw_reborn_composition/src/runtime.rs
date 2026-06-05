@@ -2363,7 +2363,7 @@ mod tests {
     use crate::runtime_input::{
         PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
         TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
-        TriggerPollerSettings,
+        TriggerPollerSettings, TurnRunnerSettings,
     };
     use crate::webui::build_webui_services;
 
@@ -3281,6 +3281,10 @@ mod tests {
             agent_id: "runtime-cancel-child-agent".to_string(),
             source_binding_id: "runtime-cancel-child-source".to_string(),
             reply_target_binding_id: "runtime-cancel-child-reply".to_string(),
+        })
+        .with_runner_settings(TurnRunnerSettings {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_secs(60),
         })
         .with_model_gateway_override(gateway);
 
