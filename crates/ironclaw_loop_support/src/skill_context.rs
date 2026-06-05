@@ -198,6 +198,13 @@ fn skill_trust_level(trust: SkillTrust) -> SkillTrustLevel {
 }
 
 fn skill_context_error_to_host_error(error: SkillContextError) -> AgentLoopHostError {
+    tracing::warn!(
+        component = "skill_context",
+        operation = "map_context_error",
+        error = %error,
+        error_debug = ?error,
+        "skill context error mapped to safe host error"
+    );
     let build_error = match error {
         SkillContextError::TrustDataMissing => HostSkillContextBuildError::TrustDataMissing,
         SkillContextError::VisibilityDataMissing => {

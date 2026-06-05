@@ -340,8 +340,9 @@ impl std::error::Error for ParseRuntimePolicyEnumError {}
 ///
 /// `ScopedVirtual` is the safe default — declared mounts only, no host paths
 /// reachable. The other variants progressively widen authority and are
-/// only valid in matching deployment modes (`HostWorkspace` for local,
-/// `TenantWorkspace` for hosted, `OrgDedicatedWorkspace` for enterprise).
+/// only valid in matching deployment modes (`HostWorkspace` /
+/// `HostWorkspaceAndHome` for local, `TenantWorkspace` for hosted,
+/// `OrgDedicatedWorkspace` for enterprise).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -350,6 +351,9 @@ pub enum FilesystemBackendKind {
     ScopedVirtual,
     /// Selected host workspace root. Local single-user only.
     HostWorkspace,
+    /// Selected host workspace plus the caller-confirmed host home root.
+    /// Local single-user yolo only.
+    HostWorkspaceAndHome,
     /// Tenant-scoped workspace under hosted multi-tenant boundary.
     TenantWorkspace,
     /// Single-organization dedicated workspace.
@@ -361,6 +365,7 @@ impl FilesystemBackendKind {
         match self {
             Self::ScopedVirtual => "scoped_virtual",
             Self::HostWorkspace => "host_workspace",
+            Self::HostWorkspaceAndHome => "host_workspace_and_home",
             Self::TenantWorkspace => "tenant_workspace",
             Self::OrgDedicatedWorkspace => "org_dedicated_workspace",
         }
@@ -780,6 +785,7 @@ mod tests {
         for fs in [
             FilesystemBackendKind::ScopedVirtual,
             FilesystemBackendKind::HostWorkspace,
+            FilesystemBackendKind::HostWorkspaceAndHome,
             FilesystemBackendKind::TenantWorkspace,
             FilesystemBackendKind::OrgDedicatedWorkspace,
         ] {

@@ -193,6 +193,307 @@ async fn both_paths_require_auth() {
     }
 }
 
+/// `tools: [{type: "function", ...}]` is the externally-provided-tools
+/// surface. POST handler must accept the field instead of rejecting with
+/// 400 — the agent's reply is delivered asynchronously, but the request
+/// validation has to clear. We use an obviously bad tool definition
+/// (missing `name`) to assert the dedicated 400 path: this proves both
+/// "the tools field is parsed" and "validation kicks in".
+#[tokio::test]
+async fn missing_tool_name_returns_validation_error() {
+    let (addr, _state, _guard) = start_test_server().await;
+    let url = format!("http://{}/api/v1/responses", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "default",
+            "input": "hi",
+            "tools": [
+                {"type": "function", "description": "nameless"}
+            ]
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses with malformed tool");
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "expected 400 from external-tool validator, got {}",
+        resp.status()
+    );
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("name"),
+        "validation error should mention the missing 'name' field, got: {body}"
+    );
+}
+
+/// Unsupported tool types (e.g. `web_search`) must be rejected by the
+/// validator with a clear 400 — not silently accepted, since the engine
+/// doesn't honour them.
+#[tokio::test]
+async fn unsupported_tool_type_returns_validation_error() {
+    let (addr, _state, _guard) = start_test_server().await;
+    let url = format!("http://{}/api/v1/responses", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "default",
+            "input": "hi",
+            "tools": [
+                {"type": "web_search", "name": "search"}
+            ]
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses with unsupported tool type");
+
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("web_search"),
+        "validation error should mention the unsupported tool type, got: {body}"
+    );
+}
+
+/// `instructions` is a per-request system/developer message (OpenAI Responses
+/// API spec). The handler used to reject it with 400; it must now accept it
+/// and route the request into the agent loop. We assert the request clears
+/// the synchronous validation gate by asking for a malformed `model` so the
+/// handler short-circuits with a 400 whose message is about `model`, not
+/// about `instructions`. A 400 mentioning `instructions` would mean the
+/// rejection regressed.
+#[tokio::test]
+async fn instructions_field_is_accepted() {
+    let (addr, _state, _guard) = start_test_server().await;
+    let url = format!("http://{}/api/v1/responses", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "not-a-real-model",
+            "input": "hi",
+            "instructions": "You are a terse assistant. Always reply in one sentence.",
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses with instructions");
+
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        !body.contains("instructions"),
+        "instructions must no longer be rejected, got: {body}"
+    );
+    assert!(
+        body.contains("Model selection"),
+        "expected the model rejection to be the reason for 400, got: {body}"
+    );
+}
+
+/// External tools require engine v2: when the engine is not initialized
+/// the handler must reject the request with a clear 4xx instead of
+/// silently degrading. The path-prefix gateway boots without engine v2
+/// (no `init_engine` call, so the `ExternalToolCatalog` is absent), and
+/// the handler keys off catalog presence rather than reading env vars
+/// directly — so this test exercises the no-engine branch by virtue of
+/// what `TestGatewayBuilder` actually wires up. No process-global env
+/// mutation required.
+#[tokio::test]
+async fn external_tools_rejected_when_engine_v2_disabled() {
+    let (addr, _state, _guard) = start_test_server().await;
+    let url = format!("http://{}/api/v1/responses", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "default",
+            "input": "hello",
+            "tools": [
+                {"type": "function", "name": "lookup", "parameters": {"type": "object"}}
+            ]
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses with tools and engine v2 unavailable");
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "expected 400 when engine v2 is unavailable, got {}",
+        resp.status()
+    );
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.to_ascii_lowercase().contains("engine v2"),
+        "rejection should mention engine v2, got: {body}"
+    );
+}
+
+/// `function_call_output` items are a resume signal: they must be
+/// matched against a pending external-tool gate for the resolved
+/// thread. Without one (e.g. because the caller fabricates a
+/// `previous_response_id` or the gate already expired), the handler
+/// must reject with 400 instead of silently sending the resume into a
+/// fresh thread.
+#[tokio::test]
+async fn resume_without_pending_gate_returns_400() {
+    let (addr, _state, _guard) = start_test_server().await;
+    let url = format!("http://{}/api/v1/responses", addr);
+
+    // Synthesize a wire-valid previous_response_id (resp_<32hex><32hex>)
+    // that names a thread the gateway has never seen. The handler
+    // accepts the format, looks for a pending gate, finds none, and
+    // must respond 400 — not silently drop the function_call_output
+    // and start a fresh turn against the thread.
+    let fake_prev = format!("resp_{}{}", "0".repeat(32), "1".repeat(32));
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "default",
+            "previous_response_id": fake_prev,
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_made_up",
+                    "output": "irrelevant"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses resume w/o pending gate");
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "expected 400 for resume without pending gate, got {}",
+        resp.status()
+    );
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("pending"),
+        "rejection should mention the missing pending gate, got: {body}"
+    );
+}
+
+/// A caller-supplied tool name that shadows a registered (built-in
+/// or extension) action must be rejected at request validation with
+/// 400. Without this check, the catalog short-circuit in
+/// `EffectBridgeAdapter::execute_action` would silently route the
+/// LLM's call to caller-side execution — even though the LLM saw
+/// the *internal* tool's description in its action surface, since
+/// `available_action_inventory` dedupes the opposite way (internal
+/// wins). That's a confused-deputy surface where the caller can
+/// craft any output and the LLM treats it as the trusted internal
+/// tool's reply.
+#[tokio::test]
+async fn external_tool_name_shadowing_registered_action_is_rejected() {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use ironclaw::context::JobContext;
+    use ironclaw::tools::{Tool, ToolError, ToolOutput, ToolRegistry};
+
+    /// Stand-in for a registered built-in. Production tools have
+    /// the same name shape (`shell`, `memory_write`, etc.); this
+    /// tool deliberately uses a unique name so the test isn't
+    /// affected by which built-ins the harness happens to register.
+    struct StandInTool;
+
+    #[async_trait]
+    impl Tool for StandInTool {
+        fn name(&self) -> &str {
+            "stand_in_tool"
+        }
+        fn description(&self) -> &str {
+            "stand-in for a registered tool — used for collision tests"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({"ok": true}),
+                std::time::Duration::from_millis(0),
+            ))
+        }
+    }
+
+    // Spin up a gateway with a registry that contains a known tool
+    // name, so the validation check has something to collide with.
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register(Arc::new(StandInTool)).await;
+
+    let state = ironclaw::channels::web::test_helpers::TestGatewayBuilder::new()
+        .user_id("test-user")
+        .tool_registry(registry)
+        .build();
+    let auth = ironclaw::channels::web::auth::MultiAuthState::single(
+        AUTH_TOKEN.to_string(),
+        "test-user".to_string(),
+    );
+    let addr: SocketAddr = "127.0.0.1:0"
+        .parse()
+        .expect("hard-coded address must parse");
+    let bound =
+        ironclaw::channels::web::platform::router::start_server(addr, state.clone(), auth.into())
+            .await
+            .expect("start gateway test server");
+    let shutdown = state.shutdown_tx.write().await.take();
+    let _guard = ServerGuard { shutdown };
+
+    let url = format!("http://{}/api/v1/responses", bound);
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "default",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "stand_in_tool",
+                    "description": "shadow attempt",
+                    "parameters": {"type": "object"}
+                }
+            ]
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses with shadowing tool name");
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "shadowing tool name must be rejected, got {}",
+        resp.status()
+    );
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("stand_in_tool"),
+        "rejection should name the colliding tool, got: {body}"
+    );
+    assert!(
+        body.to_ascii_lowercase().contains("shadow")
+            || body.to_ascii_lowercase().contains("built-in"),
+        "rejection should explain why (shadow / built-in), got: {body}"
+    );
+}
+
 /// Both GET item paths (`/api/v1/responses/{id}` and `/v1/responses/{id}`)
 /// must also enforce bearer-token auth. A missing token should return 401,
 /// not 404 — the auth middleware has to apply to legacy aliases as well.

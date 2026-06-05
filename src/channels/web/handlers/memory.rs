@@ -244,7 +244,8 @@ mod tests {
     use crate::channels::web::sse::SseManager;
     use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
     use crate::db::Database;
-    use crate::workspace::{EmbeddingCacheConfig, Workspace};
+    use crate::workspace::Workspace;
+    use ironclaw_embeddings::EmbeddingCacheConfig;
 
     use super::memory_read_handler;
 

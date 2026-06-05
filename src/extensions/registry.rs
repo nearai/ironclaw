@@ -50,7 +50,11 @@ impl ExtensionRegistry {
     /// Search the registry by query string. Returns results sorted by relevance.
     ///
     /// Splits the query into lowercase tokens and scores each entry by matches
-    /// in name, keywords, and description.
+    /// in name, keywords, and description. Entries marked `hidden: true`
+    /// (e.g. `telegram_mtproto` alongside the canonical `telegram` channel)
+    /// are omitted from search results so the agent doesn't enumerate them
+    /// as competing options. They remain installable by explicit name via
+    /// `tool_install` (`get`/`get_with_kind` do not filter).
     pub async fn search(&self, query: &str) -> Vec<SearchResult> {
         let tokens: Vec<String> = query
             .to_lowercase()
@@ -63,6 +67,7 @@ impl ExtensionRegistry {
             return self
                 .entries
                 .iter()
+                .filter(|e| !e.hidden)
                 .map(|e| SearchResult {
                     entry: e.clone(),
                     source: ResultSource::Registry,
@@ -75,6 +80,9 @@ impl ExtensionRegistry {
 
         // Score built-in entries
         for entry in &self.entries {
+            if entry.hidden {
+                continue;
+            }
             let score = score_entry(entry, &tokens);
             if score > 0 {
                 scored.push((
@@ -91,6 +99,9 @@ impl ExtensionRegistry {
         // Score cached discoveries
         let cache = self.discovery_cache.read().await;
         for entry in cache.iter() {
+            if entry.hidden {
+                continue;
+            }
             let score = score_entry(entry, &tokens);
             if score > 0 {
                 scored.push((
@@ -270,6 +281,7 @@ pub fn builtin_entries_with_relay(relay_url: Option<String>) -> Vec<RegistryEntr
             fallback_source: None,
             auth_hint: AuthHint::ChannelRelayOAuth,
             version: None,
+            hidden: false,
         });
     }
 
@@ -295,6 +307,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
             version: None,
+            hidden: false,
         };
 
         let score = score_entry(&entry, &["notion".to_string()]);
@@ -319,6 +332,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
             version: None,
+            hidden: false,
         };
 
         let score = score_entry(&entry, &["calendar".to_string()]);
@@ -343,6 +357,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
             version: None,
+            hidden: false,
         };
 
         let score = score_entry(&entry, &["wiki".to_string()]);
@@ -367,6 +382,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
             version: None,
+            hidden: false,
         };
 
         let score = score_entry(&entry, &["xyzfoobar".to_string()]);
@@ -410,6 +426,37 @@ mod tests {
         // Linear should be near the top since it has both keywords
         let linear_pos = results.iter().position(|r| r.entry.name == "linear");
         assert!(linear_pos.is_some(), "Linear should appear in results");
+    }
+
+    /// Hidden registry entries (e.g. `telegram_mtproto`) must not surface
+    /// through `search()` — otherwise the agent re-introduces the "two
+    /// Telegram options" outcome that #3533 fixes for `list()`. Hidden
+    /// entries remain installable by exact name (via `get`/`get_with_kind`).
+    #[tokio::test]
+    async fn test_search_skips_hidden_entries() {
+        let registry = registry_with_catalog();
+
+        let results = registry.search("telegram").await;
+        assert!(
+            results.iter().all(|r| r.entry.name != "telegram_mtproto"),
+            "telegram_mtproto is hidden and must not surface in search; got: {:?}",
+            results.iter().map(|r| &r.entry.name).collect::<Vec<_>>()
+        );
+
+        let empty_results = registry.search("").await;
+        assert!(
+            empty_results
+                .iter()
+                .all(|r| r.entry.name != "telegram_mtproto"),
+            "empty-query search must also exclude hidden entries"
+        );
+
+        // Hidden entries remain installable by exact name.
+        let exact = registry.get("telegram_mtproto").await;
+        assert!(
+            exact.is_some(),
+            "hidden entries must still be retrievable by exact name"
+        );
     }
 
     #[tokio::test]
@@ -456,6 +503,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
             version: None,
+            hidden: false,
         };
 
         registry.cache_discovered(vec![discovered]).await;
@@ -483,6 +531,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::None,
             version: None,
+            hidden: false,
         };
 
         registry.cache_discovered(vec![entry.clone()]).await;
@@ -509,6 +558,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
+                hidden: false,
             },
             // Two entries with same name but different kinds should coexist
             RegistryEntry {
@@ -523,6 +573,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::Dcr,
                 version: None,
+                hidden: false,
             },
             RegistryEntry {
                 name: "dual-ext".to_string(),
@@ -538,6 +589,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
+                hidden: false,
             },
         ];
 
@@ -576,6 +628,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::Dcr,
                 version: None,
+                hidden: false,
             },
             RegistryEntry {
                 name: "test-ext".to_string(),
@@ -589,6 +642,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::Dcr,
                 version: None,
+                hidden: false,
             },
         ];
 
@@ -618,6 +672,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
+                hidden: false,
             },
             RegistryEntry {
                 name: "telegram".to_string(),
@@ -633,6 +688,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
+                hidden: false,
             },
         ];
 
@@ -696,6 +752,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::None,
             version: None,
+            hidden: false,
         };
         let channel_entry = RegistryEntry {
             name: "cached-ext".to_string(),
@@ -711,6 +768,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::None,
             version: None,
+            hidden: false,
         };
 
         registry
@@ -755,6 +813,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
+                hidden: false,
             },
             RegistryEntry {
                 name: "telegram".to_string(),
@@ -770,6 +829,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
+                hidden: false,
             },
         ];
 
@@ -819,6 +879,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::None,
                 version: None,
+                hidden: false,
             },
             RegistryEntry {
                 name: "myext".to_string(),
@@ -834,6 +895,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::None,
                 version: None,
+                hidden: false,
             },
         ];
 

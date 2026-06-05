@@ -52,6 +52,14 @@ pub fn set_runtime_env(key: &str, value: &str) {
         .insert(key.to_string(), value.to_string());
 }
 
+/// Remove a runtime env override.
+pub fn remove_runtime_env(key: &str) {
+    runtime_overrides()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(key);
+}
+
 /// Read an env var, checking real env first, then runtime overrides, then any
 /// secondary fallback registered by the embedding application.
 ///
@@ -101,5 +109,13 @@ mod tests {
         let _guard = lock_env();
         set_runtime_env("IRONCLAW_TEST_EMPTY", "");
         assert_eq!(env_or_override("IRONCLAW_TEST_EMPTY"), None);
+    }
+
+    #[test]
+    fn runtime_override_can_be_removed() {
+        let _guard = lock_env();
+        set_runtime_env("IRONCLAW_TEST_REMOVE", "1");
+        remove_runtime_env("IRONCLAW_TEST_REMOVE");
+        assert_eq!(env_or_override("IRONCLAW_TEST_REMOVE"), None);
     }
 }

@@ -224,6 +224,7 @@ fn read_directory_text_into(path: &Path, output: &mut String) {
 }
 
 const EXTENSION_MANIFEST_WITH_RAW_SENTINELS: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
 id = "echo"
 name = "Echo"
 version = "0.1.0"
@@ -239,5 +240,7 @@ id = "echo.say"
 description = "Echo safely"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object", description = "extension_raw_schema_sentinel_3022" }
+visibility = "model"
+input_schema_ref = "schemas/echo/extension_raw_schema_sentinel_3022.input.v1.json"
+output_schema_ref = "schemas/echo/extension_raw_schema_sentinel_3022.output.v1.json"
 "#;

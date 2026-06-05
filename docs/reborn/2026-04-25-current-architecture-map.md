@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Generated:** 2026-04-25T12:18:38Z
-**Last updated:** 2026-05-06 after conversation-binding semantic slice
+**Last updated:** 2026-06-02 after Reborn trigger worker lifecycle slice
 **Status:** Current docs snapshot / implementation-alignment map
 **Scope:** Reborn host architecture, current implemented slices, and explicit gaps
 
@@ -33,6 +33,7 @@ docs/reborn/contracts/settings-config.md
 docs/reborn/contracts/turns-agent-loop.md
 docs/reborn/contracts/turn-persistence.md
 docs/reborn/contracts/conversation-binding.md
+docs/reborn/contracts/triggers.md
 docs/reborn/contracts/migration-compatibility.md
 ```
 
@@ -43,6 +44,21 @@ https://github.com/nearai/ironclaw/issues/2987
 ```
 
 These docs record the delegation-ready system decisions: kernel as security perimeter, loops/userland running on the kernel surface, first-class optional `AgentId`, hybrid storage placement, typed repositories for structured state, split memory services over shared backends, durable event streams with replay cursors, all built-in obligations for V1, all three runtime lanes as first-class, and schema reuse where viable.
+
+Trigger system status: `[partially implemented]`. The contract is frozen in
+`docs/reborn/contracts/triggers.md`; `ironclaw_triggers` now owns trigger
+records, schedule validation, durable libSQL/PostgreSQL repositories, atomic
+fire claim/update APIs, poller core, and first-party `trigger_*` management
+capabilities. Reborn composition now wires a configurable background trigger
+poller lifecycle for local runtime startup/readiness/shutdown; the poller is
+opt-in by default, uses bounded shutdown for stalled ticks, records trusted
+trigger prompts only after accepted/replayed turn submission, and batches
+active-run lookup snapshots per cleanup page. Trusted trigger submission is
+sealed by trigger-worker-owned request minting, private conversation-owned
+trusted inbound construction, and Reborn architecture dependency tests.
+External trigger result delivery, production
+lifecycle/readiness policy, active-run retention/tombstone semantics, and
+production jitter source selection remain follow-up slices.
 
 ---
 
@@ -255,10 +271,12 @@ The current Reborn stack includes these contract and implementation slices. Thes
 | Runtime events and audit | `[partially implemented]` runtime/process `RuntimeEvent` vocabulary with `EventSink`, separate control-plane `AuditEnvelope` records with `AuditSink`, in-memory/JSONL sinks, tenant/user/agent-scoped JSONL path helpers, append-only writes, `EventCursor`/`EventReplay` replay after cursor, malformed-log fail-closed behavior, and hardened read-error semantics; sink failures are ignored by dispatcher/resolver so observability outages do not alter runtime or control-plane outcomes |
 | WASM lane | `[implemented slice]` `WasmRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to configured `WasmRuntime` and can enforce accepted `ApplyNetworkPolicy` obligations through `ironclaw_network::HardenedHttpEgressClient` or `WasmPolicyHttpClient` on host-mediated HTTP imports; hardened egress scans guest request/response data and can inject already-resolved HTTP credentials without exposing them to the guest |
 | Script lane | `[implemented slice]` `ScriptRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to `ScriptExecutor` with semantic manifest runner profiles, in-process demo backend, and optional legacy Docker backend support |
+| Process sandbox lane | `[partial MVP]` `ironclaw_process_sandbox` owns dynamic sandbox process execution behind `ProcessSandboxBackend` plus a `ProcessExecutor` adapter, with typed `SandboxProcessPlan` validation, trusted-config Docker mount roots in the first `DockerProcessSandboxBackend`, split install/run phase command construction, fail-closed rejection for unenforced install/runtime host allowlists, credentialed-run broker requirement, egress-lockdown container contract, explicit timeout/cancel container cleanup, and broker header rewrite/redaction policy core; full product wiring, secure capture UI, production HTTPS MITM transport, warm pools, and Kubernetes `agent-sandbox` backend remain follow-up work |
 | MCP lane | `[implemented slice]` `McpRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to `McpExecutor`; not a full MCP lifecycle product yet |
 | Process persistence | `[implemented slice]` process store/manager records, scoped process result records with inline JSON or filesystem output refs, `ProcessServices` wiring, host-facing `ProcessHost` status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, background completion/failure transition protection, lifecycle events, and resource reservation ownership/cleanup |
 | Conversation binding / inbound turns | `[implemented slice]` `ironclaw_conversations` remains the canonical conversation/thread contract for binding creation, participant checks, source/reply binding refs, external-event idempotency, accepted-message replay before live binding resolution, and `TurnCoordinator` submission refs; `ironclaw_product_workflow` adds the product-adapter-facing facade above that seam, with matching replay-before-binding and non-terminal busy retry semantics for adapter envelopes; durable transcript storage remains downstream of #3204 |
 | Live vertical slice | `[implemented slice]` runnable demos through discovery -> registry -> dispatcher adapters -> resources/events and through `CapabilityHost` -> authorization -> host-runtime-composed dispatcher adapters -> process services; host-runtime composition helper covers shared service wiring and has non-Docker in-memory and filesystem-backed live examples |
+| Subagent spawn design | `[proposed design]` `docs/reborn/subagent-spawn/README.md` and its phase docs specify child-loop spawning for the Reborn agent loop. No runtime implementation is claimed by this row; mergeable implementation still needs the contracts, DB-backed stores, projection wiring, and caller-level tests described there. |
 
 ---
 
@@ -271,6 +289,7 @@ These are explicit gaps, not architecture contradictions:
 | Real Telegram/channel adapters | Telegram/Slack/Web/CLI should be transport drivers over the shared host request/event contracts; product-grade channel adapters still need to be built or ported into this shape. |
 | Kernel turn coordination | The shared kernel-mediated service that owns one-active-run-per-thread, scope-consistent turn/run state, blocked-state coordination, checkpoint/resume edge, and handoff to the loop is not implemented yet. |
 | Reference/userland loop runtime | The default parent agent loop should be a shipped reference loop running on the kernel surface and emitting `Reply | CapabilityCalls`; custom loop families are expected later. It is not yet a Reborn runtime/service. |
+| Subagent spawn runtime | A proposed design exists in `docs/reborn/subagent-spawn/README.md`, but `spawn_subagent`, child loop families, dependent-run gates, background wake delivery, pending-gate projection wiring, and production DB-backed subagent stores are not implemented yet. |
 | Process product APIs | Process records, scoped status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, result records with filesystem JSON output refs, lifecycle events, and resource cleanup ownership exist as service slices; generalized artifact refs for streaming/binary outputs, output streams, forced abort handles, richer scoped read/projection APIs, durable subscription cursors, and event fanout are not complete. |
 | Memory plugin/indexer/search wiring | `ironclaw_memory` now owns the memory backend plugin contract and filesystem adapter plus PostgreSQL/libSQL adapters for `memory_documents`, `memory_chunks`/FTS, and `memory_document_versions`, including metadata inheritance/schema validation, skip-indexing/versioning behavior, embedding-provider integration, and rank-fused full-text/vector search APIs; external MCP/WASM/Rust backend adapters, production provider credential/network wiring, multi-scope search, and richer provider-specific search result metadata are not complete. |
 | Durable leases | Async filesystem-backed exact-invocation lease persistence now covers issue, claim, consume, revoke, reload, tenant/user/invocation isolation, and fail-closed approval+lease coordination without nested async `block_on`; single-store ACID transactions, full audit retention policy, and reusable approval scopes are not complete. |

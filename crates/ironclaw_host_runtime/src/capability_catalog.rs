@@ -36,7 +36,7 @@ pub struct HotCapabilityRecord {
     pub descriptor: CapabilityDescriptor,
     /// Resolved output schema retained adjacent to the descriptor.
     pub output_schema: Value,
-    /// Resolved prompt document. Required for model-visible capabilities.
+    /// Optional lazy help document. Not part of the always-visible model surface.
     pub prompt_doc: Option<String>,
 }
 
@@ -101,12 +101,6 @@ where
         .await?;
         let prompt_doc = match &declaration.prompt_doc_ref {
             Some(prompt_ref) => Some(read_text_ref(fs, &package.root, prompt_ref).await?),
-            None if declaration.visibility == CapabilityVisibility::Model => {
-                return Err(HostRuntimeError::invalid_request(format!(
-                    "model-visible capability {} is missing prompt_doc_ref",
-                    declaration.id
-                )));
-            }
             None => None,
         };
 
@@ -121,14 +115,14 @@ where
     Ok(())
 }
 
-async fn read_json_ref<F>(
+pub(crate) async fn read_json_ref<F>(
     fs: &F,
     root: &VirtualPath,
     reference: &CapabilityProfileSchemaRef,
     field: &'static str,
 ) -> Result<Value, HostRuntimeError>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     let path = resolve_under_root(root, reference)?;
     let bytes = read_bounded(fs, &path, MAX_HOT_SCHEMA_BYTES, field).await?;
@@ -153,7 +147,7 @@ async fn read_text_ref<F>(
     reference: &CapabilityProfileSchemaRef,
 ) -> Result<String, HostRuntimeError>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     let path = resolve_under_root(root, reference)?;
     let bytes = read_bounded(fs, &path, MAX_HOT_PROMPT_BYTES, "prompt_doc_ref").await?;
@@ -172,7 +166,7 @@ async fn read_bounded<F>(
     field: &'static str,
 ) -> Result<Vec<u8>, HostRuntimeError>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     let bytes = fs
         .read_file_bounded(path, max_bytes)

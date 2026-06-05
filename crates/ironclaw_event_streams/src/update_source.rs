@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::ProjectionScope;
@@ -19,6 +22,15 @@ pub trait ProjectionUpdateSource: Send + Sync {
         &self,
         request: ProjectionLiveUpdateRequest,
     ) -> Result<broadcast::Receiver<Arc<ProductProjectionEnvelope>>, ProjectionStreamError>;
+
+    async fn replay_after(
+        &self,
+        _request: ProjectionLiveUpdateRequest,
+        _after: Option<ironclaw_event_projections::ProjectionCursor>,
+        _limit: usize,
+    ) -> Result<Vec<Arc<ProductProjectionEnvelope>>, ProjectionStreamError> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +44,7 @@ pub struct ProjectionLiveUpdateRequest {
 pub struct InMemoryProjectionUpdateSource {
     capacity: usize,
     senders: Mutex<HashMap<ScopeAdmissionKey, broadcast::Sender<Arc<ProductProjectionEnvelope>>>>,
+    replay: Mutex<HashMap<ScopeAdmissionKey, InMemoryProjectionReplayBuffer>>,
 }
 
 impl InMemoryProjectionUpdateSource {
@@ -39,6 +52,7 @@ impl InMemoryProjectionUpdateSource {
         Self {
             capacity: capacity.max(1),
             senders: Mutex::new(HashMap::new()),
+            replay: Mutex::new(HashMap::new()),
         }
     }
 
@@ -54,6 +68,7 @@ impl InMemoryProjectionUpdateSource {
         envelope: Arc<ProductProjectionEnvelope>,
     ) -> Result<usize, ProjectionStreamError> {
         let key = live_update_key_for_envelope(envelope.as_ref())?;
+        self.remember(&key, Arc::clone(&envelope))?;
         let sender = {
             let mut senders = self.senders.lock();
             prune_inactive_senders(&mut senders);
@@ -69,6 +84,19 @@ impl InMemoryProjectionUpdateSource {
                 Err(ProjectionStreamError::Source)
             }
         }
+    }
+
+    fn remember(
+        &self,
+        key: &ScopeAdmissionKey,
+        envelope: Arc<ProductProjectionEnvelope>,
+    ) -> Result<(), ProjectionStreamError> {
+        let mut replay = self.replay.lock();
+        let buffer = replay
+            .entry(key.clone())
+            .or_insert_with(|| InMemoryProjectionReplayBuffer::new(self.capacity));
+        buffer.push(envelope);
+        Ok(())
     }
 
     fn remove_inactive_sender(&self, key: &ScopeAdmissionKey) {
@@ -97,6 +125,59 @@ impl ProjectionUpdateSource for InMemoryProjectionUpdateSource {
         });
         Ok(sender.subscribe())
     }
+
+    async fn replay_after(
+        &self,
+        request: ProjectionLiveUpdateRequest,
+        after: Option<ironclaw_event_projections::ProjectionCursor>,
+        limit: usize,
+    ) -> Result<Vec<Arc<ProductProjectionEnvelope>>, ProjectionStreamError> {
+        let key = scope_key(&request.scope, &request.target);
+        let replay = self.replay.lock();
+        let Some(buffer) = replay.get(&key) else {
+            return Ok(Vec::new());
+        };
+        buffer.replay_after(after, limit)
+    }
+}
+
+struct InMemoryProjectionReplayBuffer {
+    capacity: usize,
+    entries: VecDeque<Arc<ProductProjectionEnvelope>>,
+}
+
+impl InMemoryProjectionReplayBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, envelope: Arc<ProductProjectionEnvelope>) {
+        self.entries.push_back(envelope);
+        while self.entries.len() > self.capacity {
+            self.entries.pop_front();
+        }
+    }
+
+    fn replay_after(
+        &self,
+        after: Option<ironclaw_event_projections::ProjectionCursor>,
+        limit: usize,
+    ) -> Result<Vec<Arc<ProductProjectionEnvelope>>, ProjectionStreamError> {
+        Ok(self
+            .entries
+            .iter()
+            .filter(|entry| {
+                after.as_ref().is_none_or(|after| {
+                    entry.scope() == &after.scope && entry.cursor().runtime > after.runtime
+                })
+            })
+            .take(limit)
+            .cloned()
+            .collect())
+    }
 }
 
 fn live_update_key_for_envelope(
@@ -117,6 +198,7 @@ fn live_update_key_for_envelope(
         }
         ProductProjectionEnvelope::ThreadSnapshot(_)
         | ProductProjectionEnvelope::ThreadUpdates(_)
+        | ProductProjectionEnvelope::ThreadLiveUpdate(_)
         | ProductProjectionEnvelope::Debug(_) => ProjectionTarget::Thread { thread_id },
     };
     Ok(scope_key(scope, &target))

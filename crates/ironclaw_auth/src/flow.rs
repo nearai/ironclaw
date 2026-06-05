@@ -1,12 +1,12 @@
 use async_trait::async_trait;
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     AuthErrorCode, AuthProductError, AuthorizationCodeHash, CredentialAccountId,
     CredentialAccountLabel, LifecyclePackageRef, OpaqueStateHash, ProductActionRef, Timestamp,
     TurnRunRef,
-    credential::{CredentialAccountStatus, CredentialOwnership},
+    credential::{CredentialAccountProjection, CredentialAccountStatus, CredentialOwnership},
     ids::{AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, OAuthAuthorizationUrl},
     scope::AuthProductScope,
 };
@@ -53,7 +53,7 @@ pub enum AuthChallenge {
     },
     AccountSelectionRequired {
         provider: AuthProviderId,
-        account_ids: Vec<CredentialAccountId>,
+        accounts: Vec<CredentialAccountProjection>,
     },
     SetupRequired {
         provider: AuthProviderId,
@@ -104,6 +104,17 @@ pub struct CredentialAccountUpdateBinding {
     pub granted_extensions: Vec<ExtensionId>,
 }
 
+impl CredentialAccountUpdateBinding {
+    pub fn from_projection(account: &crate::CredentialAccountProjection) -> Self {
+        Self {
+            account_id: account.id,
+            ownership: account.ownership,
+            owner_extension: account.owner_extension.clone(),
+            granted_extensions: account.granted_extensions.clone(),
+        }
+    }
+}
+
 /// Durable scoped auth flow record. OAuth state/verifier/code values are
 /// represented by hashes only; raw callback material must stay in one-shot
 /// provider-client inputs.
@@ -128,14 +139,51 @@ pub struct AuthFlowRecord {
     pub authorization_code_hash: Option<AuthorizationCodeHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<AuthErrorCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_emitted_at: Option<Timestamp>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub expires_at: Timestamp,
 }
 
+/// Stable owner fields used by read models that project auth flows.
+///
+/// Invocation id, surface, session, and mission are intentionally excluded:
+/// they describe how setup happened, not who owns the blocked auth interaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthFlowOwnerScope {
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
+    pub thread_id: ThreadId,
+}
+
+impl AuthFlowOwnerScope {
+    pub fn matches(&self, flow: &AuthFlowRecord) -> bool {
+        let resource = &flow.scope.resource;
+        resource.tenant_id == self.tenant_id
+            && resource.user_id == self.user_id
+            && resource.agent_id == self.agent_id
+            && resource.project_id == self.project_id
+            && resource.mission_id.is_none()
+            && resource.thread_id.as_ref() == Some(&self.thread_id)
+    }
+}
+
+/// Query for one auth flow that backs a blocked turn gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnGateAuthFlowQuery {
+    pub owner: AuthFlowOwnerScope,
+    pub turn_run_ref: TurnRunRef,
+    pub gate_ref: AuthGateRef,
+    pub include_terminal: bool,
+}
+
 /// Input used to create an auth flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAuthFlow {
+    pub id: Option<AuthFlowId>,
     pub scope: AuthProductScope,
     pub kind: AuthFlowKind,
     pub provider: AuthProviderId,
@@ -174,6 +222,21 @@ pub struct OAuthCallbackFailureInput {
     pub error: AuthErrorCode,
 }
 
+/// User-selected configured credential that completes an account-selection
+/// auth flow without exposing credential internals to product surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialSelectionInput {
+    pub flow_id: AuthFlowId,
+    pub credential_account_id: CredentialAccountId,
+}
+
+/// User-submitted manual token that completed a manual-token auth flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualTokenCompletionInput {
+    pub interaction_id: AuthInteractionId,
+    pub credential_account_id: CredentialAccountId,
+}
+
 /// Pre-egress claim for an authorized OAuth callback. This validates and marks
 /// the scoped flow before one-shot provider exchange can consume a raw code.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,10 +269,35 @@ pub trait AuthFlowManager: Send + Sync {
         input: OAuthCallbackInput,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
+    async fn complete_credential_selection(
+        &self,
+        scope: &AuthProductScope,
+        input: CredentialSelectionInput,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    async fn complete_manual_token(
+        &self,
+        scope: &AuthProductScope,
+        input: ManualTokenCompletionInput,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    async fn cancel_manual_token(
+        &self,
+        scope: &AuthProductScope,
+        interaction_id: AuthInteractionId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError>;
+
     async fn fail_oauth_callback(
         &self,
         scope: &AuthProductScope,
         input: OAuthCallbackFailureInput,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    async fn mark_continuation_dispatched(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        emitted_at: Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
     async fn cancel_flow(
@@ -219,6 +307,40 @@ pub trait AuthFlowManager: Send + Sync {
     ) -> Result<AuthFlowRecord, AuthProductError>;
 }
 
-pub(crate) fn credential_status_for_completed_flow() -> CredentialAccountStatus {
+/// Read-only auth-flow projection source for product interaction views.
+///
+/// This is intentionally smaller than [`AuthFlowManager`]: callers can list
+/// sanitized flow records for scoped read-model composition, but cannot mutate
+/// auth-flow state or bypass manager validation.
+#[async_trait]
+pub trait AuthFlowRecordSource: Send + Sync {
+    async fn flow_for_turn_gate(
+        &self,
+        query: TurnGateAuthFlowQuery,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError>;
+
+    async fn flows_for_owner(
+        &self,
+        owner: AuthFlowOwnerScope,
+    ) -> Result<Vec<AuthFlowRecord>, AuthProductError>;
+}
+
+pub fn flow_matches_turn_gate_query(flow: &AuthFlowRecord, query: &TurnGateAuthFlowQuery) -> bool {
+    if !query.include_terminal && crate::is_terminal_status(flow.status) {
+        return false;
+    }
+    if !query.owner.matches(flow) {
+        return false;
+    }
+    matches!(
+        &flow.continuation,
+        AuthContinuationRef::TurnGateResume {
+            turn_run_ref,
+            gate_ref,
+        } if turn_run_ref == &query.turn_run_ref && gate_ref == &query.gate_ref
+    )
+}
+
+pub fn credential_status_for_completed_flow() -> CredentialAccountStatus {
     CredentialAccountStatus::Configured
 }

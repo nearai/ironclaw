@@ -1,0 +1,1 @@
+{"type":"object","additionalProperties":false,"required":["message"],"properties":{"message":{"type":"object","additionalProperties":false,"required":["raw","threadId"],"properties":{"raw":{"type":"string","minLength":1,"maxLength":5242880},"threadId":{"type":"string","minLength":1,"maxLength":1024}}}}}

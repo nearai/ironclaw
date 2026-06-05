@@ -23,15 +23,16 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
     GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
     NoopTurnRunWakeNotifier, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunState, TurnRunWake,
-    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore,
+    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, SpawnTreeReservation,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
+    TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore,
     TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
+        RecoverExpiredLeasesResponse, TurnRunTransitionPort,
     },
 };
 use tokio::{sync::Notify, time::timeout};
@@ -255,11 +256,11 @@ impl TurnRunTransitionPort for FailingClaimTransitions {
         panic!("failing claim transitions should not fail runs")
     }
 
-    async fn record_recovery_required(
+    async fn record_runner_failure(
         &self,
-        _request: RecordRecoveryRequiredRequest,
+        _request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        panic!("failing claim transitions should not record recovery")
+        panic!("failing claim transitions should not record terminal failure")
     }
 
     async fn apply_validated_loop_exit(
@@ -299,6 +300,59 @@ impl TurnStateStore for DurableLikeTurnStore {
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.inner.get_run_state(request).await
+    }
+}
+
+#[async_trait]
+impl TurnSpawnTreeStateStore for DurableLikeTurnStore {
+    async fn submit_child_turn(
+        &self,
+        request: SubmitChildRunRequest,
+        admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
+        run_profile_resolver: &dyn ironclaw_turns::RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.inner
+            .submit_child_turn(request, admission_policy, run_profile_resolver)
+            .await
+    }
+
+    async fn children_of(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        self.inner.children_of(scope, run_id).await
+    }
+
+    async fn get_run_record(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        self.inner.get_run_record(scope, run_id).await
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+        cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        self.inner
+            .reserve_tree_descendants(scope, root_run_id, delta, cap)
+            .await
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+    ) -> Result<(), TurnError> {
+        self.inner
+            .release_tree_descendants(scope, root_run_id, delta)
+            .await
     }
 }
 
@@ -351,11 +405,11 @@ impl TurnRunTransitionPort for DurableLikeTurnStore {
         self.inner.fail_run(request).await
     }
 
-    async fn record_recovery_required(
+    async fn record_runner_failure(
         &self,
-        request: RecordRecoveryRequiredRequest,
+        request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.inner.record_recovery_required(request).await
+        self.inner.record_runner_failure(request).await
     }
 
     async fn apply_validated_loop_exit(
@@ -445,11 +499,11 @@ impl TurnRunTransitionPort for DurableTurnStoreStub {
         panic!("transition stub should not fail runs")
     }
 
-    async fn record_recovery_required(
+    async fn record_runner_failure(
         &self,
-        _request: RecordRecoveryRequiredRequest,
+        _request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        panic!("transition stub should not record recovery")
+        panic!("transition stub should not record terminal failure")
     }
 
     async fn apply_validated_loop_exit(
@@ -584,11 +638,11 @@ impl TurnRunTransitionPort for HeartbeatTrackingTransitions {
         self.store.fail_run(request).await
     }
 
-    async fn record_recovery_required(
+    async fn record_runner_failure(
         &self,
-        request: RecordRecoveryRequiredRequest,
+        request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.store.record_recovery_required(request).await
+        self.store.record_runner_failure(request).await
     }
 
     async fn apply_validated_loop_exit(
@@ -652,11 +706,11 @@ impl TurnRunTransitionPort for ClaimRecordingTransitions {
         self.store.fail_run(request).await
     }
 
-    async fn record_recovery_required(
+    async fn record_runner_failure(
         &self,
-        request: RecordRecoveryRequiredRequest,
+        request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.store.record_recovery_required(request).await
+        self.store.record_runner_failure(request).await
     }
 
     async fn apply_validated_loop_exit(
@@ -1082,7 +1136,7 @@ async fn executor_completion_rearms_drain_without_waiting_for_poll() {
 }
 
 #[tokio::test]
-async fn executor_error_records_recovery_required_instead_of_retrying() {
+async fn executor_error_fails_run_instead_of_retrying() {
     let store = Arc::new(InMemoryTurnStateStore::default());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(FailingExecutor::default());
@@ -1106,7 +1160,7 @@ async fn executor_error_records_recovery_required_instead_of_retrying() {
                 })
                 .await
                 .unwrap();
-            if state.status == TurnStatus::RecoveryRequired {
+            if state.status == TurnStatus::Failed {
                 assert_eq!(
                     state.failure.as_ref().map(|failure| failure.category()),
                     Some("scheduler_test_error")
@@ -1117,12 +1171,12 @@ async fn executor_error_records_recovery_required_instead_of_retrying() {
         }
     })
     .await
-    .expect("run did not move to recovery_required");
+    .expect("run did not move to failed");
     handle.shutdown().await;
 }
 
 #[tokio::test]
-async fn executor_panic_records_recovery_required() {
+async fn executor_panic_fails_run() {
     let store = Arc::new(InMemoryTurnStateStore::default());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(PanickingExecutor::default());
@@ -1146,7 +1200,7 @@ async fn executor_panic_records_recovery_required() {
                 })
                 .await
                 .unwrap();
-            if state.status == TurnStatus::RecoveryRequired {
+            if state.status == TurnStatus::Failed {
                 assert_eq!(
                     state.failure.as_ref().map(|failure| failure.category()),
                     Some("scheduler_executor_panic")
@@ -1157,7 +1211,7 @@ async fn executor_panic_records_recovery_required() {
         }
     })
     .await
-    .expect("run did not move to recovery_required after executor panic");
+    .expect("run did not move to failed after executor panic");
     handle.shutdown().await;
 }
 
@@ -1196,7 +1250,7 @@ async fn scheduler_heartbeats_long_running_executor_until_completion() {
 }
 
 #[tokio::test]
-async fn canceled_hanging_executor_lease_expires_to_recovery_required() {
+async fn canceled_hanging_executor_lease_expires_to_cancelled() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
         InMemoryTurnStateStoreLimits {
             runner_lease_ttl: ChronoDuration::milliseconds(40),
@@ -1216,7 +1270,7 @@ async fn canceled_hanging_executor_lease_expires_to_recovery_required() {
     let coordinator =
         DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
 
-    let request = submit_turn_request("thread-cancel-recovery", "idem-cancel-recovery");
+    let request = submit_turn_request("thread-cancel-terminal", "idem-cancel-terminal");
     let scope = request.scope.clone();
     let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
     executor.wait_for_started().await;
@@ -1231,12 +1285,12 @@ async fn canceled_hanging_executor_lease_expires_to_recovery_required() {
         .await
         .unwrap();
 
-    wait_for_status(&*store, scope, run_id, TurnStatus::RecoveryRequired).await;
+    wait_for_status(&*store, scope, run_id, TurnStatus::Cancelled).await;
     handle.shutdown().await;
 }
 
 #[tokio::test]
-async fn expired_lease_reconciler_marks_running_run_recovery_required() {
+async fn expired_lease_reconciler_fails_running_run() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
         InMemoryTurnStateStoreLimits {
             runner_lease_ttl: ChronoDuration::milliseconds(-1),
@@ -1276,7 +1330,11 @@ async fn expired_lease_reconciler_marks_running_run_recovery_required() {
                 })
                 .await
                 .unwrap();
-            if state.status == TurnStatus::RecoveryRequired {
+            if state.status == TurnStatus::Failed {
+                assert_eq!(
+                    state.failure.as_ref().map(|failure| failure.category()),
+                    Some("lease_expired")
+                );
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1332,6 +1390,10 @@ fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest
         requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
         received_at: Utc::now(),
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
     }
 }
 
