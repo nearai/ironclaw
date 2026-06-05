@@ -215,10 +215,10 @@ impl RebornLibSqlUserStore {
             return Ok(Vec::new());
         }
 
-        let domain_predicates = std::iter::repeat("lower(email) LIKE ? ESCAPE '\\'")
-            .take(allowed_patterns.len())
-            .collect::<Vec<_>>()
-            .join(" OR ");
+        let domain_predicates =
+            std::iter::repeat_n("lower(email) LIKE ? ESCAPE '\\'", allowed_patterns.len())
+                .collect::<Vec<_>>()
+                .join(" OR ");
         let sql = format!(
             "SELECT id \
              FROM users \
