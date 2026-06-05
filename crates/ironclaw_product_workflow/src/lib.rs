@@ -25,14 +25,23 @@
 #![forbid(unsafe_code)]
 
 mod action;
+mod approval_interaction;
+mod auth_continuation;
+mod auth_interaction;
 mod binding;
+mod binding_ref;
+mod command_dispatch;
+mod commands;
 mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
+mod gate_state;
 mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;
+mod lifecycle;
+mod outbound_delivery;
 mod policy;
 mod reborn_services;
 mod webui_inbound;
@@ -42,25 +51,72 @@ pub use action::{
     ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,
     ProductActionId, ProductCommandName, ProductInboundAction, SourceBindingKey,
 };
+pub use approval_interaction::{
+    ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionActionView,
+    ApprovalInteractionDecision, ApprovalInteractionReadModel, ApprovalInteractionRejectionKind,
+    ApprovalInteractionScope, ApprovalInteractionService, ApprovalLeaseTermsProvider,
+    ApprovalResolutionPort, ApprovalResolverPort, ApprovalTurnRunLocator,
+    DefaultApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    PendingApprovalInteractionView, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, RunStateApprovalInteractionReadModel, approval_gate_ref,
+    is_approval_gate_ref,
+};
+/// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
+/// bridge product-auth continuations into the workflow-owned turn boundary.
+pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
+pub use auth_interaction::{
+    AuthCredentialAccountChoiceView, AuthGateRecord, AuthInteractionChallengeView,
+    AuthInteractionDecision, AuthInteractionReadModel, AuthInteractionRejectionKind,
+    AuthInteractionScope, AuthInteractionService, AuthInteractionStatus,
+    DefaultAuthInteractionService, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, PendingAuthInteractionView, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, is_auth_gate_ref,
+};
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding,
+    ResolvedBinding, route_kind_for_inbound_payload,
+};
+pub use command_dispatch::{
+    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductCommandService, RejectingProductCommandAdmissionService, RejectingProductCommandService,
+};
+pub use commands::{
+    LifecycleProductCommandService, ProductCommand, ProductCommandDescriptor, ProductModelCommand,
+    product_command_descriptors,
 };
 pub use conversation_binding::{
+    ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
-    StaticProductInstallationResolver,
+    StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
-pub use error::ProductWorkflowError;
+pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
-    FakeInboundTurnService,
+    FakeInboundTurnService, rejecting_reborn_services_error,
 };
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
 };
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
+pub use lifecycle::{
+    LifecycleBlockerRef, LifecycleCommandKind, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
+    LifecycleReadinessBlocker, LifecycleSkillSource, LifecycleSkillSummary,
+    UnsupportedLifecycleProductFacade,
+};
+// Product hosts use this outbound orchestration seam to wire outbound policy
+// decisions to adapter rendering without reaching into module internals.
+pub use outbound_delivery::{
+    ProductOutboundDeliveryError, ProductOutboundDeliveryOutcome, ProductOutboundDeliveryRequest,
+    ProductOutboundStatusUpdateFailure, ProductOutboundTargetResolver,
+    VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
+};
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
@@ -71,26 +127,38 @@ pub use policy::{
 // a direct dependency on `ironclaw_product_adapters` — the single-facade
 // boundary is enforced by `ironclaw_architecture`.
 pub use ironclaw_product_adapters::{
-    AuthPromptView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProgressKind,
-    ProgressUpdateView, ProjectionCursor,
+    AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
+    CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase,
+    ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
-// Re-exported so the WebUI v2 handler crate can validate the
-// `extension_name` path segment at the handler/facade boundary
-// without pulling `ironclaw_common` into its forbidden-imports set.
-pub use ironclaw_common::ExtensionName;
 pub use reborn_services::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
+    AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, AutomationProductFacade,
+    CodexLoginStart, ConnectableChannelsProductFacade, ExtensionCredentialSetupService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, LlmActiveSelection,
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductAgentBoundCaller,
+    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
+    RebornExtensionListResponse, RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
+    RebornExtensionSetupSecret, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornSetupExtensionStatus, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
+    StaticConnectableChannelsProductFacade, UnsupportedAutomationProductFacade,
+    UpsertLlmProviderRequest,
 };
+
 pub use webui_inbound::{
     WebUiAuthenticatedCaller, WebUiCancelReason, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 pub use workflow::DefaultProductWorkflow;

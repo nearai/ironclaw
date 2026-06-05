@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub create_pull_request input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository owner or organization."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository name."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "description": "Pull request title."
+    },
+    "head": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Head branch or ref."
+    },
+    "base": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Base branch."
+    },
+    "body": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Pull request body."
+    },
+    "draft": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "required": [
+    "owner",
+    "repo",
+    "title",
+    "head",
+    "base"
+  ]
+}

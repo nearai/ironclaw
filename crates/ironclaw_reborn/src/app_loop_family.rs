@@ -11,7 +11,10 @@ use ironclaw_agent_loop::{
 /// Builtin family means adding its factory here; the framework crate exports
 /// family factories but does not decide which ones are bound in production.
 pub fn build_loop_family_registry() -> Result<Arc<LoopFamilyRegistry>, LoopFamilyRegistryError> {
-    LoopFamilyRegistry::with_families(vec![Arc::new(families::default())])
+    LoopFamilyRegistry::with_families(vec![
+        Arc::new(families::default()),
+        Arc::new(families::subagent()),
+    ])
 }
 
 #[cfg(test)]
@@ -21,15 +24,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_registry_binds_default_family_only() {
+    fn production_registry_binds_default_and_subagent_families() {
         let registry = build_loop_family_registry().expect("valid production registry");
 
         assert!(registry.get(&LoopFamilyId::DEFAULT).is_some());
+        assert!(registry.get(&LoopFamilyId::SUBAGENT).is_some());
         assert!(
             registry
                 .get(&LoopFamilyId::new("unknown").expect("valid test id"))
                 .is_none()
         );
-        assert_eq!(registry.ids().count(), 1);
+        assert_eq!(registry.ids().count(), 2);
     }
 }

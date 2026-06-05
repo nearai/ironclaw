@@ -656,6 +656,7 @@ impl HookDispatcher {
     // generic `install_observer` accepts an explicit trust class; the
     // tier-specific helpers make the common case ergonomic.
 
+    // arch-exempt: too_many_args, needs HookInstallContext aggregation, plan #4088
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn install_observer(
         &mut self,
@@ -795,6 +796,7 @@ impl HookDispatcher {
         Ok(())
     }
 
+    // arch-exempt: too_many_args, needs HookInstallContext aggregation, plan #4088
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn install_event_triggered(
         &mut self,
@@ -2090,6 +2092,7 @@ impl HookDispatcherBuilder {
         Ok(self)
     }
 
+    // arch-exempt: too_many_args, needs HookInstallContext aggregation, plan #4088
     #[allow(clippy::too_many_arguments)]
     pub fn install_observer(
         mut self,
@@ -2157,6 +2160,7 @@ impl HookDispatcherBuilder {
         Ok(self)
     }
 
+    // arch-exempt: too_many_args, needs HookInstallContext aggregation, plan #4088
     #[allow(clippy::too_many_arguments)]
     pub fn install_event_triggered(
         mut self,

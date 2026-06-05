@@ -1,18 +1,26 @@
 //! Default Reborn runtime-loop composition.
 
-use std::{error::Error, fmt, sync::Arc};
+use std::{error::Error, fmt, marker::PhantomData, sync::Arc};
 
-use async_trait::async_trait;
+use ironclaw_events::SecurityAuditSink;
+use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
-    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
-    HostInputQueue, HostManagedModelGateway, HostRuntimeLoopCapabilityPortFactory,
-    HostSkillContextSource, ProductLiveCancellationReadiness, RunCancellationFactory,
+    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
+    DecoratingLoopCapabilityPortFactory, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostSkillContextSource, LoopCapabilityPortDecorator,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationReadiness,
+    RunCancellationFactory, SpawnSubagentInputCodec, SubagentDefinitionResolver,
+    SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
+    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
     verify_product_live_cancellation_probe,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
-    AgentLoopDriverError, CheckpointStateStore, DefaultTurnCoordinator, LoopCheckpointStore,
-    RunProfileResolver, TurnRunWakeNotifier, TurnStateStore,
+    AgentLoopDriverError, CheckpointStateStore, DefaultTurnCoordinator,
+    DefaultTurnLifecycleEventBus, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
+    LoopCheckpointStore, RunProfileResolver, TurnCommittedEventObserver, TurnEventSink,
+    TurnLifecycleEventBus, TurnRunWakeNotifier, TurnSpawnTreePort, TurnSpawnTreeStateStore,
+    TurnStateStore,
     loop_exit::LoopExitEvidencePort,
     run_profile::{
         AgentLoopHostError, InstructionSafetyContext, LoopCapabilityPort, LoopHostMilestoneSink,
@@ -24,14 +32,19 @@ use ironclaw_turns::{
 use crate::{
     app_loop_family::build_loop_family_registry,
     driver_registry::{DriverRegistry, DriverRegistryError},
-    loop_driver_host::{
-        LoopCapabilityPortFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
-    },
+    loop_driver_host::{RebornLoopDriverHostFactory, TextOnlyLoopHostConfig},
     loop_exit_applier::{LoopExitApplier, ThreadCheckpointLoopExitEvidencePort},
     model_routes::ModelRouteResolver,
     planned_driver_factory::{
         DefaultPlannedDriverRegistrationError, default_planned_run_profile_resolver,
         register_default_planned_driver, register_default_text_only_driver,
+        register_subagent_planned_driver,
+    },
+    subagent::{
+        capability_surface::SubagentCapabilitySurfaceResolver,
+        completion_observer::SubagentCompletionObserver,
+        gate_resolution::BoundedSubagentGateResolutionStore, goal_store::SubagentGoalStore,
+        prompt_material::GateBackedSubagentPromptMaterialSource,
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
     turn_runner::{
@@ -46,14 +59,13 @@ pub struct DefaultPlannedRuntimeConfig {
     pub host: TextOnlyLoopHostConfig,
 }
 
-pub struct DefaultPlannedRuntimeParts<T, S, G>
+pub struct DefaultPlannedRuntimeParts<T, G>
 where
-    T: TurnStateStore + TurnRunTransitionPort + Send + Sync + 'static,
-    S: SessionThreadService + ?Sized + Send + Sync + 'static,
+    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     pub turn_state: Arc<T>,
-    pub thread_service: Arc<S>,
+    pub thread_service: Arc<dyn SessionThreadService>,
     pub thread_scope: ThreadScope,
     pub model_gateway: Arc<G>,
     pub checkpoint_state_store: Arc<dyn CheckpointStateStore>,
@@ -61,6 +73,12 @@ where
     pub milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     pub capability_factory: Arc<dyn LoopCapabilityPortFactory>,
     pub capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
+    pub capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    pub subagent_goal_store: Arc<dyn RuntimeSubagentGoalStore>,
+    pub subagent_gate_store: Arc<BoundedSubagentGateResolutionStore>,
+    pub subagent_definition_resolver: Arc<dyn SubagentDefinitionResolver>,
+    pub subagent_spawn_input_codec: Arc<dyn SpawnSubagentInputCodec>,
+    pub subagent_spawn_limits: SubagentSpawnLimits,
     pub loop_exit_evidence: Arc<dyn LoopExitEvidencePort>,
     pub config: DefaultPlannedRuntimeConfig,
     pub model_route_resolver: Option<Arc<dyn ModelRouteResolver>>,
@@ -78,14 +96,18 @@ where
     pub model_policy_guard: Option<Arc<dyn LoopModelPolicyGuard>>,
     pub model_budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
     pub safety_context: Option<InstructionSafetyContext>,
-    /// Optional security-audit sink for hook-driven `Deny` decisions. When
-    /// set, [`build_default_planned_runtime`] threads it onto the
-    /// [`RebornLoopDriverHostFactory`] so the per-build `HookDispatcher`
-    /// records explicit hook denies to the retention sink. Production
-    /// composition supplies [`ironclaw_events::TracingSecurityAuditSink`];
-    /// it takes effect once a hook dispatcher builder factory is also
-    /// installed (the sink is inert without a dispatcher, by design).
-    pub hook_security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
+    pub hook_security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
+    pub turn_event_sink: Option<Arc<dyn TurnEventSink>>,
+}
+
+pub trait RuntimeSubagentGoalStore:
+    SubagentGoalStore + SubagentSpawnGoalStore + Send + Sync
+{
+}
+
+impl<T> RuntimeSubagentGoalStore for T where
+    T: SubagentGoalStore + SubagentSpawnGoalStore + Send + Sync
+{
 }
 
 pub struct RebornRuntimeLoopComposition<T, S, G>
@@ -96,10 +118,11 @@ where
 {
     pub driver_registry: Arc<DriverRegistry>,
     pub run_profile_resolver: Arc<dyn RunProfileResolver>,
-    pub coordinator: Arc<DefaultTurnCoordinator<T>>,
+    pub coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub host_factory: Arc<RebornLoopDriverHostFactory<S, G>>,
     pub worker: Arc<TurnRunnerWorker>,
     pub wake_sender: TurnRunnerWakeSender,
+    _turn_state: PhantomData<fn() -> T>,
 }
 
 #[derive(Debug)]
@@ -107,6 +130,7 @@ pub enum DefaultPlannedRuntimeBuildError {
     DriverRegistry(DriverRegistryError),
     PlannedDriver(DefaultPlannedDriverRegistrationError),
     RunProfile(String),
+    SubagentCompletion(String),
 }
 
 impl fmt::Display for DefaultPlannedRuntimeBuildError {
@@ -115,6 +139,9 @@ impl fmt::Display for DefaultPlannedRuntimeBuildError {
             Self::DriverRegistry(error) => write!(formatter, "driver registry failed: {error}"),
             Self::PlannedDriver(error) => write!(formatter, "planned driver failed: {error}"),
             Self::RunProfile(error) => write!(formatter, "run profile resolver failed: {error}"),
+            Self::SubagentCompletion(error) => {
+                write!(formatter, "subagent completion wiring failed: {error}")
+            }
         }
     }
 }
@@ -209,12 +236,14 @@ impl Error for ProductLiveRuntimeBuildError {
     }
 }
 
-pub fn build_product_live_planned_runtime<T, S, G>(
-    mut parts: DefaultPlannedRuntimeParts<T, S, G>,
-) -> Result<RebornRuntimeLoopComposition<T, S, G>, ProductLiveRuntimeBuildError>
+pub fn build_product_live_planned_runtime<T, G>(
+    mut parts: DefaultPlannedRuntimeParts<T, G>,
+) -> Result<
+    RebornRuntimeLoopComposition<T, dyn SessionThreadService, G>,
+    ProductLiveRuntimeBuildError,
+>
 where
-    T: TurnStateStore + TurnRunTransitionPort + Send + Sync + 'static,
-    S: SessionThreadService + ?Sized + Send + Sync + 'static,
+    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     if parts.model_route_resolver.is_none() {
@@ -267,17 +296,27 @@ where
             Arc::clone(&parts.loop_checkpoint_store),
             parts.thread_scope.clone(),
         )
+        .with_checkpoint_state_store(Arc::clone(&parts.checkpoint_state_store))
         .with_cancellation_factory(cancellation_factory),
     );
     build_default_planned_runtime(parts).map_err(ProductLiveRuntimeBuildError::Runtime)
 }
 
-pub fn build_default_planned_runtime<T, S, G>(
-    parts: DefaultPlannedRuntimeParts<T, S, G>,
-) -> Result<RebornRuntimeLoopComposition<T, S, G>, DefaultPlannedRuntimeBuildError>
+fn local_development_noop_safety_context() -> InstructionSafetyContext {
+    tracing::debug!(
+        "using local-development no-op instruction safety context; configure a real instruction safety scanner before product-live use"
+    );
+    InstructionSafetyContext::local_development_noop()
+}
+
+pub fn build_default_planned_runtime<T, G>(
+    parts: DefaultPlannedRuntimeParts<T, G>,
+) -> Result<
+    RebornRuntimeLoopComposition<T, dyn SessionThreadService, G>,
+    DefaultPlannedRuntimeBuildError,
+>
 where
-    T: TurnStateStore + TurnRunTransitionPort + Send + Sync + 'static,
-    S: SessionThreadService + ?Sized + Send + Sync + 'static,
+    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     let mut registry = DriverRegistry::new();
@@ -291,7 +330,8 @@ where
             ),
         )
     })?;
-    register_default_planned_driver(&mut registry, family_registry)?;
+    register_default_planned_driver(&mut registry, Arc::clone(&family_registry))?;
+    register_subagent_planned_driver(&mut registry, family_registry)?;
     let driver_registry = Arc::new(registry);
 
     let resolver = Arc::new(
@@ -314,13 +354,78 @@ where
         )),
         None => worker_wake_notifier,
     };
-    let coordinator = Arc::new(
-        DefaultTurnCoordinator::new(Arc::clone(&parts.turn_state))
-            .with_run_profile_resolver(Arc::clone(&run_profile_resolver))
-            .with_wake_notifier(wake_notifier),
-    );
+    let turn_state_for_observer: Arc<dyn TurnSpawnTreeStateStore> = parts.turn_state.clone();
+    let completion_observer = Arc::new(SubagentCompletionObserver::new_unbound(
+        Arc::clone(&parts.subagent_gate_store),
+        Arc::clone(&parts.subagent_goal_store) as Arc<dyn SubagentSpawnGoalStore>,
+        turn_state_for_observer,
+        Arc::clone(&parts.capability_result_writer),
+        Arc::clone(&parts.thread_service),
+    ));
+    let subagent_completion_observer: Arc<dyn TurnCommittedEventObserver> =
+        completion_observer.clone();
+    let lifecycle_bus = Arc::new(DefaultTurnLifecycleEventBus::new());
+    lifecycle_bus
+        .subscribe_required(Arc::clone(&subagent_completion_observer))
+        .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
+    if let Some(turn_event_sink) = parts.turn_event_sink.clone() {
+        lifecycle_bus
+            .subscribe_best_effort(turn_event_sink)
+            .map_err(|error| {
+                DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string())
+            })?;
+    }
+    let turn_state = Arc::new(LifecyclePublishingTurnStateStore::new(
+        Arc::clone(&parts.turn_state),
+        lifecycle_bus,
+    ));
+    let publication_error_port: Arc<dyn LifecyclePublicationErrorPort> = turn_state.clone();
+    let base_coordinator = DefaultTurnCoordinator::new(Arc::clone(&turn_state))
+        .with_run_profile_resolver(Arc::clone(&run_profile_resolver))
+        .with_wake_notifier(Arc::clone(&wake_notifier))
+        .with_lifecycle_publication_error_port(publication_error_port);
+    let base_coordinator_arc = Arc::new(base_coordinator);
+    let child_runs: Arc<dyn TurnSpawnTreePort> = base_coordinator_arc.clone();
+    let coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = base_coordinator_arc;
+    completion_observer
+        .bind_coordinator(Arc::clone(&coordinator))
+        .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
 
-    let turn_state_store: Arc<dyn TurnStateStore> = parts.turn_state.clone();
+    let turn_state_store: Arc<dyn TurnStateStore> = turn_state.clone();
+    let subagent_prompt_source: Arc<dyn SubagentPromptMaterialSource> =
+        Arc::new(GateBackedSubagentPromptMaterialSource::new(
+            Arc::clone(&parts.subagent_goal_store),
+            Arc::clone(&parts.subagent_gate_store),
+            Arc::clone(&parts.thread_service),
+        ));
+    let subagent_prompt_composer = SubagentPromptComposer::new(Arc::clone(&subagent_prompt_source));
+    let spawn_decorator = Arc::new(SubagentSpawnCapabilityDecorator::new(
+        SubagentSpawnDeps {
+            coordinator: Arc::clone(&coordinator) as Arc<dyn ironclaw_turns::TurnCoordinator>,
+            child_runs,
+            turn_state_store: Arc::clone(&parts.turn_state) as Arc<dyn TurnSpawnTreeStateStore>,
+            thread_service: Arc::clone(&parts.thread_service),
+            goal_store: Arc::clone(&parts.subagent_goal_store) as Arc<dyn SubagentSpawnGoalStore>,
+            gate_store: Arc::clone(&parts.subagent_gate_store)
+                as Arc<dyn ironclaw_loop_support::SubagentGateResolutionStore>,
+            definition_resolver: Arc::clone(&parts.subagent_definition_resolver),
+            spawn_input_codec: Arc::clone(&parts.subagent_spawn_input_codec),
+            result_writer: Arc::clone(&parts.capability_result_writer),
+        },
+        parts.subagent_spawn_limits,
+    )?);
+    let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(
+        DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
+            .with_decorator(spawn_decorator),
+    );
+    let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
+        Arc::new(SubagentCapabilitySurfaceResolver::new(
+            parts.capability_surface_resolver,
+            Arc::clone(&subagent_prompt_source),
+        ));
+    let safety_context = parts
+        .safety_context
+        .unwrap_or_else(local_development_noop_safety_context);
     let mut host_factory = RebornLoopDriverHostFactory::new(
         Arc::clone(&parts.thread_service),
         parts.thread_scope,
@@ -330,11 +435,10 @@ where
         Arc::clone(&parts.loop_checkpoint_store),
         parts.milestone_sink,
         parts.config.host,
+        safety_context,
     )
-    .with_profiled_capability_port_factory(
-        parts.capability_factory,
-        parts.capability_surface_resolver,
-    )
+    .with_profiled_capability_port_factory(capability_factory, capability_surface_resolver)
+    .with_subagent_prompt_composer(subagent_prompt_composer)
     .with_driver_requirements(driver_registry.requirements_snapshot());
     if let Some(resolver) = parts.model_route_resolver {
         host_factory = host_factory.with_model_route_resolver(resolver);
@@ -354,16 +458,13 @@ where
     if let Some(accountant) = parts.model_budget_accountant {
         host_factory = host_factory.with_model_budget_accountant(accountant);
     }
-    if let Some(safety) = parts.safety_context {
-        host_factory = host_factory.with_safety_context(safety);
-    }
-    host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
     if let Some(sink) = parts.hook_security_audit_sink {
         host_factory = host_factory.with_hook_security_audit_sink(sink);
     }
+    host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
     let host_factory = Arc::new(host_factory);
 
-    let transition_port: Arc<dyn TurnRunTransitionPort> = parts.turn_state;
+    let transition_port: Arc<dyn TurnRunTransitionPort> = turn_state;
     let loop_exit_applier = Arc::new(LoopExitApplier::new(
         Arc::clone(&transition_port),
         parts.loop_exit_evidence,
@@ -377,22 +478,282 @@ where
         wake_receiver,
     ));
 
-    Ok(RebornRuntimeLoopComposition {
-        driver_registry,
-        run_profile_resolver,
-        coordinator,
-        host_factory,
-        worker,
-        wake_sender,
-    })
+    Ok(
+        RebornRuntimeLoopComposition::<T, dyn SessionThreadService, G> {
+            driver_registry,
+            run_profile_resolver,
+            coordinator,
+            host_factory,
+            worker,
+            wake_sender,
+            _turn_state: PhantomData,
+        },
+    )
 }
 
-#[async_trait]
-impl LoopCapabilityPortFactory for HostRuntimeLoopCapabilityPortFactory {
-    async fn create_capability_port(
+struct SubagentSpawnCapabilityDecorator {
+    spawn_deps: Arc<SubagentSpawnDeps>,
+    spawn_id: CapabilityId,
+    spawn_limits: SubagentSpawnLimits,
+}
+
+impl SubagentSpawnCapabilityDecorator {
+    fn new(
+        spawn_deps: SubagentSpawnDeps,
+        spawn_limits: SubagentSpawnLimits,
+    ) -> Result<Self, DefaultPlannedRuntimeBuildError> {
+        let spawn_id =
+            CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+        Ok(Self {
+            spawn_deps: Arc::new(spawn_deps),
+            spawn_id,
+            spawn_limits,
+        })
+    }
+}
+
+impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
+    fn decorate(
         &self,
         run_context: &LoopRunContext,
-    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        Ok(self.for_run_context(run_context.clone()))
+        inner: Arc<dyn LoopCapabilityPort>,
+    ) -> Arc<dyn LoopCapabilityPort> {
+        Arc::new(SubagentSpawnCapabilityPort::new(
+            inner,
+            run_context.clone(),
+            self.spawn_id.clone(),
+            self.spawn_limits,
+            Arc::clone(&self.spawn_deps),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use async_trait::async_trait;
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_turns::{
+        InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
+        run_profile::{
+            AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
+            CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
+            LoopRunContext, RunProfileResolutionRequest, VisibleCapabilityRequest,
+            VisibleCapabilitySurface,
+        },
+    };
+
+    use ironclaw_loop_support::{
+        DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
+    };
+
+    async fn test_run_context() -> LoopRunContext {
+        let tenant_id = TenantId::new("tenant-runtime-test").unwrap();
+        let agent_id = AgentId::new("agent-runtime-test").unwrap();
+        let project_id = ProjectId::new("project-runtime-test").unwrap();
+        let thread_id = ThreadId::new("thread-runtime-test").unwrap();
+        let turn_scope = TurnScope::new(tenant_id, Some(agent_id), Some(project_id), thread_id);
+        let resolved = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .unwrap();
+        LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
+    }
+
+    struct FailingFactory {
+        error: AgentLoopHostError,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPortFactory for FailingFactory {
+        async fn create_capability_port(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+            Err(self.error.clone())
+        }
+    }
+
+    struct InnerPort {
+        label: &'static str,
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPort for InnerPort {
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            self.log.lock().unwrap().push(self.label);
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                format!("{label} failed", label = self.label),
+            ))
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                format!("{label} unused", label = self.label),
+            ))
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                format!("{label} unused", label = self.label),
+            ))
+        }
+    }
+
+    struct LoggingDecorator {
+        label: &'static str,
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl LoopCapabilityPortDecorator for LoggingDecorator {
+        fn decorate(
+            &self,
+            _run_context: &LoopRunContext,
+            inner: Arc<dyn LoopCapabilityPort>,
+        ) -> Arc<dyn LoopCapabilityPort> {
+            Arc::new(LoggingDecoratorPort {
+                label: self.label,
+                log: Arc::clone(&self.log),
+                inner,
+            })
+        }
+    }
+
+    struct LoggingDecoratorPort {
+        label: &'static str,
+        log: Arc<Mutex<Vec<&'static str>>>,
+        inner: Arc<dyn LoopCapabilityPort>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPort for LoggingDecoratorPort {
+        async fn visible_capabilities(
+            &self,
+            request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            self.log.lock().unwrap().push(self.label);
+            self.inner.visible_capabilities(request).await
+        }
+
+        async fn invoke_capability(
+            &self,
+            request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            self.log.lock().unwrap().push(self.label);
+            self.inner.invoke_capability(request).await
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            self.log.lock().unwrap().push(self.label);
+            self.inner.invoke_capability_batch(request).await
+        }
+    }
+
+    #[tokio::test]
+    async fn decorating_factory_applies_layers_in_order() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let inner = Arc::new(InnerPort {
+            label: "inner",
+            log: Arc::clone(&log),
+        });
+        let factory =
+            DecoratingLoopCapabilityPortFactory::new(Arc::new(StaticFactory { port: inner }))
+                .with_decorator(Arc::new(LoggingDecorator {
+                    label: "first",
+                    log: Arc::clone(&log),
+                }))
+                .with_decorator(Arc::new(LoggingDecorator {
+                    label: "second",
+                    log: Arc::clone(&log),
+                }));
+
+        let port = factory
+            .create_capability_port(&test_run_context().await)
+            .await
+            .expect("decorated capability port");
+
+        let error = match port.visible_capabilities(VisibleCapabilityRequest).await {
+            Ok(_) => panic!("inner port should fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert_eq!(&*log.lock().unwrap(), &["second", "first", "inner"]);
+    }
+
+    #[tokio::test]
+    async fn decorating_factory_propagates_inner_error() {
+        let decorate_calls = Arc::new(AtomicUsize::new(0));
+        let factory = DecoratingLoopCapabilityPortFactory::new(Arc::new(FailingFactory {
+            error: AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "inner factory failed",
+            ),
+        }))
+        .with_decorator(Arc::new(NoopDecorator {
+            decorate_calls: Arc::clone(&decorate_calls),
+        }));
+
+        let error = match factory
+            .create_capability_port(&test_run_context().await)
+            .await
+        {
+            Ok(_) => panic!("inner error should propagate"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert_eq!(error.safe_summary, "inner factory failed");
+        assert_eq!(decorate_calls.load(Ordering::SeqCst), 0);
+    }
+
+    struct StaticFactory {
+        port: Arc<dyn LoopCapabilityPort>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPortFactory for StaticFactory {
+        async fn create_capability_port(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+            Ok(Arc::clone(&self.port))
+        }
+    }
+
+    struct NoopDecorator {
+        decorate_calls: Arc<AtomicUsize>,
+    }
+
+    impl LoopCapabilityPortDecorator for NoopDecorator {
+        fn decorate(
+            &self,
+            _run_context: &LoopRunContext,
+            inner: Arc<dyn LoopCapabilityPort>,
+        ) -> Arc<dyn LoopCapabilityPort> {
+            self.decorate_calls.fetch_add(1, Ordering::SeqCst);
+            inner
+        }
     }
 }

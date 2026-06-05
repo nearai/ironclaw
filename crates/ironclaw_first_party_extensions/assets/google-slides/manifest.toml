@@ -1,0 +1,206 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "google-slides"
+name = "Google Slides"
+version = "0.1.0"
+description = "Google Slides capabilities for creating, reading, editing, and formatting presentations."
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/google_slides_tool.wasm"
+
+[[capabilities]]
+id = "google-slides.create_presentation"
+description = "Create a new presentation."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/create_presentation.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/create_presentation.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.get_presentation"
+description = "Get presentation metadata."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations.readonly"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/get_presentation.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/get_presentation.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.get_thumbnail"
+description = "Get a slide thumbnail URL."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations.readonly"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/get_thumbnail.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/get_thumbnail.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.create_slide"
+description = "Create a new slide."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/create_slide.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/create_slide.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.delete_object"
+description = "Delete a slide or page element."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/delete_object.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/delete_object.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.insert_text"
+description = "Insert text into a shape."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/insert_text.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/insert_text.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.delete_text"
+description = "Delete text from a shape."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/delete_text.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/delete_text.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.replace_all_text"
+description = "Find and replace text."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/replace_all_text.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/replace_all_text.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.create_shape"
+description = "Create a shape or text box."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/create_shape.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/create_shape.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.insert_image"
+description = "Insert an image on a slide."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/insert_image.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/insert_image.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.format_text"
+description = "Format text in a shape."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/format_text.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/format_text.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.format_paragraph"
+description = "Set paragraph alignment."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/format_paragraph.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/format_paragraph.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.replace_shapes_with_image"
+description = "Replace matching shapes with an image."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/replace_shapes_with_image.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/replace_shapes_with_image.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-slides.batch_update"
+description = "Execute raw Slides API batchUpdate requests."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/presentations"] } }, provider_scopes = ["https://www.googleapis.com/auth/presentations"], audience = { scheme = "https", host_pattern = "slides.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-slides/batch_update.input.v1.json"
+output_schema_ref = "schemas/google-slides/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-slides/batch_update.md"
+required_host_ports = ["host.runtime.http_egress"]

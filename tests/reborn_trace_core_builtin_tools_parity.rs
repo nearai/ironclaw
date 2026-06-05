@@ -3,7 +3,17 @@
 mod reborn_support;
 mod support;
 
+use std::sync::{Arc, Mutex};
+
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, StatusCode, header},
+    response::IntoResponse,
+    routing::get,
+};
 use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::{NetworkPolicy, NetworkScheme, NetworkTargetPattern};
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, HTTP_CAPABILITY_ID, JSON_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
     TIME_CAPABILITY_ID,
@@ -26,6 +36,7 @@ async fn reborn_trace_core_builtin_tools_parity() {
     let http = CapabilityId::new(HTTP_CAPABILITY_ID).expect("valid capability id");
     let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
     let apply_patch = CapabilityId::new(APPLY_PATCH_CAPABILITY_ID).expect("valid capability id");
+    let live_http = LiveHttpServer::start().await;
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![
@@ -51,7 +62,7 @@ async fn reborn_trace_core_builtin_tools_parity() {
                     http.clone(),
                     "call_http_get",
                     serde_json::json!({
-                        "url": "https://api.example.test/v1/items",
+                        "url": live_http.url("/v1/items"),
                         "headers": {"x-request-id": "reborn-core-builtins"},
                         "timeout_ms": 2500,
                     }),
@@ -84,12 +95,14 @@ async fn reborn_trace_core_builtin_tools_parity() {
             expected_tool_results: Vec::new(),
         },
     ]);
-    let mut harness = RebornBinaryE2EHarness::with_host_runtime_core_builtin_capabilities(
-        "room-trace-core-builtins",
-        model_gateway,
-    )
-    .await
-    .expect("harness");
+    let mut harness =
+        RebornBinaryE2EHarness::with_host_runtime_core_builtin_capabilities_live_http_egress(
+            "room-trace-core-builtins",
+            model_gateway,
+            live_http_network_policy(live_http.port),
+        )
+        .await
+        .expect("harness");
     seed_workspace(&harness);
     harness.start();
 
@@ -121,6 +134,22 @@ async fn reborn_trace_core_builtin_tools_parity() {
     assert_eq!(invocations[2].capability_id, http);
     assert_eq!(invocations[3].capability_id, read_file);
     assert_eq!(invocations[4].capability_id, apply_patch);
+
+    let seen_requests = live_http.requests();
+    assert_eq!(seen_requests.len(), 1);
+    assert_eq!(seen_requests[0].path, "/v1/items");
+    assert_eq!(
+        seen_requests[0].request_id.as_deref(),
+        Some("reborn-core-builtins")
+    );
+
+    let results = harness.capability_results();
+    assert_eq!(results[2].capability_id, http);
+    assert_eq!(results[2].output["status"], serde_json::json!(200));
+    assert_eq!(
+        results[2].output["body_text"],
+        serde_json::json!(r#"{"accepted":true,"source":"live-loopback"}"#)
+    );
 
     let requests = harness.model_requests();
     assert_eq!(requests.len(), 4);
@@ -160,4 +189,96 @@ fn tool_result_count(request: &ironclaw_loop_support::HostManagedModelRequest) -
         .iter()
         .filter(|message| message.role == HostManagedModelMessageRole::ToolResult)
         .count()
+}
+
+struct LiveHttpServer {
+    port: u16,
+    requests: Arc<Mutex<Vec<LiveHttpRequest>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveHttpRequest {
+    path: String,
+    request_id: Option<String>,
+}
+
+impl LiveHttpServer {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind live HTTP test server");
+        let port = listener.local_addr().expect("local addr").port();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = LiveHttpState {
+            requests: Arc::clone(&requests),
+        };
+        let app = Router::new()
+            .route("/v1/items", get(live_items))
+            .with_state(state);
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        Self {
+            port,
+            requests,
+            task,
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://127.0.0.1:{}{path}", self.port)
+    }
+
+    fn requests(&self) -> Vec<LiveHttpRequest> {
+        self.requests
+            .lock()
+            .expect("live HTTP request log lock poisoned")
+            .clone()
+    }
+}
+
+impl Drop for LiveHttpServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[derive(Clone)]
+struct LiveHttpState {
+    requests: Arc<Mutex<Vec<LiveHttpRequest>>>,
+}
+
+async fn live_items(State(state): State<LiveHttpState>, headers: HeaderMap) -> impl IntoResponse {
+    state
+        .requests
+        .lock()
+        .expect("live HTTP request log lock poisoned")
+        .push(LiveHttpRequest {
+            path: "/v1/items".to_string(),
+            request_id: headers
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+        });
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        Json(serde_json::json!({"accepted": true, "source": "live-loopback"})),
+    )
+        .into_response()
+}
+
+fn live_http_network_policy(port: u16) -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.1".to_string(),
+            port: Some(port),
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: Some(10_000),
+    }
 }

@@ -15,6 +15,18 @@ pub enum AuthSurface {
     Callback,
 }
 
+impl AuthSurface {
+    pub const ALL: [Self; 7] = [
+        Self::Api,
+        Self::Callback,
+        Self::Web,
+        Self::Chat,
+        Self::Cli,
+        Self::Tui,
+        Self::SetupAdmin,
+    ];
+}
+
 /// Scoped product auth owner.
 ///
 /// Durable implementations should key records by this scope plus the opaque

@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Drive upload_file",
+  "description": "Upload a new text file.",
+  "type": "object",
+  "required": [
+    "name",
+    "content"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "File name."
+    },
+    "content": {
+      "type": "string",
+      "description": "File content."
+    },
+    "mime_type": {
+      "type": "string",
+      "description": "MIME type. Defaults to text/plain."
+    },
+    "parent_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Parent folder ID."
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "File description."
+    }
+  },
+  "additionalProperties": false
+}

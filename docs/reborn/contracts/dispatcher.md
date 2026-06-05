@@ -147,12 +147,14 @@ pub struct CapabilityDispatchResult {
     pub provider: ExtensionId,
     pub runtime: RuntimeKind,
     pub output: serde_json::Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
     pub receipt: ResourceReceipt,
 }
 ```
 
 The shape intentionally exposes common host-level facts and avoids leaking WASM-specific internals as the generic contract.
+`display_preview` is an optional, model-hidden presentation side channel for already-sanitizable UI material such as unified diffs; callers must keep the canonical capability output in `output`.
 
 ---
 

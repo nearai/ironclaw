@@ -51,6 +51,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 | Obligations | All built-in obligations must be implemented for V1; unsupported obligations fail closed. |
 | Migration | Reuse existing schemas where viable; bridge only when necessary. |
 | Runtime lanes | WASM, Script, and MCP are all first-class V1 lanes. |
+| Triggers | Trigger intake is a planned Reborn substrate slice. V1 is cron/schedule-only, enters through host-trusted ingress, and must not introduce a parallel agent loop. |
 
 ---
 
@@ -90,9 +91,11 @@ If a task needs to change one of those answers, it is not implementation work; i
 - [`turn-persistence.md`](turn-persistence.md)
 - [`turn-runner.md`](turn-runner.md)
 - [`conversation-binding.md`](conversation-binding.md)
+- [`triggers.md`](triggers.md)
 - [`migration-compatibility.md`](migration-compatibility.md)
 - [`product-adapters.md`](product-adapters.md) (issue #3269 first-slice)
 - [`telegram-v2.md`](telegram-v2.md) (issue #3285 first-slice)
+- [`communication-delivery-resolution.md`](communication-delivery-resolution.md)
 - [`trust-boundary-hardening.md`](trust-boundary-hardening.md)
 
 ---

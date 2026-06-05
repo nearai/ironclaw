@@ -10,9 +10,12 @@
 
 use std::{fmt, sync::Arc};
 
+use async_trait::async_trait;
+use ironclaw_events::AuditSink;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    MountView, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress,
+    MountView, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
     runtime_policy::{
         DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode,
     },
@@ -31,8 +34,11 @@ use crate::{ExecutionPlan, RuntimeProcessPort};
 pub struct InvocationServices {
     pub filesystem: Arc<dyn RootFilesystem>,
     pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    pub tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
     pub process: Arc<dyn RuntimeProcessPort>,
     pub secret_store: Option<Arc<dyn SecretStore>>,
+    pub audit_sink: Option<Arc<dyn AuditSink>>,
+    pub unsafe_raw_diagnostics_allowed: bool,
 }
 
 impl fmt::Debug for InvocationServices {
@@ -44,13 +50,40 @@ impl fmt::Debug for InvocationServices {
                 "runtime_http_egress",
                 &self.runtime_http_egress.as_ref().map(|_| "[REDACTED]"),
             )
+            .field(
+                "tool_call_http_egress",
+                &self.tool_call_http_egress.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("process", &"[REDACTED]")
             .field(
                 "secret_store",
                 &self.secret_store.as_ref().map(|_| "[REDACTED]"),
             )
+            .field(
+                "audit_sink",
+                &self.audit_sink.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "unsafe_raw_diagnostics_allowed",
+                &self.unsafe_raw_diagnostics_allowed,
+            )
             .finish()
     }
+}
+
+/// HTTP egress port for host-owned tool calls that need bounded
+/// model-visible output shaping.
+///
+/// This port is intentionally host-runtime-local. Shared runtime HTTP callers
+/// use [`RuntimeHttpEgress`] and keep strict response-limit behavior; first-party
+/// tool handlers can use this narrower port when they need sanitized partial
+/// output for model context.
+#[async_trait]
+pub trait ToolCallHttpEgress: Send + Sync {
+    async fn execute_for_model_visible_output(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>;
 }
 
 /// Inputs used to bind an approved execution plan to concrete host services.
@@ -107,9 +140,11 @@ impl InvocationServicesError {
 pub struct LocalInvocationServicesResolver {
     filesystem: Arc<dyn RootFilesystem>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
     process: Arc<dyn RuntimeProcessPort>,
     tenant_sandbox_process: Option<Arc<dyn RuntimeProcessPort>>,
     secret_store: Option<Arc<dyn SecretStore>>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
 impl LocalInvocationServicesResolver {
@@ -122,10 +157,20 @@ impl LocalInvocationServicesResolver {
         Self {
             filesystem,
             runtime_http_egress,
+            tool_call_http_egress: None,
             process,
             tenant_sandbox_process: None,
             secret_store,
+            audit_sink: None,
         }
+    }
+
+    pub fn with_tool_call_http_egress(
+        mut self,
+        tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
+    ) -> Self {
+        self.tool_call_http_egress = tool_call_http_egress;
+        self
     }
 
     pub fn with_tenant_sandbox_process_port(
@@ -133,6 +178,11 @@ impl LocalInvocationServicesResolver {
         process: Arc<dyn RuntimeProcessPort>,
     ) -> Self {
         self.tenant_sandbox_process = Some(process);
+        self
+    }
+
+    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = Some(audit_sink);
         self
     }
 }
@@ -149,7 +199,7 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
         if plan.requires_filesystem
             && !matches!(
                 plan.filesystem_backend,
-                FilesystemBackendKind::HostWorkspace
+                FilesystemBackendKind::HostWorkspace | FilesystemBackendKind::HostWorkspaceAndHome
             )
         {
             return Err(InvocationServicesError::UnsupportedFilesystemBackend {
@@ -207,12 +257,21 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 .requires_network
                 .then(|| self.runtime_http_egress.clone())
                 .flatten(),
+            tool_call_http_egress: plan
+                .requires_network
+                .then(|| self.tool_call_http_egress.clone())
+                .flatten(),
             process,
             secret_store: if plan.requires_secret {
                 self.secret_store.clone()
             } else {
                 None
             },
+            audit_sink: self.audit_sink.clone(),
+            unsafe_raw_diagnostics_allowed: crate::local_runtime_allows_unsafe_raw_http_diagnostics(
+                plan.deployment,
+                plan.resolved_profile,
+            ),
         })
     }
 }
@@ -276,8 +335,9 @@ mod tests {
 
     struct NoopRuntimeHttpEgress;
 
+    #[async_trait]
     impl ironclaw_host_api::RuntimeHttpEgress for NoopRuntimeHttpEgress {
-        fn execute(
+        async fn execute(
             &self,
             _request: ironclaw_host_api::RuntimeHttpEgressRequest,
         ) -> Result<
@@ -296,6 +356,7 @@ mod tests {
         ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
             Ok(CommandExecutionOutput {
                 output: self.0.to_string(),
+                saved_output: None,
                 exit_code: 0,
                 sandboxed: false,
                 duration: std::time::Duration::ZERO,
@@ -467,6 +528,30 @@ mod tests {
     }
 
     #[test]
+    fn local_resolver_accepts_host_workspace_and_home_when_filesystem_required() {
+        let resolver = resolver_without_http();
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            false,
+        );
+        plan.requires_filesystem = true;
+        plan.filesystem_backend = FilesystemBackendKind::HostWorkspaceAndHome;
+
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .expect("local-yolo filesystem backend should resolve");
+
+        assert!(services.runtime_http_egress.is_none());
+    }
+
+    #[test]
     fn local_resolver_ignores_unsupported_filesystem_backend_when_not_required() {
         let resolver = resolver_without_http();
         let mut plan = plan(
@@ -633,6 +718,53 @@ mod tests {
     }
 
     #[test]
+    fn local_resolver_allows_raw_diagnostics_only_for_local_dev_and_yolo() {
+        let resolver = LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            Some(Arc::new(NoopRuntimeHttpEgress)),
+            Arc::new(NoopProcessPort),
+            None,
+        );
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            true,
+            NetworkMode::Direct,
+            false,
+        );
+
+        plan.resolved_profile = RuntimeProfile::LocalSafe;
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap();
+        assert!(!services.unsafe_raw_diagnostics_allowed);
+
+        plan.resolved_profile = RuntimeProfile::LocalDev;
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap();
+        assert!(services.unsafe_raw_diagnostics_allowed);
+
+        plan.resolved_profile = RuntimeProfile::LocalYolo;
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap();
+        assert!(services.unsafe_raw_diagnostics_allowed);
+    }
+
+    #[test]
     fn local_resolver_hides_runtime_http_egress_when_network_is_not_required() {
         let resolver = LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
@@ -778,12 +910,6 @@ mod tests {
         let sources = [
             include_str!("first_party_tools/shell.rs"),
             include_str!("first_party_tools/http.rs"),
-            include_str!("first_party_tools/coding/apply_patch.rs"),
-            include_str!("first_party_tools/coding/glob.rs"),
-            include_str!("first_party_tools/coding/grep.rs"),
-            include_str!("first_party_tools/coding/list_dir.rs"),
-            include_str!("first_party_tools/coding/read_file.rs"),
-            include_str!("first_party_tools/coding/write_file.rs"),
         ];
         for source in sources {
             assert!(!source.contains("ProcessBackendKind"));

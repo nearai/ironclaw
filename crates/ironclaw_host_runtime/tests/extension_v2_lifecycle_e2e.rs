@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::{
@@ -6,15 +9,19 @@ use ironclaw_dispatcher::{
     RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
 };
 use ironclaw_extensions::{
-    ExtensionError, ExtensionLifecycleService, ExtensionRegistry, ManifestV2Error,
+    ExtensionError, ExtensionLifecycleService, ExtensionManifest, ExtensionPackage,
+    ExtensionRegistry, ExtensionRuntime, ManifestSource, ManifestV2Error,
 };
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, HostPath, MountView, ReservationStatus, ResourceEstimate,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeKind, TenantId, UserId,
-    VirtualPath,
+    CapabilityId, EffectKind, ExtensionId, HostPath, MountView, NetworkScheme,
+    NetworkTargetPattern, PermissionMode, ReservationStatus, ResourceEstimate,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
+    TenantId, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
+    default_host_api_contract_registry, default_host_port_catalog,
     discover_extensions_with_default_host_api_contracts, publish_hot_capability_catalog,
 };
 use ironclaw_resources::{
@@ -128,6 +135,176 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
 }
 
 #[tokio::test]
+async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
+    let github_asset_root = github_first_party_asset_root();
+    assert!(github_asset_root.join("wasm-src/Cargo.toml").is_file());
+
+    let (_storage, fs) = mounted_github_package_fs();
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        &std::fs::read_to_string(github_asset_root.join("manifest.toml")).unwrap(),
+        ManifestSource::HostBundled,
+        &default_host_port_catalog().unwrap(),
+        &default_host_api_contract_registry().unwrap(),
+    )
+    .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/github").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let extension_id = ExtensionId::new("github").unwrap();
+    let package = registry.get_extension(&extension_id).unwrap();
+
+    assert!(matches!(
+        &package.manifest.runtime,
+        ExtensionRuntime::Wasm { module } if module.as_str() == "wasm/github_tool.wasm"
+    ));
+    assert_eq!(
+        package
+            .capabilities
+            .iter()
+            .map(|capability| capability.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "github.search_issues",
+            "github.get_issue",
+            "github.comment_issue"
+        ]
+    );
+    for capability in &package.manifest.capabilities {
+        let expected_effects = if capability.id.as_str() == "github.comment_issue" {
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+                EffectKind::ExternalWrite,
+            ]
+        } else {
+            vec![EffectKind::Network, EffectKind::UseSecret]
+        };
+        assert_eq!(capability.effects, expected_effects);
+        assert_eq!(capability.default_permission, PermissionMode::Ask);
+        assert_eq!(
+            capability
+                .required_host_ports
+                .iter()
+                .map(|port| port.as_str())
+                .collect::<Vec<_>>(),
+            vec!["host.runtime.http_egress"]
+        );
+        assert_eq!(capability.runtime_credentials.len(), 1);
+        let credential = &capability.runtime_credentials[0];
+        assert_eq!(
+            credential.handle,
+            SecretHandle::new("github_runtime_token").unwrap()
+        );
+        assert_eq!(
+            credential.source,
+            RuntimeCredentialRequirementSource::ProductAuthAccount {
+                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                setup: Default::default(),
+            }
+        );
+        assert_eq!(
+            credential.audience,
+            NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.github.com".to_string(),
+                port: None,
+            }
+        );
+        assert_eq!(
+            credential.target,
+            RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            }
+        );
+        assert!(credential.required);
+    }
+
+    let hot_catalog = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap();
+    assert_eq!(hot_catalog.capabilities.len(), 3);
+
+    let search = hot_catalog
+        .get(&CapabilityId::new("github.search_issues").unwrap())
+        .unwrap();
+    assert_eq!(search.descriptor.provider, extension_id);
+    assert_eq!(search.descriptor.runtime, RuntimeKind::Wasm);
+    assert_eq!(
+        search.descriptor.parameters_schema["properties"]["query"]["type"],
+        json!("string")
+    );
+    assert_eq!(
+        search.output_schema["properties"]["items"]["type"],
+        json!("array")
+    );
+    assert!(
+        search
+            .prompt_doc
+            .as_deref()
+            .is_some_and(|doc| doc.contains("github.search_issues")
+                && doc.contains("GitHub product-auth account"))
+    );
+
+    let get_issue = hot_catalog
+        .get(&CapabilityId::new("github.get_issue").unwrap())
+        .unwrap();
+    assert_eq!(
+        get_issue.descriptor.parameters_schema["required"],
+        json!(["owner", "repo", "issue_number"])
+    );
+    assert_eq!(
+        get_issue.descriptor.parameters_schema["properties"]["owner"]["pattern"],
+        json!("^[^\\s/?#]+$")
+    );
+    assert_eq!(
+        get_issue.descriptor.parameters_schema["properties"]["owner"]["not"]["pattern"],
+        json!("\\.\\.")
+    );
+    assert_eq!(
+        get_issue.output_schema["required"],
+        json!(["number", "title", "state", "html_url"])
+    );
+    assert!(
+        get_issue
+            .prompt_doc
+            .as_deref()
+            .is_some_and(|doc| doc.contains("github.get_issue") && doc.contains("read-only"))
+    );
+
+    let comment_issue = hot_catalog
+        .get(&CapabilityId::new("github.comment_issue").unwrap())
+        .unwrap();
+    assert_eq!(
+        comment_issue.descriptor.parameters_schema["required"],
+        json!(["owner", "repo", "issue_number", "body"])
+    );
+    assert_eq!(
+        comment_issue.descriptor.effects,
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::UseSecret,
+            EffectKind::ExternalWrite,
+        ]
+    );
+    assert_eq!(
+        comment_issue.output_schema["required"],
+        json!(["id", "html_url", "body"])
+    );
+    assert!(comment_issue.prompt_doc.as_deref().is_some_and(|doc| {
+        doc.contains("github.comment_issue")
+            && doc.contains("external write")
+            && doc.contains("GitHub product-auth account")
+    }));
+}
+
+#[tokio::test]
 async fn extension_v2_lifecycle_fails_closed_before_install_for_unknown_required_host_port() {
     let manifest =
         SCRIPT_MANIFEST.replace("host.runtime.http_egress", "host.runtime.not_supported");
@@ -232,6 +409,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
 
         Ok(RuntimeAdapterResult {
             output: self.output.clone(),
+            display_preview: None,
             usage,
             receipt,
             output_bytes,
@@ -283,6 +461,48 @@ fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFi
     )
     .unwrap();
     (storage, fs)
+}
+
+fn mounted_github_package_fs() -> (tempfile::TempDir, LocalFilesystem) {
+    let storage = tempdir().unwrap();
+    let source_root = github_first_party_asset_root();
+    let package_root = storage.path().join("github");
+
+    for relative in [
+        "manifest.toml",
+        "schemas/github/search_issues.input.v1.json",
+        "schemas/github/search_issues.output.v1.json",
+        "schemas/github/get_issue.input.v1.json",
+        "schemas/github/get_issue.output.v1.json",
+        "schemas/github/comment_issue.input.v1.json",
+        "schemas/github/comment_issue.output.v1.json",
+        "prompts/github/search_issues.md",
+        "prompts/github/get_issue.md",
+        "prompts/github/comment_issue.md",
+    ] {
+        copy_package_file(&source_root, &package_root, relative);
+    }
+
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    (storage, fs)
+}
+
+fn github_first_party_asset_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("crates/ironclaw_first_party_extensions/assets/github")
+}
+
+fn copy_package_file(source_root: &Path, package_root: &Path, relative: &str) {
+    let source = source_root.join(relative);
+    let destination = package_root.join(relative);
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    std::fs::copy(source, destination).unwrap();
 }
 
 fn sample_scope() -> ResourceScope {

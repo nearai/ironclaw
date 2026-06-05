@@ -974,6 +974,203 @@ fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
     }
 }
 
+// Private-use Unicode chars used as internal sentinels by `markdown_to_mrkdwn`
+// to bracket references into the `protected` arena. User input is filtered of
+// these before processing, so any remaining occurrence after step 1 was
+// written by our own code and refers to a valid arena index.
+const MRKDWN_PROTECT_START: char = '\u{E000}';
+const MRKDWN_PROTECT_END: char = '\u{E001}';
+
+/// Single-pass expansion of `<PROTECT_START><idx><PROTECT_END>` sentinel
+/// references in `s` against the `protected` arena. Unrecognized references
+/// (bad index, non-numeric body) are emitted verbatim. Used both for the
+/// final restore and for pre-expanding URL/text before pushing a generated
+/// link span (so the span we push contains no further references).
+fn expand_protected_spans(s: &str, protected: &[String]) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        let Some(start) = rest.find(MRKDWN_PROTECT_START) else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after_start = &rest[start + MRKDWN_PROTECT_START.len_utf8()..];
+        let Some(end) = after_start.find(MRKDWN_PROTECT_END) else {
+            out.push_str(&rest[start..]);
+            break;
+        };
+        let idx_str = &after_start[..end];
+        match idx_str.parse::<usize>().ok().and_then(|i| protected.get(i)) {
+            Some(span) => out.push_str(span),
+            None => {
+                out.push(MRKDWN_PROTECT_START);
+                out.push_str(idx_str);
+                out.push(MRKDWN_PROTECT_END);
+            }
+        }
+        rest = &after_start[end + MRKDWN_PROTECT_END.len_utf8()..];
+    }
+    out
+}
+
+/// Escape characters that would break Slack's `<url|text>` parser when they
+/// appear in the visible label. Slack uses `&lt;` / `&gt;` for the literal
+/// `<` / `>` characters; `&` is left alone because escaping it as `&amp;`
+/// would double-escape input the agent already encoded.
+fn escape_mrkdwn_label(text: &str) -> String {
+    text.replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn markdown_to_mrkdwn(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+
+    // Strip our internal sentinel chars from untrusted input so a message
+    // containing literal `\u{E000}N\u{E001}` cannot interfere with the
+    // protect/restore mechanism below.
+    let sanitized: String = input
+        .chars()
+        .filter(|c| *c != MRKDWN_PROTECT_START && *c != MRKDWN_PROTECT_END)
+        .collect();
+    let input = sanitized.as_str();
+
+    let mut protected: Vec<String> = Vec::new();
+    let mut tmp = String::with_capacity(input.len());
+
+    // Protect Slack-native <...> constructs so we don't rewrite inside them.
+    //
+    // NOTE: We must not index `input` by byte offsets that are not UTF-8
+    // character boundaries. Slack's special constructs are ASCII-only, but
+    // messages can contain arbitrary Unicode elsewhere.
+    let mut i = 0;
+    while i < input.len() {
+        let ch = input[i..].chars().next().unwrap();
+        if ch == '<' {
+            let start = i;
+            i += ch.len_utf8();
+
+            // Scan forward to the next '>' (ASCII) without assuming anything
+            // about intervening UTF-8.
+            let mut j = i;
+            let mut found_end = None;
+            while j < input.len() {
+                let c = input[j..].chars().next().unwrap();
+                if c == '>' {
+                    found_end = Some(j + c.len_utf8());
+                    break;
+                }
+                j += c.len_utf8();
+            }
+
+            if let Some(end) = found_end {
+                let span = &input[start..end];
+                let idx = protected.len();
+                protected.push(span.to_string());
+                tmp.push(MRKDWN_PROTECT_START);
+                tmp.push_str(&idx.to_string());
+                tmp.push(MRKDWN_PROTECT_END);
+                i = end;
+                continue;
+            }
+
+            // Unmatched '<' — treat as a literal.
+            tmp.push('<');
+            continue;
+        }
+
+        tmp.push(ch);
+        i += ch.len_utf8();
+    }
+
+    // Convert headings per-line.
+    let mut out = String::with_capacity(tmp.len());
+    for (line_idx, line) in tmp.split('\n').enumerate() {
+        if line_idx > 0 {
+            out.push('\n');
+        }
+
+        if let Some(rest) = line.strip_prefix("# ") {
+            out.push('*');
+            out.push_str(rest);
+            out.push('*');
+        } else {
+            out.push_str(line);
+        }
+    }
+
+    // Convert [text](url) -> <url|text>.
+    let mut link_out = String::with_capacity(out.len());
+    let mut s = out.as_str();
+    while let Some(open_bracket) = s.find('[') {
+        link_out.push_str(&s[..open_bracket]);
+        s = &s[open_bracket..];
+
+        let Some(close_bracket) = s.find(']') else {
+            link_out.push_str(s);
+            s = "";
+            break;
+        };
+        let text = &s[1..close_bracket];
+
+        let after_bracket = &s[close_bracket + 1..];
+        if !after_bracket.starts_with('(') {
+            link_out.push_str(&s[..close_bracket + 1]);
+            s = after_bracket;
+            continue;
+        }
+
+        let Some(close_paren) = after_bracket.find(')') else {
+            link_out.push_str(&s[..close_bracket + 1]);
+            s = after_bracket;
+            continue;
+        };
+        let url = &after_bracket[1..close_paren];
+
+        // Expand any sentinel refs embedded in url/text by step 1 so the
+        // link span we push into the arena contains no further references —
+        // the final restore pass does not re-scan content it has already
+        // emitted, so a buried sentinel would otherwise leak into the output
+        // as raw U+E000/U+E001 characters.
+        let url_expanded = expand_protected_spans(url, &protected);
+        let text_expanded = expand_protected_spans(text, &protected);
+
+        // If the URL or expanded label contains characters that would break
+        // Slack's `<url|text>` parser, fall back to leaving the original
+        // markdown form intact. RFC 3986 disallows these in URLs anyway.
+        if url_expanded.contains(['<', '>', '|']) || text_expanded.contains('|') {
+            link_out.push('[');
+            link_out.push_str(text);
+            link_out.push_str("](");
+            link_out.push_str(url);
+            link_out.push(')');
+            s = &after_bracket[close_paren + 1..];
+            continue;
+        }
+
+        // Push the generated `<url|text>` into the protected arena so the
+        // global `**`/`~~` replacement below can't rewrite anything inside
+        // it. Escape `<` / `>` in the visible label so they render literally
+        // rather than opening/closing a Slack span.
+        let span = format!("<{}|{}>", url_expanded, escape_mrkdwn_label(&text_expanded));
+        let idx = protected.len();
+        protected.push(span);
+        link_out.push(MRKDWN_PROTECT_START);
+        link_out.push_str(&idx.to_string());
+        link_out.push(MRKDWN_PROTECT_END);
+
+        s = &after_bracket[close_paren + 1..];
+    }
+    link_out.push_str(s);
+
+    // Convert **bold** -> *bold* and ~~strike~~ -> ~strike~.
+    // This is intentionally minimal and does not attempt full Markdown parsing.
+    let out = link_out.replace("~~", "~").replace("**", "*");
+
+    expand_protected_spans(&out, &protected)
+}
+
 /// Interpret a Slack `chat.postMessage` response body (returned with HTTP 200)
 /// as either success or a scoped failure. Extracted so the parsing logic can
 /// be unit-tested without the `channel_host` extern — see #1839.
@@ -1006,7 +1203,8 @@ fn post_slack_message(
     text: &str,
     thread_ts: Option<&str>,
 ) -> Result<Option<String>, String> {
-    let payload = build_broadcast_payload(channel, text, thread_ts);
+    let converted = markdown_to_mrkdwn(text);
+    let payload = build_broadcast_payload(channel, &converted, thread_ts);
     let payload_bytes = serde_json::to_vec(&payload)
         .map_err(|e| format!("Failed to serialize payload: {}", e))?;
 
@@ -1596,5 +1794,97 @@ mod tests {
         let target = resolve_broadcast_target("#C0123ABC");
         assert!(looks_like_slack_id(target));
         assert_eq!(target, "C0123ABC");
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_bold() {
+        assert_eq!(markdown_to_mrkdwn("a **b** c"), "a *b* c");
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_strike() {
+        assert_eq!(markdown_to_mrkdwn("~~x~~"), "~x~");
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_heading_multiline() {
+        assert_eq!(markdown_to_mrkdwn("# Title\nbody"), "*Title*\nbody");
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_link() {
+        assert_eq!(
+            markdown_to_mrkdwn("[near](https://example.com)"),
+            "<https://example.com|near>"
+        );
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_preserves_slack_native_formatting() {
+        let input = "<@U123> <https://e.com|e> <#C123|chan>";
+        assert_eq!(markdown_to_mrkdwn(input), input);
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_preserves_emphasis_inside_generated_link() {
+        // After `[text](url)` becomes `<url|text>`, the global `**`/`~~`
+        // rewrite must not reach inside the generated span. Bold around the
+        // link is still converted; bold inside the link text stays literal.
+        assert_eq!(
+            markdown_to_mrkdwn("see [**bold**](https://e.com) **after**"),
+            "see <https://e.com|**bold**> *after*",
+        );
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_strips_internal_sentinel_chars() {
+        // Untrusted input containing the private-use sentinels must not be
+        // able to forge a protected-span reference or split surrounding
+        // formatting markers. The chars are stripped at the boundary.
+        let input = "a\u{E000}0\u{E001}b **c**";
+        assert_eq!(markdown_to_mrkdwn(input), "a0b *c*");
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_escapes_brackets_in_link_label() {
+        // `<` and `>` in the visible label would otherwise open/close a
+        // Slack span and break the link. They must render as literal text.
+        assert_eq!(
+            markdown_to_mrkdwn("[a<b>c](https://e.com)"),
+            "<https://e.com|a&lt;b&gt;c>",
+        );
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_falls_back_when_url_has_pipe_or_gt() {
+        // A `|` or `>` inside the URL would corrupt `<url|text>`. The
+        // converter leaves the original markdown form intact instead.
+        assert_eq!(
+            markdown_to_mrkdwn("[x](https://e.com/a|b)"),
+            "[x](https://e.com/a|b)",
+        );
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_falls_back_when_expanded_label_has_pipe() {
+        // A `|` inside the expanded label would corrupt Slack's
+        // `<url|text>` parser, so leave the original markdown link intact.
+        assert_eq!(
+            markdown_to_mrkdwn("[a|b](https://e.com)"),
+            "[a|b](https://e.com)",
+        );
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_link_with_slack_native_span_inside_label() {
+        // A Slack-native `<...>` span inside the markdown link label is
+        // protected by step 1, then expanded again before the link span is
+        // pushed — guaranteeing the final output contains no leftover
+        // sentinel characters and the bracket chars are escaped for the
+        // label.
+        assert_eq!(
+            markdown_to_mrkdwn("[<@U1> there](https://e.com)"),
+            "<https://e.com|&lt;@U1&gt; there>",
+        );
     }
 }

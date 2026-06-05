@@ -123,6 +123,10 @@ with the running assistant (not during the wizard). The `## First-Run Bootstrap`
 prompt on first run. Once the agent writes a profile via `memory_write` and deletes
 `BOOTSTRAP.md`, the block stops injecting.
 
+**Web UI onboarding** (`/onboarding` in WebUI v2) presents a curated provider
+picker for first-run browser users. NEAR AI setup offers both API-key entry and
+SSO; SSO choices (NEAR Wallet, GitHub, Google) are kept behind the setup menu.
+
 ---
 
 ### Step 1: Database Connection
@@ -357,6 +361,11 @@ key first, then falls back to the standard env var.
 - Reads `capabilities.json` for `setup.required_secrets`
 - For each secret: check existing, prompt or auto-generate, validate regex
 - Save each secret via `SecretsContext`
+- For WeCom, additionally prompts for non-secret runtime preferences such as
+  DM admission policy, optional sender allowlist, and inbound media merge
+  window. These values are persisted as
+  `settings.channels.wasm_channel_runtime_overrides.wecom:<key>` entries and
+  merged back into the channel runtime config during activation/reconfiguration.
 - Persist selected channel names in `settings.channels.wasm_channels` as a
   first-run startup fallback. Once the running app writes
   `activated_channels`, that runtime state becomes the authoritative restore

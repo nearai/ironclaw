@@ -89,7 +89,8 @@ def _write_skill(skills_dir, mock_api_host):
         f.write(f"""---
 name: github
 version: "1.0.0"
-keywords: [github, issues]
+activation:
+  keywords: [github, issues]
 credentials:
   - name: github_token
     provider: github

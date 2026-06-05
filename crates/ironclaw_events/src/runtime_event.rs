@@ -1,6 +1,6 @@
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ProcessId, ResourceScope, RuntimeKind, Timestamp,
+    CapabilityId, ExtensionId, InvocationId, ProcessId, ResourceScope, RuntimeKind, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -38,6 +38,9 @@ pub enum RuntimeEventKind {
     RuntimeSelected,
     DispatchSucceeded,
     DispatchFailed,
+    CapabilityActivityRequested,
+    CapabilityActivitySucceeded,
+    CapabilityActivityFailed,
     ModelStarted,
     ModelCompleted,
     ModelFailed,
@@ -79,6 +82,8 @@ pub struct RuntimeEvent {
     pub timestamp: Timestamp,
     pub kind: RuntimeEventKind,
     pub scope: ResourceScope,
+    /// Parent run invocation id when this event represents nested activity.
+    pub parent_invocation_id: Option<InvocationId>,
     pub capability_id: CapabilityId,
     pub provider: Option<ExtensionId>,
     pub runtime: Option<RuntimeKind>,
@@ -111,6 +116,8 @@ struct RuntimeEventWire {
     timestamp: Timestamp,
     kind: RuntimeEventKind,
     scope: ResourceScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_invocation_id: Option<InvocationId>,
     capability_id: CapabilityId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider: Option<ExtensionId>,
@@ -150,6 +157,7 @@ impl Serialize for RuntimeEvent {
             timestamp: self.timestamp,
             kind: self.kind,
             scope: self.scope.clone(),
+            parent_invocation_id: self.parent_invocation_id,
             capability_id: self.capability_id.clone(),
             provider: self.provider.clone(),
             runtime: self.runtime,
@@ -176,25 +184,129 @@ impl<'de> Deserialize<'de> for RuntimeEvent {
         D: serde::Deserializer<'de>,
     {
         let wire = RuntimeEventWire::deserialize(deserializer)?;
-        Ok(Self {
-            event_id: wire.event_id,
-            timestamp: wire.timestamp,
-            kind: wire.kind,
-            scope: wire.scope,
-            capability_id: wire.capability_id,
-            provider: wire.provider,
-            runtime: wire.runtime,
-            process_id: wire.process_id,
-            output_bytes: wire.output_bytes,
-            error_kind: wire.error_kind.map(sanitize_error_kind),
-            hook_id: wire.hook_id.map(sanitize_hook_id),
-            hook_point: wire.hook_point.map(sanitize_hook_label),
-            hook_trust_class: wire.hook_trust_class.map(sanitize_hook_label),
-            hook_decision: wire.hook_decision.map(sanitize_hook_label),
-            hook_failure_category: wire.hook_failure_category.map(sanitize_hook_label),
-            hook_failure_disposition: wire.hook_failure_disposition.map(sanitize_hook_label),
-        })
+        Ok(wire.into_event())
     }
+}
+
+#[derive(Deserialize)]
+struct TrustedRuntimeEventWire {
+    event_id: RuntimeEventId,
+    timestamp: Timestamp,
+    kind: RuntimeEventKind,
+    scope: ResourceScope,
+    #[serde(default)]
+    parent_invocation_id: Option<InvocationId>,
+    capability_id: CapabilityId,
+    #[serde(default)]
+    provider: Option<ExtensionId>,
+    #[serde(default)]
+    runtime: Option<TrustedRuntimeKindWire>,
+    #[serde(default)]
+    process_id: Option<ProcessId>,
+    #[serde(default)]
+    output_bytes: Option<u64>,
+    #[serde(default)]
+    error_kind: Option<String>,
+    #[serde(default)]
+    hook_id: Option<String>,
+    #[serde(default)]
+    hook_point: Option<String>,
+    #[serde(default)]
+    hook_trust_class: Option<String>,
+    #[serde(default)]
+    hook_decision: Option<String>,
+    #[serde(default)]
+    hook_failure_category: Option<String>,
+    #[serde(default)]
+    hook_failure_disposition: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TrustedRuntimeKindWire {
+    Wasm,
+    Mcp,
+    Script,
+    FirstParty,
+    System,
+}
+
+impl From<TrustedRuntimeKindWire> for RuntimeKind {
+    fn from(value: TrustedRuntimeKindWire) -> Self {
+        match value {
+            TrustedRuntimeKindWire::Wasm => Self::Wasm,
+            TrustedRuntimeKindWire::Mcp => Self::Mcp,
+            TrustedRuntimeKindWire::Script => Self::Script,
+            TrustedRuntimeKindWire::FirstParty => Self::FirstParty,
+            TrustedRuntimeKindWire::System => Self::System,
+        }
+    }
+}
+
+impl RuntimeEventWire {
+    fn into_event(self) -> RuntimeEvent {
+        RuntimeEvent {
+            event_id: self.event_id,
+            timestamp: self.timestamp,
+            kind: self.kind,
+            scope: self.scope,
+            parent_invocation_id: self.parent_invocation_id,
+            capability_id: self.capability_id,
+            provider: self.provider,
+            runtime: self.runtime,
+            process_id: self.process_id,
+            output_bytes: self.output_bytes,
+            error_kind: self.error_kind.map(sanitize_error_kind),
+            hook_id: self.hook_id.map(sanitize_hook_id),
+            hook_point: self.hook_point.map(sanitize_hook_label),
+            hook_trust_class: self.hook_trust_class.map(sanitize_hook_label),
+            hook_decision: self.hook_decision.map(sanitize_hook_label),
+            hook_failure_category: self.hook_failure_category.map(sanitize_hook_label),
+            hook_failure_disposition: self.hook_failure_disposition.map(sanitize_hook_label),
+        }
+    }
+}
+
+impl TrustedRuntimeEventWire {
+    fn into_event(self) -> RuntimeEvent {
+        RuntimeEvent {
+            event_id: self.event_id,
+            timestamp: self.timestamp,
+            kind: self.kind,
+            scope: self.scope,
+            parent_invocation_id: self.parent_invocation_id,
+            capability_id: self.capability_id,
+            provider: self.provider,
+            runtime: self.runtime.map(Into::into),
+            process_id: self.process_id,
+            output_bytes: self.output_bytes,
+            error_kind: self.error_kind.map(sanitize_error_kind),
+            hook_id: self.hook_id.map(sanitize_hook_id),
+            hook_point: self.hook_point.map(sanitize_hook_label),
+            hook_trust_class: self.hook_trust_class.map(sanitize_hook_label),
+            hook_decision: self.hook_decision.map(sanitize_hook_label),
+            hook_failure_category: self.hook_failure_category.map(sanitize_hook_label),
+            hook_failure_disposition: self.hook_failure_disposition.map(sanitize_hook_label),
+        }
+    }
+}
+
+pub fn deserialize_trusted_runtime_event<'de, D>(deserializer: D) -> Result<RuntimeEvent, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    TrustedRuntimeEventWire::deserialize(deserializer).map(TrustedRuntimeEventWire::into_event)
+}
+
+pub fn runtime_event_from_trusted_json_slice(
+    value: &[u8],
+) -> Result<RuntimeEvent, serde_json::Error> {
+    serde_json::from_slice::<TrustedRuntimeEventWire>(value)
+        .map(TrustedRuntimeEventWire::into_event)
+}
+
+pub fn runtime_event_from_trusted_json_str(value: &str) -> Result<RuntimeEvent, serde_json::Error> {
+    serde_json::from_str::<TrustedRuntimeEventWire>(value).map(TrustedRuntimeEventWire::into_event)
 }
 
 impl RuntimeEvent {
@@ -491,6 +603,7 @@ impl RuntimeEvent {
             timestamp: Utc::now(),
             kind: payload.kind,
             scope: payload.scope,
+            parent_invocation_id: None,
             capability_id: payload.capability_id,
             provider: payload.provider,
             runtime: payload.runtime,
@@ -503,6 +616,42 @@ impl RuntimeEvent {
             hook_decision: payload.hook_decision,
             hook_failure_category: payload.hook_failure_category,
             hook_failure_disposition: payload.hook_failure_disposition,
+        }
+    }
+
+    pub fn capability_activity_requested(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+    ) -> Self {
+        Self {
+            kind: RuntimeEventKind::CapabilityActivityRequested,
+            ..Self::dispatch_requested(scope, capability_id)
+        }
+    }
+
+    pub fn capability_activity_succeeded(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: ExtensionId,
+        runtime: RuntimeKind,
+        output_bytes: u64,
+    ) -> Self {
+        Self {
+            kind: RuntimeEventKind::CapabilityActivitySucceeded,
+            ..Self::dispatch_succeeded(scope, capability_id, provider, runtime, output_bytes)
+        }
+    }
+
+    pub fn capability_activity_failed(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: Option<ExtensionId>,
+        runtime: Option<RuntimeKind>,
+        error_kind: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: RuntimeEventKind::CapabilityActivityFailed,
+            ..Self::dispatch_failed(scope, capability_id, provider, runtime, error_kind)
         }
     }
 
@@ -868,6 +1017,58 @@ mod tests {
         let decoded: RuntimeEvent =
             serde_json::from_str(&serde_json::to_string(&failed).expect("ser")).expect("de");
         assert_eq!(decoded.provider, Some(owner));
+    }
+
+    #[test]
+    fn runtime_event_deserializes_host_written_privileged_runtime_kind() {
+        let mut event = RuntimeEvent::dispatch_succeeded(
+            scope(),
+            capability(),
+            ExtensionId::new("builtin").expect("valid extension id"),
+            RuntimeKind::FirstParty,
+            0,
+        );
+        event.runtime = Some(RuntimeKind::System);
+
+        for runtime in ["first_party", "system"] {
+            let mut wire =
+                serde_json::to_value(&event).expect("runtime event should serialize to json");
+            wire["runtime"] = serde_json::Value::String(runtime.to_string());
+
+            assert!(
+                serde_json::from_value::<RuntimeEvent>(wire.clone()).is_err(),
+                "untrusted runtime event serde must not accept privileged runtime kind"
+            );
+            let decoded =
+                runtime_event_from_trusted_json_str(&serde_json::to_string(&wire).unwrap())
+                    .expect("trusted runtime event should deserialize");
+            assert_eq!(
+                decoded.runtime,
+                Some(match runtime {
+                    "first_party" => RuntimeKind::FirstParty,
+                    "system" => RuntimeKind::System,
+                    _ => unreachable!("test table only contains privileged runtime kinds"),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_runtime_event_rejects_unknown_runtime_kind_from_json() {
+        let event = RuntimeEvent::dispatch_succeeded(
+            scope(),
+            capability(),
+            ExtensionId::new("builtin").expect("valid extension id"),
+            RuntimeKind::Script,
+            0,
+        );
+        let mut wire =
+            serde_json::to_value(&event).expect("runtime event should serialize to json");
+        wire["runtime"] = serde_json::Value::String("admin".to_string());
+
+        assert!(
+            runtime_event_from_trusted_json_str(&serde_json::to_string(&wire).unwrap()).is_err()
+        );
     }
 
     #[test]

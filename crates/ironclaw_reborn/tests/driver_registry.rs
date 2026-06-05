@@ -183,7 +183,7 @@ fn readiness_requires_driver_for_non_terminal_run_identity() {
             configured_profiles: Vec::new(),
             persisted_runs: vec![PersistedRunDriverIdentity::new(
                 "run-1",
-                TurnStatus::RecoveryRequired,
+                TurnStatus::Running,
                 old_driver_key,
             )],
         },

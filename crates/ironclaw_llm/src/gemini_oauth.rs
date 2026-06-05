@@ -4,11 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use base64::{Engine as _, engine::general_purpose};
 use chrono::Utc;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use url::Url;
@@ -61,7 +59,6 @@ fn oauth_client_secret() -> String {
 const OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile";
 const GOOG_API_CLIENT: &str = concat!("gl-rust/1.0.0 ironclaw/", env!("CARGO_PKG_VERSION"));
 
-const PKCE_CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
 const STATE_CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 /// Synthetic thought signature injected into model functionCall parts
@@ -185,49 +182,54 @@ impl std::fmt::Display for InvalidStreamType {
 
 /// Credits tracking from Cloud Code API responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GeminiCredits {
+pub(crate) struct GeminiCredits {
     #[serde(rename = "creditType")]
-    pub credit_type: String,
+    pub(crate) credit_type: String,
     #[serde(rename = "creditAmount")]
-    pub credit_amount: String,
+    pub(crate) credit_amount: String,
 }
 
 /// Extended response metadata parsed from Gemini API responses.
+// Fields are unread now that the only consumer (`last_response_meta`) is
+// unused after `gemini_oauth` was made `pub(crate)`. Kept to preserve the
+// move's no-behavior-change guarantee; delete in a follow-up if no caller
+// emerges.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
-pub struct GeminiResponseMeta {
+pub(crate) struct GeminiResponseMeta {
     /// Model version actually used (from response).
-    pub model_version: Option<String>,
+    pub(crate) model_version: Option<String>,
     /// Prompt feedback including block reason if any.
-    pub prompt_feedback: Option<serde_json::Value>,
+    pub(crate) prompt_feedback: Option<serde_json::Value>,
     /// Grounding metadata (citations, chunks, supports).
-    pub grounding_metadata: Option<serde_json::Value>,
+    pub(crate) grounding_metadata: Option<serde_json::Value>,
     /// Citation metadata from model response.
-    pub citation_metadata: Option<serde_json::Value>,
+    pub(crate) citation_metadata: Option<serde_json::Value>,
     /// Credits consumed by this request.
-    pub consumed_credits: Vec<GeminiCredits>,
+    pub(crate) consumed_credits: Vec<GeminiCredits>,
     /// Credits remaining after this request.
-    pub remaining_credits: Vec<GeminiCredits>,
+    pub(crate) remaining_credits: Vec<GeminiCredits>,
     /// Cached content token count.
-    pub cached_content_token_count: Option<u32>,
+    pub(crate) cached_content_token_count: Option<u32>,
     /// Total token count from usage metadata.
-    pub total_token_count: Option<u32>,
+    pub(crate) total_token_count: Option<u32>,
 }
 
 /// Token representation matching Node.js `Credentials` format from `google-auth-library`
 /// usually stored in `~/.gemini/oauth_creds.json`
 #[derive(Clone, Serialize, Deserialize)]
-pub struct OAuthCredential {
-    pub access_token: String,
+pub(crate) struct OAuthCredential {
+    pub(crate) access_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub refresh_token: Option<String>,
+    pub(crate) refresh_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub expiry_date: Option<i64>,
+    pub(crate) expiry_date: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub token_type: Option<String>,
+    pub(crate) token_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub id_token: Option<String>,
+    pub(crate) id_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
+    pub(crate) project_id: Option<String>,
 }
 
 impl std::fmt::Debug for OAuthCredential {
@@ -289,19 +291,10 @@ struct PKCEParams {
 fn generate_pkce_params() -> PKCEParams {
     use rand::Rng;
 
-    let mut rng = rand::thread_rng();
-    let code_verifier: String = (0..64)
-        .map(|_| {
-            let idx = rng.gen_range(0..PKCE_CHARSET.len());
-            PKCE_CHARSET[idx] as char
-        })
-        .collect();
+    let code_verifier = ironclaw_common::pkce::generate_code_verifier();
+    let code_challenge = ironclaw_common::pkce::s256_challenge(code_verifier.as_bytes());
 
-    let mut hasher = Sha256::new();
-    hasher.update(&code_verifier);
-    let hash = hasher.finalize();
-    let code_challenge = general_purpose::URL_SAFE_NO_PAD.encode(hash);
-
+    let mut rng = rand::rngs::OsRng;
     let state: String = (0..32)
         .map(|_| {
             let idx = rng.gen_range(0..STATE_CHARSET.len());
@@ -316,14 +309,14 @@ fn generate_pkce_params() -> PKCEParams {
     }
 }
 
-pub struct CredentialManager {
+pub(crate) struct CredentialManager {
     profiles_path: PathBuf,
     lock: Mutex<()>,
     client: Client,
 }
 
 impl CredentialManager {
-    pub fn new(profiles_path: impl AsRef<Path>) -> Result<Self, LlmError> {
+    pub(crate) fn new(profiles_path: impl AsRef<Path>) -> Result<Self, LlmError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -371,7 +364,7 @@ impl CredentialManager {
         expiry_ms > (now + 60_000)
     }
 
-    pub async fn get_valid_credential(&self) -> Result<OAuthCredential> {
+    pub(crate) async fn get_valid_credential(&self) -> Result<OAuthCredential> {
         let _guard = self.lock.lock().await;
 
         let credential = match self.load_credential().await {
@@ -433,14 +426,18 @@ impl CredentialManager {
         }
     }
 
-    pub async fn get_valid_access_token(&self) -> Result<String> {
+    // Unused after `pub mod gemini_oauth` → `pub(crate) mod gemini_oauth`. Kept
+    // in place because the boundary-cleanup move is meant to be behavior-preserving;
+    // delete in a follow-up if there's no future caller.
+    #[allow(dead_code)]
+    pub(crate) async fn get_valid_access_token(&self) -> Result<String> {
         let cred = self.get_valid_credential().await?;
         Ok(cred.access_token)
     }
 
     /// Force a token refresh regardless of the current token's expiry time.
     /// This is useful when the server returns 401 Unauthorized for a supposedly valid token.
-    pub async fn force_refresh(&self) -> Result<OAuthCredential> {
+    pub(crate) async fn force_refresh(&self) -> Result<OAuthCredential> {
         let _guard = self.lock.lock().await;
 
         let credential = self
@@ -916,7 +913,7 @@ impl CredentialManager {
     }
 }
 
-pub struct GeminiOauthProvider {
+pub(crate) struct GeminiOauthProvider {
     config: GeminiOauthConfig,
     cred_manager: CredentialManager,
     http_client: Client,
@@ -932,7 +929,7 @@ pub struct GeminiOauthProvider {
 type GeminiParsedResponse = (CompletionResponse, Vec<ToolCall>, HashMap<String, String>);
 
 impl GeminiOauthProvider {
-    pub fn new(config: GeminiOauthConfig) -> Result<Self, LlmError> {
+    pub(crate) fn new(config: GeminiOauthConfig) -> Result<Self, LlmError> {
         let cred_manager = CredentialManager::new(&config.credentials_path)?;
         let http_client = Client::builder()
             .timeout(Duration::from_secs(300))
@@ -952,7 +949,9 @@ impl GeminiOauthProvider {
     }
 
     /// Returns the latest response metadata from the last API call.
-    pub fn last_response_meta(&self) -> GeminiResponseMeta {
+    // Unused after module privatization; see `get_valid_access_token` above.
+    #[allow(dead_code)]
+    pub(crate) fn last_response_meta(&self) -> GeminiResponseMeta {
         self.last_response_meta
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1070,7 +1069,9 @@ impl GeminiOauthProvider {
     }
 
     /// Count tokens for the given messages using the Gemini countTokens API.
-    pub async fn count_tokens(&self, messages: &[ChatMessage]) -> Result<u32, LlmError> {
+    // Unused after module privatization; see `get_valid_access_token` above.
+    #[allow(dead_code)]
+    pub(crate) async fn count_tokens(&self, messages: &[ChatMessage]) -> Result<u32, LlmError> {
         let sigs = self
             .thought_signatures
             .lock()
@@ -1158,7 +1159,7 @@ impl GeminiOauthProvider {
         Self::model_uses_cloud_code_api(&self.config.model)
     }
 
-    pub fn model_uses_cloud_code_api(model: &str) -> bool {
+    pub(crate) fn model_uses_cloud_code_api(model: &str) -> bool {
         let model = model.to_ascii_lowercase();
         // Models containing "-preview" suffix or "gemini-3" use the Cloud Code API.
         // Using "-preview" (with hyphen) to avoid false positives on unrelated model names.
@@ -2041,6 +2042,7 @@ impl GeminiOauthProvider {
                 finish_reason: stop_reason,
                 input_tokens,
                 output_tokens,
+                reasoning: None,
                 cache_read_input_tokens: cached_content_tokens,
                 cache_creation_input_tokens: 0,
             },

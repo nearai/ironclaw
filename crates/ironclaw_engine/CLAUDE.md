@@ -129,8 +129,10 @@ preflight raises an `Authentication` gate at execute time, the inline-await
 machinery parks the VM, and the OAuth callback delivers the resolved
 credential to retry the action. Integrations that need user-driven setup
 (`NeedsSetup`, `Inactive`, `AvailableNotInstalled`) are listed under
-`Activatable Integrations` and the model tells the user to install/activate
-them through the IronClaw UI — the model cannot enable them itself.
+`Activatable Integrations` and the model installs them by calling
+`tool_install(name="<name>")` directly (issue #3533 / PR #3559 — the
+hidden gate on `tool_install` from #2868 was removed; the tool's
+`requires_approval = UnlessAutoApproved` mediates user consent).
 
 **Context as variables** (not attention input):
 - Thread messages injected as `context` Python variable
