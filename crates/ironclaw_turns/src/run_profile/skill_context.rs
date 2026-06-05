@@ -40,7 +40,8 @@ use crate::LoopMessageRef;
 
 use super::snippet_ref::stable_skill_snippet_display_hash;
 use super::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, LoopContextSnippetMetadata,
+    AgentLoopHostError, AgentLoopHostErrorKind, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
+    LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES, LoopContextSnippet, LoopContextSnippetMetadata,
 };
 
 // ---------------------------------------------------------------------------
@@ -129,26 +130,29 @@ impl SkillTrustLevel {
 // ---------------------------------------------------------------------------
 
 const EMPTY_SNAPSHOT_VERSION: &str = "empty";
-const DEFAULT_MAX_SKILL_SNIPPET_BYTES: usize = 8 * 1024;
-const DEFAULT_MAX_SKILL_CONTEXT_BYTES: usize = 32 * 1024;
+// Trusted skill prompts can be materially larger than their safe descriptions.
+// Use the shared loop-context model-content limits here so prompt construction
+// has one bounded policy for host-approved model-visible snippet content.
+const DEFAULT_MAX_SKILL_SNIPPET_BYTES: usize = LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES;
+const DEFAULT_MAX_SKILL_CONTEXT_BYTES: usize = LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES;
 
 /// Byte budgets for model-visible skill context produced by [`SkillContextService`].
 ///
 /// Hosts can map a run's context profile to these limits via
-/// [`SkillContextService::with_budget`]. Both limits fail closed when exceeded.
+/// [`SkillContextService::with_budget`]. The aggregate limit fails closed when exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillContextBudget {
-    /// Maximum bytes for one snippet summary.
+    /// Maximum bytes for one model-visible skill snippet.
     pub max_snippet_bytes: usize,
-    /// Maximum aggregate bytes across emitted snippet refs and summaries.
+    /// Maximum aggregate bytes across emitted snippet refs and model-visible content.
     pub max_context_bytes: usize,
 }
 
 impl SkillContextBudget {
     /// Create explicit skill-context budget limits.
-    pub const fn new(max_snippet_bytes: usize, max_context_bytes: usize) -> Self {
+    pub const fn new(max_context_bytes: usize) -> Self {
         Self {
-            max_snippet_bytes,
+            max_snippet_bytes: DEFAULT_MAX_SKILL_SNIPPET_BYTES,
             max_context_bytes,
         }
     }
@@ -235,7 +239,9 @@ impl SkillRunSnapshot {
 pub struct SkillContextSnippet {
     /// Reference identifier, e.g. `skill:<name>`.
     pub snippet_ref: String,
-    /// Sanitized summary containing only the safe description and optionally prompt content.
+    /// Full model-visible skill content.
+    pub model_content: String,
+    /// Short sanitized summary for metadata and diagnostics.
     pub safe_summary: String,
     /// Model-visible skill name used for telemetry, never for authority decisions.
     pub skill_name: String,
@@ -248,6 +254,7 @@ impl SkillContextSnippet {
     pub fn into_loop_snippet(self) -> LoopContextSnippet {
         LoopContextSnippet {
             snippet_ref: self.snippet_ref,
+            model_content: self.model_content,
             safe_summary: self.safe_summary,
             metadata: Some(LoopContextSnippetMetadata {
                 source_name: self.skill_name,
@@ -335,7 +342,7 @@ impl SkillContextSource for SkillContextService {
         let mut total_bytes = 0usize;
 
         for entry in visible {
-            let safe_summary = match entry.trust {
+            let model_content = match entry.trust {
                 SkillTrustLevel::Trusted => {
                     if let Some(ref content) = entry.prompt_content {
                         format!("{}\n\n{}", entry.safe_description, content)
@@ -345,24 +352,27 @@ impl SkillContextSource for SkillContextService {
                 }
                 SkillTrustLevel::Installed => entry.safe_description.clone(),
             };
+            let safe_summary = entry.safe_description.clone();
 
-            if safe_summary.len() > self.budget.max_snippet_bytes {
+            if model_content.len() > self.budget.max_snippet_bytes {
                 return Err(SkillContextError::ContextBudgetExceeded);
             }
 
             validate_model_visible_skill_name(&entry.name)?;
-            validate_model_visible_text(&safe_summary)?;
+            validate_model_visible_content(&model_content)?;
+            validate_model_visible_summary(&safe_summary)?;
 
             let snippet_ref = format!("skill:{}", entry.name);
             total_bytes = checked_context_total_bytes(
                 total_bytes,
                 snippet_ref.len(),
-                safe_summary.len(),
+                model_content.len(),
                 self.budget.max_context_bytes,
             )?;
 
             snippets.push(SkillContextSnippet {
                 snippet_ref,
+                model_content,
                 safe_summary,
                 skill_name: entry.name.clone(),
                 trust: entry.trust,
@@ -482,10 +492,7 @@ fn validate_snapshot(snapshot: &SkillRunSnapshot) -> Result<(), SkillContextErro
 }
 
 fn validate_budget(budget: SkillContextBudget) -> Result<(), SkillContextError> {
-    if budget.max_snippet_bytes == 0
-        || budget.max_context_bytes == 0
-        || budget.max_snippet_bytes > budget.max_context_bytes
-    {
+    if budget.max_context_bytes == 0 {
         return Err(SkillContextError::BudgetMisconfigured);
     }
 
@@ -546,7 +553,18 @@ fn validate_model_visible_skill_name(name: &str) -> Result<(), SkillContextError
     Ok(())
 }
 
-fn validate_model_visible_text(text: &str) -> Result<(), SkillContextError> {
+fn validate_model_visible_content(text: &str) -> Result<(), SkillContextError> {
+    if text
+        .chars()
+        .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+    {
+        return Err(SkillContextError::UnsafeModelVisibleContent);
+    }
+
+    Ok(())
+}
+
+fn validate_model_visible_summary(text: &str) -> Result<(), SkillContextError> {
     if text
         .chars()
         .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
@@ -602,12 +620,12 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 fn checked_context_total_bytes(
     current_total: usize,
     snippet_ref_bytes: usize,
-    safe_summary_bytes: usize,
+    model_content_bytes: usize,
     max_context_bytes: usize,
 ) -> Result<usize, SkillContextError> {
     let next_total = current_total
         .checked_add(snippet_ref_bytes)
-        .and_then(|total| total.checked_add(safe_summary_bytes))
+        .and_then(|total| total.checked_add(model_content_bytes))
         .ok_or(SkillContextError::ContextBudgetExceeded)?;
 
     if next_total > max_context_bytes {

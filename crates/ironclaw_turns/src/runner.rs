@@ -82,11 +82,18 @@ pub struct CancelRunCompletionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecordRecoveryRequiredRequest {
+pub struct RecordRunnerFailureRequest {
     pub run_id: TurnRunId,
     pub runner_id: TurnRunnerId,
     pub lease_token: TurnLeaseToken,
     pub failure: SanitizedFailure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelinquishRunRequest {
+    pub run_id: TurnRunId,
+    pub runner_id: TurnRunnerId,
+    pub lease_token: TurnLeaseToken,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,10 +148,34 @@ pub trait TurnRunTransitionPort: Send + Sync {
 
     async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError>;
 
-    async fn record_recovery_required(
+    async fn record_runner_failure(
         &self,
-        request: RecordRecoveryRequiredRequest,
-    ) -> Result<TurnRunState, TurnError>;
+        request: RecordRunnerFailureRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.fail_run(FailRunRequest {
+            run_id: request.run_id,
+            runner_id: request.runner_id,
+            lease_token: request.lease_token,
+            failure: request.failure,
+        })
+        .await
+    }
+
+    /// Release the lease and re-queue the run so another worker can claim it.
+    ///
+    /// Use for transient worker-side events (`WorkerCancelled`, `HeartbeatStopped`) where
+    /// the turn should be retried rather than permanently failed.
+    /// If the run is already `CancelRequested`, the cancellation intent is honored and the
+    /// run transitions to `Cancelled` instead of being re-queued.
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let _ = request;
+        Err(TurnError::Unavailable {
+            reason: "relinquish_run not implemented for this TurnRunTransitionPort".to_string(),
+        })
+    }
 
     async fn apply_validated_loop_exit(
         &self,

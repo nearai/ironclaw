@@ -14,7 +14,10 @@ use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventStreamKey, InMemoryDurableAuditLog,
     InMemoryDurableEventLog, ReadScope,
 };
-use ironclaw_host_api::{AgentId, CapabilityId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, RuntimeKind, TenantId,
+    ThreadId, UserId,
+};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
@@ -34,19 +37,19 @@ use ironclaw_threads::{
     SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
-    InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-    LoopCompletionKind, LoopExitId, LoopFailureKind, ReplyTargetBindingRef, ResumeTurnRequest,
-    RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
-    TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
-    TurnScope, TurnStateStore, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, EventCursor,
+    GetRunStateRequest, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
+    InMemoryRunProfileResolver, LoopCompletionKind, LoopExitId, LoopFailureKind,
+    ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId, RunProfileResolutionRequest,
+    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnActor, TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId,
+    TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, HookDecisionSummary,
-        LoopCheckpointKind, LoopDriverId, LoopGateKind, LoopHostMilestone,
-        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopModelPort,
-        LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopTranscriptPort, ParentLoopOutput, PromptMode,
+        AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind, FinalizeAssistantMessage,
+        HookDecisionSummary, InstructionSafetyContext, LoopCheckpointKind, LoopDriverId,
+        LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind,
+        LoopHostMilestoneSink, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest,
+        LoopPromptPort, LoopRunContext, LoopTranscriptPort, ParentLoopOutput, PromptMode,
     },
     runner::ClaimedTurnRun,
 };
@@ -265,6 +268,7 @@ async fn durable_milestone_sink_does_not_project_lossy_loop_progress_milestones(
     ] {
         sink.publish_loop_milestone(LoopHostMilestone {
             scope: scope.clone(),
+            actor: None,
             turn_id: TurnId::new(),
             run_id,
             loop_driver_id: LoopDriverId::new("test-driver").unwrap(),
@@ -636,6 +640,7 @@ fn projection_scope_for_thread(thread_id: ThreadId) -> ProjectionScope {
 fn loop_milestone_for_scope(scope: TurnScope) -> LoopHostMilestone {
     LoopHostMilestone {
         scope,
+        actor: None,
         turn_id: TurnId::new(),
         run_id: TurnRunId::new(),
         loop_driver_id: LoopDriverId::new("test-driver").unwrap(),
@@ -783,6 +788,7 @@ impl HostFixture {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
         };
@@ -839,6 +845,7 @@ impl HostFixture {
                 max_messages: 8,
                 ..TextOnlyLoopHostConfig::default()
             },
+            InstructionSafetyContext::local_development_noop(),
         )
         .build_text_only_host(RebornLoopDriverHostRequest {
             claimed_run: self.claimed.clone(),
@@ -914,7 +921,7 @@ fn user_id() -> UserId {
 
 const HOOK_HEX_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-fn hook_thread_scope() -> ThreadScope {
+fn milestone_thread_scope() -> ThreadScope {
     ThreadScope {
         tenant_id: tenant_id(),
         agent_id: agent_id(),
@@ -924,29 +931,35 @@ fn hook_thread_scope() -> ThreadScope {
     }
 }
 
-fn hook_milestone_for(
+fn milestone_for(
     scope: TurnScope,
     run_id: TurnRunId,
     kind: LoopHostMilestoneKind,
 ) -> LoopHostMilestone {
     LoopHostMilestone {
         scope,
+        actor: None,
         turn_id: TurnId::new(),
         run_id,
-        loop_driver_id: LoopDriverId::new("hook-projection-driver").unwrap(),
+        loop_driver_id: LoopDriverId::new("milestone-projection-driver").unwrap(),
         kind,
     }
 }
 
 #[tokio::test]
-async fn publish_loop_milestone_projects_hook_dispatched_to_runtime_event() {
+async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events() {
     let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
-    let thread_id = ThreadId::new("thread-hook-publish-dispatched").unwrap();
+    let thread_id = ThreadId::new("thread-capability-publish-lifecycle").unwrap();
     let run_id = TurnRunId::new();
+    let first_activity_id = CapabilityActivityId::new();
+    let second_activity_id = CapabilityActivityId::new();
+    let first_capability_id = CapabilityId::new("demo.echo").unwrap();
+    let second_capability_id = CapabilityId::new("demo.search").unwrap();
+    let provider_id = ExtensionId::new("demo").unwrap();
     let sink = DurableLoopHostMilestoneSink::new(
         Arc::clone(&events),
         DurableLoopHostMilestoneScope::from_thread_scope_for_run(
-            &hook_thread_scope(),
+            &milestone_thread_scope(),
             thread_id.clone(),
             run_id,
         )
@@ -959,7 +972,129 @@ async fn publish_loop_milestone_projects_hook_dispatched_to_runtime_event() {
         thread_id.clone(),
     );
 
-    sink.publish_loop_milestone(hook_milestone_for(
+    sink.publish_loop_milestone(milestone_for(
+        scope.clone(),
+        run_id,
+        LoopHostMilestoneKind::ModelStarted {
+            requested_model_profile_id: None,
+        },
+    ))
+    .await
+    .unwrap();
+
+    for kind in [
+        LoopHostMilestoneKind::CapabilityInvoked {
+            activity_id: first_activity_id,
+            capability_id: first_capability_id.clone(),
+        },
+        LoopHostMilestoneKind::CapabilityCompleted {
+            activity_id: first_activity_id,
+            capability_id: first_capability_id.clone(),
+            provider: provider_id.clone(),
+            runtime: RuntimeKind::FirstParty,
+            output_bytes: 64,
+        },
+        LoopHostMilestoneKind::CapabilityInvoked {
+            activity_id: second_activity_id,
+            capability_id: second_capability_id.clone(),
+        },
+        LoopHostMilestoneKind::CapabilityFailed {
+            activity_id: second_activity_id,
+            capability_id: second_capability_id.clone(),
+            provider: Some(provider_id.clone()),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind: CapabilityFailureKind::OperationFailed,
+        },
+    ] {
+        sink.publish_loop_milestone(milestone_for(scope.clone(), run_id, kind))
+            .await
+            .unwrap();
+    }
+
+    let manager = event_stream_manager(events, Arc::new(InMemoryDurableAuditLog::new()));
+    let snapshot = manager
+        .runtime_snapshot(ProjectionRequest {
+            scope: projection_scope_for_thread(thread_id),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.timeline.entries.len(), 5);
+    let kinds = snapshot
+        .timeline
+        .entries
+        .iter()
+        .map(|entry| entry.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            TimelineEntryKind::ModelStarted,
+            TimelineEntryKind::DispatchRequested,
+            TimelineEntryKind::DispatchSucceeded,
+            TimelineEntryKind::DispatchRequested,
+            TimelineEntryKind::DispatchFailed,
+        ]
+    );
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Running);
+    assert_eq!(snapshot.capability_activities.len(), 2);
+    let completed = snapshot
+        .capability_activities
+        .iter()
+        .find(|activity| {
+            activity.invocation_id == InvocationId::from_uuid(first_activity_id.as_uuid())
+        })
+        .expect("first capability activity projected");
+    assert_eq!(
+        completed.run_id,
+        Some(InvocationId::from_uuid(run_id.as_uuid()))
+    );
+    assert_eq!(completed.capability_id, first_capability_id);
+    assert_eq!(completed.provider.as_ref(), Some(&provider_id));
+    assert_eq!(completed.runtime, Some(RuntimeKind::FirstParty));
+    assert_eq!(completed.output_bytes, Some(64));
+    let failed = snapshot
+        .capability_activities
+        .iter()
+        .find(|activity| {
+            activity.invocation_id == InvocationId::from_uuid(second_activity_id.as_uuid())
+        })
+        .expect("second capability activity projected");
+    assert_eq!(
+        failed.run_id,
+        Some(InvocationId::from_uuid(run_id.as_uuid()))
+    );
+    assert_eq!(failed.capability_id, second_capability_id);
+    assert_eq!(failed.provider.as_ref(), Some(&provider_id));
+    assert_eq!(failed.runtime, Some(RuntimeKind::FirstParty));
+    assert_eq!(failed.error_kind.as_deref(), Some("operation_failed"));
+}
+
+#[tokio::test]
+async fn publish_loop_milestone_projects_hook_dispatched_to_runtime_event() {
+    let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let thread_id = ThreadId::new("thread-hook-publish-dispatched").unwrap();
+    let run_id = TurnRunId::new();
+    let sink = DurableLoopHostMilestoneSink::new(
+        Arc::clone(&events),
+        DurableLoopHostMilestoneScope::from_thread_scope_for_run(
+            &milestone_thread_scope(),
+            thread_id.clone(),
+            run_id,
+        )
+        .unwrap(),
+    );
+    let scope = TurnScope::new(
+        tenant_id(),
+        Some(agent_id()),
+        Some(project_id()),
+        thread_id.clone(),
+    );
+
+    sink.publish_loop_milestone(milestone_for(
         scope,
         run_id,
         LoopHostMilestoneKind::HookDispatched {
@@ -1003,7 +1138,7 @@ async fn publish_loop_milestone_projects_hook_decision_with_closed_vocabulary_on
     let sink = DurableLoopHostMilestoneSink::new(
         Arc::clone(&events),
         DurableLoopHostMilestoneScope::from_thread_scope_for_run(
-            &hook_thread_scope(),
+            &milestone_thread_scope(),
             thread_id.clone(),
             run_id,
         )
@@ -1019,7 +1154,7 @@ async fn publish_loop_milestone_projects_hook_decision_with_closed_vocabulary_on
     // The raw `reason` must NOT cross into the durable event — only the
     // closed-vocabulary `kind_name()` (here, "deny") may flow through.
     const RAW_DECISION_REASON: &str = "RAW_DECISION_REASON_SENTINEL sk-leak";
-    sink.publish_loop_milestone(hook_milestone_for(
+    sink.publish_loop_milestone(milestone_for(
         scope,
         run_id,
         LoopHostMilestoneKind::HookDecisionEmitted {
@@ -1066,7 +1201,7 @@ async fn publish_loop_milestone_projects_hook_failed_with_disposition() {
     let sink = DurableLoopHostMilestoneSink::new(
         Arc::clone(&events),
         DurableLoopHostMilestoneScope::from_thread_scope_for_run(
-            &hook_thread_scope(),
+            &milestone_thread_scope(),
             thread_id.clone(),
             run_id,
         )
@@ -1079,7 +1214,7 @@ async fn publish_loop_milestone_projects_hook_failed_with_disposition() {
         thread_id.clone(),
     );
 
-    sink.publish_loop_milestone(hook_milestone_for(
+    sink.publish_loop_milestone(milestone_for(
         scope,
         run_id,
         LoopHostMilestoneKind::HookFailed {

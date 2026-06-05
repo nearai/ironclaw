@@ -301,6 +301,34 @@ async fn product_thread_subscription_blocks_foreign_thread_live_payload() {
 }
 
 #[tokio::test]
+async fn product_thread_subscription_blocks_foreign_activity_live_payload() {
+    let scope = projection_scope("thread-a");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
+    let manager = manager_with_source(scope.clone(), Arc::clone(&source));
+    let mut subscription = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("authorized subscription");
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+
+    source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(
+            replay_with_activity_thread(&scope, 11, 11, "thread-b"),
+        ))
+        .expect("publish foreign activity payload with matching cursor scope");
+
+    match subscription.next().await.expect("access marker") {
+        ProjectionStreamItem::Lagged { reason, .. } => {
+            assert_eq!(reason, LagReason::AccessBlocked);
+        }
+        other => panic!("expected access lag marker, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn live_forwarding_advances_cursor_and_reports_latest_reconnect_cursor() {
     let scope = projection_scope("thread-a");
     let source = Arc::new(InMemoryProjectionUpdateSource::new(8));

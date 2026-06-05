@@ -10,6 +10,37 @@ use ironclaw_product_adapters::{
 use ironclaw_turns::{TurnError, TurnErrorCategory};
 use thiserror::Error;
 
+use crate::approval_interaction::ApprovalInteractionRejectionKind;
+use crate::auth_interaction::AuthInteractionRejectionKind;
+
+/// Stable reasons for rejecting an auth continuation before or during turn resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthContinuationRejectionKind {
+    NotTurnGateResume,
+    MissingThreadScope,
+    InvalidTurnRunRef,
+    InvalidGateRef,
+    InvalidIdempotencyKey,
+    InvalidBindingRef,
+    UnauthorizedBlockedGate,
+}
+
+impl AuthContinuationRejectionKind {
+    pub fn sanitized_reason(self) -> &'static str {
+        match self {
+            Self::NotTurnGateResume => "auth continuation is not a turn-gate resume",
+            Self::MissingThreadScope => "invalid auth continuation scope",
+            Self::InvalidTurnRunRef => "invalid auth continuation run reference",
+            Self::InvalidGateRef => "invalid auth continuation gate reference",
+            Self::InvalidIdempotencyKey => "invalid auth continuation idempotency key",
+            Self::InvalidBindingRef => "invalid auth continuation binding ref",
+            Self::UnauthorizedBlockedGate => {
+                "auth continuation does not match an authorized blocked auth gate"
+            }
+        }
+    }
+}
+
 /// Internal error type for the product workflow facade.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProductWorkflowError {
@@ -45,6 +76,24 @@ pub enum ProductWorkflowError {
     #[error("turn resume rejected: {reason}")]
     TurnResumeRejected { reason: String },
 
+    /// Auth continuation was rejected with a stable sanitized reason.
+    #[error("auth continuation rejected: {kind:?}")]
+    AuthContinuationRejected { kind: AuthContinuationRejectionKind },
+
+    /// Approval interaction was rejected with a stable sanitized reason.
+    #[error("approval interaction rejected: {kind:?}")]
+    ApprovalInteractionRejected {
+        kind: ApprovalInteractionRejectionKind,
+    },
+
+    /// Auth interaction was rejected with a stable sanitized reason.
+    #[error("auth interaction rejected: {kind:?}")]
+    AuthInteractionRejected { kind: AuthInteractionRejectionKind },
+
+    /// Turn coordinator rejected a resume with typed category/status information.
+    #[error("turn resume denied: {error}")]
+    TurnResumeDenied { error: TurnError },
+
     /// A transient store or service failure.
     #[error("transient workflow failure: {reason}")]
     Transient { reason: String },
@@ -59,10 +108,6 @@ pub enum ProductWorkflowError {
         prior_outcome: ironclaw_product_adapters::ProductInboundAck,
     },
 
-    /// Command routing is not yet implemented.
-    #[error("command routing unavailable: {command}")]
-    CommandRoutingUnavailable { command: String },
-
     /// The requested action kind is not supported by this workflow version.
     #[error("unsupported action kind: {kind}")]
     UnsupportedActionKind { kind: String },
@@ -76,6 +121,7 @@ fn workflow_rejection_kind(category: TurnErrorCategory) -> ProductWorkflowReject
         TurnErrorCategory::Unauthorized => ProductWorkflowRejectionKind::Unauthorized,
         TurnErrorCategory::InvalidRequest => ProductWorkflowRejectionKind::InvalidRequest,
         TurnErrorCategory::Unavailable => ProductWorkflowRejectionKind::Unavailable,
+        TurnErrorCategory::CapacityExceeded => ProductWorkflowRejectionKind::AdmissionRejected,
         TurnErrorCategory::Conflict => ProductWorkflowRejectionKind::Conflict,
     }
 }
@@ -133,6 +179,39 @@ impl From<ProductWorkflowError> for ProductAdapterError {
             ProductWorkflowError::TurnResumeRejected { reason } => ProductAdapterError::Internal {
                 detail: RedactedString::new(reason),
             },
+            ProductWorkflowError::AuthContinuationRejected { kind } => {
+                ProductAdapterError::WorkflowRejected {
+                    kind: ProductWorkflowRejectionKind::InvalidRequest,
+                    status_code: 400,
+                    retryable: false,
+                    reason: RedactedString::new(kind.sanitized_reason()),
+                }
+            }
+            ProductWorkflowError::ApprovalInteractionRejected { kind } => {
+                ProductAdapterError::WorkflowRejected {
+                    kind: kind.workflow_rejection_kind(),
+                    status_code: kind.status_code(),
+                    retryable: kind.retryable(),
+                    reason: RedactedString::new(kind.sanitized_reason()),
+                }
+            }
+            ProductWorkflowError::AuthInteractionRejected { kind } => {
+                ProductAdapterError::WorkflowRejected {
+                    kind: kind.workflow_rejection_kind(),
+                    status_code: kind.status_code(),
+                    retryable: kind.retryable(),
+                    reason: RedactedString::new(kind.sanitized_reason()),
+                }
+            }
+            ProductWorkflowError::TurnResumeDenied { error } => {
+                let status_code = error.adapter_status_code();
+                ProductAdapterError::WorkflowRejected {
+                    kind: workflow_rejection_kind(error.category()),
+                    status_code,
+                    retryable: matches!(status_code, 429 | 503),
+                    reason: RedactedString::new(error.to_string()),
+                }
+            }
             ProductWorkflowError::Transient { reason } => ProductAdapterError::WorkflowTransient {
                 reason: RedactedString::new(reason),
             },
@@ -156,11 +235,6 @@ impl From<ProductWorkflowError> for ProductAdapterError {
             ProductWorkflowError::DuplicateAction { .. } => ProductAdapterError::Internal {
                 detail: RedactedString::new("duplicate action escaped workflow layer"),
             },
-            ProductWorkflowError::CommandRoutingUnavailable { command } => {
-                ProductAdapterError::Internal {
-                    detail: RedactedString::new(format!("command routing unavailable: {command}")),
-                }
-            }
             ProductWorkflowError::UnsupportedActionKind { kind } => ProductAdapterError::Internal {
                 detail: RedactedString::new(format!("unsupported action kind: {kind}")),
             },
@@ -199,5 +273,56 @@ mod tests {
         .into();
         assert!(!err.is_retryable());
         assert!(matches!(err, ProductAdapterError::WorkflowRejected { .. }));
+    }
+
+    #[test]
+    fn turn_resume_denied_maps_to_workflow_rejected() {
+        for (error, expected_kind, expected_status, expected_retryable) in [
+            (
+                TurnError::Unauthorized,
+                ProductWorkflowRejectionKind::Unauthorized,
+                403,
+                false,
+            ),
+            (
+                TurnError::ScopeNotFound,
+                ProductWorkflowRejectionKind::ScopeNotFound,
+                404,
+                false,
+            ),
+            (
+                TurnError::Unavailable {
+                    reason: "turn store offline".to_string(),
+                },
+                ProductWorkflowRejectionKind::Unavailable,
+                503,
+                true,
+            ),
+            (
+                TurnError::capacity_exceeded(
+                    ironclaw_turns::TurnCapacityResource::SpawnTreeDescendants,
+                    3,
+                ),
+                ProductWorkflowRejectionKind::AdmissionRejected,
+                429,
+                true,
+            ),
+        ] {
+            let err: ProductAdapterError = ProductWorkflowError::TurnResumeDenied { error }.into();
+
+            match err {
+                ProductAdapterError::WorkflowRejected {
+                    kind,
+                    status_code,
+                    retryable,
+                    ..
+                } => {
+                    assert_eq!(kind, expected_kind);
+                    assert_eq!(status_code, expected_status);
+                    assert_eq!(retryable, expected_retryable);
+                }
+                other => panic!("expected typed workflow rejection, got {other:?}"),
+            }
+        }
     }
 }

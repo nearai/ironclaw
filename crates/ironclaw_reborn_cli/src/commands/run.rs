@@ -2,6 +2,7 @@ use clap::Args;
 use ironclaw_reborn_composition::reborn_runtime_readiness_snapshot;
 
 use crate::context::RebornCliContext;
+use crate::runtime::RuntimeInputOptions;
 
 /// Start the standalone Reborn runtime. Sends `--message` if provided
 /// (single-shot mode), otherwise drops into a stdin REPL.
@@ -17,6 +18,10 @@ pub(crate) struct RunCommand {
     /// smoke tests keep passing.
     #[arg(long = "dry-run")]
     dry_run: bool,
+
+    /// Confirm trusted-laptop host filesystem access for local-dev-yolo.
+    #[arg(long = "confirm-host-access")]
+    confirm_host_access: bool,
 }
 
 impl RunCommand {
@@ -26,7 +31,13 @@ impl RunCommand {
             return run_dry(context);
         }
 
-        crate::runtime::execute(context, self.message)
+        crate::runtime::execute(
+            context,
+            self.message,
+            RuntimeInputOptions {
+                confirm_host_access: self.confirm_host_access,
+            },
+        )
     }
 }
 

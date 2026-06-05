@@ -689,6 +689,9 @@ mod tests {
         // (e.g. a backend without pgvector); the trait-level capability
         // declaration is what gates real backends.
         let fs = InMemoryBackend::new();
+        let capabilities = fs.capabilities();
+        assert!(capabilities.has(crate::Capability::IndexFts));
+        assert!(capabilities.has(crate::Capability::IndexVector));
         let prefix = vpath("/memory");
         let fts = IndexSpec::new(
             IndexName::new("by_chunk").unwrap(),
@@ -910,6 +913,22 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec!["a.md", "d.md", "sub"]);
+    }
+
+    #[tokio::test]
+    async fn list_dir_bounded_uses_trait_default_truncation() {
+        let fs = InMemoryBackend::new();
+        for p in ["/projects/a.md", "/projects/b.md", "/projects/c.md"] {
+            fs.put(&vpath(p), Entry::bytes(vec![]), CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+
+        let entries = fs.list_dir_bounded(&vpath("/projects"), 2).await.unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "a.md");
+        assert_eq!(entries[1].name, "b.md");
     }
 
     #[tokio::test]

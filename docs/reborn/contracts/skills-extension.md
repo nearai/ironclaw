@@ -75,6 +75,13 @@ Supporting files are data by default. `scripts/` files do not become executable
 just because they live in a skill bundle. Executing a script requires a separate
 kernel-mediated capability lease and sandbox/runtime decision.
 
+URL installs preserve the same bundle boundary as filesystem installs. A direct
+raw `SKILL.md` URL installs only that document, while ZIP archives and supported
+GitHub repository/tree URLs install the selected skill directory including
+supporting files such as `references/`, `templates/`, `scripts/`, and `assets/`.
+Supporting file paths must remain relative to the skill directory and pass the
+same scoped-path containment checks before write.
+
 ---
 
 ## 4. Contract surfaces
@@ -103,6 +110,13 @@ handles, capability lease IDs, or unapproved prompt content.
 Approved `SKILL.md` instruction content transformed into loop snippets through
 `HostSkillContextSource`. This is the only path by which full skill instructions
 become model-visible runtime context.
+
+Reborn local-dev selection follows a catalog/list-first flow: the model may
+inspect visible skills through `skill_list`, then request full context for
+chosen skill names through the local-dev synthetic `skill_activate` capability.
+Natural-language activation criteria may rank or describe skills, but they must
+not inject full runtime skill context in this flow. Explicit `$skill-name`
+mentions remain a direct activation path.
 
 Implementations must not reuse a catalog/admin descriptor as a model selection
 descriptor, and must not reuse either descriptor as runtime skill context.
@@ -354,6 +368,10 @@ registry internals.
 Expected creation paths:
 
 - user imports or uploads a skill bundle;
+- a user or agent provides an HTTPS raw `SKILL.md`, ZIP bundle, or supported
+  GitHub repository/tree URL to the networked `builtin.skill_install_url`
+  capability, fetched through host-mediated network egress before writing to
+  scoped skill storage with installed-skill provenance metadata;
 - an agent/LLM creates or patches a learned skill under scoped `/skills`;
 - a hub, tap, or repository install normalizes into the same bundle layout;
 - admin/system provisioning installs read-only `/system/skills`.

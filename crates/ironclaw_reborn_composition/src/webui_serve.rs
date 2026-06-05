@@ -33,6 +33,8 @@
 //! surfaces to keep host auth host-owned and route/body/CORS security
 //! in gateway-owned code; the Reborn binary owns this stack itself.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
@@ -42,13 +44,28 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
+use ironclaw_auth::GoogleOAuthRouteConfig;
+use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
+use ironclaw_webui_v2::{
+    WebUiV2RouteOptions, WebUiV2State, is_webui_v2_llm_config_route_id,
+    webui_v2_router_with_options,
+};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+use crate::product_auth_serve::{ProductAuthRouteState, product_auth_route_mount};
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::slack_personal_binding_pairing_serve::{
+    SlackPersonalBindingPairingRouteConfig, slack_personal_binding_pairing_route_mount,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::slack_personal_binding_serve::{
+    SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteState,
+    slack_personal_binding_route_mount,
+};
 use crate::webui::RebornWebuiBundle;
 use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
@@ -82,6 +99,14 @@ pub(crate) const DEFAULT_WEBUI_CSP: &str =
 #[async_trait::async_trait]
 pub trait WebuiAuthenticator: Send + Sync + 'static {
     async fn authenticate(&self, token: &str) -> Option<UserId>;
+
+    /// Whether bearer tokens accepted by this authenticator represent a
+    /// single trusted operator. Operator-wide LLM config routes mutate shared
+    /// provider catalog, secret, and active model state, so host composition
+    /// only mounts them for authenticators that explicitly opt in.
+    fn allows_operator_llm_config(&self) -> bool {
+        false
+    }
 }
 
 /// Host-installation composition the Reborn HTTP gateway needs in
@@ -144,6 +169,94 @@ pub struct WebuiServeConfig {
     /// flows; supply it when the host installation has a single
     /// canonical project.
     pub(crate) default_project_id: Option<ProjectId>,
+    /// Host-supplied public (unauthenticated) route mounts merged
+    /// into the composed app outside the bearer auth layer. Used
+    /// by `ironclaw_reborn_webui_ingress::webui_v2_auth_router`
+    /// to mount the WebChat v2 OAuth login surface and by protocol
+    /// webhooks such as Slack Events API. Both the `Router` and the
+    /// `Vec<IngressRouteDescriptor>` are required so the descriptor-driven
+    /// per-route rate-limit and body-limit middlewares apply to these routes
+    /// just like they do to the v2 facade and the product-auth callback —
+    /// no side door. Defaults to an empty list.
+    pub(crate) public_mounts: Vec<PublicRouteMount>,
+    /// Optional Google OAuth setup config for Reborn product-auth
+    /// credential onboarding. When absent, the mounted Google setup
+    /// route fails closed with a sanitized service-unavailable response.
+    pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
+    /// Optional Slack personal-binding WebUI OAuth route config.
+    /// Host binaries must opt in explicitly after wiring a host-owned
+    /// Slack OAuth client plus identity binding store.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_personal_binding: Option<SlackPersonalBindingRouteConfig>,
+    /// Optional Slack personal-binding pairing-code redeem route config.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_personal_binding_pairing: Option<SlackPersonalBindingPairingRouteConfig>,
+}
+
+/// Async drain hook for public route mounts that schedule work outside the
+/// request/response future.
+pub trait PublicRouteDrain: Send + Sync {
+    fn drain<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+}
+
+/// A host-supplied public sub-router plus the descriptors composition
+/// needs to install the per-route policy middleware around it.
+/// Mirrors the shape `ProductAuthRouteMount` uses internally so the
+/// two public surfaces ride on the same machinery.
+#[derive(Clone)]
+pub struct PublicRouteMount {
+    pub router: Router,
+    pub descriptors: Vec<IngressRouteDescriptor>,
+    pub drain: Option<Arc<dyn PublicRouteDrain>>,
+}
+
+impl PublicRouteMount {
+    pub fn new(router: Router, descriptors: Vec<IngressRouteDescriptor>) -> Self {
+        Self {
+            router,
+            descriptors,
+            drain: None,
+        }
+    }
+
+    pub fn with_drain(mut self, drain: Arc<dyn PublicRouteDrain>) -> Self {
+        self.drain = Some(drain);
+        self
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct PublicRouteDrains {
+    drains: Arc<Vec<Arc<dyn PublicRouteDrain>>>,
+}
+
+impl PublicRouteDrains {
+    fn new(drains: Vec<Arc<dyn PublicRouteDrain>>) -> Self {
+        Self {
+            drains: Arc::new(drains),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.drains.is_empty()
+    }
+
+    pub async fn drain(&self) {
+        for drain in self.drains.iter() {
+            drain.drain().await;
+        }
+    }
+}
+
+pub struct WebuiV2App {
+    router: Router,
+    public_route_drains: PublicRouteDrains,
+}
+
+impl WebuiV2App {
+    pub fn into_parts(self) -> (Router, PublicRouteDrains) {
+        (self.router, self.public_route_drains)
+    }
 }
 
 impl WebuiServeConfig {
@@ -163,7 +276,66 @@ impl WebuiServeConfig {
             canonical_host: None,
             default_agent_id: None,
             default_project_id: None,
+            public_mounts: Vec::new(),
+            google_oauth: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_personal_binding: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_personal_binding_pairing: None,
         }
+    }
+
+    pub fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
+        self.google_oauth = Some(config);
+        self
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[rustfmt::skip]
+    pub fn with_slack_personal_binding(mut self, config: SlackPersonalBindingRouteConfig) -> Self { // pub-api-exempt: host OAuth hook
+        self.slack_personal_binding = Some(config);
+        self
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn with_slack_personal_binding_pairing(
+        mut self,
+        config: SlackPersonalBindingPairingRouteConfig,
+    ) -> Self {
+        self.slack_personal_binding_pairing = Some(config);
+        self
+    }
+
+    /// Attach a host-supplied public sub-router PLUS its route
+    /// descriptors. The router is merged into the composed app
+    /// outside the bearer auth layer; the descriptors fold into
+    /// the same per-route rate-limit / body-limit middlewares the
+    /// v2 facade and the product-auth callback already use, so
+    /// the public surface rides on the canonical policy stack —
+    /// no descriptor-less side door. Multiple public mounts are
+    /// allowed so OAuth/login routes and protocol webhooks can coexist
+    /// on the same Reborn listener.
+    ///
+    /// Today this is the seam
+    /// `ironclaw_reborn_webui_ingress::webui_v2_auth_router` plugs
+    /// into; future host-owned public surfaces can reuse the same
+    /// hook by returning a [`PublicRouteMount`].
+    ///
+    /// **Do NOT pass a v1 gateway router through this hook.** v1's
+    /// `/auth/*` handlers in `src/channels/web/handlers/auth.rs`
+    /// share path names with the v2-native router from
+    /// `webui_v2_auth_router` (`/auth/providers`,
+    /// `/auth/login/{p}`, `/auth/callback/{p}`, `/auth/logout`) by
+    /// design — they implement the same protocol on two
+    /// independent listeners. Merging the v1 router here would
+    /// conflict with the v2-native router and, more importantly,
+    /// would route v1 traffic into the v2 host-owned `SessionStore`
+    /// it never had access to. The v2 listener is exclusively for
+    /// `webui_v2_auth_router` (and any future host-native public
+    /// surface that follows the same boundary rules).
+    pub fn with_public_route_mount(mut self, mount: PublicRouteMount) -> Self {
+        self.public_mounts.push(mount);
+        self
     }
 
     /// Set the canonical host for WebSocket same-origin checks. See
@@ -258,14 +430,16 @@ pub enum WebuiServeError {
 /// - CORS allow-origin list
 /// - outer global request body limit (defense in depth for unmatched paths)
 /// - per-route body limit, resolved from the
-///   `ironclaw_webui_v2::webui_v2_routes()` descriptors (16 KiB for
-///   create_thread, 1 MiB for send_message, 4 KiB for cancel_run /
-///   resolve_gate, NoBody for timeline / SSE)
+///   WebUI v2 descriptors plus product-auth descriptors when mounted
+///   (16 KiB for create_thread/product-auth start, 1 MiB for
+///   send_message, 4 KiB for cancel_run / resolve_gate, NoBody for
+///   timeline / SSE / product-auth callback)
 /// - bearer auth (+ `?token=` on the v2 SSE path) → injects
 ///   [`WebUiAuthenticatedCaller`]
 /// - per-route rate limit, resolved from the
-///   `ironclaw_webui_v2::webui_v2_routes()` descriptors (mutation
-///   60/60, read 120/60, stream 12/60 per `(tenant, user)` today)
+///   WebUI v2 descriptors plus product-auth descriptors when mounted
+///   (authenticated WebUI routes are per caller; the public OAuth
+///   callback is per peer IP)
 /// - WebChat v2 route set from `ironclaw_webui_v2::webui_v2_router`
 ///
 /// The returned [`Router`] is the seam between this composition crate
@@ -280,6 +454,13 @@ pub fn webui_v2_app(
     bundle: RebornWebuiBundle,
     config: WebuiServeConfig,
 ) -> Result<Router, WebuiServeError> {
+    Ok(webui_v2_app_with_lifecycle(bundle, config)?.into_parts().0)
+}
+
+pub fn webui_v2_app_with_lifecycle(
+    bundle: RebornWebuiBundle,
+    config: WebuiServeConfig,
+) -> Result<WebuiV2App, WebuiServeError> {
     let csp_value = config.csp_header.clone().map(Ok).unwrap_or_else(|| {
         HeaderValue::from_str(DEFAULT_WEBUI_CSP)
             .map_err(|err| WebuiServeError::InvalidCspHeader(err.to_string()))
@@ -307,7 +488,56 @@ pub fn webui_v2_app(
         authenticator: config.authenticator.clone(),
     };
 
-    let descriptors = ironclaw_webui_v2::webui_v2_routes();
+    let product_auth_mount = bundle.product_auth.clone().map(|product_auth| {
+        let mut state = ProductAuthRouteState::new(
+            product_auth,
+            config.tenant_id.clone(),
+            config.default_agent_id.clone(),
+            config.default_project_id.clone(),
+        );
+        if let Some(google_oauth) = config.google_oauth.clone() {
+            state = state.with_google_oauth(google_oauth);
+        }
+        product_auth_route_mount(state)
+    });
+    #[cfg(feature = "slack-v2-host-beta")]
+    let slack_personal_binding_mount = config
+        .slack_personal_binding
+        .clone()
+        .map(SlackPersonalBindingRouteState::new)
+        .map(slack_personal_binding_route_mount);
+    #[cfg(feature = "slack-v2-host-beta")]
+    let slack_personal_binding_pairing_mount = config
+        .slack_personal_binding_pairing
+        .clone()
+        .map(slack_personal_binding_pairing_route_mount);
+    let public_mounts = config.public_mounts;
+    let public_route_drains = PublicRouteDrains::new(
+        public_mounts
+            .iter()
+            .filter_map(|mount| mount.drain.clone())
+            .collect(),
+    );
+    let mount_llm_config_routes = config.authenticator.allows_operator_llm_config();
+    let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
+    if !mount_llm_config_routes {
+        descriptors
+            .retain(|descriptor| !is_webui_v2_llm_config_route_id(descriptor.route_id().as_str()));
+    }
+    if let Some(mount) = &product_auth_mount {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = &slack_personal_binding_mount {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = &slack_personal_binding_pairing_mount {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
+    for mount in &public_mounts {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
     let rate_limit_state = build_rate_limit_state(&descriptors)?;
     let body_limit_state = build_body_limit_state(&descriptors);
     let ws_origin_state = build_websocket_origin_state(
@@ -319,8 +549,39 @@ pub fn webui_v2_app(
     // Inner: the v2 route surface, retagged to `Router<()>` so it can
     // merge into the outer stateless router. `webui_v2_router` has
     // already baked its own `WebUiV2State` into every handler.
+    let route_options = if mount_llm_config_routes {
+        WebUiV2RouteOptions::all()
+    } else {
+        WebUiV2RouteOptions::without_llm_config_routes()
+    };
     let v2_inner: Router<()> =
-        webui_v2_router(WebUiV2State::new(bundle.api.clone())).with_state(());
+        webui_v2_router_with_options(WebUiV2State::new(bundle.api.clone()), route_options)
+            .with_state(());
+
+    let mut protected_inner = Router::new().merge(v2_inner);
+    let mut public_inner: Option<Router> = None;
+    if let Some(mount) = product_auth_mount {
+        protected_inner = protected_inner.merge(mount.protected);
+        public_inner = Some(mount.public);
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = slack_personal_binding_mount {
+        protected_inner = protected_inner.merge(mount.protected);
+        public_inner = Some(match public_inner {
+            Some(existing) => existing.merge(mount.public),
+            None => mount.public,
+        });
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = slack_personal_binding_pairing_mount {
+        protected_inner = protected_inner.merge(mount.protected);
+    }
+    for mount in public_mounts {
+        public_inner = Some(match public_inner {
+            Some(existing) => existing.merge(mount.router),
+            None => mount.router,
+        });
+    }
 
     // Layer order matters. `route_layer` stacks inside-out from the
     // bottom of the chain up — the LAST `.route_layer(...)` call is
@@ -333,10 +594,9 @@ pub fn webui_v2_app(
     // validation. Auth runs before rate-limit so the limiter has a
     // real caller key and an unauthenticated request never burns a
     // rate-limit slot.
-    let app = Router::new()
-        .merge(v2_inner)
+    let protected = protected_inner
         .route_layer(middleware::from_fn_with_state(
-            rate_limit_state,
+            rate_limit_state.clone(),
             enforce_rate_limit,
         ))
         .route_layer(middleware::from_fn_with_state(
@@ -344,7 +604,7 @@ pub fn webui_v2_app(
             authenticate_request,
         ))
         .route_layer(middleware::from_fn_with_state(
-            body_limit_state,
+            body_limit_state.clone(),
             enforce_body_limit,
         ))
         // WS upgrades skip CORS pre-flight, so origin enforcement runs
@@ -355,7 +615,38 @@ pub fn webui_v2_app(
         .route_layer(middleware::from_fn_with_state(
             ws_origin_state,
             enforce_websocket_origin,
-        ))
+        ));
+
+    let mut app = Router::new().merge(protected);
+    if let Some(public_inner) = public_inner {
+        let public = public_inner
+            .route_layer(middleware::from_fn_with_state(
+                rate_limit_state,
+                enforce_rate_limit,
+            ))
+            .route_layer(middleware::from_fn_with_state(
+                body_limit_state,
+                enforce_body_limit,
+            ));
+        app = app.merge(public);
+    }
+    let app = app
+        // SPA static assets served from the embedded
+        // `ironclaw_webui_v2_static` bundle. Routed AFTER the
+        // route_layer stack above so the SPA does not require bearer
+        // auth or burn rate-limit slots — anonymous fetches of
+        // HTML/JS/CSS/images are expected. Outer security headers,
+        // CORS, panic boundary, and the global body-limit
+        // (`.layer(...)` calls below) still apply, defense in depth.
+        //
+        // The static crate's `mount_at_prefix` factory owns the
+        // routing surface (root, trailing-slash, wildcard, and any
+        // future routes it adds) so the composition layer never
+        // enumerates individual handlers. `merge` (not `nest`) is
+        // used because the factory already returns fully prefixed
+        // routes — `nest` in axum 0.8 has quirky dispatch for the
+        // exact prefix with/without trailing slash.
+        .merge(ironclaw_webui_v2_static::mount_at_prefix("/v2"))
         // Outer global cap: applies to unmatched paths (e.g. 404 fallback)
         // as defense in depth. v2 routes are tighter via the per-route
         // body-limit middleware above.
@@ -387,7 +678,10 @@ pub fn webui_v2_app(
             HeaderValue::from_static("no-referrer"),
         ));
 
-    Ok(app)
+    Ok(WebuiV2App {
+        router: app,
+        public_route_drains,
+    })
 }
 
 // ─── auth middleware ──────────────────────────────────────────────────

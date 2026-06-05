@@ -6,6 +6,7 @@
 
 use std::{
     collections::HashMap,
+    num::NonZeroUsize,
     sync::{Arc, Mutex},
 };
 
@@ -24,6 +25,7 @@ const DEFAULT_IN_FLIGHT_LEASE: Duration = Duration::seconds(60);
 pub struct InMemoryIdempotencyLedger {
     state: Arc<Mutex<InMemoryIdempotencyState>>,
     in_flight_lease: Duration,
+    max_settled_entries: Option<NonZeroUsize>,
 }
 
 #[derive(Default)]
@@ -41,6 +43,15 @@ impl InMemoryIdempotencyLedger {
         Self {
             state: Arc::new(Mutex::new(InMemoryIdempotencyState::default())),
             in_flight_lease,
+            max_settled_entries: None,
+        }
+    }
+
+    pub fn with_settled_entry_limit(max_settled_entries: NonZeroUsize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(InMemoryIdempotencyState::default())),
+            in_flight_lease: DEFAULT_IN_FLIGHT_LEASE,
+            max_settled_entries: Some(max_settled_entries),
         }
     }
 
@@ -124,6 +135,7 @@ impl IdempotencyLedger for InMemoryIdempotencyLedger {
         }
         state.in_flight.remove(&action.fingerprint);
         state.settled.insert(action.fingerprint.clone(), action);
+        trim_settled_entries(&mut state, self.max_settled_entries);
         Ok(())
     }
 
@@ -136,5 +148,25 @@ impl IdempotencyLedger for InMemoryIdempotencyLedger {
             state.in_flight.remove(&action.fingerprint);
         }
         Ok(())
+    }
+}
+
+fn trim_settled_entries(
+    state: &mut InMemoryIdempotencyState,
+    max_settled_entries: Option<NonZeroUsize>,
+) {
+    let Some(max_settled_entries) = max_settled_entries else {
+        return;
+    };
+    while state.settled.len() > max_settled_entries.get() {
+        let Some(oldest) = state
+            .settled
+            .iter()
+            .min_by_key(|(_, action)| action.settled_at.unwrap_or(action.received_at))
+            .map(|(fingerprint, _)| fingerprint.clone())
+        else {
+            return;
+        };
+        state.settled.remove(&oldest);
     }
 }

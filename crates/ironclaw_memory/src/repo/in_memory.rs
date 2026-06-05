@@ -11,7 +11,8 @@ use crate::metadata::MemoryWriteOptions;
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
 
 use super::{
-    MemoryAppendOutcome, MemoryDocumentRepository, ensure_document_path_does_not_conflict,
+    MemoryAppendOutcome, MemoryDocumentRepository, MemoryWriteOutcome,
+    ensure_document_path_does_not_conflict,
 };
 
 /// In-memory memory document repository for tests and examples.
@@ -95,6 +96,35 @@ impl MemoryDocumentRepository for InMemoryMemoryDocumentRepository {
             .or_insert_with(Vec::new)
             .extend_from_slice(bytes);
         Ok(MemoryAppendOutcome::Appended)
+    }
+
+    async fn compare_and_write_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<MemoryWriteOutcome, FilesystemError> {
+        let _ = options;
+        let mut documents = self.documents.lock().map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::WriteFile,
+                "memory document repository lock poisoned",
+            )
+        })?;
+        let current_hash = documents.get(path).map(|bytes| content_bytes_sha256(bytes));
+        if current_hash.as_deref() != expected_previous_hash {
+            return Ok(MemoryWriteOutcome::Conflict);
+        }
+        let existing = documents
+            .keys()
+            .filter(|document| document.scope() == path.scope())
+            .cloned()
+            .collect::<Vec<_>>();
+        ensure_document_path_does_not_conflict(path, &existing, FilesystemOperation::WriteFile)?;
+        documents.insert(path.clone(), bytes.to_vec());
+        Ok(MemoryWriteOutcome::Written)
     }
 
     async fn read_document_metadata(

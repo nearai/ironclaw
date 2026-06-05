@@ -10,7 +10,7 @@
 
 `LoopExit` is the driver-facing claim returned by an agent-loop attempt after a runner has already claimed a turn run. It is not durable run state and it is not trusted by itself.
 
-`TurnRunner` validates `LoopExit` evidence before translating it to a trusted `TurnRunnerOutcome` or to `RecoveryRequired` when safety cannot be proven. Syntactically valid refs are not evidence by themselves; the host/runner must verify referenced transcript, result, checkpoint, and gate records before trusting an exit.
+`TurnRunner` validates `LoopExit` evidence before translating it to a trusted `TurnRunnerOutcome`. Invalid exits that cannot be proven safe to terminalize are mapped to `TurnRunnerOutcome::Failed` with a stable sanitized category. `RecoveryRequired` is a legacy compat status; see §5. Syntactically valid refs are not evidence by themselves; the host/runner must verify referenced transcript, result, checkpoint, and gate records before trusting an exit.
 
 This prevents unsafe state changes such as releasing the active-thread lock after a driver says `Completed` without durable transcript/result refs, or blocking a run without a durable checkpoint and gate reference.
 
@@ -22,7 +22,7 @@ This prevents unsafe state changes such as releasing the active-thread lock afte
 AgentLoopDriver
   -> LoopExit claim
   -> TurnRunner validates evidence/policy
-  -> TurnRunnerOutcome or RecoveryRequired
+  -> TurnRunnerOutcome
   -> TurnStateStore transition
 ```
 
@@ -41,7 +41,7 @@ The driver-facing variants are fixed for the MVP:
 | `Cancelled` | Loop observed a host cancellation/interrupt and stopped safely. | `TurnRunnerOutcome::Cancelled` |
 | `Failed` | Loop stopped because of a stable sanitized failure category. | `TurnRunnerOutcome::Failed` |
 
-`RecoveryRequired` is intentionally not a normal driver return. It is runner/system-derived when validation cannot prove side-effect safety.
+`RecoveryRequired` is intentionally not a normal driver return. It is a legacy compat status retained for backward-compat deserialization of persisted rows; new invalid-exit handling always maps to `TurnRunnerOutcome::Failed`.
 
 ---
 
@@ -62,8 +62,8 @@ The driver-facing variants are fixed for the MVP:
 
 Validation always produces a redacted decision:
 
-- If the invalid exit is safe to terminalize, it maps to `TurnRunnerOutcome::Failed` with a stable sanitized category such as `driver_protocol_violation` or `interrupted_unexpectedly`.
-- If side-effect safety cannot be proven, it maps to `RecoveryRequired`; the active-thread lock must remain held until explicit operator/user resolution.
+- Invalid exits map to `TurnRunnerOutcome::Failed` with a stable sanitized category such as `driver_protocol_violation` or `interrupted_unexpectedly`. The active-thread lock is released on the Failed terminal transition.
+- `LoopExitMapping::RecoveryRequired` is a compat shim retained for deserialization of legacy stored rows; it is treated as terminal Failed by the transition port and no longer keeps the active lock held.
 
 Initial validation covers:
 
@@ -86,7 +86,7 @@ Later slices may add validation against transcript draft state, checkpoint fresh
 - bounded durable reference types for loop exit/message/result/usage/diagnostic refs;
 - `LoopExitEvidencePort` and evidence request DTOs for host-owned validation inputs;
 - crate-private `LoopExitValidationPolicy` construction plus public `LoopExitValidationDecision`;
-- one-way mapping to `TurnRunnerOutcome` or `LoopExitMapping::RecoveryRequired`;
+- one-way mapping to `TurnRunnerOutcome` (invalid exits always map to Failed; `LoopExitMapping::RecoveryRequired` is a backward-compat shim);
 - `LoopExitApplier`, which derives validation policy from host-owned evidence and invokes the trusted `TurnRunTransitionPort` with an already-validated `LoopExitMapping`.
 
 `ApplyValidatedLoopExitRequest` remains the transition-port DTO for already-validated mappings. Driver-facing code must not be able to supply `LoopExitValidationPolicy` directly.

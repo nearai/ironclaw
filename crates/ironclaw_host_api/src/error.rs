@@ -28,6 +28,8 @@ pub enum HostApiError {
     InvalidMount { value: String, reason: String },
     #[error("invalid network target '{value}': {reason}")]
     InvalidNetworkTarget { value: String, reason: String },
+    #[error("invalid runtime credential target '{value}': {reason}")]
+    InvalidRuntimeCredentialTarget { value: String, reason: String },
     #[error("host API invariant violation: {reason}")]
     InvariantViolation { reason: String },
 }
@@ -54,6 +56,26 @@ impl HostApiError {
 
     pub(crate) fn invalid_mount(value: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::InvalidMount {
+            value: value.into(),
+            reason: reason.into(),
+        }
+    }
+
+    pub(crate) fn invalid_network_target(
+        value: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::InvalidNetworkTarget {
+            value: value.into(),
+            reason: reason.into(),
+        }
+    }
+
+    pub(crate) fn invalid_runtime_credential_target(
+        value: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::InvalidRuntimeCredentialTarget {
             value: value.into(),
             reason: reason.into(),
         }

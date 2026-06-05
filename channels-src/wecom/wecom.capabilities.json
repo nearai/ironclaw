@@ -1,0 +1,73 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.1",
+  "type": "channel",
+  "name": "wecom",
+  "description": "WeCom intelligent bot channel with WebSocket inbound, pairing, group-aware sessions, and direct Bot media sends",
+  "auth": {
+    "secret_name": "wecom_bot_id",
+    "display_name": "WeCom",
+    "instructions": "Create a WeCom intelligent bot and collect its Bot ID and Bot Secret.",
+    "setup_url": "https://open.work.weixin.qq.com/",
+    "token_hint": "Bot ID and Bot Secret come from the WeCom intelligent bot setup page.",
+    "env_var": "WECOM_BOT_ID"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "wecom_bot_id",
+        "prompt": "Enter the BotId from your WeCom intelligent bot settings.",
+        "validation": "^[A-Za-z0-9_-]{3,128}$",
+        "optional": false
+      },
+      {
+        "name": "wecom_bot_secret",
+        "prompt": "Enter the Secret from your WeCom intelligent bot settings.",
+        "validation": "^[A-Za-z0-9_-]{16,128}$",
+        "optional": false
+      }
+    ],
+    "setup_url": "https://open.work.weixin.qq.com/"
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "openws.work.weixin.qq.com", "path_prefix": "/", "methods": ["GET"] },
+        { "host": "*.myqcloud.com", "path_prefix": "/", "methods": ["GET"] }
+      ],
+      "max_response_bytes": 20971520,
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 2000
+      }
+    },
+    "websocket": {
+      "url": "wss://openws.work.weixin.qq.com",
+      "connect_on_start": true,
+      "protocol": "wecom_aibot",
+      "bot_id_secret_name": "wecom_bot_id",
+      "bot_secret_name": "wecom_bot_secret",
+      "heartbeat_interval_ms": 30000,
+      "max_missed_heartbeat_acks": 2
+    },
+    "secrets": {
+      "allowed_names": ["wecom_bot_id", "wecom_bot_secret"]
+    },
+    "channel": {
+      "allowed_paths": [],
+      "allow_polling": true,
+      "workspace_prefix": "channels/wecom/",
+      "callback_timeout_secs": 45,
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      }
+    }
+  },
+  "config": {
+    "inbound_merge_window_ms": 5000,
+    "owner_id": null,
+    "dm_policy": "pairing",
+    "allow_from": []
+  }
+}

@@ -46,8 +46,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
     AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind,
-    ConversationBindingResolution, ConversationBindingService, ExternalActorRef,
-    ExternalConversationIdentity, InMemoryConversationServices, InboundTurnError,
+    ConversationActorPairingService, ConversationBindingResolution, ConversationBindingService,
+    ExternalActorRef, ExternalConversationIdentity, InMemoryConversationServices, InboundTurnError,
     LinkConversationRequest, LinkedConversationBinding, ReplyTargetBinding,
     ResolveConversationRequest, SessionThreadService, ThreadMessageRecord,
     ValidateReplyTargetRequest,
@@ -465,6 +465,28 @@ impl RebornFilesystemConversationServices {
                 adapter_kind,
                 adapter_installation_id,
                 external_actor_ref,
+            )
+            .await
+    }
+}
+
+#[async_trait]
+impl ConversationActorPairingService for RebornFilesystemConversationServices {
+    async fn pair_external_actor(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+        user_id: UserId,
+    ) -> Result<(), InboundTurnError> {
+        self.inner
+            .try_pair_external_actor(
+                tenant_id,
+                adapter_kind,
+                adapter_installation_id,
+                external_actor_ref,
+                user_id,
             )
             .await
     }

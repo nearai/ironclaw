@@ -17,6 +17,12 @@ AUTH_FULL_TESTS = AUTH_SMOKE_TESTS + [
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_tool_oauth_exchange_failure_leaves_extension_unauthed",
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_tool_first_chat_auth_attempt_emits_auth_url",
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_chat_first_gmail_installs_prompts_and_retries",
+    # ironclaw#3533 — chat-driven `tool_install` raises an approval gate,
+    # user approves via the approval card, then the auth card surfaces.
+    # Pairs with `test_chat_first_gmail_installs_prompts_and_retries`
+    # (auto-approve variant); both must stay green so the regression that
+    # made "connect my telegram" narrate manual UI steps can't ship again.
+    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_chat_install_approval_then_auth_card",
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_settings_first_gmail_auth_then_chat_runs",
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_settings_first_custom_mcp_auth_then_chat_runs",
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_tool_oauth_refresh_on_demand",
@@ -26,6 +32,17 @@ AUTH_FULL_TESTS = AUTH_SMOKE_TESTS + [
 
 AUTH_CHANNEL_TESTS = [
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_channel_oauth_roundtrip",
+    # ironclaw#3317 — pairing reply must name every IronClaw surface, and
+    # `approve telegram CODE` typed in chat must complete the pairing.
+    # Without this lane the whole class of "user pastes code in the wrong
+    # place, agent improvises an unhelpful answer" regressions would only
+    # surface in production.
+    "tests/e2e/scenarios/test_telegram_pairing_chat_claim.py::test_telegram_pairing_reply_names_every_surface",
+    "tests/e2e/scenarios/test_telegram_pairing_chat_claim.py::test_chat_surface_approves_pairing_code",
+    # PR #3381 review — `approve telegram CODE` typed in Telegram itself
+    # must NOT complete pairing (the allowlist gate intercepts before the
+    # agent parser), and the bot's reply must not promise that surface.
+    "tests/e2e/scenarios/test_telegram_pairing_chat_claim.py::test_telegram_dm_approve_command_is_intercepted_by_allowlist_gate",
 ]
 
 AUTH_PROFILES: dict[str, list[str]] = {

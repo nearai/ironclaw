@@ -10,9 +10,9 @@
 //!    `ironclaw_reborn_config::LlmSlotSelection`. "Use provider X
 //!    for the `default` slot, with model Y."
 //! 3. **Runtime config** — derived here. The resolved `ProviderDefinition`
-//!    plus the selection's overrides becomes a `RebornLlmConfig` that
-//!    `build_reborn_runtime` knows how to wire into a host-managed
-//!    model gateway.
+//!    plus the selection's overrides becomes an `ironclaw_llm::LlmConfig`
+//!    that `build_reborn_runtime` wires through the shared LLM provider
+//!    chain.
 //!
 //! This module is the home of step 3. Lives behind the
 //! `root-llm-provider` feature so the substrate-only composition stays
@@ -30,12 +30,14 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use ironclaw_llm::{ProviderRegistry, registry::ProviderDefinition};
+use ironclaw_llm::{
+    ProviderRegistry, ProviderResolutionError, ProviderSelection, registry::ProviderDefinition,
+};
 use ironclaw_reborn_config::{
     LlmSlotSelection, RebornBootConfig, RebornConfigFile, reject_inline_secret,
 };
 
-use crate::runtime_input::{DEFAULT_LLM_REQUEST_TIMEOUT_SECS, RebornLlmConfig, ResolvedRebornLlm};
+use crate::runtime_input::ResolvedRebornLlm;
 
 /// Errors surfaced when resolving an `LlmSlotSelection` against the
 /// merged provider catalog.
@@ -99,13 +101,6 @@ pub enum RebornLlmCatalogError {
         #[source]
         source: ironclaw_llm::registry::ProviderRegistryLoadError,
     },
-    /// Provider extra headers env var is malformed.
-    #[error("llm provider `{provider}` extra headers env var `{env}` is invalid: {reason}")]
-    ExtraHeadersInvalid {
-        provider: String,
-        env: String,
-        reason: String,
-    },
     /// Environment fallback could not be resolved by the LLM provider layer.
     #[error("could not resolve LLM environment fallback: {source}")]
     EnvResolution {
@@ -129,7 +124,7 @@ pub fn resolve_reborn_runtime_llm(
             selection,
             Some(boot.home().providers_file_path().as_path()),
         )
-        .map(ResolvedRebornLlm::from_catalog)
+        .map(ResolvedRebornLlm::from_llm_config)
         .map(Some);
     }
 
@@ -139,15 +134,9 @@ pub fn resolve_reborn_runtime_llm(
 fn resolve_llm_from_env(
     boot: &RebornBootConfig,
 ) -> Result<Option<ResolvedRebornLlm>, RebornLlmCatalogError> {
-    ironclaw_llm::resolve_registry_provider_from_env(Some(
-        boot.home().providers_file_path().as_path(),
-    ))
-    .map(|maybe_config| {
-        maybe_config.map(|config| {
-            ResolvedRebornLlm::from_registry_provider(config, DEFAULT_LLM_REQUEST_TIMEOUT_SECS)
-        })
-    })
-    .map_err(|source| RebornLlmCatalogError::EnvResolution { source })
+    ironclaw_llm::resolve_llm_config_from_env(Some(boot.home().providers_file_path().as_path()))
+        .map(|maybe_config| maybe_config.map(ResolvedRebornLlm::from_llm_config))
+        .map_err(|source| RebornLlmCatalogError::EnvResolution { source })
 }
 
 /// Resolve an `LlmSlotSelection` against the merged provider catalog.
@@ -155,15 +144,12 @@ fn resolve_llm_from_env(
 /// Steps:
 /// 1. Build the catalog (`ProviderRegistry::load_from_path(user)`).
 /// 2. Look up the requested `provider_id`.
-/// 3. Determine api_key_env (selection override > catalog default).
-/// 4. Read the API key value from that env var (fail-closed if absent).
-/// 5. Determine base_url (selection override > catalog default).
-/// 6. Determine model (selection override > catalog default).
-/// 7. Build and return a `RebornLlmConfig`.
+/// 3. Validate Reborn-specific secret/env-var policy on catalog and selection.
+/// 4. Let `ironclaw_llm` resolve provider fields and build the full config.
 pub fn resolve_llm_selection_against_catalog(
     selection: &LlmSlotSelection,
     user_providers_path: Option<&Path>,
-) -> Result<RebornLlmConfig, RebornLlmCatalogError> {
+) -> Result<ironclaw_llm::LlmConfig, RebornLlmCatalogError> {
     let registry = ProviderRegistry::try_load_from_path(user_providers_path)
         .map_err(|source| RebornLlmCatalogError::CatalogLoad { source })?;
     resolve_against_registry(selection, &registry)
@@ -175,7 +161,7 @@ pub fn resolve_llm_selection_against_catalog(
 pub fn resolve_against_registry(
     selection: &LlmSlotSelection,
     registry: &ProviderRegistry,
-) -> Result<RebornLlmConfig, RebornLlmCatalogError> {
+) -> Result<ironclaw_llm::LlmConfig, RebornLlmCatalogError> {
     validate_catalog(registry)?;
 
     let provider_id = selection
@@ -202,28 +188,110 @@ pub fn resolve_against_registry(
         .position(|candidate| std::ptr::eq(candidate, provider))
         .unwrap_or(0);
 
-    // API key resolution.
-    let api_key = read_api_key(selection, provider)?;
+    validate_selection(selection, provider, catalog_index)?;
 
-    // Base URL resolution (provider env override > selection > catalog default).
-    // An empty base URL is intentional for providers such as OpenAI: the
-    // `ironclaw_llm` client constructors use it to select protocol defaults.
-    let base_url = resolve_base_url(selection, provider, catalog_index)?;
+    let resolved = ironclaw_llm::resolve_provider_config_from_selection(
+        ProviderSelection {
+            provider_id: provider.id.clone(),
+            api_key_env: selection.api_key_env.clone(),
+            base_url: selection.base_url.clone(),
+            model: selection.model.clone(),
+        },
+        registry,
+    )
+    .map_err(|source| map_selection_resolution_error(source, selection, provider))?;
 
-    // Model resolution (provider env override > selection > catalog default).
-    let model = resolve_model(selection, provider, catalog_index)?;
+    validate_catalog_text(
+        provider,
+        catalog_index,
+        "resolved_base_url",
+        resolved.base_url(),
+    )?;
+    validate_catalog_text(provider, catalog_index, "resolved_model", resolved.model())?;
 
-    let extra_headers = resolve_extra_headers(provider)?;
+    ironclaw_llm::build_llm_config_from_resolved_provider(resolved)
+        .map_err(|source| RebornLlmCatalogError::EnvResolution { source })
+}
 
-    Ok(RebornLlmConfig {
-        provider_id: provider.id.clone(),
-        model,
-        base_url,
-        api_key,
-        protocol: serialize_protocol(provider.protocol),
-        request_timeout_secs: DEFAULT_LLM_REQUEST_TIMEOUT_SECS,
-        extra_headers,
-    })
+/// Overlay an operator-stored API-key value onto a resolved `LlmConfig`.
+///
+/// The catalog/selection only ever carry an `api_key_env` *name* — values are
+/// rejected as inline secrets. When the operator pastes a key through the
+/// webui2 settings surface it is stored in the scoped secret store and applied
+/// here, after catalog/env resolution, so a stored value takes precedence over
+/// whatever `api_key_env` resolved to. Both the startup resolution and the live
+/// reload path call this so the two never drift.
+///
+/// Custom providers that rely on a stored key must be written into the overlay
+/// with `api_key_required = false`, otherwise resolution fails closed on the
+/// missing env var before this injection runs.
+pub(crate) fn apply_stored_api_key(
+    config: &mut ironclaw_llm::LlmConfig,
+    key: secrecy::SecretString,
+) {
+    if let Some(provider) = config.provider.as_mut() {
+        provider.api_key = Some(key);
+    } else if config.backend == "nearai" {
+        config.nearai.api_key = Some(key);
+    }
+    // Dedicated codex/gemini/bedrock backends authenticate via OAuth/session or
+    // AWS credential chains rather than a pasted key; surfacing those in the UI
+    // is a follow-up, so they are intentionally left untouched here.
+}
+
+fn validate_selection(
+    selection: &LlmSlotSelection,
+    provider: &ProviderDefinition,
+    catalog_index: usize,
+) -> Result<(), RebornLlmCatalogError> {
+    if let Some(env) = selection.api_key_env.as_deref()
+        && (reject_inline_secret("llm.<slot>.api_key_env", env).is_err() || !is_env_var_name(env))
+    {
+        return Err(RebornLlmCatalogError::ApiKeyEnvInvalid {
+            provider: provider.id.clone(),
+        });
+    }
+    if let Some(base_url) = selection.base_url.as_deref() {
+        validate_catalog_text(provider, catalog_index, "selection_base_url", base_url)?;
+    }
+    if let Some(model) = selection.model.as_deref() {
+        validate_catalog_text(provider, catalog_index, "selection_model", model)?;
+    }
+    Ok(())
+}
+
+fn map_selection_resolution_error(
+    source: ProviderResolutionError,
+    selection: &LlmSlotSelection,
+    provider: &ProviderDefinition,
+) -> RebornLlmCatalogError {
+    match source {
+        ProviderResolutionError::MissingApiKey {
+            provider: error_provider,
+        } if error_provider == provider.id => {
+            match selection
+                .api_key_env
+                .clone()
+                .or_else(|| provider.api_key_env.clone())
+            {
+                Some(env) => RebornLlmCatalogError::ApiKeyEnvUnset {
+                    provider: provider.id.clone(),
+                    env,
+                },
+                None => RebornLlmCatalogError::ApiKeyEnvUnconfigured {
+                    provider: provider.id.clone(),
+                },
+            }
+        }
+        ProviderResolutionError::MissingBaseUrl {
+            provider: error_provider,
+        } if error_provider == provider.id => RebornLlmCatalogError::BaseUrlUnconfigured {
+            provider: provider.id.clone(),
+        },
+        source => RebornLlmCatalogError::EnvResolution {
+            source: source.into_llm_error(),
+        },
+    }
 }
 
 fn validate_catalog(registry: &ProviderRegistry) -> Result<(), RebornLlmCatalogError> {
@@ -307,45 +375,6 @@ fn safe_catalog_display_value(label: &'static str, value: &str) -> String {
     }
 }
 
-fn read_api_key(
-    selection: &LlmSlotSelection,
-    provider: &ProviderDefinition,
-) -> Result<Option<secrecy::SecretString>, RebornLlmCatalogError> {
-    let env_var = selection
-        .api_key_env
-        .clone()
-        .or_else(|| provider.api_key_env.clone());
-
-    match (env_var, provider.api_key_required) {
-        (Some(env), required) => {
-            if reject_inline_secret("llm.<slot>.api_key_env", &env).is_err()
-                || !is_env_var_name(&env)
-            {
-                return Err(RebornLlmCatalogError::ApiKeyEnvInvalid {
-                    provider: provider.id.clone(),
-                });
-            }
-            match std::env::var(&env) {
-                Ok(value) if !value.is_empty() => Ok(Some(secrecy::SecretString::from(value))),
-                Ok(_) if required => Err(RebornLlmCatalogError::ApiKeyEnvUnset {
-                    provider: provider.id.clone(),
-                    env,
-                }),
-                Ok(_) => Ok(None),
-                Err(_) if required => Err(RebornLlmCatalogError::ApiKeyEnvUnset {
-                    provider: provider.id.clone(),
-                    env,
-                }),
-                Err(_) => Ok(None),
-            }
-        }
-        (None, true) => Err(RebornLlmCatalogError::ApiKeyEnvUnconfigured {
-            provider: provider.id.clone(),
-        }),
-        (None, false) => Ok(None),
-    }
-}
-
 fn is_env_var_name(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -353,144 +382,6 @@ fn is_env_var_name(value: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == '_')
         && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
-}
-
-fn resolve_base_url(
-    selection: &LlmSlotSelection,
-    provider: &ProviderDefinition,
-    catalog_index: usize,
-) -> Result<String, RebornLlmCatalogError> {
-    let base_url = provider
-        .base_url_env
-        .as_deref()
-        .and_then(nonempty_env)
-        .or_else(|| selection.base_url.clone())
-        .or_else(|| provider.default_base_url.clone())
-        .unwrap_or_default();
-
-    validate_catalog_text(provider, catalog_index, "resolved_base_url", &base_url)?;
-
-    if provider.base_url_required && base_url.is_empty() {
-        return Err(RebornLlmCatalogError::BaseUrlUnconfigured {
-            provider: provider.id.clone(),
-        });
-    }
-
-    Ok(base_url)
-}
-
-fn resolve_model(
-    selection: &LlmSlotSelection,
-    provider: &ProviderDefinition,
-    catalog_index: usize,
-) -> Result<String, RebornLlmCatalogError> {
-    let model = nonempty_env(&provider.model_env)
-        .or_else(|| selection.model.clone())
-        .unwrap_or_else(|| provider.default_model.clone());
-    validate_catalog_text(provider, catalog_index, "resolved_model", &model)?;
-    Ok(model)
-}
-
-fn resolve_extra_headers(
-    provider: &ProviderDefinition,
-) -> Result<Vec<(String, String)>, RebornLlmCatalogError> {
-    let env_headers = match provider.extra_headers_env.as_deref() {
-        Some(env) => {
-            // Header values intentionally come from env without inline-secret rejection:
-            // env vars are the approved secret-carrying channel. The catalog-supplied
-            // env var name is validated by `validate_catalog_env_var` before this runs,
-            // and `parse_extra_headers` never echoes header values in errors.
-            nonempty_env(env)
-                .map(|value| parse_extra_headers(&provider.id, env, &value))
-                .transpose()?
-                .unwrap_or_default()
-        }
-        None => Vec::new(),
-    };
-
-    if matches!(
-        provider.protocol,
-        ironclaw_llm::ProviderProtocol::GithubCopilot
-    ) {
-        Ok(merge_extra_headers(
-            ironclaw_llm::github_copilot_auth::default_headers(),
-            env_headers,
-        ))
-    } else {
-        Ok(env_headers)
-    }
-}
-
-fn nonempty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-fn parse_extra_headers(
-    provider: &str,
-    env: &str,
-    value: &str,
-) -> Result<Vec<(String, String)>, RebornLlmCatalogError> {
-    let mut headers = Vec::new();
-    for part in value.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let Some((key, header_value)) = part.split_once(':') else {
-            return Err(RebornLlmCatalogError::ExtraHeadersInvalid {
-                provider: provider.to_string(),
-                env: env.to_string(),
-                reason: "header must use `Name:Value` format".to_string(),
-            });
-        };
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(RebornLlmCatalogError::ExtraHeadersInvalid {
-                provider: provider.to_string(),
-                env: env.to_string(),
-                reason: "header name must not be empty".to_string(),
-            });
-        }
-        // Empty values are allowed: some APIs use presence-only headers,
-        // and the env var is operator-controlled. Servers that reject an
-        // empty value will return a provider-specific HTTP error later.
-        headers.push((key.to_string(), header_value.trim().to_string()));
-    }
-    Ok(headers)
-}
-
-fn merge_extra_headers(
-    defaults: Vec<(String, String)>,
-    overrides: Vec<(String, String)>,
-) -> Vec<(String, String)> {
-    let mut merged = defaults;
-    for (key, value) in overrides {
-        if let Some((_, existing_value)) = merged
-            .iter_mut()
-            .find(|(existing_key, _)| existing_key.eq_ignore_ascii_case(&key))
-        {
-            *existing_value = value;
-        } else {
-            merged.push((key, value));
-        }
-    }
-    merged
-}
-
-/// Map `ironclaw_llm::ProviderProtocol` to the wire string
-/// `RebornLlmConfig.protocol` accepts.
-fn serialize_protocol(protocol: ironclaw_llm::ProviderProtocol) -> String {
-    use ironclaw_llm::ProviderProtocol;
-    match protocol {
-        ProviderProtocol::OpenAiCompletions => "open_ai_completions",
-        ProviderProtocol::Anthropic => "anthropic",
-        ProviderProtocol::Ollama => "ollama",
-        ProviderProtocol::GithubCopilot => "github_copilot",
-        ProviderProtocol::DeepSeek => "deep_seek",
-        ProviderProtocol::Gemini => "gemini",
-        ProviderProtocol::OpenRouter => "open_router",
-    }
-    .to_string()
 }
 
 #[cfg(test)]
@@ -575,6 +466,25 @@ mod tests {
             model_env: "REBORN_TEST_GITHUB_COPILOT_MODEL_UNSET_DO_NOT_SET_9c13".to_string(),
             default_model: "gpt-4o".to_string(),
             description: "test github copilot".to_string(),
+            extra_headers_env: None,
+            unsupported_params: Vec::new(),
+            setup: None,
+        }
+    }
+
+    fn provider_with_protocol(id: &str, protocol: ProviderProtocol) -> ProviderDefinition {
+        ProviderDefinition {
+            id: id.to_string(),
+            aliases: Vec::new(),
+            protocol,
+            default_base_url: None,
+            base_url_env: None,
+            base_url_required: false,
+            api_key_env: None,
+            api_key_required: false,
+            model_env: "REBORN_TEST_DEDICATED_MODEL_UNSET_DO_NOT_SET_9c13".to_string(),
+            default_model: "dedicated-default-model".to_string(),
+            description: "test dedicated provider".to_string(),
             extra_headers_env: None,
             unsupported_params: Vec::new(),
             setup: None,
@@ -764,28 +674,12 @@ mod tests {
         };
 
         let config = resolve_against_registry(&selection, &registry).expect("must resolve");
-        assert_eq!(config.provider_id, "alpha");
-        assert_eq!(config.model, "llama3"); // catalog default
-        assert_eq!(config.base_url, "http://localhost:11434"); // catalog default
-        assert_eq!(config.protocol, "ollama");
-        assert!(config.api_key.is_none());
-    }
-
-    #[test]
-    fn serializes_protocols_with_serde_snake_case_names() {
-        assert_eq!(
-            serialize_protocol(ProviderProtocol::OpenAiCompletions),
-            "open_ai_completions"
-        );
-        assert_eq!(serialize_protocol(ProviderProtocol::DeepSeek), "deep_seek");
-        assert_eq!(
-            serialize_protocol(ProviderProtocol::OpenRouter),
-            "open_router"
-        );
-        assert_eq!(
-            serialize_protocol(ProviderProtocol::GithubCopilot),
-            "github_copilot"
-        );
+        let provider = config.provider.as_ref().expect("registry provider");
+        assert_eq!(provider.provider_id, "alpha");
+        assert_eq!(provider.model, "llama3"); // catalog default
+        assert_eq!(provider.base_url, "http://localhost:11434"); // catalog default
+        assert_eq!(provider.protocol, ProviderProtocol::Ollama);
+        assert!(provider.api_key.is_none());
     }
 
     #[test]
@@ -797,8 +691,9 @@ mod tests {
         };
 
         let config = resolve_against_registry(&selection, &registry).expect("must resolve");
-        assert_eq!(config.base_url, "");
-        assert_eq!(config.model, "default-model");
+        let provider = config.provider.as_ref().expect("registry provider");
+        assert_eq!(provider.base_url, "");
+        assert_eq!(provider.model, "default-model");
     }
 
     #[test]
@@ -827,8 +722,9 @@ mod tests {
         };
 
         let config = resolve_against_registry(&selection, &registry).expect("must resolve");
-        assert_eq!(config.model, "custom-model");
-        assert_eq!(config.base_url, "https://override.test/v1");
+        let provider = config.provider.as_ref().expect("registry provider");
+        assert_eq!(provider.model, "custom-model");
+        assert_eq!(provider.base_url, "https://override.test/v1");
     }
 
     #[test]
@@ -844,53 +740,92 @@ mod tests {
         let config = resolve_against_registry(&selection, &registry).expect("must resolve");
         assert!(
             config
+                .provider
+                .as_ref()
+                .expect("registry provider")
                 .extra_headers
                 .iter()
                 .any(|(key, _)| key == "Editor-Version"),
             "headers: {:?}",
-            config.extra_headers
+            config.provider.as_ref().unwrap().extra_headers
         );
         assert!(
             config
+                .provider
+                .as_ref()
+                .expect("registry provider")
                 .extra_headers
                 .iter()
                 .any(|(key, _)| key == "Copilot-Integration-Id"),
             "headers: {:?}",
-            config.extra_headers
+            config.provider.as_ref().unwrap().extra_headers
         );
     }
 
     #[test]
-    fn parses_extra_headers_with_colons_in_values() {
-        let headers = parse_extra_headers(
-            "alpha",
-            "ALPHA_HEADERS",
-            "HTTP-Referer:https://example.test,X-Token:Bearer abc:def",
-        )
-        .expect("headers parse");
+    fn nearai_catalog_selection_resolves_to_full_dedicated_llm_config() {
+        let registry = ProviderRegistry::new(vec![provider_with_protocol(
+            "nearai",
+            ProviderProtocol::NearAi,
+        )]);
+        let selection = LlmSlotSelection {
+            provider_id: Some("nearai".to_string()),
+            model: Some("nearai/test-model".to_string()),
+            base_url: Some("https://private.near.ai".to_string()),
+            api_key_env: None,
+        };
 
+        let config = resolve_against_registry(&selection, &registry).expect("must resolve");
+        assert_eq!(config.backend, "nearai");
+        assert_eq!(config.nearai.model, "nearai/test-model");
+        assert_eq!(config.nearai.base_url, "https://private.near.ai");
+        assert!(config.provider.is_none());
+    }
+
+    #[test]
+    fn openai_codex_catalog_selection_resolves_to_full_dedicated_llm_config() {
+        let registry = ProviderRegistry::new(vec![provider_with_protocol(
+            "openai_codex",
+            ProviderProtocol::OpenAiCodex,
+        )]);
+        let selection = LlmSlotSelection {
+            provider_id: Some("openai_codex".to_string()),
+            model: Some("gpt-test-codex".to_string()),
+            ..Default::default()
+        };
+
+        let config = resolve_against_registry(&selection, &registry).expect("must resolve");
+        assert_eq!(config.backend, "openai_codex");
         assert_eq!(
-            headers,
-            vec![
-                (
-                    "HTTP-Referer".to_string(),
-                    "https://example.test".to_string()
-                ),
-                ("X-Token".to_string(), "Bearer abc:def".to_string()),
-            ]
+            config.openai_codex.as_ref().expect("codex config").model,
+            "gpt-test-codex"
         );
+        assert!(config.provider.is_none());
     }
 
     #[test]
-    fn malformed_extra_header_error_does_not_echo_value() {
-        let pasted_secret = format!("Authorization Bearer {}{}", "s", "k-proj-1234567890abcdef");
-        let err = parse_extra_headers("alpha", "ALPHA_HEADERS", &pasted_secret)
-            .expect_err("malformed header must error");
-        let rendered = err.to_string();
-        assert!(
-            !rendered.contains(&pasted_secret),
-            "error must not echo header value: {rendered}"
+    fn gemini_oauth_catalog_selection_resolves_to_full_dedicated_llm_config() {
+        let registry = ProviderRegistry::new(vec![provider_with_protocol(
+            "gemini_oauth",
+            ProviderProtocol::GeminiOauth,
+        )]);
+        let selection = LlmSlotSelection {
+            provider_id: Some("gemini_oauth".to_string()),
+            model: Some("gemini-test".to_string()),
+            ..Default::default()
+        };
+
+        let config = resolve_against_registry(&selection, &registry).expect("must resolve");
+        assert_eq!(config.backend, "gemini_oauth");
+        assert_eq!(
+            config
+                .gemini_oauth
+                .as_ref()
+                .expect("gemini oauth config")
+                .model,
+            "gemini-test"
         );
+        assert!(config.provider.is_none());
     }
 
     #[test]
@@ -911,6 +846,66 @@ mod tests {
         assert!(
             rendered.contains("providers.json[7]"),
             "error must identify catalog index: {rendered}"
+        );
+    }
+
+    #[test]
+    fn apply_stored_api_key_overrides_registry_provider() {
+        use secrecy::ExposeSecret as _;
+
+        let registry = ProviderRegistry::new(vec![provider_no_key_required("alpha")]);
+        let selection = LlmSlotSelection {
+            provider_id: Some("alpha".to_string()),
+            ..Default::default()
+        };
+        let mut config = resolve_against_registry(&selection, &registry).expect("resolve");
+        assert!(
+            config
+                .provider
+                .as_ref()
+                .expect("provider")
+                .api_key
+                .is_none()
+        );
+
+        apply_stored_api_key(&mut config, secrecy::SecretString::from("sk-stored"));
+
+        let stored = config
+            .provider
+            .as_ref()
+            .expect("provider")
+            .api_key
+            .as_ref()
+            .expect("api key");
+        assert_eq!(stored.expose_secret(), "sk-stored");
+    }
+
+    #[test]
+    fn apply_stored_api_key_targets_nearai_dedicated_config() {
+        use secrecy::ExposeSecret as _;
+
+        let registry = ProviderRegistry::new(vec![provider_with_protocol(
+            "nearai",
+            ProviderProtocol::NearAi,
+        )]);
+        let selection = LlmSlotSelection {
+            provider_id: Some("nearai".to_string()),
+            model: Some("nearai/test-model".to_string()),
+            ..Default::default()
+        };
+        let mut config = resolve_against_registry(&selection, &registry).expect("resolve");
+        assert!(config.provider.is_none());
+
+        apply_stored_api_key(&mut config, secrecy::SecretString::from("sk-nearai"));
+
+        assert_eq!(
+            config
+                .nearai
+                .api_key
+                .as_ref()
+                .expect("nearai key")
+                .expose_secret(),
+            "sk-nearai"
         );
     }
 

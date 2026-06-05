@@ -11,9 +11,8 @@
 //! - extension IDs starting with `ironclaw.` are reserved for HostBundled;
 //! - installed manifests must use `wasm` / `mcp` / `script` runtimes only;
 //! - every capability declares `visibility`, relative
-//!   [`CapabilityProfileSchemaRef`] input/output schema refs, optional
-//!   `prompt_doc_ref` (required when visibility is `model`), and the set of
-//!   host ports it needs;
+//!   [`CapabilityProfileSchemaRef`] input/output schema refs, optional lazy
+//!   `prompt_doc_ref`, and the set of host ports it needs;
 //! - host port names validate against a host-defined [`HostPortCatalog`].
 //!
 //! This module does **not** dispatch capabilities, load WASM modules, evaluate
@@ -40,8 +39,10 @@ use std::sync::Arc;
 
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
-    HostApiError, HostPortCatalog, HostPortId, PermissionMode, RequestedTrustClass,
-    ResourceProfile, RuntimeKind, TrustClass,
+    HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode,
+    RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
+    TrustClass,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -321,6 +322,7 @@ pub struct CapabilityDeclV2 {
     pub output_schema_ref: CapabilityProfileSchemaRef,
     pub prompt_doc_ref: Option<CapabilityProfileSchemaRef>,
     pub required_host_ports: Vec<HostPortId>,
+    pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
     pub resource_profile: Option<ResourceProfile>,
 }
 
@@ -475,8 +477,6 @@ pub enum ManifestV2Error {
         capability: CapabilityId,
         port: HostPortId,
     },
-    #[error("capability {capability} is model-visible but has no prompt_doc_ref")]
-    MissingPromptDocRef { capability: CapabilityId },
     #[error("duplicate capability id {id}")]
     DuplicateCapability { id: CapabilityId },
     #[error("capability id {id} must be provider-prefixed with '{expected}.' (extension id)")]
@@ -815,10 +815,6 @@ impl CapabilityDeclV2 {
             })
             .transpose()?;
 
-        if matches!(raw.visibility, CapabilityVisibility::Model) && prompt_doc_ref.is_none() {
-            return Err(ManifestV2Error::MissingPromptDocRef { capability: id });
-        }
-
         let mut required_host_ports_seen = BTreeSet::new();
         let mut required_host_ports = Vec::with_capacity(raw.required_host_ports.len());
         for port in raw.required_host_ports {
@@ -838,6 +834,56 @@ impl CapabilityDeclV2 {
             required_host_ports.push(port);
         }
 
+        if !raw.runtime_credentials.is_empty() && !raw.effects.contains(&EffectKind::UseSecret) {
+            return Err(ManifestV2Error::Invalid {
+                reason: format!(
+                    "capability {id} declares runtime_credentials without use_secret effect"
+                ),
+            });
+        }
+        let mut credential_handles_seen = BTreeSet::new();
+        let mut runtime_credentials = Vec::with_capacity(raw.runtime_credentials.len());
+        for raw_credential in raw.runtime_credentials {
+            let handle = SecretHandle::new(raw_credential.handle)?;
+            if !credential_handles_seen.insert(handle.clone()) {
+                return Err(ManifestV2Error::Invalid {
+                    reason: format!(
+                        "capability {id} declares duplicate runtime credential handle {handle}"
+                    ),
+                });
+            }
+            raw_credential
+                .target
+                .validate_declaration()
+                .map_err(|error| ManifestV2Error::Invalid {
+                    reason: format!(
+                        "capability {id} declares invalid runtime credential target: {error}"
+                    ),
+                })?;
+            raw_credential
+                .audience
+                .validate_declaration()
+                .map_err(|error| ManifestV2Error::Invalid {
+                    reason: format!(
+                        "capability {id} declares invalid runtime credential audience: {error}"
+                    ),
+                })?;
+            validate_runtime_credential_audience(&id, &raw_credential.audience)?;
+            let provider_scopes = validate_runtime_credential_provider_scopes(
+                &id,
+                &raw_credential.source,
+                raw_credential.provider_scopes,
+            )?;
+            runtime_credentials.push(RuntimeCredentialRequirement {
+                handle,
+                source: raw_credential.source,
+                provider_scopes,
+                audience: raw_credential.audience,
+                target: raw_credential.target,
+                required: raw_credential.required,
+            });
+        }
+
         Ok(Self {
             id,
             implements,
@@ -849,9 +895,24 @@ impl CapabilityDeclV2 {
             output_schema_ref,
             prompt_doc_ref,
             required_host_ports,
+            runtime_credentials,
             resource_profile: raw.resource_profile,
         })
     }
+}
+
+fn validate_runtime_credential_audience(
+    id: &CapabilityId,
+    audience: &NetworkTargetPattern,
+) -> Result<(), ManifestV2Error> {
+    if audience.scheme != Some(NetworkScheme::Https) {
+        return Err(ManifestV2Error::Invalid {
+            reason: format!(
+                "capability {id} declares runtime credential audience without https scheme"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn validate_host_api_refs(
@@ -1365,5 +1426,119 @@ pub(crate) struct RawCapabilityV2 {
     #[serde(default)]
     required_host_ports: Vec<String>,
     #[serde(default)]
+    runtime_credentials: Vec<RawRuntimeCredentialV2>,
+    #[serde(default)]
     resource_profile: Option<ResourceProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRuntimeCredentialV2 {
+    handle: String,
+    #[serde(default)]
+    source: RuntimeCredentialRequirementSource,
+    #[serde(default)]
+    provider_scopes: Vec<String>,
+    audience: NetworkTargetPattern,
+    target: RuntimeCredentialTarget,
+    #[serde(default = "default_runtime_credential_required")]
+    required: bool,
+}
+
+fn default_runtime_credential_required() -> bool {
+    true
+}
+
+fn validate_runtime_credential_provider_scopes(
+    capability_id: &CapabilityId,
+    source: &RuntimeCredentialRequirementSource,
+    raw_scopes: Vec<String>,
+) -> Result<Vec<String>, ManifestV2Error> {
+    if !raw_scopes.is_empty()
+        && !matches!(
+            source,
+            RuntimeCredentialRequirementSource::ProductAuthAccount { .. }
+        )
+    {
+        return Err(ManifestV2Error::Invalid {
+            reason: format!(
+                "capability {capability_id} declares runtime credential provider scopes for a non product-auth credential source"
+            ),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    let mut scopes = Vec::with_capacity(raw_scopes.len());
+    for raw_scope in raw_scopes {
+        if raw_scope.trim() != raw_scope || raw_scope.is_empty() {
+            return Err(ManifestV2Error::Invalid {
+                reason: format!(
+                    "capability {capability_id} declares invalid runtime credential provider scope"
+                ),
+            });
+        }
+        if !seen.insert(raw_scope.clone()) {
+            return Err(ManifestV2Error::Invalid {
+                reason: format!(
+                    "capability {capability_id} declares duplicate runtime credential provider scope {raw_scope}"
+                ),
+            });
+        }
+        scopes.push(raw_scope);
+    }
+    Ok(scopes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn capability_id() -> CapabilityId {
+        CapabilityId::new("acme.echo").unwrap()
+    }
+
+    fn product_auth_source() -> RuntimeCredentialRequirementSource {
+        RuntimeCredentialRequirementSource::ProductAuthAccount {
+            provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        }
+    }
+
+    #[test]
+    fn validate_runtime_credential_provider_scopes_rejects_empty_scope() {
+        let err = validate_runtime_credential_provider_scopes(
+            &capability_id(),
+            &product_auth_source(),
+            vec!["".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn validate_runtime_credential_provider_scopes_rejects_whitespace_padded_scope() {
+        let err = validate_runtime_credential_provider_scopes(
+            &capability_id(),
+            &product_auth_source(),
+            vec![" https://www.googleapis.com/auth/drive".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn validate_runtime_credential_provider_scopes_rejects_duplicate_scope() {
+        let err = validate_runtime_credential_provider_scopes(
+            &capability_id(),
+            &product_auth_source(),
+            vec![
+                "https://www.googleapis.com/auth/drive".to_string(),
+                "https://www.googleapis.com/auth/drive".to_string(),
+            ],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    }
 }
