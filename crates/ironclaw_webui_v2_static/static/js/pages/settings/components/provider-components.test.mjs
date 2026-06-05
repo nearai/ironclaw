@@ -244,6 +244,7 @@ function createProviderCardHarness() {
     globalThis: {},
     html,
     isProviderConfigured: (provider) => provider.configured !== false,
+    providerAcceptsApiKey: (provider) => provider.accepts_api_key !== false,
     providerDisplayModel: (provider) => provider.default_model || "model",
     providerEffectiveBaseUrl: (provider) => provider.base_url || "https://example.com/v1",
     providerMissingReason: (provider) => provider.missing || "api_key",
@@ -403,18 +404,28 @@ test("ProviderCard actions keep existing callbacks without toggling disclosure",
 });
 
 test("ProviderCard renders login actions instead of generic use for login providers", () => {
+  const calls = [];
   const harness = createProviderCardHarness();
 
   let rendered = harness.render({
     activeProviderId: "openai",
-    provider: builtinProvider("nearai", { adapter: "nearai" }),
+    onConfigure: (provider) => calls.push(["configure", provider.id]),
+    provider: builtinProvider("nearai", { adapter: "nearai", has_api_key: false }),
   });
   let labels = collectScalars(rendered);
   let templateText = collectTemplateText(rendered);
   assert.ok(labels.includes("onboarding.nearWallet"));
+  assert.ok(labels.includes("llm.addApiKey"));
   assert.ok(templateText.includes("GitHub"));
   assert.ok(templateText.includes("Google"));
   assert.ok(!labels.includes("llm.use"));
+  const addKeyButton = findComponentNodes(rendered, "Button").find((node) => {
+    const scalars = collectScalars(node);
+    return scalars.includes("llm.addApiKey") && !scalars.includes("onboarding.nearWallet");
+  });
+  assert.ok(addKeyButton, "expected NEAR API key action");
+  componentProps(addKeyButton, "Button").onClick();
+  assert.deepEqual(calls, [["configure", "nearai"]]);
 
   rendered = harness.render({
     activeProviderId: "openai",
@@ -424,4 +435,27 @@ test("ProviderCard renders login actions instead of generic use for login provid
   templateText = collectTemplateText(rendered);
   assert.ok(labels.includes("onboarding.codexSignIn"));
   assert.ok(!labels.includes("llm.use"));
+});
+
+test("ProviderCard renders generic use action for NEAR when an API key is configured", () => {
+  const calls = [];
+  const harness = createProviderCardHarness();
+
+  const rendered = harness.render({
+    activeProviderId: "openai",
+    onUse: (provider) => calls.push(["use", provider.id]),
+    provider: builtinProvider("nearai", {
+      adapter: "nearai",
+      has_api_key: true,
+    }),
+  });
+  const labels = collectScalars(rendered);
+  const templateText = collectTemplateText(rendered);
+
+  assert.ok(labels.includes("llm.use"));
+  assert.ok(!labels.includes("onboarding.nearWallet"));
+  assert.ok(!templateText.includes("GitHub"));
+
+  firstButtonProps(rendered).onClick();
+  assert.deepEqual(calls, [["use", "nearai"]]);
 });

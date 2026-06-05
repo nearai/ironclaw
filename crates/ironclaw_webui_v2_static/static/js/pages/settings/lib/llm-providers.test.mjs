@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   API_KEY_UNCHANGED,
   groupProvidersByStatus,
+  providerAcceptsApiKey,
   providerStatus,
 } from "./llm-providers.js";
 
@@ -69,6 +70,32 @@ test("providerStatus returns 'setup' when an API key is missing", () => {
 
 test("providerStatus returns 'setup' when a required base URL is missing", () => {
   assert.equal(providerStatus(builtinNeedsBaseUrl("openai"), {}, "nearai"), "setup");
+});
+
+test("providerAcceptsApiKey supports dual-auth NEAR providers", () => {
+  const nearai = builtinReady("nearai", {
+    adapter: "nearai",
+    api_key_required: false,
+    accepts_api_key: true,
+    has_api_key: false,
+  });
+
+  assert.equal(providerAcceptsApiKey(nearai), true);
+});
+
+test("providerAcceptsApiKey rejects missing provider input", () => {
+  assert.equal(providerAcceptsApiKey(null), false);
+  assert.equal(providerAcceptsApiKey(undefined), false);
+});
+
+test("providerAcceptsApiKey honors explicit false", () => {
+  const loginOnly = builtinReady("openai_codex", {
+    adapter: "openai_codex",
+    api_key_required: false,
+    accepts_api_key: false,
+  });
+
+  assert.equal(providerAcceptsApiKey(loginOnly), false);
 });
 
 test("groupProvidersByStatus buckets providers into active/ready/setup", () => {
