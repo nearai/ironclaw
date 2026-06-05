@@ -52,6 +52,22 @@ impl LocalTriggerAccessSource {
     }
 }
 
+/// Fixed lifecycle state persisted on local-dev access rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalTriggerAccessStatus {
+    Active,
+    Inactive,
+}
+
+impl LocalTriggerAccessStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Inactive => "inactive",
+        }
+    }
+}
+
 /// Failure modes of the libSQL local trigger access store.
 #[derive(Debug, Error)]
 pub enum RebornLocalTriggerAccessStoreError {
@@ -160,7 +176,7 @@ impl RebornLibSqlLocalTriggerAccessStore {
         tx.execute(
             "INSERT INTO local_reborn_access \
                  (tenant_id, user_id, agent_id, project_id, role, status, source, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?7) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8) \
                  ON CONFLICT(tenant_id, user_id, agent_id, project_id) DO NOTHING",
             libsql::params![
                 seed.tenant_id.as_str(),
@@ -168,6 +184,7 @@ impl RebornLibSqlLocalTriggerAccessStore {
                 optional_scope_key(seed.agent_id.map(AgentId::as_str)),
                 optional_scope_key(seed.project_id.map(ProjectId::as_str)),
                 seed.role.as_str(),
+                LocalTriggerAccessStatus::Active.as_str(),
                 seed.source.as_str(),
                 now.as_str(),
             ],
@@ -208,12 +225,13 @@ impl RebornLibSqlLocalTriggerAccessStore {
                    AND agent_id = ?2 \
                    AND project_id = ?3 \
                    AND source = ?4 \
-                   AND status = 'active'",
+                   AND status = ?5",
                 libsql::params![
                     reconciliation.tenant_id.as_str(),
                     agent_key,
                     project_key,
                     reconciliation.source.as_str(),
+                    LocalTriggerAccessStatus::Active.as_str(),
                 ],
             )
             .await
@@ -230,20 +248,22 @@ impl RebornLibSqlLocalTriggerAccessStore {
         for user_id in stale_user_ids {
             tx.execute(
                 "UPDATE local_reborn_access \
-                 SET status = 'inactive', updated_at = ?1 \
-                 WHERE tenant_id = ?2 \
-                   AND user_id = ?3 \
-                   AND agent_id = ?4 \
-                   AND project_id = ?5 \
-                   AND source = ?6 \
-                   AND status = 'active'",
+                 SET status = ?1, updated_at = ?2 \
+                 WHERE tenant_id = ?3 \
+                   AND user_id = ?4 \
+                   AND agent_id = ?5 \
+                   AND project_id = ?6 \
+                   AND source = ?7 \
+                   AND status = ?8",
                 libsql::params![
+                    LocalTriggerAccessStatus::Inactive.as_str(),
                     now.as_str(),
                     reconciliation.tenant_id.as_str(),
                     user_id.as_str(),
                     agent_key,
                     project_key,
                     reconciliation.source.as_str(),
+                    LocalTriggerAccessStatus::Active.as_str(),
                 ],
             )
             .await
@@ -254,7 +274,7 @@ impl RebornLibSqlLocalTriggerAccessStore {
             tx.execute(
                 "INSERT INTO local_reborn_access \
                      (tenant_id, user_id, agent_id, project_id, role, status, source, created_at, updated_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?7) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8) \
                      ON CONFLICT(tenant_id, user_id, agent_id, project_id) DO NOTHING",
                 libsql::params![
                     reconciliation.tenant_id.as_str(),
@@ -262,6 +282,7 @@ impl RebornLibSqlLocalTriggerAccessStore {
                     agent_key,
                     project_key,
                     reconciliation.role.as_str(),
+                    LocalTriggerAccessStatus::Active.as_str(),
                     reconciliation.source.as_str(),
                     now.as_str(),
                 ],
@@ -292,13 +313,14 @@ impl RebornLibSqlLocalTriggerAccessStore {
                    AND user_id = ?2 \
                    AND agent_id = ?3 \
                    AND project_id = ?4 \
-                   AND status = 'active' \
+                   AND status = ?5 \
                  LIMIT 1",
                 libsql::params![
                     tenant_id.as_str(),
                     user_id.as_str(),
                     optional_scope_key(agent_id.map(AgentId::as_str)),
                     optional_scope_key(project_id.map(ProjectId::as_str)),
+                    LocalTriggerAccessStatus::Active.as_str(),
                 ],
             )
             .await
@@ -453,9 +475,10 @@ mod tests {
 
         let conn = store.conn().await.expect("conn");
         conn.execute(
-            "UPDATE local_reborn_access SET status = 'inactive' \
-             WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 AND project_id = ?4",
+            "UPDATE local_reborn_access SET status = ?1 \
+             WHERE tenant_id = ?2 AND user_id = ?3 AND agent_id = ?4 AND project_id = ?5",
             libsql::params![
+                LocalTriggerAccessStatus::Inactive.as_str(),
                 tenant_id.as_str(),
                 user_id.as_str(),
                 agent_id.as_str(),
@@ -574,6 +597,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconcile_local_access_inserts_all_allowed_users() {
+        let store = store().await;
+        let tenant_id = TenantId::new("local-reconcile-many-tenant").expect("tenant id");
+        let first_user_id = UserId::new("local-reconcile-many-first").expect("user id");
+        let second_user_id = UserId::new("local-reconcile-many-second").expect("user id");
+        let agent_id = AgentId::new("local-reconcile-many-agent").expect("agent id");
+        let project_id = ProjectId::new("local-reconcile-many-project").expect("project id");
+        let allowed_user_ids = [first_user_id.clone(), second_user_id.clone()];
+
+        store
+            .reconcile_local_access(LocalTriggerAccessReconciliation {
+                tenant_id: &tenant_id,
+                user_ids: &allowed_user_ids,
+                agent_id: Some(&agent_id),
+                project_id: Some(&project_id),
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .expect("reconcile local access");
+
+        for user_id in [&first_user_id, &second_user_id] {
+            assert!(
+                store
+                    .has_active_local_access(
+                        &tenant_id,
+                        user_id,
+                        Some(&agent_id),
+                        Some(&project_id)
+                    )
+                    .await
+                    .expect("check local access"),
+                "every admitted user from one reconciliation should be inserted"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn reconcile_local_access_does_not_reactivate_inactive_allowed_user() {
         let store = store().await;
         let tenant_id = TenantId::new("local-reconcile-revoked-tenant").expect("tenant id");
@@ -594,9 +655,15 @@ mod tests {
 
         let conn = store.conn().await.expect("conn");
         conn.execute(
-            "UPDATE local_reborn_access SET status = 'inactive' \
-             WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 AND project_id = ''",
-            libsql::params![tenant_id.as_str(), user_id.as_str(), agent_id.as_str()],
+            "UPDATE local_reborn_access SET status = ?1 \
+             WHERE tenant_id = ?2 AND user_id = ?3 AND agent_id = ?4 AND project_id = ?5",
+            libsql::params![
+                LocalTriggerAccessStatus::Inactive.as_str(),
+                tenant_id.as_str(),
+                user_id.as_str(),
+                agent_id.as_str(),
+                optional_scope_key(None),
+            ],
         )
         .await
         .expect("mark access inactive");

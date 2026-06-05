@@ -55,10 +55,11 @@ pub(crate) async fn build_webui_auth_surface(
     local_trigger_access: Option<LocalTriggerAccessBootstrapConfig>,
 ) -> anyhow::Result<WebuiAuthSurface> {
     let Some(sso) = sso_startup else {
-        debug_assert!(
-            local_trigger_access.is_none(),
-            "local trigger access bootstrap requires SSO startup config"
-        );
+        if let Some(config) = local_trigger_access {
+            reconcile_local_trigger_access(user_store_path, config, Vec::new())
+                .await
+                .context("failed to deactivate local trigger access for disabled SSO")?;
+        }
         return Ok(WebuiAuthSurface {
             authenticator: env_authenticator,
             public_mount: None,
@@ -73,35 +74,15 @@ pub(crate) async fn build_webui_auth_surface(
         .await
         .context("failed to initialize WebChat user-identity store")?;
     let local_trigger_access = if let Some(config) = local_trigger_access {
-        let LocalTriggerAccessBootstrapConfig {
-            tenant_id,
-            agent_id,
-            project_id,
-        } = config;
-        let access_store = open_local_trigger_access_store(user_store_path)
-            .await
-            .context("failed to initialize local trigger access store for SSO")?;
         let admitted_user_ids = user_store
             .list_active_users_by_allowed_email_domains(&sso.allowed_email_domains)
             .await
             .context("failed to list admitted WebChat SSO users for local trigger access")?;
-        access_store
-            .reconcile_local_access(LocalTriggerAccessReconciliation {
-                tenant_id: &tenant_id,
-                user_ids: &admitted_user_ids,
-                agent_id: Some(&agent_id),
-                project_id: project_id.as_ref(),
-                role: LocalTriggerAccessRole::Owner,
-                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
-            })
-            .await
-            .context("failed to reconcile local trigger access for SSO users")?;
-        Some(LocalTriggerAccessBootstrap::new(
-            access_store,
-            tenant_id,
-            agent_id,
-            project_id,
-        ))
+        Some(
+            reconcile_local_trigger_access(user_store_path, config, admitted_user_ids)
+                .await
+                .context("failed to reconcile local trigger access for SSO users")?,
+        )
     } else {
         None
     };
@@ -128,6 +109,37 @@ pub(crate) async fn build_webui_auth_surface(
         authenticator: wiring.authenticator,
         public_mount: Some(wiring.mount),
     })
+}
+
+async fn reconcile_local_trigger_access(
+    user_store_path: &Path,
+    config: LocalTriggerAccessBootstrapConfig,
+    admitted_user_ids: Vec<ironclaw_reborn_composition::host_api::UserId>,
+) -> anyhow::Result<LocalTriggerAccessBootstrap> {
+    let LocalTriggerAccessBootstrapConfig {
+        tenant_id,
+        agent_id,
+        project_id,
+    } = config;
+    let access_store = open_local_trigger_access_store(user_store_path)
+        .await
+        .context("failed to initialize local trigger access store for SSO")?;
+    access_store
+        .reconcile_local_access(LocalTriggerAccessReconciliation {
+            tenant_id: &tenant_id,
+            user_ids: &admitted_user_ids,
+            agent_id: Some(&agent_id),
+            project_id: project_id.as_ref(),
+            role: LocalTriggerAccessRole::Owner,
+            source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+        })
+        .await?;
+    Ok(LocalTriggerAccessBootstrap::new(
+        access_store,
+        tenant_id,
+        agent_id,
+        project_id,
+    ))
 }
 
 #[cfg(test)]
@@ -182,25 +194,72 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "local trigger access bootstrap requires SSO startup config")]
-    async fn env_auth_surface_rejects_local_trigger_access_without_sso_in_debug() {
+    async fn env_auth_surface_deactivates_sso_local_trigger_access_without_sso() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let user_store_path = tmp.path().join("reborn-local-dev.db");
         let tenant_id = TenantId::new("env-auth-local-access-tenant").expect("tenant id");
         let agent_id = AgentId::new("env-auth-local-access-agent").expect("agent id");
+        let stale_user_id = UserId::new("env-auth-local-access-stale").expect("user id");
+        let access_store = open_local_trigger_access_store(&user_store_path)
+            .await
+            .expect("open local access store");
+        access_store
+            .seed_local_access(ironclaw_reborn_composition::LocalTriggerAccessSeed {
+                tenant_id: &tenant_id,
+                user_id: &stale_user_id,
+                agent_id: Some(&agent_id),
+                project_id: None,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .expect("seed stale SSO access");
 
-        let _surface = build_webui_auth_surface(
+        let surface = build_webui_auth_surface(
             None,
-            &tmp.path().join("reborn-local-dev.db"),
+            &user_store_path,
             tenant_id.clone(),
             SecretString::from("operator-session-secret".to_string()),
             Arc::new(OneToken),
             Some(LocalTriggerAccessBootstrapConfig {
-                tenant_id,
-                agent_id,
+                tenant_id: tenant_id.clone(),
+                agent_id: agent_id.clone(),
                 project_id: None,
             }),
         )
-        .await;
+        .await
+        .expect("build env auth surface");
+
+        assert!(
+            surface
+                .authenticator
+                .authenticate("env-token")
+                .await
+                .is_some(),
+            "env auth remains active when no SSO providers are configured"
+        );
+        assert!(
+            surface.public_mount.is_none(),
+            "no SSO providers means no public login mount"
+        );
+        let denied = access_store
+            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id: stale_user_id,
+                agent_id: Some(agent_id),
+                project_id: None,
+                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check stale access");
+        assert_eq!(
+            denied,
+            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
+                reason: "trigger creator does not have active local access for this scope"
+                    .to_string(),
+            }
+        );
     }
 
     #[tokio::test]

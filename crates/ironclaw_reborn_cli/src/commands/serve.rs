@@ -332,8 +332,6 @@ impl ServeCommand {
                 "binding WebChat v2 listener on a non-loopback interface",
             );
         }
-        let sso_configured = sso_startup.is_some();
-
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -347,6 +345,28 @@ impl ServeCommand {
                 &user_id,
                 &default_agent_id,
                 default_project_id.as_ref(),
+            )
+            .await?;
+
+            // Assemble the WebChat v2 auth surface before the runtime is
+            // built so SSO local-trigger access reconciliation completes
+            // before the trigger poller can start firing queued triggers.
+            let crate::commands::webui_auth::WebuiAuthSurface {
+                authenticator,
+                public_mount,
+            } = crate::commands::webui_auth::build_webui_auth_surface(
+                sso_startup,
+                &user_store_path,
+                tenant_id.clone(),
+                session_signing_secret,
+                env_authenticator,
+                Some(
+                    crate::commands::webui_auth::LocalTriggerAccessBootstrapConfig {
+                        tenant_id: tenant_id.clone(),
+                        agent_id: default_agent_id.clone(),
+                        project_id: default_project_id.clone(),
+                    },
+                ),
             )
             .await?;
 
@@ -370,29 +390,6 @@ impl ServeCommand {
             )?;
             #[cfg(not(feature = "slack-v2-host-beta"))]
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
-
-            // Assemble the WebChat v2 auth surface (authenticator + optional
-            // public login mount). The auth/identity module owns the store
-            // opening + signed-session wiring; `serve` only supplies host
-            // config.
-            let crate::commands::webui_auth::WebuiAuthSurface {
-                authenticator,
-                public_mount,
-            } = crate::commands::webui_auth::build_webui_auth_surface(
-                sso_startup,
-                &user_store_path,
-                tenant_id.clone(),
-                session_signing_secret,
-                env_authenticator,
-                sso_configured.then(|| {
-                    crate::commands::webui_auth::LocalTriggerAccessBootstrapConfig {
-                        tenant_id: tenant_id.clone(),
-                        agent_id: default_agent_id.clone(),
-                        project_id: default_project_id.clone(),
-                    }
-                }),
-            )
-            .await?;
 
             print_serve_banner(
                 listen_addr,

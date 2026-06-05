@@ -343,4 +343,54 @@ mod tests {
             "admitted SSO users get an exact local-dev trigger access row"
         );
     }
+
+    #[tokio::test]
+    async fn sso_user_directory_does_not_seed_local_trigger_access_for_unadmitted_user() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.keep().join("reborn-local-dev.db");
+        let user_store = ironclaw_reborn_composition::open_webui_user_store(&path)
+            .await
+            .expect("open user store");
+        let access_store = ironclaw_reborn_composition::open_local_trigger_access_store(&path)
+            .await
+            .expect("open access store");
+        let tenant_id = TenantId::new("sso-access-reject-tenant").expect("tenant id");
+        let agent_id = AgentId::new("sso-access-reject-agent").expect("agent id");
+        let project_id = ProjectId::new("sso-access-reject-project").expect("project id");
+        let dir = WebuiUserDirectory::new(user_store.clone(), vec!["example.com".to_string()])
+            .with_local_trigger_access(LocalTriggerAccessBootstrap::new(
+                access_store.clone(),
+                tenant_id.clone(),
+                agent_id.clone(),
+                Some(project_id.clone()),
+            ));
+
+        let err = dir
+            .resolve(&google(), &profile(Some("mallory@evil.test"), true))
+            .await
+            .expect_err("off-allowlist SSO profile must be rejected");
+        assert!(matches!(err, UserDirectoryError::Unknown));
+
+        let rejected_users = user_store
+            .list_active_users_by_allowed_email_domains(&["evil.test".to_string()])
+            .await
+            .expect("list rejected-domain users");
+        assert!(
+            rejected_users.is_empty(),
+            "rejected SSO profiles must fail before user resolution"
+        );
+        let sentinel_user_id = UserId::new("sso-access-reject-user").expect("user id");
+        assert!(
+            !access_store
+                .has_active_local_access(
+                    &tenant_id,
+                    &sentinel_user_id,
+                    Some(&agent_id),
+                    Some(&project_id)
+                )
+                .await
+                .expect("check local access"),
+            "rejected SSO profiles must not seed local trigger access"
+        );
+    }
 }
