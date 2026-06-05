@@ -15,7 +15,7 @@ use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
-    ResourceScope, TenantId, UserId, VirtualPath,
+    ResourceScope, ScopedPath, TenantId, UserId, VirtualPath,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalEventId, ProductAdapterId, ProductInboundAck,
@@ -50,6 +50,13 @@ fn custom_root(suffix: &str) -> VirtualPath {
         "/engine/product_workflow/idempotency/test_roots/{suffix}"
     ))
     .expect("valid custom ledger root")
+}
+
+fn scoped_custom_root(suffix: &str) -> ScopedPath {
+    ScopedPath::new(format!(
+        "/engine/product_workflow/idempotency/test_roots/{suffix}"
+    ))
+    .expect("valid scoped custom ledger root")
 }
 
 fn scoped_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
@@ -346,6 +353,67 @@ async fn assert_settled_entry_limit_prunes_oldest(ledger: &dyn IdempotencyLedger
     ));
 }
 
+async fn assert_settled_prune_interval_defers_until_interval(
+    ledger: &dyn IdempotencyLedger,
+    suffix: &str,
+) {
+    let received_at = Utc::now();
+    let first = fingerprint(&format!("{suffix}-first"));
+    let second = fingerprint(&format!("{suffix}-second"));
+    let third = fingerprint(&format!("{suffix}-third"));
+
+    for (fingerprint, received_at) in [
+        (first.clone(), received_at),
+        (second.clone(), received_at + Duration::seconds(1)),
+    ] {
+        let IdempotencyDecision::New(mut action) = ledger
+            .begin_or_replay(fingerprint, received_at)
+            .await
+            .expect("begin settled action")
+        else {
+            panic!("expected new action before prune interval");
+        };
+        action.settle(ProductInboundAck::NoOp);
+        ledger.settle(action).await.expect("settle action");
+    }
+
+    assert!(matches!(
+        ledger
+            .begin_or_replay(first.clone(), received_at + Duration::seconds(2))
+            .await
+            .expect("first action is retained before prune interval"),
+        IdempotencyDecision::Replay(_)
+    ));
+
+    let IdempotencyDecision::New(mut third_action) = ledger
+        .begin_or_replay(third.clone(), received_at + Duration::seconds(3))
+        .await
+        .expect("begin third action")
+    else {
+        panic!("expected third action");
+    };
+    third_action.settle(ProductInboundAck::NoOp);
+    ledger
+        .settle(third_action)
+        .await
+        .expect("settle third action");
+
+    assert!(matches!(
+        ledger
+            .begin_or_replay(first, received_at + Duration::seconds(4))
+            .await
+            .expect("first action is pruned on interval"),
+        IdempotencyDecision::New(_)
+    ));
+    assert!(matches!(
+        ledger
+            .begin_or_replay(third, received_at + Duration::seconds(4))
+            .await
+            .expect("newest action remains after interval prune"),
+        IdempotencyDecision::Replay(_)
+    ));
+}
+
 #[tokio::test]
 async fn scoped_filesystem_settled_action_replays() {
     let filesystem = scoped_filesystem();
@@ -401,6 +469,38 @@ async fn scoped_filesystem_settled_entry_limit_prunes_oldest() {
     .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"));
 
     assert_settled_entry_limit_prunes_oldest(&ledger, "scoped-retention").await;
+}
+
+#[tokio::test]
+async fn scoped_filesystem_settled_prune_interval_defers_until_interval() {
+    let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+        scoped_filesystem(),
+        resource_scope("user:scoped-prune-interval"),
+        Duration::seconds(10),
+    )
+    .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"))
+    .with_settled_prune_interval(NonZeroUsize::new(3).expect("non-zero interval"));
+
+    assert_settled_prune_interval_defers_until_interval(&ledger, "scoped-prune-interval").await;
+}
+
+#[tokio::test]
+async fn scoped_filesystem_custom_root_isolated_from_default_root() {
+    let filesystem = scoped_filesystem();
+    let scope = resource_scope("user:scoped-custom-root");
+    let custom = RebornFilesystemIdempotencyLedger::with_root(
+        Arc::clone(&filesystem),
+        scope.clone(),
+        scoped_custom_root("scoped"),
+        Duration::seconds(60),
+    );
+    let default = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+        filesystem,
+        scope,
+        Duration::seconds(60),
+    );
+
+    assert_custom_root_isolated_from_default_root(&custom, &default, "scoped-custom-root").await;
 }
 
 #[cfg(feature = "libsql")]

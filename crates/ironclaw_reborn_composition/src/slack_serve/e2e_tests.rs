@@ -361,6 +361,24 @@ async fn slack_dm_waits_for_finalized_assistant_message_after_completed_state() 
 }
 
 #[tokio::test]
+async fn slack_dm_skips_final_reply_after_message_wait_timeout() {
+    let harness = build_harness(TurnMode::CompleteWithoutMessage).await;
+
+    let response = harness
+        .post_event(dm_message("Ev-timeout-final", "hello"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_body(response, "ok").await;
+    harness.drain().await;
+
+    assert!(
+        harness.slack_messages().is_empty(),
+        "completed run without finalized assistant message must not post an empty Slack reply"
+    );
+}
+
+#[tokio::test]
 async fn slack_dm_for_personally_bound_user_routes_through_reborn_identity() {
     let harness = build_harness_with_actor_user_resolver(
         TurnMode::Complete {
@@ -469,6 +487,7 @@ enum TurnMode {
         assistant_text: String,
         finalize_delay: Duration,
     },
+    CompleteWithoutMessage,
     BlockApproval,
 }
 
@@ -557,6 +576,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
                 TurnStatus::Completed
             }
             TurnMode::CompleteAfterState { .. } => TurnStatus::Completed,
+            TurnMode::CompleteWithoutMessage => TurnStatus::Completed,
             TurnMode::BlockApproval => TurnStatus::BlockedApproval,
         };
         let gate_ref = if status == TurnStatus::BlockedApproval {
@@ -864,6 +884,7 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
     match (event_id, text) {
         ("Ev-final", "hello") => DM_FINAL,
         ("Ev-delayed-final", "hello") => DM_DELAYED_FINAL,
+        ("Ev-timeout-final", "hello") => DM_TIMEOUT_FINAL,
         ("Ev-approval", "needs approval") => DM_APPROVAL,
         ("Ev-block", "needs approval") => DM_BLOCK,
         ("Ev-approve", "approve") => DM_APPROVE,
@@ -897,6 +918,14 @@ const DM_DELAYED_FINAL: &str = r#"{
   "api_app_id":"A-slack",
   "event_id":"Ev-delayed-final",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"hello","ts":"1710000000.000007"}
+	}"#;
+
+const DM_TIMEOUT_FINAL: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-timeout-final",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"hello","ts":"1710000000.000008"}
 	}"#;
 
 const DM_APPROVAL: &str = r#"{

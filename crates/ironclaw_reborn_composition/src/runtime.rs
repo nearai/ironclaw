@@ -554,11 +554,15 @@ impl RebornRuntime {
     }
 
     #[cfg(all(test, feature = "slack-v2-host-beta"))]
+    /// Test-only seam for Slack host-beta composition tests that mirrors
+    /// production startup without durable local runtime services.
     pub(crate) fn clear_local_runtime_for_test(&mut self) {
         self.services.local_runtime = None;
     }
 
     #[cfg(all(test, feature = "slack-v2-host-beta"))]
+    /// Test-only seam for Slack host-beta e2e assertions that reads the same
+    /// turn persistence state the production turn runner consumes.
     pub(crate) async fn turn_persistence_snapshot_for_test(
         &self,
     ) -> Option<TurnPersistenceSnapshot> {

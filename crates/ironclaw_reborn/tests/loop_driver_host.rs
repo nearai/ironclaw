@@ -3525,6 +3525,43 @@ async fn text_only_host_factory_rejects_thread_scope_mismatch() {
 }
 
 #[tokio::test]
+async fn text_only_host_factory_rejects_fixed_project_mismatch() {
+    let fixture = HostFixture::new("thread-host-project-scope-mismatch", "hello").await;
+    let wrong_scope = ThreadScope {
+        project_id: Some(ProjectId::new("project-other").unwrap()),
+        ..fixture.thread_scope.clone()
+    };
+    let factory = RebornLoopDriverHostFactory::new(
+        Arc::clone(&fixture.thread_service),
+        wrong_scope,
+        Arc::clone(&fixture.gateway),
+        fixture.checkpoint_state_store.clone(),
+        fixture.turn_state_store.clone(),
+        fixture.loop_checkpoint_store.clone(),
+        fixture.milestone_sink.clone(),
+        TextOnlyLoopHostConfig {
+            max_messages: 8,
+            require_model_route_snapshot: false,
+        },
+        InstructionSafetyContext::local_development_noop(),
+    );
+
+    let error = factory
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("turn project does not match fixed thread scope project")
+    );
+}
+
+#[tokio::test]
 async fn text_only_host_factory_rejects_agentless_turn_scope() {
     let fixture = HostFixture::new("thread-host-agentless-scope", "hello").await;
     let mut context = fixture.context.clone();

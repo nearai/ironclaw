@@ -203,44 +203,16 @@ impl RunScopedDurableLoopHostMilestoneSink {
         &self,
         milestone: &LoopHostMilestone,
     ) -> Result<ThreadScope, AgentLoopHostError> {
-        let Some(agent_id) = milestone.scope.agent_id.clone() else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "loop milestone event scope requires an agent-scoped run",
-            ));
-        };
-        if self.base_thread_scope.tenant_id != milestone.scope.tenant_id
-            || self.base_thread_scope.agent_id != agent_id
-        {
-            return Err(AgentLoopHostError::new(
+        crate::thread_scope::ThreadScopeResolver::resolve_for_turn_scope(
+            &self.base_thread_scope,
+            &milestone.scope,
+            milestone.actor.as_ref(),
+        )
+        .map_err(|error| {
+            AgentLoopHostError::new(
                 AgentLoopHostErrorKind::ScopeMismatch,
-                "loop milestone scope does not match runtime thread scope",
-            ));
-        }
-        if self.base_thread_scope.project_id.is_some()
-            && self.base_thread_scope.project_id != milestone.scope.project_id
-        {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::ScopeMismatch,
-                "loop milestone project does not match runtime thread scope",
-            ));
-        }
-        let Some(actor) = milestone.actor.as_ref() else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "loop milestone event scope requires a run actor",
-            ));
-        };
-        Ok(ThreadScope {
-            tenant_id: self.base_thread_scope.tenant_id.clone(),
-            agent_id: self.base_thread_scope.agent_id.clone(),
-            project_id: self
-                .base_thread_scope
-                .project_id
-                .clone()
-                .or_else(|| milestone.scope.project_id.clone()),
-            owner_user_id: Some(actor.user_id.clone()),
-            mission_id: self.base_thread_scope.mission_id.clone(),
+                format!("loop milestone scope does not match runtime thread scope: {error}"),
+            )
         })
     }
 }
@@ -554,6 +526,48 @@ mod tests {
             )
             .await
             .expect("read projected run-scoped event");
+        assert_eq!(replay.entries.len(), 1);
+        assert_eq!(
+            replay.entries[0].record.kind,
+            RuntimeEventKind::ModelStarted
+        );
+    }
+
+    #[tokio::test]
+    async fn run_scoped_sink_accepts_actorless_milestone_with_runtime_owner() {
+        let event_log = Arc::new(InMemoryDurableEventLog::new());
+        let base_scope = fixture_thread_scope();
+        let sink =
+            RunScopedDurableLoopHostMilestoneSink::new(event_log.clone(), base_scope.clone());
+        let (milestone, thread_id, run_id) =
+            fixture_milestone(LoopHostMilestoneKind::ModelStarted {
+                requested_model_profile_id: None,
+            });
+
+        sink.publish_loop_milestone(milestone)
+            .await
+            .expect("actorless milestones keep the runtime owner scope");
+
+        let expected_scope = ResourceScope {
+            tenant_id: base_scope.tenant_id,
+            user_id: base_scope
+                .owner_user_id
+                .expect("fixture supplies a runtime owner"),
+            agent_id: Some(base_scope.agent_id),
+            project_id: Some(ProjectId::new("project-hook-projection").unwrap()),
+            mission_id: None,
+            thread_id: Some(thread_id),
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+        };
+        let replay = event_log
+            .read_after_cursor(
+                &EventStreamKey::from_scope(&expected_scope),
+                &ReadScope::any(),
+                None,
+                10,
+            )
+            .await
+            .expect("read actorless run-scoped event");
         assert_eq!(replay.entries.len(), 1);
         assert_eq!(
             replay.entries[0].record.kind,

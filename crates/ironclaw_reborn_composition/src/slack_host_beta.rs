@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_conversations::RebornFilesystemConversationServices;
+use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_outbound::{FilesystemOutboundStateStore, OutboundStateStore};
 use ironclaw_product_adapters::{
@@ -154,8 +154,6 @@ pub enum SlackHostBetaBuildError {
     RuntimeHttpEgressUnavailable,
     #[error("Slack host-beta requires durable host state")]
     DurableHostStateUnavailable,
-    #[error("Slack host-beta durable host state failed to initialize: {reason}")]
-    DurableHostStateInitFailed { reason: String },
     #[error(
         "Slack host-beta personal binding requires [slack].api_app_id for tenant app-scoped pairing"
     )]
@@ -260,15 +258,7 @@ pub async fn build_slack_events_route_mount_with_actor_user_resolver(
         auth_requirement: slack_request_signature_auth_requirement(),
     }));
 
-    let conversations = Arc::new(
-        RebornFilesystemConversationServices::new(Arc::clone(&local_runtime.host_state_filesystem))
-            .await
-            .map_err(
-                |error| SlackHostBetaBuildError::DurableHostStateInitFailed {
-                    reason: error.to_string(),
-                },
-            )?,
-    );
+    let conversations = Arc::new(InMemoryConversationServices::default());
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations.clone();
     let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =

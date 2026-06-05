@@ -200,7 +200,8 @@ impl FilesystemIdempotencyLedger {
                     if self.should_prune_after_settle()
                         && let Err(error) = self.prune_settled_entries().await
                     {
-                        tracing::debug!(
+                        // silent-ok: settled-action pruning is retention cleanup; future settles retry.
+                        tracing::warn!(
                             error = %error,
                             "product workflow idempotency ledger failed to prune settled entries"
                         );
