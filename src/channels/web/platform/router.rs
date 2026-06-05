@@ -82,7 +82,7 @@ use crate::channels::web::features::extensions::{
     extensions_setup_handler, extensions_setup_submit_handler, extensions_tools_handler,
 };
 use crate::channels::web::features::logs::{
-    logs_events_handler, logs_level_get_handler, logs_level_set_handler,
+    logs_events_handler, logs_history_handler, logs_level_get_handler, logs_level_set_handler,
 };
 use crate::channels::web::features::oauth::{
     oauth_callback_handler, relay_events_handler, slack_relay_oauth_callback_handler,
@@ -198,6 +198,7 @@ pub async fn start_server(
         .route("/api/jobs/{id}/files/list", get(job_files_list_handler))
         .route("/api/jobs/{id}/files/read", get(job_files_read_handler))
         // Logs
+        .route("/api/logs/history", get(logs_history_handler))
         .route("/api/logs/events", get(logs_events_handler))
         .route("/api/logs/level", get(logs_level_get_handler))
         .route(

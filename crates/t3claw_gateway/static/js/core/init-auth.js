@@ -25,7 +25,7 @@ function initApp() {
   cleaned.searchParams.delete('log_level');
   window.history.replaceState({}, '', cleaned.pathname + cleaned.search + cleaned.hash);
   connectSSE();
-  connectLogSSE();
+  if (currentTab === 'logs') connectLogSSE();
   startGatewayStatusPolling();
   // Fetch user profile and render avatar + account menu.
   apiFetch('/api/profile').then(function(profile) {

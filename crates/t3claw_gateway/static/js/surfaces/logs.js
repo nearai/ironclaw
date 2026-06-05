@@ -8,6 +8,7 @@ function connectLogSSE() {
   const output = document.getElementById('logs-output');
   if (output) output.innerHTML = '';
 
+  // Subscribe to live stream first so no entries are missed while history loads.
   const logSseUrl = (token && !oidcProxyAuth)
     ? '/api/logs/events?token=' + encodeURIComponent(token)
     : '/api/logs/events';
@@ -23,14 +24,30 @@ function connectLogSSE() {
   });
 
   logEventSource.onerror = () => {
-    // Silent reconnect
+    // Silent reconnect — live only, no history replay on reconnect.
   };
+
+  // Fetch history separately so SSE reconnects never cause duplicates.
+  apiFetch('/api/logs/history')
+    .then(entries => {
+      // Render oldest-first: prepending in order leaves newest at top.
+      for (const entry of entries) {
+        appendLogEntry(entry);
+      }
+    })
+    .catch(() => {}); // ignore if DB unavailable
 }
 
-function prependLogEntry(entry) {
+function appendLogEntry(entry) {
   const output = document.getElementById('logs-output');
+  const div = buildLogEntryEl(entry);
+  output.appendChild(div);
+  while (output.children.length > LOG_MAX_ENTRIES) {
+    output.removeChild(output.firstChild);
+  }
+}
 
-  // Level filter
+function buildLogEntryEl(entry) {
   const levelFilter = document.getElementById('logs-level-filter').value;
   const targetFilter = document.getElementById('logs-target-filter').value.trim().toLowerCase();
 
@@ -61,13 +78,16 @@ function prependLogEntry(entry) {
 
   div.addEventListener('click', () => div.classList.toggle('expanded'));
 
-  // Apply current filters as visibility
   const matchesLevel = levelFilter === 'all' || entry.level === levelFilter;
   const matchesTarget = !targetFilter || entry.target.toLowerCase().includes(targetFilter);
-  if (!matchesLevel || !matchesTarget) {
-    div.style.display = 'none';
-  }
+  if (!matchesLevel || !matchesTarget) div.style.display = 'none';
 
+  return div;
+}
+
+function prependLogEntry(entry) {
+  const output = document.getElementById('logs-output');
+  const div = buildLogEntryEl(entry);
   output.prepend(div);
 
   // Cap entries (remove oldest at the bottom)

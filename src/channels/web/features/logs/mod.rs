@@ -20,36 +20,38 @@ use axum::{
 };
 use tokio_stream::StreamExt;
 
+use axum::extract::Query;
+use serde::Deserialize;
+
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::log_layer::LogEntry;
 use crate::channels::web::platform::state::GatewayState;
 
-/// How many log entries to load from DB when the page opens.
-const LOG_HISTORY_LIMIT: i64 = 300;
+const LOG_HISTORY_DEFAULT_LIMIT: i64 = 300;
+const LOG_HISTORY_MAX_LIMIT: i64 = 5_000;
 
-/// `GET /api/logs/events` — SSE stream of log entries.
+#[derive(Deserialize)]
+pub(crate) struct LogHistoryQuery {
+    limit: Option<i64>,
+}
+
+/// `GET /api/logs/history?limit=N` — returns the last N persisted log entries (info+) as JSON.
 ///
-/// Loads the most recent `LOG_HISTORY_LIMIT` entries from DB as the history
-/// prefix (info+ only), then forwards every new entry from the live broadcaster
-/// (all levels). The subscription is opened before the DB query so no live
-/// entries fall through the gap.
-pub(crate) async fn logs_events_handler(
+/// `limit` defaults to 300, max 5000. Called once by the frontend on page open.
+/// Kept separate from the SSE stream so auto-reconnects never replay history.
+pub(crate) async fn logs_history_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let broadcaster = state.log_broadcaster.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Log broadcaster not available".to_string(),
-    ))?;
-
-    // Subscribe before loading history so no live entries are missed.
-    let rx = broadcaster.subscribe();
-
-    // Load persisted history from DB (best-effort; empty slice if DB unavailable).
-    let history: Vec<LogEntry> = if let Some(ref db) = state.store {
-        db.list_log_entries(LOG_HISTORY_LIMIT)
+    Query(params): Query<LogHistoryQuery>,
+) -> Result<Json<Vec<LogEntry>>, (StatusCode, String)> {
+    let limit = params
+        .limit
+        .unwrap_or(LOG_HISTORY_DEFAULT_LIMIT)
+        .clamp(1, LOG_HISTORY_MAX_LIMIT);
+    let entries = if let Some(ref db) = state.store {
+        db.list_log_entries(limit)
             .await
-            .unwrap_or_default() // silent-ok: dashboard refresh, live stream still works
+            .unwrap_or_default() // silent-ok: dashboard refresh still works without history
             .into_iter()
             .map(|r| LogEntry {
                 level: r.level,
@@ -63,11 +65,23 @@ pub(crate) async fn logs_events_handler(
     } else {
         Vec::new()
     };
+    Ok(Json(entries))
+}
 
-    let history_stream = futures::stream::iter(history).map(|entry| {
-        let data = serde_json::to_string(&entry).unwrap_or_default();
-        Ok::<_, Infallible>(Event::default().event("log").data(data))
-    });
+/// `GET /api/logs/events` — live SSE stream of log entries (all levels).
+///
+/// Streams new entries in real time. History is served separately via
+/// `GET /api/logs/history` so SSE reconnects never replay past entries.
+pub(crate) async fn logs_events_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let broadcaster = state.log_broadcaster.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Log broadcaster not available".to_string(),
+    ))?;
+
+    let rx = broadcaster.subscribe();
 
     let live_stream = tokio_stream::wrappers::BroadcastStream::new(rx)
         .filter_map(|result| result.ok())
@@ -76,7 +90,7 @@ pub(crate) async fn logs_events_handler(
             Ok::<_, Infallible>(Event::default().event("log").data(data))
         });
 
-    let stream = history_stream.chain(live_stream);
+    let stream = live_stream;
 
     Ok((
         [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
