@@ -245,13 +245,30 @@ pub struct SlackSection {
     /// Omit this for the pairing-code flow, where unknown Slack actors are
     /// prompted to bind in WebUI.
     pub slack_user_id: Option<String>,
-    /// Reborn user id the configured Slack user maps to. Defaults in the CLI
-    /// to the same user as the WebUI env-bearer authenticator.
+    /// Reborn user id the configured legacy Slack user maps to, and the local
+    /// host owner used for Slack host-mediated egress. Defaults in the CLI to
+    /// the same user as the WebUI env-bearer authenticator.
     pub user_id: Option<String>,
+    /// Optional Reborn user id whose scope owns shared Slack channel turns.
+    /// Omit to require explicit channel-route configuration instead of
+    /// silently inheriting a personal/default user scope.
+    pub shared_subject_user_id: Option<String>,
+    /// Optional channel-specific shared subjects for Slack app mentions and
+    /// thread replies. Each route maps one Slack channel id to a Reborn user
+    /// scope that owns tools, skills, memory, and conversation context.
+    #[serde(default)]
+    pub channel_routes: Vec<SlackChannelRouteSection>,
     /// Environment variable name containing the Slack signing secret.
     pub signing_secret_env: Option<String>,
     /// Environment variable name containing the Slack bot token.
     pub bot_token_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlackChannelRouteSection {
+    pub channel_id: Option<String>,
+    pub subject_user_id: Option<String>,
 }
 
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
@@ -640,6 +657,26 @@ impl RebornConfigFile {
             if let Some(user_id) = &slack.user_id {
                 check(Cow::Borrowed("slack.user_id"), user_id)?;
             }
+            if let Some(shared_subject_user_id) = &slack.shared_subject_user_id {
+                check(
+                    Cow::Borrowed("slack.shared_subject_user_id"),
+                    shared_subject_user_id,
+                )?;
+            }
+            for (index, route) in slack.channel_routes.iter().enumerate() {
+                if let Some(channel_id) = &route.channel_id {
+                    check(
+                        Cow::Owned(format!("slack.channel_routes[{index}].channel_id")),
+                        channel_id,
+                    )?;
+                }
+                if let Some(subject_user_id) = &route.subject_user_id {
+                    check(
+                        Cow::Owned(format!("slack.channel_routes[{index}].subject_user_id")),
+                        subject_user_id,
+                    )?;
+                }
+            }
             if let Some(signing_secret_env) = &slack.signing_secret_env {
                 check(
                     Cow::Borrowed("slack.signing_secret_env"),
@@ -997,8 +1034,13 @@ team_id = "T123"
 api_app_id = "A123"
 slack_user_id = "U123"
 user_id = "operator"
+shared_subject_user_id = "team-agent"
 signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
 bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
+
+[[slack.channel_routes]]
+channel_id = "CENG"
+subject_user_id = "eng-team-agent"
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         assert_eq!(cfg.api_version.as_deref(), Some("ironclaw.runtime/v1"));
@@ -1027,6 +1069,12 @@ bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
         let slack = cfg.slack.as_ref().expect("slack section present");
         assert_eq!(slack.enabled, Some(true));
         assert_eq!(slack.team_id.as_deref(), Some("T123"));
+        assert_eq!(slack.shared_subject_user_id.as_deref(), Some("team-agent"));
+        assert_eq!(slack.channel_routes.len(), 1);
+        assert_eq!(
+            slack.channel_routes[0].subject_user_id.as_deref(),
+            Some("eng-team-agent")
+        );
         assert_eq!(
             slack.signing_secret_env.as_deref(),
             Some("IRONCLAW_REBORN_SLACK_SIGNING_SECRET")

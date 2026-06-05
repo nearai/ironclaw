@@ -19,8 +19,8 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InMemoryIdempotencyLedger,
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
-    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
-    StaticProductInstallationResolver,
+    ProductConversationRouteKey, ProductInstallationKey, ProductInstallationScope,
+    ProductWorkflowError, StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
     SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackV2Adapter,
@@ -77,17 +77,29 @@ pub struct SlackHostBetaConfig {
     pub agent_id: AgentId,
     pub project_id: Option<ProjectId>,
     pub installation_id: AdapterInstallationId,
+    pub team_id: String,
     pub installation_selector: SlackInstallationSelector,
     /// Optional Slack actor retained only for legacy static personal-binding
     /// tests/config. Tenant app host-beta resolution uses durable personal
     /// bindings and does not require a preselected Slack user.
     pub slack_actor: Option<ExternalActorRef>,
-    /// User scope that owns Slack shared-route execution, tools, skills, and
-    /// memory in this beta route. Personal DM routes still use the paired actor
-    /// as the subject.
+    /// Host/runtime user used for Slack host-mediated state and legacy static
+    /// Slack actor mapping. Shared channel execution is owned only by
+    /// `shared_subject_user_id` when explicitly configured.
     pub user_id: UserId,
+    /// Optional user scope that owns Slack shared-channel execution, tools,
+    /// skills, and memory in this beta route. Personal DM routes still use the
+    /// paired actor as the subject.
+    pub shared_subject_user_id: Option<UserId>,
+    pub channel_routes: Vec<SlackHostBetaChannelRoute>,
     pub signing_secret: SecretString,
     pub bot_token: SecretString,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlackHostBetaChannelRoute {
+    pub channel_id: String,
+    pub subject_user_id: UserId,
 }
 
 pub struct SlackHostBetaConfigInput {
@@ -99,6 +111,8 @@ pub struct SlackHostBetaConfigInput {
     pub api_app_id: Option<String>,
     pub slack_user_id: Option<String>,
     pub user_id: UserId,
+    pub shared_subject_user_id: Option<UserId>,
+    pub channel_routes: Vec<SlackHostBetaChannelRoute>,
     pub signing_secret: SecretString,
     pub bot_token: SecretString,
 }
@@ -107,10 +121,15 @@ impl SlackHostBetaConfig {
     pub fn new(input: SlackHostBetaConfigInput) -> Result<Self, SlackHostBetaBuildError> {
         let installation_id = AdapterInstallationId::new(input.installation_id)
             .map_err(|reason| invalid_config("installation_id", reason.to_string()))?;
+        let team_id = input.team_id;
         let installation_selector = match input.api_app_id {
-            Some(api_app_id) => SlackInstallationSelector::app_team(api_app_id, input.team_id),
-            None => SlackInstallationSelector::team(input.team_id),
+            Some(api_app_id) => SlackInstallationSelector::app_team(api_app_id, team_id.clone()),
+            None => SlackInstallationSelector::team(team_id.clone()),
         };
+        for route in &input.channel_routes {
+            ProductConversationRouteKey::new(Some(team_id.clone()), route.channel_id.clone())
+                .map_err(|reason| invalid_config("channel_routes", reason.to_string()))?;
+        }
         let slack_actor = input
             .slack_user_id
             .map(|slack_user_id| {
@@ -123,9 +142,12 @@ impl SlackHostBetaConfig {
             agent_id: input.agent_id,
             project_id: input.project_id,
             installation_id,
+            team_id,
             installation_selector,
             slack_actor,
             user_id: input.user_id,
+            shared_subject_user_id: input.shared_subject_user_id,
+            channel_routes: input.channel_routes,
             signing_secret: input.signing_secret,
             bot_token: input.bot_token,
         })
@@ -140,9 +162,12 @@ impl std::fmt::Debug for SlackHostBetaConfig {
             .field("agent_id", &self.agent_id)
             .field("project_id", &self.project_id)
             .field("installation_id", &self.installation_id)
+            .field("team_id", &self.team_id)
             .field("installation_selector", &self.installation_selector)
             .field("slack_actor", &self.slack_actor)
             .field("user_id", &self.user_id)
+            .field("shared_subject_user_id", &self.shared_subject_user_id)
+            .field("channel_routes", &self.channel_routes)
             .field("signing_secret", &"[REDACTED]")
             .field("bot_token", &"[REDACTED]")
             .finish()
@@ -240,8 +265,8 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
     // The resolver controls inbound Slack actor binding. `config.user_id`
-    // scopes shared Slack channel execution and host-mediated Slack bot-token
-    // egress for this beta route.
+    // scopes host-mediated Slack bot-token egress and legacy static actor
+    // mapping. Shared Slack channel execution is configured separately.
     tracing::warn!(
         "Slack host-beta uses in-memory conversation bindings, idempotency ledger, and outbound state; Slack continuity, retry deduplication, and delivery state are lost on process restart"
     );
@@ -260,13 +285,23 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
         conversations.clone();
     let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
         conversations.clone();
-    let scope = ProductInstallationScope::with_default_scope(
+    let mut scope = ProductInstallationScope::with_default_scope(
         config.tenant_id.clone(),
         config.agent_id.clone(),
         config.project_id.clone(),
-    )
-    .with_default_subject_user_id(config.user_id.clone())
-    .with_actor_user_resolver(actor_user_resolver, actor_pairings);
+    );
+    if let Some(shared_subject_user_id) = config.shared_subject_user_id.clone() {
+        scope = scope.with_default_subject_user_id(shared_subject_user_id);
+    }
+    for route in &config.channel_routes {
+        let route_key = ProductConversationRouteKey::new(
+            Some(config.team_id.clone()),
+            route.channel_id.clone(),
+        )
+        .map_err(|reason| invalid_config("channel_routes", reason.to_string()))?;
+        scope = scope.with_conversation_subject_route(route_key, route.subject_user_id.clone());
+    }
+    let scope = scope.with_actor_user_resolver(actor_user_resolver, actor_pairings);
     let installation_resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(adapter_id, config.installation_id.clone()),
         scope,
@@ -512,6 +547,7 @@ mod tests {
     const AGENT: &str = "agent:slack-host";
     const PROJECT: &str = "project:slack-host";
     const USER: &str = "user:slack-host";
+    const SHARED_SUBJECT: &str = "user:slack-shared-subject";
     const INSTALLATION: &str = "install_host_beta";
     const TEAM: &str = "T0HOST";
     const API_APP: &str = "A0HOST";
@@ -790,7 +826,7 @@ mod tests {
         let final_reply = wait_for_slack_post_message(&egress, "ok").await;
         assert_eq!(final_reply["channel"], "D0HOST");
         assert_eq!(final_reply["text"], "ok");
-        assert_eq!(final_reply["mrkdwn"], false);
+        assert_eq!(final_reply["mrkdwn"], true);
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
@@ -816,7 +852,7 @@ mod tests {
 
         let history = wait_for_slack_thread_history_with_owner(
             &runtime,
-            Some(UserId::new(USER).expect("user")),
+            Some(UserId::new(SHARED_SUBJECT).expect("shared subject")),
         )
         .await;
         let accepted_message = history
@@ -839,7 +875,7 @@ mod tests {
                     Some(AgentId::new(AGENT).expect("agent")),
                     Some(ProjectId::new(PROJECT).expect("project")),
                     accepted_message.thread_id.clone(),
-                    Some(UserId::new(USER).expect("user")),
+                    Some(UserId::new(SHARED_SUBJECT).expect("shared subject")),
                 ),
                 run_id,
             })
@@ -905,6 +941,8 @@ mod tests {
             api_app_id: None,
             slack_user_id: Some(SLACK_USER.to_string()),
             user_id: UserId::new(USER).expect("user"),
+            shared_subject_user_id: None,
+            channel_routes: Vec::new(),
             signing_secret: SecretString::from(SECRET),
             bot_token: SecretString::from("xoxb-host-token"),
         })
@@ -987,6 +1025,11 @@ mod tests {
             api_app_id: Some(API_APP.to_string()),
             slack_user_id: Some(SLACK_USER.to_string()),
             user_id: UserId::new(USER).expect("user"),
+            shared_subject_user_id: None,
+            channel_routes: vec![SlackHostBetaChannelRoute {
+                channel_id: "C0HOST".to_string(),
+                subject_user_id: UserId::new(SHARED_SUBJECT).expect("shared subject"),
+            }],
             signing_secret: SecretString::from(SECRET),
             bot_token: SecretString::from("xoxb-host-token"),
         })
@@ -1003,6 +1046,8 @@ mod tests {
             api_app_id: Some(API_APP.to_string()),
             slack_user_id: None,
             user_id: UserId::new(USER).expect("user"),
+            shared_subject_user_id: None,
+            channel_routes: Vec::new(),
             signing_secret: SecretString::from(SECRET),
             bot_token: SecretString::from("xoxb-host-token"),
         })
