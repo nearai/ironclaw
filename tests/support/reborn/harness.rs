@@ -1034,11 +1034,12 @@ impl RebornBinaryE2EHarness {
             .resolve_binding(binding_request)
             .await?;
         let thread_scope = thread_scope_from_binding_with_route_kind(&binding, route_kind)?;
-        let turn_scope = TurnScope::new(
+        let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
+            binding.subject_user_id.clone(),
         );
         let actor = TurnActor::new(binding.actor_user_id.clone());
         let ack = self.workflow.accept_inbound(envelope).await?;
@@ -1981,7 +1982,7 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
-    .with_runtime_http_egress(egress)
+    .with_first_party_http_egress(egress)
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
@@ -2408,6 +2409,16 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             response_bytes: body.len() as u64,
             redaction_applied: false,
         })
+    }
+}
+
+#[async_trait]
+impl ironclaw_host_runtime::ToolCallHttpEgress for RecordingRuntimeHttpEgress {
+    async fn execute_for_model_visible_output(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        RuntimeHttpEgress::execute(self, request).await
     }
 }
 

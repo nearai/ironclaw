@@ -751,12 +751,12 @@ fn notion_authorized_request(
                 authorization_code: OAuthAuthorizationCode::new(SecretString::from(
                     "raw-notion-auth-code".to_string(),
                 ))
-                .unwrap(),
+                .unwrap(), // safety: test-only fixture literal is valid by construction.
                 authorization_code_hash: code_hash(),
                 pkce_verifier: PkceVerifierSecret::new(SecretString::from(
                     "raw-notion-pkce-verifier".to_string(),
                 ))
-                .unwrap(),
+                .unwrap(), // safety: test-only fixture literal is valid by construction.
                 pkce_verifier_hash: pkce_hash(),
                 scopes: vec![provider_scope("workspace")],
             },

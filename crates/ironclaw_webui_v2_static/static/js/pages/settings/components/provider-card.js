@@ -21,6 +21,10 @@ export function ProviderCard({
   onUse,
   onConfigure,
   onDelete,
+  onNearaiLogin,
+  onNearaiWallet,
+  onCodexLogin,
+  loginBusy,
 }) {
   const t = useT();
   const isActive = provider.id === activeProviderId;
@@ -50,8 +54,31 @@ export function ProviderCard({
         ${adapterLabel(provider.adapter)} · ${model || provider.default_model || t("llm.none")}
       </span>`;
 
+  const isLoginProvider = provider.id === "nearai" || provider.id === "openai_codex";
+  const loginActions =
+    !isActive && provider.id === "nearai"
+      ? html`
+          <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${onNearaiWallet}>
+            ${t("onboarding.nearWallet")}
+          <//>
+          <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${() => onNearaiLogin("github")}>
+            GitHub
+          <//>
+          <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${() => onNearaiLogin("google")}>
+            Google
+          <//>
+        `
+      : !isActive && provider.id === "openai_codex"
+      ? html`
+          <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${onCodexLogin}>
+            ${t("onboarding.codexSignIn")}
+          <//>
+        `
+      : null;
   const primaryAction = isActive
     ? null
+    : isLoginProvider
+    ? loginActions
     : configured
     ? html`
         <${Button}
@@ -75,6 +102,8 @@ export function ProviderCard({
           ${missing === "api_key" ? t("llm.addApiKey") : t("llm.configure")}
         <//>
       `;
+  const showConfigureAction =
+    !isLoginProvider && ((provider.builtin && provider.id !== "bedrock") || !provider.builtin);
 
   return html`
     <${Card}
@@ -120,7 +149,7 @@ export function ProviderCard({
           </span>
           <span className="hidden min-w-0 max-w-[280px] truncate sm:block">${inlineMeta}</span>
         </button>
-        <div className="flex shrink-0 items-center gap-2 py-3 pr-4 sm:pr-5">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 py-3 pr-4 sm:pr-5">
           ${primaryAction}
           <button
             type="button"
@@ -156,7 +185,7 @@ export function ProviderCard({
           </div>
 
           <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-[var(--v2-panel-border)] pt-3">
-            ${((provider.builtin && provider.id !== "bedrock") || !provider.builtin) &&
+            ${showConfigureAction &&
             html`
               <${Button}
                 type="button"

@@ -44,7 +44,7 @@
     "protocol": "openai_codex",
     "api_key_required": false,
     "model_env": "OPENAI_CODEX_MODEL",
-    "default_model": "gpt-5.3-codex",
+    "default_model": "gpt-5.5",
     "description": "ChatGPT subscription (Plus/Pro/Max)",
     "setup": {
       "kind": "o_auth_device_code",

@@ -1636,7 +1636,10 @@ impl Inner {
             cursor: record.event_cursor,
             scope: record.scope.clone(),
             occurred_at: Some(Utc::now()),
-            owner_user_id: Some(record.actor.user_id.clone()),
+            owner_user_id: crate::events::lifecycle_owner_user_id(
+                &record.scope,
+                Some(&record.actor.user_id),
+            ),
             run_id: record.run_id,
             status: record.status,
             kind,

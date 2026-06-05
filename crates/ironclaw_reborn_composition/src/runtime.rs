@@ -661,6 +661,42 @@ impl RebornRuntime {
         self.boot.as_ref()
     }
 
+    /// The runtime's NEAR AI session manager, when an LLM seam is wired. The
+    /// LLM-config service uses it so a completed NEAR AI login applies to the
+    /// live provider on reload.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn webui_llm_session(&self) -> Option<Arc<ironclaw_llm::SessionManager>> {
+        self.llm_reload
+            .as_ref()
+            .map(|parts| Arc::clone(&parts.session))
+    }
+
+    /// Shared NEAR AI login-state store. The authenticated start endpoint
+    /// issues states and the public callback consumes them.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn webui_nearai_login_states(
+        &self,
+    ) -> Option<Arc<crate::llm_config_service::NearAiLoginStateStore>> {
+        self.llm_reload
+            .as_ref()
+            .map(|parts| Arc::clone(&parts.nearai_login_states))
+    }
+
+    /// Public NEAR AI login callback mount for the host ingress to merge via
+    /// [`crate::webui_serve::WebuiServeConfig::with_public_route_mount`]. Built
+    /// from the runtime's private session/reload/boot so those stay internal.
+    /// `None` when no LLM seam or boot config was wired.
+    #[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
+    pub fn nearai_login_callback_mount(&self) -> Option<crate::webui_serve::PublicRouteMount> {
+        let boot = self.boot.clone()?;
+        let session = self.webui_llm_session()?;
+        let reload = self.webui_llm_reload_trigger()?;
+        let states = self.webui_nearai_login_states()?;
+        Some(crate::nearai_login_serve::nearai_login_callback_mount(
+            session, reload, boot, states,
+        ))
+    }
+
     /// Live LLM-provider reload trigger for the settings service. Returns the
     /// hot-swap adapter when an LLM provider was wired at boot; otherwise
     /// `None`, in which case config edits persist to disk and apply on the
@@ -779,6 +815,14 @@ impl RebornRuntime {
 
     pub(crate) fn webui_auth_interaction_service(&self) -> Arc<dyn AuthInteractionService> {
         self.auth_interaction_service.clone()
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
+        self.services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
     }
 
     #[cfg(test)]
@@ -1534,18 +1578,33 @@ pub async fn build_reborn_runtime(
     // 3. The test override wins over the production gateway when set;
     //    the LLM-derived cost table is kept regardless so the
     //    accountant can fire against a stub gateway too.
-    #[cfg(any(test, feature = "test-support"))]
-    let test_model_gateway_override = model_gateway_override;
-    #[cfg(feature = "root-llm-provider")]
-    let (production_gateway, llm_cost_table, llm_reload) =
-        build_production_model_gateway(llm).await?;
-    #[cfg(not(feature = "root-llm-provider"))]
-    let (production_gateway, llm_cost_table) = build_production_model_gateway()?;
-
-    #[cfg(any(test, feature = "test-support"))]
-    let model_gateway = test_model_gateway_override.unwrap_or(production_gateway);
-    #[cfg(not(any(test, feature = "test-support")))]
-    let model_gateway = production_gateway;
+    // 3. A test gateway override short-circuits the production build entirely:
+    //    building a real gateway only to discard it wastes startup work (and, on
+    //    the cold-boot path, an LLM session manager), which made
+    //    timeout-sensitive tests flaky. When no override is set, build normally.
+    #[cfg(all(feature = "root-llm-provider", any(test, feature = "test-support")))]
+    let (model_gateway, llm_cost_table, llm_reload) = match model_gateway_override {
+        Some(override_gateway) => (override_gateway, None, None),
+        None => build_production_model_gateway(llm).await?,
+    };
+    #[cfg(all(
+        feature = "root-llm-provider",
+        not(any(test, feature = "test-support"))
+    ))]
+    let (model_gateway, llm_cost_table, llm_reload) = build_production_model_gateway(llm).await?;
+    #[cfg(all(
+        not(feature = "root-llm-provider"),
+        any(test, feature = "test-support")
+    ))]
+    let (model_gateway, llm_cost_table) = match model_gateway_override {
+        Some(override_gateway) => (override_gateway, None),
+        None => build_production_model_gateway()?,
+    };
+    #[cfg(all(
+        not(feature = "root-llm-provider"),
+        not(any(test, feature = "test-support"))
+    ))]
+    let (model_gateway, llm_cost_table) = build_production_model_gateway()?;
 
     // Resolved cost table is either: the LLM-policy-derived table (real
     // LLM wired), a test override (so tests can drive deterministic
@@ -2142,6 +2201,11 @@ async fn build_production_model_gateway(
     ),
     RebornRuntimeError,
 > {
+    // Even with no LLM configured at boot we build a real swappable gateway
+    // around a placeholder provider (which errors until swapped) plus a reload
+    // handle. That way the FIRST configuration made through the settings UI
+    // hot-swaps the placeholder into a working provider without a restart —
+    // otherwise a cold boot would wire a dead stub with no reload seam.
     match llm {
         Some(cfg) => {
             let LlmGatewayBundle {
@@ -2151,7 +2215,16 @@ async fn build_production_model_gateway(
             } = build_llm_gateway(cfg).await?;
             Ok((gateway, Some(policy.build_cost_table()), Some(reload)))
         }
-        None => Ok((build_stub_gateway(), None, None)),
+        None => {
+            let LlmGatewayBundle {
+                gateway, reload, ..
+            } = build_placeholder_llm_gateway().await?;
+            // No cost table for the placeholder: there is no real model to cost,
+            // and a synthetic table would gate budgets against a model that
+            // isn't actually in use. The budget cost table is (re)derived when a
+            // real provider is configured + the binary restarts.
+            Ok((gateway, None, Some(reload)))
+        }
     }
 }
 
@@ -2187,22 +2260,44 @@ struct LlmGatewayBundle {
 pub(crate) struct RebornLlmReloadParts {
     pub(crate) reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
     pub(crate) session: Arc<ironclaw_llm::SessionManager>,
+    pub(crate) nearai_login_states: Arc<crate::llm_config_service::NearAiLoginStateStore>,
 }
 
 #[cfg(feature = "root-llm-provider")]
 async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, RebornRuntimeError> {
-    use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
-    use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
-    use ironclaw_turns::run_profile::ModelProfileId;
-
     let model = llm.model().to_string();
     let session = ironclaw_llm::create_session_manager(llm.config.session.clone()).await;
     let raw = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
+    wrap_swappable_gateway(raw, Some(model), session)
+}
 
-    // Wrap in a swappable provider and keep its reload handle so settings
-    // changes can hot-swap the inner backend live.
+/// Cold-boot gateway: no LLM configured yet. Wraps a placeholder provider (which
+/// errors until swapped) so the model-gateway + reload seam exist from the
+/// start; the first configuration applied through the settings UI swaps the
+/// placeholder for a real provider chain with no restart.
+#[cfg(feature = "root-llm-provider")]
+async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRuntimeError> {
+    let session =
+        ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
+    let raw: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(PlaceholderLlmProvider);
+    wrap_swappable_gateway(raw, None, session)
+}
+
+/// Wrap a raw provider in a [`SwappableLlmProvider`] + reload handle and build
+/// the model gateway. Shared by the real and placeholder boot paths so both get
+/// an identical live-reload seam.
+#[cfg(feature = "root-llm-provider")]
+fn wrap_swappable_gateway(
+    raw: Arc<dyn ironclaw_llm::LlmProvider>,
+    model: Option<String>,
+    session: Arc<ironclaw_llm::SessionManager>,
+) -> Result<LlmGatewayBundle, RebornRuntimeError> {
+    use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
+    use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
+    use ironclaw_turns::run_profile::ModelProfileId;
+
     let swappable = Arc::new(SwappableLlmProvider::new(raw));
     let reload_handle = Arc::new(LlmReloadHandle::new(Arc::clone(&swappable), None));
     let provider: Arc<dyn LlmProvider> = swappable;
@@ -2210,7 +2305,7 @@ async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, R
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
     })?;
-    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, Some(model));
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, model);
     let gateway = LlmProviderModelGateway::new(provider, policy.clone());
     Ok(LlmGatewayBundle {
         gateway: Arc::new(gateway),
@@ -2218,10 +2313,56 @@ async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, R
         reload: RebornLlmReloadParts {
             reload_handle,
             session,
+            nearai_login_states: Arc::new(crate::llm_config_service::NearAiLoginStateStore::new()),
         },
     })
 }
 
+/// Stand-in provider used before any LLM is configured. Every call fails with a
+/// clear, user-safe message; it exists only so the gateway/reload seam is live
+/// from a cold boot and the first configuration can swap it out.
+#[cfg(feature = "root-llm-provider")]
+#[derive(Debug)]
+struct PlaceholderLlmProvider;
+
+#[cfg(feature = "root-llm-provider")]
+#[async_trait::async_trait]
+impl ironclaw_llm::LlmProvider for PlaceholderLlmProvider {
+    fn model_name(&self) -> &str {
+        "unconfigured"
+    }
+
+    fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+        (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+    }
+
+    async fn complete(
+        &self,
+        _request: ironclaw_llm::CompletionRequest,
+    ) -> Result<ironclaw_llm::CompletionResponse, ironclaw_llm::LlmError> {
+        Err(placeholder_unconfigured_error())
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ironclaw_llm::ToolCompletionRequest,
+    ) -> Result<ironclaw_llm::ToolCompletionResponse, ironclaw_llm::LlmError> {
+        Err(placeholder_unconfigured_error())
+    }
+}
+
+#[cfg(feature = "root-llm-provider")]
+fn placeholder_unconfigured_error() -> ironclaw_llm::LlmError {
+    ironclaw_llm::LlmError::RequestFailed {
+        provider: "unconfigured".to_string(),
+        reason: "no LLM provider is configured yet; choose one in Settings → Inference".to_string(),
+    }
+}
+
+// Only the substrate-only build (no `root-llm-provider`) still wires a dead
+// stub gateway. With the LLM provider compiled in, a cold boot uses a
+// placeholder-backed swappable gateway instead (see `build_placeholder_llm_gateway`).
+#[cfg(not(feature = "root-llm-provider"))]
 fn build_stub_gateway() -> Arc<dyn ironclaw_loop_support::HostManagedModelGateway> {
     use async_trait::async_trait;
     use ironclaw_loop_support::{

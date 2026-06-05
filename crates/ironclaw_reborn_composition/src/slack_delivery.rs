@@ -21,9 +21,10 @@ use ironclaw_outbound::{
     RunNotificationOrigin, SourceRouteContext, ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
-    AuthPromptView, ExternalActorRef, ExternalConversationRef, FinalReplyView, GatePromptView,
-    OutboundDeliverySink, ProductAdapter, ProductInboundAck, ProductInboundEnvelope,
-    ProductOutboundPayload, ProtocolHttpEgress,
+    ExternalActorRef, ExternalConversationRef, FinalReplyView, GatePromptView,
+    OutboundDeliverySink, ProductAdapter, ProductAdapterError, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundPayload, ProductTriggerReason,
+    ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::{
     ConversationBindingService, ProductOutboundDeliveryRequest, ProductOutboundTargetResolver,
@@ -37,6 +38,9 @@ use ironclaw_turns::{
 };
 use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
 use tokio::sync::Semaphore;
+
+use crate::AuthChallengeProvider;
+use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
 
 const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const SLACK_RUN_POLL_JITTER_BUCKETS: u32 = 5;
@@ -67,6 +71,7 @@ pub struct SlackFinalReplyDeliveryServices {
     pub adapter: Arc<dyn ProductAdapter>,
     pub egress: Arc<dyn ProtocolHttpEgress>,
     pub delivery_sink: Arc<dyn OutboundDeliverySink>,
+    pub auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
 }
 
 pub struct SlackFinalReplyDeliveryObserver {
@@ -156,19 +161,22 @@ impl SlackFinalReplyDeliveryObserver {
                     );
                     return Ok(());
                 };
+                let view = slack_auth_prompt_view(
+                    &envelope,
+                    auth_prompt_view_for_blocked_auth(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        gate_ref.as_str(),
+                        "Authenticate to continue this run.".to_string(),
+                        &actionable_state.credential_requirements,
+                        self.services.auth_challenges.as_deref(),
+                    )
+                    .await?,
+                );
                 (
                     RunNotificationEventKind::AuthRequired,
-                    ProductOutboundPayload::AuthPrompt(AuthPromptView {
-                        turn_run_id: run_id,
-                        auth_request_ref: gate_ref.as_str().to_string(),
-                        headline: "Authentication required".to_string(),
-                        body: "Use WebUI setup to connect the missing account.".to_string(),
-                        challenge_kind: None,
-                        provider: None,
-                        account_label: None,
-                        authorization_url: None,
-                        expires_at: None,
-                    }),
+                    ProductOutboundPayload::AuthPrompt(view),
                 )
             }
             _ => return Ok(()),
@@ -281,6 +289,24 @@ impl SlackFinalReplyDeliveryObserver {
     }
 }
 
+fn slack_auth_prompt_view(
+    envelope: &ProductInboundEnvelope,
+    mut view: ironclaw_product_adapters::AuthPromptView,
+) -> ironclaw_product_adapters::AuthPromptView {
+    if !slack_auth_setup_link_is_private(envelope) {
+        view.authorization_url = None;
+    }
+    view
+}
+
+fn slack_auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
+    matches!(
+        envelope.payload(),
+        ProductInboundPayload::UserMessage(payload)
+            if payload.trigger == ProductTriggerReason::DirectChat
+    )
+}
+
 fn jittered_poll_interval(base: Duration, run_id: &TurnRunId) -> Duration {
     if base.is_zero() {
         return base;
@@ -321,6 +347,8 @@ enum SlackFinalReplyDeliveryError {
     Thread(#[from] ironclaw_threads::SessionThreadError),
     #[error("outbound delivery failed: {0}")]
     Outbound(#[from] ironclaw_product_workflow::ProductOutboundDeliveryError),
+    #[error("adapter failed: {0}")]
+    Adapter(#[from] ProductAdapterError),
     #[error("outbound policy failed: {0}")]
     OutboundPolicy(#[from] OutboundError),
     #[error("run {run_id} did not finish before Slack delivery timeout")]

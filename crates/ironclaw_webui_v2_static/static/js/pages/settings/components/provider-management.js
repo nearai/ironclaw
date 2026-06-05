@@ -6,7 +6,9 @@ import { useT } from "../../../lib/i18n.js";
 import { SettingsSearchEmpty } from "./settings-search-empty.js";
 import { ProviderCard } from "./provider-card.js";
 import { ProviderDialog } from "./provider-dialog.js";
+import { ProviderLoginStatus } from "./provider-login-status.js";
 import { useProviderManagementActions } from "../hooks/useProviderManagementActions.js";
+import { useProviderLogin } from "../hooks/useProviderLogin.js";
 import { groupProvidersByStatus } from "../lib/llm-providers.js";
 
 const GROUP_ORDER = [
@@ -33,6 +35,10 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
   const t = useT();
   const actions = useProviderManagementActions({ settings, gatewayStatus, searchQuery, t });
   const state = actions.providerState;
+  // NEAR AI / Codex authenticate via login flows; on success the snapshot
+  // refresh re-renders the now-active card in place (no navigation here).
+  const login = useProviderLogin();
+  const loginBusy = login.nearaiBusy || login.codexBusy;
 
   if (searchQuery && actions.filteredProviders.length === 0) {
     return html`<${SettingsSearchEmpty} query=${searchQuery} />`;
@@ -74,6 +80,8 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
         </div>
       `}
 
+      <${ProviderLoginStatus} login=${login} />
+
       ${state.isLoading
         ? html`<div className="text-sm text-[var(--v2-text-muted)]">${t("common.loading")}</div>`
         : state.error
@@ -109,6 +117,10 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
                             onUse=${actions.handleUse}
                             onConfigure=${actions.openDialog}
                             onDelete=${actions.handleDelete}
+                            onNearaiLogin=${login.startNearai}
+                            onNearaiWallet=${login.startNearaiWallet}
+                            onCodexLogin=${login.startCodex}
+                            loginBusy=${loginBusy}
                           />
                         `
                       )}

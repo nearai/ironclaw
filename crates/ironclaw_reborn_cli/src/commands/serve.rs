@@ -432,6 +432,12 @@ impl ServeCommand {
                     .with_public_route_mount(slack_mounts.events)
                     .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing);
             }
+            // Public NEAR AI login callback route (token redirect target). Built
+            // from the runtime's LLM seam; absent when no LLM was wired.
+            #[cfg(feature = "root-llm-provider")]
+            if let Some(nearai_mount) = runtime.nearai_login_callback_mount() {
+                serve_config = serve_config.with_public_route_mount(nearai_mount);
+            }
             if let Some(mount) = public_mount {
                 serve_config = serve_config.with_public_route_mount(mount);
             }

@@ -3953,7 +3953,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "ironclaw"
-version = "0.28.2"
+version = "0.29.1"
 dependencies = [
  "aes",
  "aes-gcm",

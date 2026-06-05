@@ -1861,7 +1861,7 @@ async fn actor_user_resolver_propagates_resolver_error_without_turn_submission()
 }
 
 #[tokio::test]
-async fn lookup_binding_with_actor_user_resolver_rejects_unknown_actor() {
+async fn lookup_binding_with_actor_user_resolver_uses_existing_pairings_only() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let (binding, actor_resolver) = product_binding_service_with_actor_user_resolver(
         conversations,
@@ -1873,14 +1873,17 @@ async fn lookup_binding_with_actor_user_resolver_rejects_unknown_actor() {
             "lookup-resolver-missing-actor",
         )))
         .await
-        .expect_err("lookup must require a resolver-backed actor binding");
+        .expect_err("lookup must require an existing durable actor pairing");
 
-    assert_eq!(actor_resolver.calls().len(), 1);
+    assert!(
+        actor_resolver.calls().is_empty(),
+        "existing-only lookup must not trigger resolver pairing challenges"
+    );
     assert!(matches!(err, ProductWorkflowError::BindingRequired { .. }));
 }
 
 #[tokio::test]
-async fn lookup_binding_with_actor_user_resolver_propagates_resolver_error() {
+async fn lookup_binding_with_actor_user_resolver_ignores_resolver_failures() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let binding = product_binding_service_with_actor_user_resolver_arc(
         conversations,
@@ -1892,16 +1895,13 @@ async fn lookup_binding_with_actor_user_resolver_propagates_resolver_error() {
             "lookup-resolver-error",
         )))
         .await
-        .expect_err("lookup must propagate resolver backend errors");
+        .expect_err("lookup should fail from missing durable pairing, not resolver backend");
 
-    assert!(matches!(
-        err,
-        ProductWorkflowError::BindingResolutionFailed { .. }
-    ));
+    assert!(matches!(err, ProductWorkflowError::BindingRequired { .. }));
 }
 
 #[tokio::test]
-async fn lookup_binding_with_actor_user_resolver_rejects_mismatched_pairing() {
+async fn lookup_binding_with_actor_user_resolver_returns_existing_actor_pairing() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     conversations
         .pair_external_actor(
@@ -1935,13 +1935,16 @@ async fn lookup_binding_with_actor_user_resolver_rejects_mismatched_pairing() {
         )],
     );
 
-    let err = binding
+    let resolved = binding
         .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
         .await
-        .expect_err("lookup must reject a pairing for a different resolved user");
+        .expect("lookup should use the existing durable actor pairing");
 
-    assert_eq!(actor_resolver.calls().len(), 1);
-    assert!(matches!(err, ProductWorkflowError::BindingAccessDenied));
+    assert!(
+        actor_resolver.calls().is_empty(),
+        "existing-only lookup must not reinterpret durable pairing through resolver"
+    );
+    assert_eq!(resolved.actor_user_id.as_str(), "user:paired-bob");
 }
 
 #[tokio::test]

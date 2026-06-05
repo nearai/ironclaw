@@ -1763,7 +1763,7 @@ mod tests {
         let cfg = crate::config::llm::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.backend, "openai_codex");
         let codex = cfg.openai_codex.expect("codex config should be present");
-        assert_eq!(codex.model, "gpt-5.3-codex"); // default
+        assert_eq!(codex.model, "gpt-5.5"); // default
         assert!(
             cfg.provider.is_none(),
             "codex should not use registry provider"

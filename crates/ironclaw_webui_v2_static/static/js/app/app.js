@@ -5,6 +5,7 @@ import { defaultRoute } from "./routes.js";
 import { GatewayLayout } from "../layout/gateway-layout.js";
 import { LoginPage as LoginView } from "../pages/login/login-page.js";
 import { ChatPage } from "../pages/chat/chat-page.js";
+import { OnboardingPage } from "../pages/onboarding/onboarding-page.js";
 import { WorkspacePage } from "../pages/workspace/workspace-page.js";
 import { ProjectsPage } from "../pages/projects/projects-page.js";
 import { MissionsPage } from "../pages/missions/missions-page.js";
@@ -101,6 +102,7 @@ export function App() {
         <${Route} path="/" element=${html`<${AuthenticatedLayout} auth=${auth} />`}>
           <${Route} index element=${html`<${Navigate} to=${defaultRoute} replace />`} />
           <${Route} path="overview" element=${html`<${Navigate} to=${defaultRoute} replace />`} />
+          <${Route} path="welcome" element=${html`<${OnboardingPage} />`} />
           <${Route} path="chat" element=${html`<${ChatPage} />`} />
           <${Route} path="chat/:threadId" element=${html`<${ChatPage} />`} />
           <${Route} path="workspace" element=${html`<${WorkspacePage} />`} />

@@ -52,6 +52,33 @@ export function listLlmProviderModels(payload) {
     body: JSON.stringify(payload),
   });
 }
+// Begin NEAR AI browser login. Returns { auth_url } to open; a background task
+// stores the session token and makes NEAR AI active once the user authorizes.
+export function startNearaiLogin(payload) {
+  return apiFetch("/api/webchat/v2/llm/nearai/login", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// Complete a NEAR AI wallet (NEP-413) login. `payload` carries the browser
+// wallet's signed message; the backend relays it to NEAR AI, stores the session
+// token, and makes NEAR AI active. Returns { active }.
+export function completeNearaiWalletLogin(payload) {
+  return apiFetch("/api/webchat/v2/llm/nearai/wallet", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// Begin an OpenAI Codex (ChatGPT subscription) device-code login. Returns
+// { user_code, verification_uri } to display; a background task polls for
+// authorization, stores the tokens, and makes Codex active once authorized.
+export function startCodexLogin() {
+  return apiFetch("/api/webchat/v2/llm/codex/login", {
+    method: "POST",
+  });
+}
 export function fetchTools() {
   return Promise.resolve({ tools: [], todo: true });
 }

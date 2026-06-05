@@ -323,6 +323,7 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
             adapter,
             egress,
             delivery_sink,
+            auth_challenges: runtime.auth_challenge_provider(),
         },
         SlackFinalReplyDeliverySettings::default(),
     ));

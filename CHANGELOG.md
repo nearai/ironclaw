@@ -12,6 +12,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.
 
+## [0.29.1](https://github.com/nearai/ironclaw/compare/ironclaw-v0.29.0...ironclaw-v0.29.1) - 2026-06-04
+
+### Added
+
+- *(web)* plumb temperature through Responses API ([#3641](https://github.com/nearai/ironclaw/pull/3641))
+
+### Fixed
+
+- *(engine)* scope v1 history for channel conversations ([#4320](https://github.com/nearai/ironclaw/pull/4320))
+
+### CI / Release
+
+- *(release)* add WeCom release artifact ([#4107](https://github.com/nearai/ironclaw/pull/4107))
+- *(ci)* track `nearai/benchmarks` at `main` instead of pinning ([#4217](https://github.com/nearai/ironclaw/pull/4217))
+- *(ci)* grant `id-token: write` to unblock nearai-bench reusable workflow ([#4220](https://github.com/nearai/ironclaw/pull/4220))
+- *(ci)* scope `id-token: write` to the nearai-bench job ([#4221](https://github.com/nearai/ironclaw/pull/4221))
+
+## [0.29.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.28.2...ironclaw-v0.29.0) - 2026-05-26
+
+### Added
+
+- *(channels)* add WeCom channel ([#2394](https://github.com/nearai/ironclaw/pull/2394))
+- *(web)* support externally-provided tools in Responses API ([#3122](https://github.com/nearai/ironclaw/pull/3122))
+- *(gateway)* add logs download button ([#3588](https://github.com/nearai/ironclaw/pull/3588))
+- *(tui)* add Ctrl-S log download from the Logs tab ([#3658](https://github.com/nearai/ironclaw/pull/3658))
+- *(engine)* add `IRONCLAW_DISABLE_CODEACT` flag for disabling v2 CodeAct ([#3665](https://github.com/nearai/ironclaw/pull/3665))
+
+### Fixed
+
+- *(markdown)* avoid converting emphasis inside generated Slack angle links ([#3532](https://github.com/nearai/ironclaw/pull/3532))
+- *(web)* restore NEAR AI API Key and Fetch Models in configure UI ([#3742](https://github.com/nearai/ironclaw/pull/3742))
+
+### Changed
+
+- *(embeddings)* extract embeddings into `ironclaw_embeddings` crate ([#3739](https://github.com/nearai/ironclaw/pull/3739))
+- *(deps)* bump dependencies to address security advisories ([#3719](https://github.com/nearai/ironclaw/pull/3719))
+- *(deps)* update Wasmtime to clear cargo-deny advisory ([#4028](https://github.com/nearai/ironclaw/pull/4028))
+
+### CI / Release
+
+- *(canary)* improve live canary counts, chat-install probe, and strict xfails ([#3682](https://github.com/nearai/ironclaw/pull/3682))
+- *(ci)* add `/benchmark` slash-command dispatcher ([#3808](https://github.com/nearai/ironclaw/pull/3808))
+- *(ci)* grant `pull-requests: write` for `/benchmark` reactions endpoint ([#3835](https://github.com/nearai/ironclaw/pull/3835))
+- *(ci)* post benchmark "started" comment with dispatcher run link ([#3836](https://github.com/nearai/ironclaw/pull/3836))
+
+### Documentation
+
+- *(api)* document the Responses API end-to-end ([#3709](https://github.com/nearai/ironclaw/pull/3709))
+
 ## [0.28.2](https://github.com/nearai/ironclaw/compare/ironclaw-v0.28.1...ironclaw-v0.28.2) - 2026-05-14
 
 ### Fixed

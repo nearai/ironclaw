@@ -78,7 +78,57 @@ pub fn mount_at_prefix(prefix: &str) -> Router {
     Router::new()
         .route(prefix, get(serve_root))
         .route(&format!("{prefix}/"), get(serve_root))
+        // Isolated NEAR-wallet connect popup. It needs a far looser CSP than the
+        // hardened SPA shell (the wallet connector loads remote executor code in
+        // sandboxed iframes and talks to wallet relays / NEAR RPC), so it gets a
+        // dedicated route and a scoped policy instead of widening the app CSP.
+        // The page takes only a random BroadcastChannel name and posts the
+        // resulting signature back on that same-origin channel, so the blast
+        // radius of the looser policy is this one popup page. Registered before
+        // the wildcard so it wins.
+        .route(
+            &format!("{prefix}/wallet/connect"),
+            get(serve_wallet_connect),
+        )
         .route(&format!("{prefix}/{{*path}}"), get(serve_wildcard))
+}
+
+/// Serve the isolated NEAR-wallet connect popup with its own relaxed CSP.
+///
+/// This page is deliberately quarantined from the SPA: it holds no session
+/// bearer and no app state, connects a NEAR wallet, signs the fixed NEAR AI
+/// login message, and posts the signature over a random same-origin
+/// `BroadcastChannel`. The authenticated SPA relays the signature to the
+/// backend, so no secret ever lives on this looser-CSP page.
+pub async fn serve_wallet_connect() -> Response {
+    let Some(asset) = assets::lookup("wallet-connect.html") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = asset_response(asset.bytes, asset.content_type);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    // Wallet connectors load remote executor code into sandboxed iframes and
+    // reach a range of wallet relays + NEAR RPC endpoints that vary per wallet,
+    // so script/connect/frame sources can't be pinned to a fixed allow-list
+    // without breaking wallets. `'unsafe-inline'` is required because the
+    // connector injects inline bootstrap scripts into its `srcdoc` sandbox
+    // frames (which run as unique opaque origins). This is acceptable only
+    // because the page is input-less and isolated; it must never gain app data.
+    let csp = "default-src 'self'; \
+         script-src 'self' 'unsafe-inline' https:; \
+         script-src-elem 'self' 'unsafe-inline' https:; \
+         style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data: https:; \
+         connect-src 'self' https:; \
+         frame-src 'self' https: data:; \
+         object-src 'none'; \
+         base-uri 'self'";
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(csp),
+    );
+    response
 }
 
 /// Render the SPA shell with a freshly-substituted CSP nonce. Used
@@ -304,6 +354,63 @@ mod tests {
         assert!(
             csp.contains(&format!("'nonce-{html_nonce}'")),
             "CSP must allow the exact nonce embedded in the HTML — got `{csp}`",
+        );
+    }
+
+    #[tokio::test]
+    async fn wallet_connect_popup_gets_relaxed_csp_and_spa_shell_stays_strict() {
+        let app = mount_at_prefix("/v2");
+
+        // The isolated wallet popup carries a deliberately relaxed CSP so the
+        // wallet connector can load remote executors and reach wallet relays.
+        let wallet = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v2/wallet/connect")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(wallet.status(), StatusCode::OK);
+        let wallet_csp = wallet
+            .headers()
+            .get(axum::http::header::CONTENT_SECURITY_POLICY)
+            .expect("CSP on wallet popup")
+            .to_str()
+            .expect("CSP ASCII")
+            .to_string();
+        assert!(
+            wallet_csp.contains("'unsafe-inline'")
+                && wallet_csp.contains("connect-src 'self' https:"),
+            "wallet popup CSP must be the relaxed policy — got `{wallet_csp}`",
+        );
+
+        // The SPA shell must NOT inherit that looseness: no `'unsafe-inline'`
+        // scripts and connect-src stays same-origin only.
+        let shell = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v2")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        let shell_csp = shell
+            .headers()
+            .get(axum::http::header::CONTENT_SECURITY_POLICY)
+            .expect("CSP on SPA shell")
+            .to_str()
+            .expect("CSP ASCII")
+            .to_string();
+        assert!(
+            shell_csp.contains("connect-src 'self';")
+                && !shell_csp.contains("script-src 'self' 'unsafe-inline'"),
+            "SPA shell CSP must stay strict (nonce-based scripts, same-origin connect) — got `{shell_csp}`",
         );
     }
 

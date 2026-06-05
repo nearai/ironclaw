@@ -1179,8 +1179,36 @@ async fn gateway_rejects_unknown_model_profile_without_calling_provider() {
 }
 
 #[tokio::test]
-async fn gateway_rejects_unpinned_model_profile_without_calling_provider() {
-    let provider = Arc::new(RecordingLlmProvider::reply("unused"));
+async fn gateway_uses_active_provider_model_for_unpinned_model_profile() {
+    let provider = Arc::new(IgnoresModelOverrideProvider::new(
+        "initial-active-model",
+        "assistant response",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new().allow_model_profile(interactive_model(), None),
+    );
+
+    gateway
+        .stream_model(model_request(interactive_model()))
+        .await
+        .unwrap();
+    provider.set_active_model("reloaded-active-model");
+    gateway
+        .stream_model(model_request(interactive_model()))
+        .await
+        .unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].model.as_deref(), Some("initial-active-model"));
+    assert_eq!(requests[1].model.as_deref(), Some("reloaded-active-model"));
+}
+
+#[tokio::test]
+async fn gateway_rejects_unpinned_model_profile_when_active_model_is_default() {
+    let provider = Arc::new(IgnoresModelOverrideProvider::new("default", "unused"));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),

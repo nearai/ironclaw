@@ -412,16 +412,14 @@ impl ConversationBindingService for ProductConversationBindingService {
         let installation_scope = self
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
-        let expected_user_id = resolve_actor_user(&installation_scope, &request).await?;
         let resolution = self
             .conversations
             .lookup_binding(conversation_request(
                 &request,
-                installation_scope.tenant_id,
+                installation_scope.tenant_id.clone(),
             )?)
             .await
             .map_err(map_conversation_error)?;
-        ensure_resolved_actor_matches_expected_user(expected_user_id.as_ref(), &resolution)?;
 
         Ok(resolved_binding_from_resolution(
             resolution,

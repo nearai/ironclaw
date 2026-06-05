@@ -76,6 +76,15 @@ function collectScalars(root) {
   return scalars;
 }
 
+function collectTemplateText(root) {
+  const text = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.strings)) return;
+    text.push(...node.strings);
+  });
+  return text.join("");
+}
+
 function valueAfter(rendered, fragment) {
   const index = rendered.strings.findIndex((part) => part.includes(fragment));
   assert.notEqual(index, -1, `expected template fragment ${fragment}`);
@@ -157,6 +166,7 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
     Icon: "Icon",
     ProviderCard,
     ProviderDialog: "ProviderDialog",
+    ProviderLoginStatus: "ProviderLoginStatus",
     SettingsSearchEmpty: "SettingsSearchEmpty",
     globalThis: {},
     groupProvidersByStatus,
@@ -164,6 +174,13 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
     useProviderManagementActions: useProviderManagementActionsStub({
       providers,
       activeProviderId,
+    }),
+    useProviderLogin: () => ({
+      codexBusy: false,
+      nearaiBusy: false,
+      startCodex: () => {},
+      startNearai: () => {},
+      startNearaiWallet: () => {},
     }),
     useT: () => (key) => key,
   };
@@ -249,6 +266,10 @@ function createProviderCardHarness() {
         onUse: () => {},
         onConfigure: () => {},
         onDelete: () => {},
+        onNearaiLogin: () => {},
+        onNearaiWallet: () => {},
+        onCodexLogin: () => {},
+        loginBusy: false,
         ...props,
       }),
   };
@@ -379,4 +400,28 @@ test("ProviderCard actions keep existing callbacks without toggling disclosure",
   componentProps(deleteButton, "Button").onClick();
   assert.deepEqual(calls.at(-1), ["delete", "local"]);
   assert.equal(harness.state.expanded, true);
+});
+
+test("ProviderCard renders login actions instead of generic use for login providers", () => {
+  const harness = createProviderCardHarness();
+
+  let rendered = harness.render({
+    activeProviderId: "openai",
+    provider: builtinProvider("nearai", { adapter: "nearai" }),
+  });
+  let labels = collectScalars(rendered);
+  let templateText = collectTemplateText(rendered);
+  assert.ok(labels.includes("onboarding.nearWallet"));
+  assert.ok(templateText.includes("GitHub"));
+  assert.ok(templateText.includes("Google"));
+  assert.ok(!labels.includes("llm.use"));
+
+  rendered = harness.render({
+    activeProviderId: "openai",
+    provider: builtinProvider("openai_codex"),
+  });
+  labels = collectScalars(rendered);
+  templateText = collectTemplateText(rendered);
+  assert.ok(labels.includes("onboarding.codexSignIn"));
+  assert.ok(!labels.includes("llm.use"));
 });

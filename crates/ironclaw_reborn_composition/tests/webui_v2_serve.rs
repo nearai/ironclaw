@@ -1358,6 +1358,9 @@ async fn llm_config_routes_are_not_mounted_for_multi_user_authenticator() {
         (Method::POST, "/api/webchat/v2/llm/active"),
         (Method::POST, "/api/webchat/v2/llm/test-connection"),
         (Method::POST, "/api/webchat/v2/llm/list-models"),
+        (Method::POST, "/api/webchat/v2/llm/nearai/login"),
+        (Method::POST, "/api/webchat/v2/llm/nearai/wallet"),
+        (Method::POST, "/api/webchat/v2/llm/codex/login"),
     ] {
         let mut builder = Request::builder()
             .method(method.clone())
