@@ -57,6 +57,12 @@ export function ProviderCard({
       </span>`;
 
   const isLoginProvider = provider.id === "nearai" || provider.id === "openai_codex";
+  const hasApiKey = provider.api_key_set === true || provider.has_api_key === true;
+  const configureLabel = provider.builtin
+    ? provider.id === "nearai" && acceptsApiKey && !hasApiKey
+      ? t("llm.addApiKey")
+      : t("llm.configure")
+    : t("common.edit");
   const apiKeyAction =
     acceptsApiKey && provider.builtin
       ? html`
@@ -67,7 +73,7 @@ export function ProviderCard({
             disabled=${isBusy}
             onClick=${() => onConfigure(provider)}
           >
-            ${t("llm.addApiKey")}
+            ${configureLabel}
           <//>
         `
       : null;
@@ -128,11 +134,6 @@ export function ProviderCard({
   const showConfigureAction =
     (!isLoginProvider && ((provider.builtin && provider.id !== "bedrock") || !provider.builtin)) ||
     (provider.id === "nearai" && acceptsApiKey);
-  const configureLabel = provider.builtin
-    ? provider.id === "nearai" && acceptsApiKey
-      ? t("llm.addApiKey")
-      : t("llm.configure")
-    : t("common.edit");
 
   return html`
     <${Card}

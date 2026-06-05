@@ -440,6 +440,7 @@ test("ProviderCard renders login actions instead of generic use for login provid
 test("ProviderCard renders generic use action for NEAR when an API key is configured", () => {
   const calls = [];
   const harness = createProviderCardHarness();
+  harness.state.expanded = true;
 
   const rendered = harness.render({
     activeProviderId: "openai",
@@ -453,6 +454,8 @@ test("ProviderCard renders generic use action for NEAR when an API key is config
   const templateText = collectTemplateText(rendered);
 
   assert.ok(labels.includes("llm.use"));
+  assert.ok(labels.includes("llm.configure"));
+  assert.ok(!labels.includes("llm.addApiKey"));
   assert.ok(!labels.includes("onboarding.nearWallet"));
   assert.ok(!templateText.includes("GitHub"));
 
