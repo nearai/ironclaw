@@ -117,6 +117,9 @@ impl SlackFinalReplyDeliveryObserver {
         envelope: ProductInboundEnvelope,
         ack: ProductInboundAck,
     ) -> Result<(), SlackFinalReplyDeliveryError> {
+        if !should_deliver_after_ack(&envelope, &ack) {
+            return Ok(());
+        }
         let Some(run_id) = submitted_run_id(&ack) else {
             return Ok(());
         };
@@ -795,6 +798,28 @@ fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
     }
 }
 
+fn should_deliver_after_ack(envelope: &ProductInboundEnvelope, ack: &ProductInboundAck) -> bool {
+    if submitted_run_id(ack).is_none() {
+        return false;
+    }
+    !matches!(
+        envelope.payload(),
+        ProductInboundPayload::AuthResolution(payload)
+            if matches!(
+                &payload.result,
+                ironclaw_product_adapters::AuthResolutionResult::Denied
+            )
+    ) && !matches!(
+        envelope.payload(),
+        ProductInboundPayload::ApprovalResolution(payload)
+            if payload.decision == ironclaw_product_adapters::ApprovalDecision::Deny
+    ) && !matches!(
+        envelope.payload(),
+        ProductInboundPayload::ScopedApprovalResolution(payload)
+            if payload.decision == ironclaw_product_adapters::ApprovalDecision::Deny
+    )
+}
+
 fn turn_scope_from_thread_scope(
     binding: &ResolvedBinding,
     thread_scope: &ThreadScope,
@@ -828,4 +853,83 @@ fn thread_scope_from_binding(
         owner_user_id: binding.subject_user_id.clone(),
         mission_id: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_product_adapters::{
+        AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
+        ExternalEventId, ParsedProductInbound, ProtocolAuthEvidence, TrustedInboundContext,
+    };
+    use ironclaw_turns::AcceptedMessageRef;
+
+    fn accepted_ack() -> ProductInboundAck {
+        ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:test-message")
+                .expect("accepted message ref"),
+            submitted_run_id: TurnRunId::new(),
+        }
+    }
+
+    fn envelope(payload: ProductInboundPayload) -> ProductInboundEnvelope {
+        let adapter_id =
+            ironclaw_product_adapters::ProductAdapterId::new("slack_v2").expect("adapter");
+        let installation_id = AdapterInstallationId::new("install_alpha").expect("installation");
+        let evidence = ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Slack-Signature".to_string(),
+            },
+            installation_id.as_str(),
+        );
+        let context = TrustedInboundContext::from_verified_evidence(
+            adapter_id,
+            installation_id,
+            Utc::now(),
+            &evidence,
+        )
+        .expect("trusted context");
+        let parsed = ParsedProductInbound::new(
+            ExternalEventId::new("evt:test").expect("event"),
+            ExternalActorRef::new("slack_user", "U123", None::<String>).expect("actor"),
+            ExternalConversationRef::new(Some("T123"), "D123", None, None).expect("conversation"),
+            payload,
+        )
+        .expect("parsed inbound");
+        ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
+    }
+
+    #[test]
+    fn auth_denial_ack_does_not_enter_slack_delivery_loop() {
+        let payload = ProductInboundPayload::AuthResolution(
+            ironclaw_product_adapters::AuthResolutionPayload::new(
+                "gate:auth-test",
+                ironclaw_product_adapters::AuthResolutionResult::Denied,
+            )
+            .expect("auth resolution"),
+        );
+
+        assert!(!should_deliver_after_ack(
+            &envelope(payload),
+            &accepted_ack()
+        ));
+    }
+
+    #[test]
+    fn auth_completion_ack_still_enters_slack_delivery_loop() {
+        let payload = ProductInboundPayload::AuthResolution(
+            ironclaw_product_adapters::AuthResolutionPayload::new(
+                "gate:auth-test",
+                ironclaw_product_adapters::AuthResolutionResult::CallbackCompleted {
+                    callback_ref: ironclaw_auth::AuthFlowId::new().to_string(),
+                },
+            )
+            .expect("auth resolution"),
+        );
+
+        assert!(should_deliver_after_ack(
+            &envelope(payload),
+            &accepted_ack()
+        ));
+    }
 }
