@@ -36,6 +36,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `runtime.rs` | `SwappableLlmProvider` + `LlmReloadHandle` for hot-reloading the provider chain on settings change |
 | `registry.rs` | Provider registry (`ProviderDefinition`, `ProviderProtocol`); resolves backend strings to clients |
 | `resolution.rs` | Full `LlmConfig` resolution for composition roots that select from `providers.json` and need dedicated providers plus the shared provider chain |
+| `tool_args.rs` | Shared sub-step primitives for provider tool-call parsing: fail-loud and silent-fallback JSON arg parsing, ordered reasoning-field probe (Layer 2 of RC3/M9 framework) |
 | `tool_schema.rs` | Tool schema normalization policies (`FlattenOnly` for NearAI, strict OpenAI for `RigAdapter` / Codex) |
 | `transcription/{mod,openai,chat_completions}.rs` | Audio transcription pipeline (Whisper / chat-completions back-ends) |
 | `image_models.rs` | Image-generation model metadata table |
