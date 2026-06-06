@@ -244,6 +244,11 @@ impl ProductInstallationScope {
         let route_key = ProductConversationRouteKey::from_external_conversation_ref(
             &request.external_conversation_ref,
         );
+        if route_key.space_id.is_none() && !self.conversation_subject_routes.is_empty() {
+            tracing::warn!(
+                "conversation ref has no space_id; channel route lookup will not match configured routes"
+            );
+        }
         self.conversation_subject_routes
             .get(&route_key)
             .or(self.default_subject_user_id.as_ref())
@@ -253,7 +258,7 @@ impl ProductInstallationScope {
 /// Static tenant map for product adapter installations.
 #[derive(Debug, Clone, Default)]
 pub struct StaticProductInstallationResolver {
-    scopes: HashMap<ProductInstallationKey, ProductInstallationScope>,
+    scopes: HashMap<ProductInstallationKey, Arc<ProductInstallationScope>>,
 }
 
 impl StaticProductInstallationResolver {
@@ -261,19 +266,22 @@ impl StaticProductInstallationResolver {
         scopes: impl IntoIterator<Item = (ProductInstallationKey, ProductInstallationScope)>,
     ) -> Self {
         Self {
-            scopes: scopes.into_iter().collect(),
+            scopes: scopes
+                .into_iter()
+                .map(|(key, scope)| (key, Arc::new(scope)))
+                .collect(),
         }
     }
 
     pub fn insert(&mut self, key: ProductInstallationKey, scope: ProductInstallationScope) {
-        self.scopes.insert(key, scope);
+        self.scopes.insert(key, Arc::new(scope));
     }
 
     fn resolve(
         &self,
         adapter_id: &ProductAdapterId,
         installation_id: &AdapterInstallationId,
-    ) -> Result<ProductInstallationScope, ProductWorkflowError> {
+    ) -> Result<Arc<ProductInstallationScope>, ProductWorkflowError> {
         self.scopes
             .get(&ProductInstallationKey::new(
                 adapter_id.clone(),
@@ -470,6 +478,7 @@ impl ConversationBindingService for ProductConversationBindingService {
             .resolve(&request.adapter_id, &request.installation_id)?;
         let configured_subject_user_id = installation_scope.shared_subject_user_id_for(&request);
         ensure_shared_route_has_configured_subject(request.route_kind, configured_subject_user_id)?;
+        let expected_user_id = resolve_actor_user(&installation_scope, &request).await?;
         let resolution = self
             .conversations
             .lookup_binding(conversation_request(
@@ -478,6 +487,7 @@ impl ConversationBindingService for ProductConversationBindingService {
             )?)
             .await
             .map_err(map_conversation_error)?;
+        ensure_resolved_actor_matches_expected_user(expected_user_id.as_ref(), &resolution)?;
 
         resolved_binding_from_resolution(resolution, request.route_kind, configured_subject_user_id)
     }

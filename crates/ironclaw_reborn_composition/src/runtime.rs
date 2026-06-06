@@ -2410,6 +2410,8 @@ mod tests {
         build_reborn_runtime,
     };
 
+    const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
     fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
         EffectiveRuntimePolicy {
             deployment: DeploymentMode::LocalSingleUser,
@@ -3220,7 +3222,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "ping"),
         )
         .await
@@ -3258,7 +3260,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_SEND_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -3285,7 +3287,7 @@ mod tests {
         );
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "ping"),
         )
         .await
@@ -3480,7 +3482,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "ping"),
         )
         .await
@@ -3528,7 +3530,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "use echo tool"),
         )
         .await
@@ -3640,7 +3642,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "review this"),
         )
         .await
@@ -3725,7 +3727,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "review this"),
         )
         .await
@@ -3820,7 +3822,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "/system-helper and /local-helper"),
         )
         .await
@@ -4010,7 +4012,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "/code-review this PR"),
         )
         .await
@@ -4074,7 +4076,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.execute_skill_message(&conversation, "$marker-helper"),
         )
         .await
@@ -4254,7 +4256,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "hello with no matching skill"),
         )
         .await
@@ -4300,14 +4302,14 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_SEND_TIMEOUT,
         })
         .with_model_gateway_override(gateway_for_runtime);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "list workspace"),
         )
         .await

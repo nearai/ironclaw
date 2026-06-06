@@ -1971,7 +1971,7 @@ async fn actor_user_resolver_propagates_resolver_error_without_turn_submission()
 }
 
 #[tokio::test]
-async fn lookup_binding_with_actor_user_resolver_uses_existing_pairings_only() {
+async fn lookup_binding_with_actor_user_resolver_requires_resolved_actor() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let (binding, actor_resolver) = product_binding_service_with_actor_user_resolver(
         conversations,
@@ -1985,15 +1985,12 @@ async fn lookup_binding_with_actor_user_resolver_uses_existing_pairings_only() {
         .await
         .expect_err("lookup must require an existing durable actor pairing");
 
-    assert!(
-        actor_resolver.calls().is_empty(),
-        "existing-only lookup must not trigger resolver pairing challenges"
-    );
+    assert_eq!(actor_resolver.calls().len(), 1);
     assert!(matches!(err, ProductWorkflowError::BindingRequired { .. }));
 }
 
 #[tokio::test]
-async fn lookup_binding_with_actor_user_resolver_ignores_resolver_failures() {
+async fn lookup_binding_with_actor_user_resolver_propagates_resolver_failures() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let binding = product_binding_service_with_actor_user_resolver_arc(
         conversations,
@@ -2005,13 +2002,16 @@ async fn lookup_binding_with_actor_user_resolver_ignores_resolver_failures() {
             "lookup-resolver-error",
         )))
         .await
-        .expect_err("lookup should fail from missing durable pairing, not resolver backend");
+        .expect_err("lookup must verify actor identity before using a durable binding");
 
-    assert!(matches!(err, ProductWorkflowError::BindingRequired { .. }));
+    assert!(matches!(
+        err,
+        ProductWorkflowError::BindingResolutionFailed { .. }
+    ));
 }
 
 #[tokio::test]
-async fn lookup_binding_with_actor_user_resolver_returns_existing_actor_pairing() {
+async fn lookup_binding_with_actor_user_resolver_denies_mismatched_existing_actor_pairing() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     conversations
         .pair_external_actor(
@@ -2045,15 +2045,56 @@ async fn lookup_binding_with_actor_user_resolver_returns_existing_actor_pairing(
         )],
     );
 
+    let error = binding
+        .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect_err("lookup must reject a durable binding for a different resolved actor");
+
+    assert_eq!(actor_resolver.calls().len(), 1);
+    assert!(matches!(error, ProductWorkflowError::BindingAccessDenied));
+}
+
+#[tokio::test]
+async fn lookup_binding_with_actor_user_resolver_returns_verified_existing_actor_pairing() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            TenantId::new("tenant:alpha").expect("tenant"),
+            ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+            ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:paired-bob").expect("user"),
+        )
+        .await;
+    let seed_binding = product_binding_service(
+        conversations.clone(),
+        vec![(
+            "test_adapter",
+            "install_alpha",
+            "tenant:alpha",
+            "agent:alpha",
+            Some("project:alpha"),
+        )],
+    );
+    let envelope = sample_envelope("lookup-resolver-match");
+    seed_binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect("seed canonical conversation binding");
+    let (binding, actor_resolver) = product_binding_service_with_actor_user_resolver(
+        conversations,
+        [(
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+            UserId::new("user:paired-bob").expect("user"),
+        )],
+    );
+
     let resolved = binding
         .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
         .await
-        .expect("lookup should use the existing durable actor pairing");
+        .expect("lookup should use the verified durable actor pairing");
 
-    assert!(
-        actor_resolver.calls().is_empty(),
-        "existing-only lookup must not reinterpret durable pairing through resolver"
-    );
+    assert_eq!(actor_resolver.calls().len(), 1);
     assert_eq!(resolved.actor_user_id.as_str(), "user:paired-bob");
 }
 

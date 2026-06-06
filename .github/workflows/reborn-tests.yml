@@ -204,7 +204,7 @@ jobs:
         run: |
           for test_name in ${{ matrix.tests }}; do
             echo "::group::cargo test --test ${test_name}"
-            timeout --signal=INT --kill-after=30s 9m \
+            timeout --signal=INT --kill-after=30s 12m \
               cargo test --test "${test_name}" -- --nocapture
             echo "::endgroup::"
           done

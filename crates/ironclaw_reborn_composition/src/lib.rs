@@ -265,7 +265,8 @@ pub use slack_personal_binding_serve::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_serve::{
     SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
-    SlackInstallationSelector, slack_events_route_descriptors, slack_events_route_mount,
+    SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
+    slack_events_route_mount,
 };
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
