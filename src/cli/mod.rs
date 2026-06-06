@@ -511,7 +511,7 @@ mod tests {
     fn render_cli_help(long: bool) -> String {
         // The generated Clap tree includes the Trace Commons subcommands and can
         // overflow Rust's default test-thread stack while rendering snapshots.
-        std::thread::Builder::new()
+        let help = std::thread::Builder::new()
             .stack_size(CLI_HELP_RENDER_STACK_SIZE)
             .spawn(move || {
                 let mut cmd = Cli::command();
@@ -523,7 +523,13 @@ mod tests {
             })
             .expect("CLI help render thread should spawn")
             .join()
-            .expect("CLI help render thread should not panic")
+            .expect("CLI help render thread should not panic");
+
+        help.lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + if help.ends_with('\n') { "\n" } else { "" }
     }
 
     #[test]
