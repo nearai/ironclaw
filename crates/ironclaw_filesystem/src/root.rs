@@ -197,6 +197,25 @@ pub trait RootFilesystem: Send + Sync {
         unsupported(path, FilesystemOperation::Tail)
     }
 
+    /// Return the highest seq present at `path` with `seq > from`, or `None`
+    /// when no such record exists. This is the head/replay-boundary probe used
+    /// by durable event logs at subscription start.
+    ///
+    /// The default impl is a correctness-preserving fallback that routes
+    /// through [`tail`](Self::tail) and takes the max observed seq, which
+    /// materializes the gap into memory. Backends with a native max-seq query
+    /// (Postgres, libSQL) MUST override this with an O(1) `MAX(seq)` lookup so
+    /// a new subscription (`from = 0`) does not load the whole stream just to
+    /// find its head.
+    async fn head_seq(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Option<SeqNo>, FilesystemError> {
+        let records = self.tail(path, from).await?;
+        Ok(records.into_iter().map(|record| record.seq).max())
+    }
+
     // ─── Legacy bytes plane (DEPRECATED — removed after consumer migration) ─
     //
     // The methods below predate the unified [`put`]/[`get`] surface and exist
