@@ -60,6 +60,10 @@ fn reborn_dockerfile_keeps_bundled_skills_in_build_context() {
         dockerignore.contains("!skills/**/*.md"),
         ".dockerignore must allow bundled SKILL.md and reference markdown files"
     );
+    assert!(
+        dockerignore.contains("!crates/**/*.md"),
+        ".dockerignore must allow crate markdown files embedded at compile time"
+    );
 }
 
 #[test]

@@ -4,5 +4,6 @@ target/
 .env.*
 *.md
 !skills/**/*.md
+!crates/**/*.md
 !CLAUDE.md
 node_modules/
