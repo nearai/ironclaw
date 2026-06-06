@@ -141,6 +141,148 @@ pub type HarnessWaitConfig = WaitConfig;
 const TEST_CAPABILITY_ID: &str = "test.echo";
 const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
 const SUBAGENT_ALLOWED_TEST_TOOL_NAME: &str = "test_read_file";
+pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
+pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
+pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
+pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
+pub const EXTENSION_LIFECYCLE_CAPABILITY_IDS: &[&str] = &[
+    EXTENSION_SEARCH_CAPABILITY_ID,
+    EXTENSION_INSTALL_CAPABILITY_ID,
+    EXTENSION_ACTIVATE_CAPABILITY_ID,
+    EXTENSION_REMOVE_CAPABILITY_ID,
+];
+pub const BUNDLED_EXTENSION_IDS: &[&str] = &[
+    "github",
+    "web-access",
+    "gmail",
+    "google-calendar",
+    "google-docs",
+    "google-sheets",
+    "google-drive",
+    "google-slides",
+    "nearai",
+    "notion",
+];
+pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
+    "github.get_repo",
+    "github.create_repo",
+    "github.list_issues",
+    "github.create_issue",
+    "github.get_issue",
+    "github.list_issue_comments",
+    "github.create_issue_comment",
+    "github.comment_issue",
+    "github.list_pull_requests",
+    "github.create_pull_request",
+    "github.get_pull_request",
+    "github.get_pull_request_files",
+    "github.create_pr_review",
+    "github.list_pull_request_comments",
+    "github.reply_pull_request_comment",
+    "github.get_pull_request_reviews",
+    "github.get_combined_status",
+    "github.merge_pull_request",
+    "github.list_repos",
+    "github.search_repositories",
+    "github.search_code",
+    "github.search_issues",
+    "github.search_issues_pull_requests",
+    "github.list_branches",
+    "github.create_branch",
+    "github.get_file_content",
+    "github.create_or_update_file",
+    "github.delete_file",
+    "github.list_releases",
+    "github.create_release",
+    "github.trigger_workflow",
+    "github.get_workflow_runs",
+    "github.fork_repo",
+    "github.handle_webhook",
+    "web-access.search",
+    "web-access.get_content",
+    "gmail.list_messages",
+    "gmail.get_message",
+    "gmail.send_message",
+    "gmail.create_draft",
+    "gmail.reply_to_message",
+    "gmail.trash_message",
+    "google-calendar.list_calendars",
+    "google-calendar.list_events",
+    "google-calendar.get_event",
+    "google-calendar.find_free_slots",
+    "google-calendar.create_event",
+    "google-calendar.update_event",
+    "google-calendar.delete_event",
+    "google-calendar.add_attendees",
+    "google-calendar.set_reminder",
+    "google-docs.create_document",
+    "google-docs.get_document",
+    "google-docs.read_content",
+    "google-docs.insert_text",
+    "google-docs.delete_content",
+    "google-docs.replace_text",
+    "google-docs.format_text",
+    "google-docs.format_paragraph",
+    "google-docs.insert_table",
+    "google-docs.create_list",
+    "google-docs.batch_update",
+    "google-sheets.create_spreadsheet",
+    "google-sheets.get_spreadsheet",
+    "google-sheets.read_values",
+    "google-sheets.batch_read_values",
+    "google-sheets.write_values",
+    "google-sheets.append_values",
+    "google-sheets.clear_values",
+    "google-sheets.add_sheet",
+    "google-sheets.delete_sheet",
+    "google-sheets.rename_sheet",
+    "google-sheets.format_cells",
+    "google-drive.list_files",
+    "google-drive.get_file",
+    "google-drive.download_file",
+    "google-drive.upload_file",
+    "google-drive.update_file",
+    "google-drive.create_folder",
+    "google-drive.delete_file",
+    "google-drive.trash_file",
+    "google-drive.share_file",
+    "google-drive.list_permissions",
+    "google-drive.remove_permission",
+    "google-drive.list_shared_drives",
+    "google-slides.create_presentation",
+    "google-slides.get_presentation",
+    "google-slides.get_thumbnail",
+    "google-slides.create_slide",
+    "google-slides.delete_object",
+    "google-slides.insert_text",
+    "google-slides.delete_text",
+    "google-slides.replace_all_text",
+    "google-slides.create_shape",
+    "google-slides.insert_image",
+    "google-slides.format_text",
+    "google-slides.format_paragraph",
+    "google-slides.replace_shapes_with_image",
+    "google-slides.batch_update",
+    "nearai.search",
+    "notion.notion-search",
+    "notion.notion-fetch",
+    "notion.notion-create-pages",
+    "notion.notion-update-page",
+    "notion.notion-move-pages",
+    "notion.notion-duplicate-page",
+    "notion.notion-create-database",
+    "notion.notion-update-data-source",
+    "notion.notion-create-view",
+    "notion.notion-update-view",
+    "notion.notion-query-data-sources",
+    "notion.notion-query-database-view",
+    "notion.notion-create-comment",
+    "notion.notion-get-comments",
+    "notion.notion-get-teams",
+    "notion.notion-get-users",
+    "notion.notion-get-user",
+    "notion.notion-get-self",
+];
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type HarnessCapabilityParts = (
@@ -512,6 +654,35 @@ impl RebornBinaryE2EHarness {
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
         let host_runtime = Arc::new(HostRuntimeCapabilityHarness::process_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_qa_smoke_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::qa_smoke_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_extension_lifecycle_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime =
+            Arc::new(HostRuntimeCapabilityHarness::extension_lifecycle_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -1476,6 +1647,7 @@ struct HostRuntimeCapabilityHarness {
     network_policy: NetworkPolicy,
     secrets: Vec<SecretHandle>,
     provider_id: ExtensionId,
+    additional_provider_trust: Vec<(ExtensionId, Vec<EffectKind>)>,
     user_id: UserId,
     invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
@@ -1549,6 +1721,101 @@ impl HostRuntimeCapabilityHarness {
             MountView::default(),
         )
         .await
+    }
+
+    async fn qa_smoke_tools() -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        std::fs::create_dir_all(storage_root.join("skills"))?;
+        std::fs::create_dir_all(storage_root.join("system/skills"))?;
+        let runtime = local_dev_host_runtime_with_http_egress(
+            storage_root,
+            Arc::new(RecordingRuntimeHttpEgress::with_body(
+                br#"{"accepted":true,"source":"qa-smoke"}"#.to_vec(),
+            )),
+        )?;
+        let mounts = qa_smoke_mounts()?;
+        let memory_mounts = memory_mounts(MountPermissions::read_write_list_delete())?;
+        let memory_capability_ids = [
+            CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+        ];
+        Ok(Self {
+            runtime,
+            io: Arc::new(ProductLiveCapabilityIo::default()),
+            root,
+            workspace_root,
+            mounts,
+            capability_mount_overrides: memory_capability_ids
+                .iter()
+                .cloned()
+                .map(|capability_id| (capability_id, memory_mounts.clone()))
+                .collect(),
+            capability_ids: vec![
+                CapabilityId::new(ECHO_CAPABILITY_ID)?,
+                CapabilityId::new(TIME_CAPABILITY_ID)?,
+                CapabilityId::new(JSON_CAPABILITY_ID)?,
+                CapabilityId::new(HTTP_CAPABILITY_ID)?,
+                CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+                CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+                CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
+                CapabilityId::new(LIST_DIR_CAPABILITY_ID)?,
+                CapabilityId::new(GLOB_CAPABILITY_ID)?,
+                CapabilityId::new(GREP_CAPABILITY_ID)?,
+                CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
+                CapabilityId::new(SHELL_CAPABILITY_ID)?,
+                CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
+            ],
+            runtime_kind: RuntimeKind::FirstParty,
+            effect_kinds: vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
+                EffectKind::Network,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::ExternalWrite,
+            ],
+            network_policy: http_test_policy(),
+            secrets: Vec::new(),
+            provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            additional_provider_trust: Vec::new(),
+            user_id: UserId::new("reborn-e2e-qa-smoke-user")?,
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: None,
+            network_egress: None,
+        })
+    }
+
+    async fn extension_lifecycle_tools() -> HarnessResult<Self> {
+        let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
+        capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
+        let mut harness = Self::new_with_mounts(
+            "reborn-e2e-extension-lifecycle-tools",
+            capability_ids,
+            local_dev_all_effects(),
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-extension-lifecycle-user")?,
+            MountView::default(),
+        )
+        .await?;
+        harness.network_policy = wildcard_test_policy();
+        harness.additional_provider_trust = bundled_extension_provider_trust()?;
+        Ok(harness)
     }
 
     async fn skill_management_tools() -> HarnessResult<Self> {
@@ -1644,6 +1911,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy: NetworkPolicy::default(),
             secrets,
             provider_id,
+            additional_provider_trust: Vec::new(),
             user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -1737,6 +2005,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy,
             secrets: Vec::new(),
             provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            additional_provider_trust: Vec::new(),
             user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -1778,6 +2047,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy: github_support::api_policy(),
             secrets: github_support::secret_handles()?,
             provider_id: github_support::provider_id()?,
+            additional_provider_trust: Vec::new(),
             user_id: UserId::new("reborn-e2e-github-user")?,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -1841,7 +2111,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let authority = ProductLiveVisibleCapabilityRequestConfig::new(
+        let mut authority = ProductLiveVisibleCapabilityRequestConfig::new(
             self.harness.user_id.clone(),
             self.harness.runtime_kind,
             TrustClass::FirstParty,
@@ -1863,6 +2133,13 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             EffectiveTrustClass::user_trusted(),
             self.harness.effect_kinds.clone(),
         );
+        for (provider, effects) in &self.harness.additional_provider_trust {
+            authority = authority.with_provider_trust_for_effects(
+                provider.clone(),
+                EffectiveTrustClass::user_trusted(),
+                effects.clone(),
+            );
+        }
         let execution_mounts = self.harness.mounts.clone();
         let visible_request = visible_capability_request_for_run(run_context, authority)
             .map_err(host_runtime_harness_error)?;
@@ -2169,7 +2446,11 @@ fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
                 EffectKind::Network,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::ExternalWrite,
             ],
             None,
         )]),
@@ -2204,6 +2485,45 @@ fn http_test_policy() -> NetworkPolicy {
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(10_000),
     }
+}
+
+fn wildcard_test_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1_000_000),
+    }
+}
+
+fn capability_ids_from_strs(ids: &[&str]) -> HarnessResult<Vec<CapabilityId>> {
+    ids.iter()
+        .map(|id| CapabilityId::new(*id).map_err(Into::into))
+        .collect()
+}
+
+fn bundled_extension_provider_trust() -> HarnessResult<Vec<(ExtensionId, Vec<EffectKind>)>> {
+    BUNDLED_EXTENSION_IDS
+        .iter()
+        .map(|id| Ok((ExtensionId::new(*id)?, local_dev_all_effects())))
+        .collect()
+}
+
+fn local_dev_all_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::DeleteFilesystem,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+        EffectKind::SpawnProcess,
+        EffectKind::ExecuteCode,
+        EffectKind::ExternalWrite,
+    ]
 }
 
 #[derive(Debug)]
@@ -2532,6 +2852,26 @@ fn memory_mounts(permissions: MountPermissions) -> HarnessResult<MountView> {
 
 fn skill_mounts() -> HarnessResult<MountView> {
     Ok(MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/skills")?,
+            VirtualPath::new("/projects/skills")?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/system/skills")?,
+            VirtualPath::new("/projects/system/skills")?,
+            MountPermissions::read_only(),
+        ),
+    ])?)
+}
+
+fn qa_smoke_mounts() -> HarnessResult<MountView> {
+    Ok(MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/workspace")?,
+            VirtualPath::new("/projects/workspace")?,
+            MountPermissions::read_write_list_delete(),
+        ),
         MountGrant::new(
             MountAlias::new("/skills")?,
             VirtualPath::new("/projects/skills")?,

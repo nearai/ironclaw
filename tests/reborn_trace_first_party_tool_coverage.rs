@@ -3,7 +3,7 @@
 mod reborn_support;
 mod support;
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use ironclaw_host_api::CapabilityId;
 use ironclaw_host_runtime::{
@@ -19,6 +19,7 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
 use reborn_support::{
+    config::WaitConfig,
     harness::{RebornBinaryE2EHarness, assert_milestone_order},
     model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
@@ -108,7 +109,7 @@ async fn reborn_trace_process_first_party_tools_parity() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -184,7 +185,7 @@ async fn reborn_trace_spawn_subagent_is_surface_text_and_structured_tool() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -242,7 +243,7 @@ async fn reborn_trace_http_save_first_party_tool_parity() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -329,7 +330,7 @@ async fn reborn_trace_skill_management_first_party_tools_parity() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -430,7 +431,7 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -541,7 +542,7 @@ async fn reborn_trace_memory_first_party_tools_parity() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -585,6 +586,13 @@ fn tool_result_count(request: &ironclaw_loop_support::HostManagedModelRequest) -
         .iter()
         .filter(|message| message.role == HostManagedModelMessageRole::ToolResult)
         .count()
+}
+
+fn reborn_e2e_wait() -> WaitConfig {
+    WaitConfig {
+        timeout: Duration::from_secs(15),
+        poll_interval: Duration::from_millis(20),
+    }
 }
 
 fn assert_skill_list_contains(output: &serde_json::Value, expected: &str) {
