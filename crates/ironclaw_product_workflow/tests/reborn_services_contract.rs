@@ -32,13 +32,13 @@ use ironclaw_product_workflow::{
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
     RebornGetRunStateRequest, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornServices,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     StaticConnectableChannelsProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
@@ -864,6 +864,7 @@ impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
                     auth_prompts: true,
                 },
             }],
+            next_cursor: None,
         })
     }
 }
@@ -4090,7 +4091,7 @@ fn set_outbound_preferences_empty_json_defaults_final_target_to_none() {
 }
 
 #[test]
-fn outbound_target_summary_preserves_browser_json_shape() {
+fn outbound_target_summary_preserves_client_json_shape() {
     let summary = outbound_target_summary("slack-dm-alpha");
 
     let serialized = serde_json::to_value(&summary).expect("serialize target summary");
@@ -4116,6 +4117,26 @@ fn outbound_target_summary_preserves_browser_json_shape() {
             .map(|description| description.as_str()),
         Some("Slack direct message")
     );
+}
+
+#[test]
+fn outbound_target_list_response_preserves_empty_json_shape_without_cursor() {
+    let response = RebornOutboundDeliveryTargetListResponse {
+        targets: Vec::new(),
+        next_cursor: None,
+    };
+
+    let serialized = serde_json::to_value(&response).expect("serialize empty target list");
+    assert_eq!(serialized, json!({ "targets": [] }));
+    assert!(
+        serialized.get("next_cursor").is_none(),
+        "None cursor must be omitted from the client payload"
+    );
+
+    let deserialized: RebornOutboundDeliveryTargetListResponse =
+        serde_json::from_value(json!({ "targets": [] })).expect("deserialize empty target list");
+    assert!(deserialized.targets.is_empty());
+    assert!(deserialized.next_cursor.is_none());
 }
 
 #[test]
@@ -4165,6 +4186,91 @@ fn outbound_target_summary_rejects_malformed_display_fields() {
     .expect_err("constructor rejects malformed display field");
 }
 
+#[test]
+fn outbound_target_display_fields_reject_whitespace_only_required_values_and_outer_whitespace() {
+    for (field, invalid_value) in [
+        ("channel", json!(" ")),
+        ("channel", json!("\t")),
+        ("display_name", json!(" ")),
+        ("display_name", json!("\t")),
+        ("channel", json!(" slack")),
+        ("channel", json!("slack ")),
+        ("display_name", json!(" Slack DM")),
+        ("display_name", json!("Slack DM ")),
+        ("description", json!(" Slack direct message")),
+        ("description", json!("Slack direct message ")),
+    ] {
+        let mut payload = json!({
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        });
+        payload[field] = invalid_value;
+
+        serde_json::from_value::<RebornOutboundDeliveryTargetSummary>(payload)
+            .expect_err("target summary display fields reject whitespace-only or padded values");
+    }
+}
+
+#[test]
+fn outbound_target_id_and_display_fields_reject_unicode_line_separators() {
+    for target_id in [
+        "slack-dm-alpha\u{2028}injected",
+        "slack-dm-alpha\u{2029}injected",
+    ] {
+        RebornOutboundDeliveryTargetId::new(target_id)
+            .expect_err("target id rejects unicode line separators");
+        serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
+            "final_reply_target_id": target_id,
+        }))
+        .expect_err("preference request rejects target id unicode line separators");
+    }
+
+    for (field, invalid_value) in [
+        ("channel", json!("slack\u{2028}injected")),
+        ("channel", json!("slack\u{2029}injected")),
+        ("display_name", json!("Slack DM\u{2028}injected")),
+        ("display_name", json!("Slack DM\u{2029}injected")),
+        ("description", json!("Slack direct\u{2028}message")),
+        ("description", json!("Slack direct\u{2029}message")),
+    ] {
+        let mut payload = json!({
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        });
+        payload[field] = invalid_value;
+
+        serde_json::from_value::<RebornOutboundDeliveryTargetSummary>(payload)
+            .expect_err("target summary display fields reject unicode line separators");
+    }
+}
+
+#[test]
+fn outbound_target_empty_description_is_accepted() {
+    let description =
+        RebornOutboundDeliveryTargetDescription::new("").expect("empty description is allowed");
+    assert_eq!(description.as_str(), "");
+
+    let summary = RebornOutboundDeliveryTargetSummary::new(
+        outbound_target_id("slack-dm-alpha"),
+        "slack",
+        "Slack DM",
+        Some("".to_string()),
+    )
+    .expect("summary accepts empty description");
+
+    assert_eq!(
+        summary
+            .description
+            .as_ref()
+            .map(RebornOutboundDeliveryTargetDescription::as_str),
+        Some("")
+    );
+}
+
 #[tokio::test]
 async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed() {
     let services = RebornServices::new(
@@ -4183,7 +4289,7 @@ async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed()
         .expect_err("unwired preference mutation");
     assert_eq!(set_error.code, RebornServicesErrorCode::Unavailable);
     assert_eq!(set_error.status_code, 503);
-    assert!(set_error.retryable);
+    assert!(!set_error.retryable);
 
     let list_error = services
         .list_outbound_delivery_targets(caller())
@@ -4191,7 +4297,7 @@ async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed()
         .expect_err("unwired target listing");
     assert_eq!(list_error.code, RebornServicesErrorCode::Unavailable);
     assert_eq!(list_error.status_code, 503);
-    assert!(list_error.retryable);
+    assert!(!list_error.retryable);
 }
 
 #[tokio::test]

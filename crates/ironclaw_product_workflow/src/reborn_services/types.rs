@@ -272,6 +272,8 @@ impl Default for RebornOutboundPreferencesResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornOutboundDeliveryTargetListResponse {
     pub targets: Vec<RebornOutboundDeliveryTargetOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +351,10 @@ impl RebornOutboundDeliveryTargetChannel {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
 }
 
 impl TryFrom<String> for RebornOutboundDeliveryTargetChannel {
@@ -359,9 +365,21 @@ impl TryFrom<String> for RebornOutboundDeliveryTargetChannel {
     }
 }
 
+impl AsRef<str> for RebornOutboundDeliveryTargetChannel {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl std::fmt::Display for RebornOutboundDeliveryTargetChannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl From<RebornOutboundDeliveryTargetChannel> for String {
+    fn from(value: RebornOutboundDeliveryTargetChannel) -> Self {
+        value.0
     }
 }
 
@@ -384,6 +402,10 @@ impl RebornOutboundDeliveryTargetDisplayName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
 }
 
 impl TryFrom<String> for RebornOutboundDeliveryTargetDisplayName {
@@ -394,9 +416,21 @@ impl TryFrom<String> for RebornOutboundDeliveryTargetDisplayName {
     }
 }
 
+impl AsRef<str> for RebornOutboundDeliveryTargetDisplayName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl std::fmt::Display for RebornOutboundDeliveryTargetDisplayName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl From<RebornOutboundDeliveryTargetDisplayName> for String {
+    fn from(value: RebornOutboundDeliveryTargetDisplayName) -> Self {
+        value.0
     }
 }
 
@@ -419,6 +453,10 @@ impl RebornOutboundDeliveryTargetDescription {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
 }
 
 impl TryFrom<String> for RebornOutboundDeliveryTargetDescription {
@@ -429,9 +467,21 @@ impl TryFrom<String> for RebornOutboundDeliveryTargetDescription {
     }
 }
 
+impl AsRef<str> for RebornOutboundDeliveryTargetDescription {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl std::fmt::Display for RebornOutboundDeliveryTargetDescription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl From<RebornOutboundDeliveryTargetDescription> for String {
+    fn from(value: RebornOutboundDeliveryTargetDescription) -> Self {
+        value.0
     }
 }
 
@@ -494,6 +544,12 @@ impl RebornOutboundDeliveryTargetId {
                 "outbound delivery target id must not contain control characters".to_string(),
             );
         }
+        if has_line_or_paragraph_separator(value) {
+            return Err(
+                "outbound delivery target id must not contain line or paragraph separators"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 }
@@ -530,16 +586,30 @@ fn validate_outbound_delivery_display_field(
     max_bytes: usize,
     require_non_empty: bool,
 ) -> Result<(), String> {
-    if require_non_empty && value.is_empty() {
+    if require_non_empty && value.trim().is_empty() {
         return Err(format!("{field_name} must not be empty"));
     }
     if value.len() > max_bytes {
         return Err(format!("{field_name} must be at most {max_bytes} bytes"));
     }
+    if value.trim() != value {
+        return Err(format!(
+            "{field_name} must not contain leading or trailing whitespace"
+        ));
+    }
     if value.chars().any(|c| c.is_control()) {
         return Err(format!("{field_name} must not contain control characters"));
     }
+    if has_line_or_paragraph_separator(value) {
+        return Err(format!(
+            "{field_name} must not contain line or paragraph separators"
+        ));
+    }
     Ok(())
+}
+
+fn has_line_or_paragraph_separator(value: &str) -> bool {
+    value.chars().any(|c| matches!(c, '\u{2028}' | '\u{2029}'))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
