@@ -64,7 +64,7 @@ impl<T: Clone + Eq, const N: usize> BoundedRing<T, N> {
             let count = self
                 .items
                 .iter()
-                .skip(self.items.len() - window + index)
+                .skip(index)
                 .filter(|candidate| *candidate == item)
                 .count();
             if count > most_common {
