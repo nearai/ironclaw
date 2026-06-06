@@ -11,7 +11,7 @@ use ironclaw_reborn_openai_compat::{
 use serde_json::json;
 
 #[test]
-fn public_refs_are_typed_opaque_and_serde_transparent() {
+fn public_refs_are_typed_opaque_and_serde_validated() {
     let chat = OpenAiChatCompletionId::new("chatcmpl-public_1").expect("chat ref");
     let response = OpenAiResponseId::new("resp_public-1").expect("response ref");
 

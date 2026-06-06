@@ -86,6 +86,54 @@ async fn durable_store_without_idempotency_key_always_creates_new_public_ref() {
 }
 
 #[tokio::test]
+async fn durable_store_writes_per_public_id_records_without_global_state() {
+    let (filesystem, root, store) = test_store("per-ref-records");
+    let first = expect_created(
+        store
+            .reserve(reservation("tenant-a", "alice", "first-key", b"first body"))
+            .await,
+    );
+    let second = expect_created(
+        store
+            .reserve(reservation(
+                "tenant-a",
+                "alice",
+                "second-key",
+                b"second body",
+            ))
+            .await,
+    );
+
+    let state_path =
+        VirtualPath::new(format!("{}/state.json", root.as_str())).expect("valid legacy state path");
+    assert!(
+        filesystem
+            .get(&state_path)
+            .await
+            .expect("legacy state lookup")
+            .is_none()
+    );
+
+    let first_path = public_id_record_path(&root, &first.public_id);
+    let second_path = public_id_record_path(&root, &second.public_id);
+    assert_ne!(first_path, second_path);
+    assert!(
+        filesystem
+            .get(&first_path)
+            .await
+            .expect("first record lookup")
+            .is_some()
+    );
+    assert!(
+        filesystem
+            .get(&second_path)
+            .await
+            .expect("second record lookup")
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn durable_store_does_not_leak_unauthorized_refs() {
     let (_, _, store) = test_store("auth");
     let created = expect_created(
@@ -210,11 +258,13 @@ async fn durable_store_retries_concurrent_same_key_to_single_mapping() {
 #[tokio::test]
 async fn durable_store_rejects_corrupt_persisted_state() {
     let (filesystem, root, store) = test_store("corrupt");
-    let state_path = VirtualPath::new(format!("{}/state.json", root.as_str()))
-        .expect("valid OpenAI-compatible ref state path");
+    let public_id = OpenAiCompatPublicId::Response(
+        OpenAiResponseId::new("resp_corrupt").expect("valid response id"),
+    );
+    let record_path = public_id_record_path(&root, &public_id);
     filesystem
         .put(
-            &state_path,
+            &record_path,
             Entry::bytes(b"{ malformed json".to_vec()),
             CasExpectation::Absent,
         )
@@ -224,15 +274,7 @@ async fn durable_store_rejects_corrupt_persisted_state() {
     let error = store
         .lookup_authorized(OpenAiCompatRefLookup::new(
             actor("tenant-a", "alice"),
-            expect_created(
-                FilesystemOpenAiCompatRefStore::with_root(
-                    Arc::new(InMemoryBackend::new()),
-                    root_for("unused"),
-                )
-                .reserve(reservation("tenant-a", "alice", "key", b"body"))
-                .await,
-            )
-            .public_id,
+            public_id,
             OpenAiCompatRefOperation::Retrieve,
         ))
         .await
@@ -247,38 +289,37 @@ async fn durable_store_rejects_corrupt_persisted_state() {
 #[tokio::test]
 async fn durable_store_rejects_inconsistent_persisted_mapping() {
     let (filesystem, root, store) = test_store("inconsistent");
-    let state_path = VirtualPath::new(format!("{}/state.json", root.as_str()))
-        .expect("valid OpenAI-compatible ref state path");
+    let public_id =
+        OpenAiCompatPublicId::Response(OpenAiResponseId::new("resp_unused").expect("id"));
+    let record_path = public_id_record_path(&root, &public_id);
     let state = json!({
-        "mappings": [{
-            "public_id": {"kind": "chat_completion", "id": "chatcmpl-valid"},
-            "owner": {
-                "tenant_id": "tenant-a",
-                "user_id": "alice",
-                "agent_id": "agent-a",
-                "project_id": "project-a"
-            },
-            "surface": "responses_api",
-            "request_fingerprint": OpenAiCompatRequestFingerprint::from_body_bytes(b"body"),
-            "binding": {
-                "state": "pending"
-            }
-        }]
+        "public_id": {"kind": "chat_completion", "id": "chatcmpl-valid"},
+        "owner": {
+            "tenant_id": "tenant-a",
+            "user_id": "alice",
+            "agent_id": "agent-a",
+            "project_id": "project-a"
+        },
+        "surface": "responses_api",
+        "request_fingerprint": OpenAiCompatRequestFingerprint::from_body_bytes(b"body"),
+        "binding": {
+            "state": "pending"
+        }
     });
     let entry = Entry::record(
-        RecordKind::new("openai_compat_ref_state").expect("valid record kind"),
+        RecordKind::new("openai_compat_ref_mapping").expect("valid record kind"),
         &state,
     )
-    .expect("valid state record");
+    .expect("valid mapping record");
     filesystem
-        .put(&state_path, entry, CasExpectation::Absent)
+        .put(&record_path, entry, CasExpectation::Absent)
         .await
-        .expect("write inconsistent state");
+        .expect("write inconsistent mapping");
 
     let error = store
         .lookup_authorized(OpenAiCompatRefLookup::new(
             actor("tenant-a", "alice"),
-            OpenAiCompatPublicId::Response(OpenAiResponseId::new("resp_unused").expect("id")),
+            public_id,
             OpenAiCompatRefOperation::Retrieve,
         ))
         .await
@@ -305,6 +346,18 @@ fn test_store(
 
 fn root_for(suffix: &str) -> VirtualPath {
     VirtualPath::new(format!("/engine/openai_compat/test/{suffix}")).expect("valid test root")
+}
+
+fn public_id_record_path(root: &VirtualPath, public_id: &OpenAiCompatPublicId) -> VirtualPath {
+    let (kind_dir, id) = match public_id {
+        OpenAiCompatPublicId::ChatCompletion(id) => ("chat_completions", id.as_str()),
+        OpenAiCompatPublicId::Response(id) => ("responses", id.as_str()),
+    };
+    VirtualPath::new(format!(
+        "{}/by_public_id/{kind_dir}/{id}.json",
+        root.as_str()
+    ))
+    .expect("valid public id record path")
 }
 
 fn reservation(

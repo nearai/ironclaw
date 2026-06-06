@@ -53,8 +53,8 @@ impl OpenAiCompatRouteSurface {
 
 macro_rules! public_ref {
     ($name:ident, $prefix:ident, $kind:literal) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
-        #[serde(transparent)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(try_from = "String")]
         pub struct $name(String);
 
         impl $name {
@@ -78,13 +78,11 @@ macro_rules! public_ref {
             }
         }
 
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                let value = String::deserialize(deserializer)?;
-                Self::new(value).map_err(serde::de::Error::custom)
+        impl TryFrom<String> for $name {
+            type Error = OpenAiCompatRefError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
             }
         }
 
@@ -135,8 +133,8 @@ impl OpenAiCompatPublicId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct OpenAiCompatIdempotencyKey(String);
 
 impl OpenAiCompatIdempotencyKey {
@@ -151,24 +149,22 @@ impl OpenAiCompatIdempotencyKey {
     }
 }
 
-impl<'de> Deserialize<'de> for OpenAiCompatIdempotencyKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
+impl TryFrom<String> for OpenAiCompatIdempotencyKey {
+    type Error = OpenAiCompatRefError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct OpenAiCompatRequestFingerprint(String);
 
 impl OpenAiCompatRequestFingerprint {
     pub fn from_body_bytes(body: &[u8]) -> Self {
         let digest = Sha256::digest(body);
-        Self(format!("sha256:{}", lower_hex(&digest)))
+        Self(format!("sha256:{}", hex::encode(digest)))
     }
 
     pub fn from_json(value: &impl Serialize) -> Result<Self, OpenAiCompatRefError> {
@@ -185,13 +181,11 @@ impl OpenAiCompatRequestFingerprint {
     }
 }
 
-impl<'de> Deserialize<'de> for OpenAiCompatRequestFingerprint {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        validate_fingerprint(&value).map_err(serde::de::Error::custom)?;
+impl TryFrom<String> for OpenAiCompatRequestFingerprint {
+    type Error = OpenAiCompatRefError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_fingerprint(&value)?;
         Ok(Self(value))
     }
 }
@@ -241,8 +235,8 @@ impl OpenAiCompatActorScope {
 
 macro_rules! internal_ref {
     ($name:ident, $kind:literal) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-        #[serde(transparent)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(try_from = "String")]
         pub struct $name(String);
 
         impl $name {
@@ -257,13 +251,11 @@ macro_rules! internal_ref {
             }
         }
 
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                let value = String::deserialize(deserializer)?;
-                Self::new(value).map_err(serde::de::Error::custom)
+        impl TryFrom<String> for $name {
+            type Error = OpenAiCompatRefError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
             }
         }
     };
@@ -651,6 +643,10 @@ fn validate_public_ref(
     Ok(())
 }
 
+/// Validates a reference string against byte-length and cleanliness limits.
+///
+/// The length limit is checked in bytes with `str::len()` because these refs
+/// are ASCII-shaped identifiers rather than user-visible text.
 fn validate_bounded_clean_ref(
     kind: &'static str,
     value: &str,
@@ -716,16 +712,6 @@ fn validate_fingerprint(value: &str) -> Result<(), OpenAiCompatRefError> {
         });
     }
     Ok(())
-}
-
-fn lower_hex(bytes: &[u8]) -> String {
-    const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(char::from(LOWER_HEX[(byte >> 4) as usize]));
-        encoded.push(char::from(LOWER_HEX[(byte & 0x0f) as usize]));
-    }
-    encoded
 }
 
 fn contains_no_exposure_sentinel(value: &str) -> bool {

@@ -15,20 +15,22 @@ This crate is storage-only:
 
 ## Storage Shape
 
-The initial durable adapter stores one CAS-protected JSON envelope under:
+The durable adapter stores CAS-protected JSON records under:
 
 ```text
-/engine/openai_compat/refs/state.json
+/engine/openai_compat/refs/by_public_id/{chat_completions|responses}/{public_id}.json
+/engine/openai_compat/refs/by_idempotency/{surface}/{digest}.json
 ```
 
-This keeps reservation, idempotency replay/conflict, and later binding updates
-atomic through a single filesystem record. The record stores metadata and
-opaque refs only; it must never contain raw prompts, response payloads, event
-cursors, host paths, backend error details, secrets, or concrete thread/run
-objects.
+Public-id records store one mapping each, so lookup/bind operations touch only
+the requested ref. Idempotency records index authenticated actor scope, route
+surface, and client idempotency key to the reserved public ref. The records store
+metadata and opaque refs only; they must never contain raw prompts, response
+payloads, event cursors, host paths, backend error details, secrets, or concrete
+thread/run objects.
 
-If this grows hot enough to need row-level indexing, preserve the same
-`OpenAiCompatRefStore` behavior first and move the indexing behind this crate
+If this grows hot enough to need backend-native secondary indexes, preserve the
+same `OpenAiCompatRefStore` behavior first and move indexing behind this crate
 rather than changing the contract crate.
 
 ## Validation

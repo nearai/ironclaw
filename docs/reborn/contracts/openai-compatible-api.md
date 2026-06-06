@@ -47,7 +47,8 @@ bind sockets or call `axum::serve`.
   not encode tenant, user, thread, run, projection cursor, or host paths.
 - Durable ref mappings are persisted behind `OpenAiCompatRefStore`; the
   contract crate defines the port and the storage crate provides
-  filesystem-backed adapters under `/engine/openai_compat/refs/state.json`.
+  filesystem-backed adapters under `/engine/openai_compat/refs/` with
+  per-public-id mapping records plus per-scope idempotency index records.
 - Client idempotency keys are scoped by authenticated actor scope, route
   surface, and request-body fingerprint. Same key + same fingerprint replays the
   same public ref; same key + different fingerprint is a sanitized conflict.

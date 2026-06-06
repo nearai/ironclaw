@@ -20,6 +20,7 @@ use ironclaw_reborn_openai_compat::{
     OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
@@ -27,8 +28,8 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 
 const DEFAULT_REF_ROOT: &str = "/engine/openai_compat/refs";
-const STATE_FILE_NAME: &str = "state.json";
-const REF_STATE_RECORD_KIND: &str = "openai_compat_ref_state";
+const MAPPING_RECORD_KIND: &str = "openai_compat_ref_mapping";
+const IDEMPOTENCY_INDEX_RECORD_KIND: &str = "openai_compat_idempotency_index";
 const FILESYSTEM_CAS_RETRIES: usize = 5;
 
 #[derive(Clone)]
@@ -56,47 +57,119 @@ impl FilesystemOpenAiCompatRefStore {
         self
     }
 
-    fn state_path(&self) -> Result<VirtualPath, OpenAiCompatRefError> {
-        state_path(&self.root)
+    fn mapping_path(
+        &self,
+        public_id: &OpenAiCompatPublicId,
+    ) -> Result<VirtualPath, OpenAiCompatRefError> {
+        mapping_path(&self.root, public_id)
     }
 
-    async fn load_state(
+    fn idempotency_index_path(
         &self,
-    ) -> Result<(StoredOpenAiCompatRefState, Option<RecordVersion>), OpenAiCompatRefError> {
-        let path = self.state_path()?;
+        owner: &OpenAiCompatActorScope,
+        surface: OpenAiCompatRouteSurface,
+        key: &OpenAiCompatIdempotencyKey,
+    ) -> Result<VirtualPath, OpenAiCompatRefError> {
+        idempotency_index_path(&self.root, owner, surface, key)
+    }
+
+    async fn load_mapping_entry(
+        &self,
+        public_id: &OpenAiCompatPublicId,
+    ) -> Result<Option<(OpenAiCompatResourceMapping, RecordVersion)>, OpenAiCompatRefError> {
+        let path = self.mapping_path(public_id)?;
         let Some(entry) = self
             .filesystem
             .get(&path)
             .await
-            .map_err(filesystem_error("load OpenAI-compatible ref state"))?
+            .map_err(filesystem_error("load OpenAI-compatible ref mapping"))?
         else {
-            return Ok((StoredOpenAiCompatRefState::default(), None));
+            return Ok(None);
         };
-        let state: StoredOpenAiCompatRefState = entry
+        let mapping: OpenAiCompatResourceMapping = entry
             .entry
             .parse_json()
-            .map_err(corrupt_mapping("deserialize OpenAI-compatible ref state"))?;
-        state.validate()?;
-        Ok((state, Some(entry.version)))
+            .map_err(corrupt_mapping("deserialize OpenAI-compatible ref mapping"))?;
+        mapping.validate()?;
+        if mapping.public_id != *public_id {
+            return Err(OpenAiCompatRefError::CorruptMapping);
+        }
+        Ok(Some((mapping, entry.version)))
     }
 
-    async fn save_state(
+    async fn load_required_mapping(
         &self,
-        state: &StoredOpenAiCompatRefState,
-        version: Option<RecordVersion>,
-    ) -> Result<(), SaveStateError> {
-        let path = self.state_path()?;
-        let cas = version.map_or(CasExpectation::Absent, CasExpectation::Version);
+        public_id: &OpenAiCompatPublicId,
+    ) -> Result<OpenAiCompatResourceMapping, OpenAiCompatRefError> {
+        self.load_mapping_entry(public_id)
+            .await?
+            .map(|(mapping, _)| mapping)
+            .ok_or(OpenAiCompatRefError::CorruptMapping)
+    }
+
+    async fn put_mapping(
+        &self,
+        mapping: &OpenAiCompatResourceMapping,
+        cas: CasExpectation,
+    ) -> Result<(), SaveRecordError> {
+        let path = self.mapping_path(&mapping.public_id)?;
         match self
             .filesystem
-            .put(&path, entry_for_state(state)?, cas)
+            .put(&path, entry_for_mapping(mapping)?, cas)
             .await
         {
             Ok(_) => Ok(()),
-            Err(FilesystemError::VersionMismatch { .. }) => Err(SaveStateError::CasConflict),
-            Err(error) => Err(SaveStateError::Ref(filesystem_error(
-                "save OpenAI-compatible ref state",
+            Err(FilesystemError::VersionMismatch { .. }) => Err(SaveRecordError::CasConflict),
+            Err(error) => Err(SaveRecordError::Ref(filesystem_error(
+                "save OpenAI-compatible ref mapping",
             )(error))),
+        }
+    }
+
+    async fn load_idempotency_index(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<StoredOpenAiCompatIdempotencyIndex>, OpenAiCompatRefError> {
+        let Some(entry) = self
+            .filesystem
+            .get(path)
+            .await
+            .map_err(filesystem_error("load OpenAI-compatible idempotency index"))?
+        else {
+            return Ok(None);
+        };
+        let index: StoredOpenAiCompatIdempotencyIndex = entry.entry.parse_json().map_err(
+            corrupt_mapping("deserialize OpenAI-compatible idempotency index"),
+        )?;
+        index.validate()?;
+        Ok(Some(index))
+    }
+
+    async fn put_idempotency_index(
+        &self,
+        path: &VirtualPath,
+        index: &StoredOpenAiCompatIdempotencyIndex,
+    ) -> Result<(), SaveRecordError> {
+        match self
+            .filesystem
+            .put(
+                path,
+                entry_for_idempotency_index(index)?,
+                CasExpectation::Absent,
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(FilesystemError::VersionMismatch { .. }) => Err(SaveRecordError::CasConflict),
+            Err(error) => Err(SaveRecordError::Ref(filesystem_error(
+                "save OpenAI-compatible idempotency index",
+            )(error))),
+        }
+    }
+
+    async fn delete_mapping_best_effort(&self, public_id: &OpenAiCompatPublicId) {
+        if let Ok(path) = self.mapping_path(public_id) {
+            let _ = self.filesystem.delete(&path).await;
         }
     }
 }
@@ -211,14 +284,13 @@ impl OpenAiCompatRefStore for FilesystemOpenAiCompatRefStore {
         &self,
         request: OpenAiCompatRefLookup,
     ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        let (state, _) = self.load_state().await?;
-        let Some(mapping) = state.mapping_by_public_id(&request.public_id) else {
+        let Some((mapping, _)) = self.load_mapping_entry(&request.public_id).await? else {
             return Ok(None);
         };
         if !mapping.is_authorized_for(&request.requester) {
             return Ok(None);
         }
-        Ok(Some(mapping.clone()))
+        Ok(Some(mapping))
     }
 }
 
@@ -227,14 +299,35 @@ impl FilesystemOpenAiCompatRefStore {
         &self,
         request: OpenAiCompatRefReservation,
     ) -> Result<OpenAiCompatRefReservationOutcome, OpenAiCompatRefError> {
+        if let Some(key) = request.idempotency_key.clone() {
+            return self.reserve_with_idempotency(request, key).await;
+        }
+
         for _ in 0..self.cas_retries {
-            let (mut state, version) = self.load_state().await?;
-            if let Some(key) = request.idempotency_key.as_ref()
-                && let Some(mapping) =
-                    state.mapping_by_idempotency(&request.owner, request.surface, key)
-            {
+            let mapping = new_pending_mapping(&request);
+            match self.put_mapping(&mapping, CasExpectation::Absent).await {
+                Ok(()) => return Ok(OpenAiCompatRefReservationOutcome::Created(mapping)),
+                Err(SaveRecordError::CasConflict) => continue,
+                Err(SaveRecordError::Ref(error)) => return Err(error),
+            }
+        }
+        Err(OpenAiCompatRefError::StoreUnavailable)
+    }
+
+    async fn reserve_with_idempotency(
+        &self,
+        request: OpenAiCompatRefReservation,
+        key: OpenAiCompatIdempotencyKey,
+    ) -> Result<OpenAiCompatRefReservationOutcome, OpenAiCompatRefError> {
+        let index_path = self.idempotency_index_path(&request.owner, request.surface, &key)?;
+        for _ in 0..self.cas_retries {
+            if let Some(index) = self.load_idempotency_index(&index_path).await? {
+                if !index.matches_request(&request.owner, request.surface, &key) {
+                    return Err(OpenAiCompatRefError::CorruptMapping);
+                }
+                let mapping = self.load_required_mapping(&index.public_id).await?;
                 if mapping.request_fingerprint == request.request_fingerprint {
-                    return Ok(OpenAiCompatRefReservationOutcome::Replayed(mapping.clone()));
+                    return Ok(OpenAiCompatRefReservationOutcome::Replayed(mapping));
                 }
                 return Ok(OpenAiCompatRefReservationOutcome::Conflict(
                     OpenAiCompatIdempotencyConflict {
@@ -243,12 +336,29 @@ impl FilesystemOpenAiCompatRefStore {
                 ));
             }
 
-            let mapping = new_pending_mapping(&state, &request);
-            state.mappings.push(mapping.clone());
-            match self.save_state(&state, version).await {
+            let mapping = new_pending_mapping(&request);
+            match self.put_mapping(&mapping, CasExpectation::Absent).await {
+                Ok(()) => {}
+                Err(SaveRecordError::CasConflict) => continue,
+                Err(SaveRecordError::Ref(error)) => return Err(error),
+            }
+
+            let index = StoredOpenAiCompatIdempotencyIndex {
+                owner: request.owner.clone(),
+                surface: request.surface,
+                key: key.clone(),
+                public_id: mapping.public_id.clone(),
+            };
+            match self.put_idempotency_index(&index_path, &index).await {
                 Ok(()) => return Ok(OpenAiCompatRefReservationOutcome::Created(mapping)),
-                Err(SaveStateError::CasConflict) => continue,
-                Err(SaveStateError::Ref(error)) => return Err(error),
+                Err(SaveRecordError::CasConflict) => {
+                    self.delete_mapping_best_effort(&mapping.public_id).await;
+                    continue;
+                }
+                Err(SaveRecordError::Ref(error)) => {
+                    self.delete_mapping_best_effort(&mapping.public_id).await;
+                    return Err(error);
+                }
             }
         }
         Err(OpenAiCompatRefError::StoreUnavailable)
@@ -259,8 +369,8 @@ impl FilesystemOpenAiCompatRefStore {
         request: OpenAiCompatBindInternalRefs,
     ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
         for _ in 0..self.cas_retries {
-            let (mut state, version) = self.load_state().await?;
-            let Some(mapping) = state.mapping_by_public_id_mut(&request.public_id) else {
+            let Some((mut mapping, version)) = self.load_mapping_entry(&request.public_id).await?
+            else {
                 return Ok(None);
             };
             if !mapping.is_authorized_for(&request.owner) {
@@ -269,116 +379,158 @@ impl FilesystemOpenAiCompatRefStore {
             mapping.binding = OpenAiCompatResourceBinding::Bound {
                 internal_refs: request.internal_refs.clone(),
             };
-            let updated = mapping.clone();
-            match self.save_state(&state, version).await {
-                Ok(()) => return Ok(Some(updated)),
-                Err(SaveStateError::CasConflict) => continue,
-                Err(SaveStateError::Ref(error)) => return Err(error),
+            match self
+                .put_mapping(&mapping, CasExpectation::Version(version))
+                .await
+            {
+                Ok(()) => return Ok(Some(mapping)),
+                Err(SaveRecordError::CasConflict) => continue,
+                Err(SaveRecordError::Ref(error)) => return Err(error),
             }
         }
         Err(OpenAiCompatRefError::StoreUnavailable)
     }
 }
 
-enum SaveStateError {
+enum SaveRecordError {
     CasConflict,
     Ref(OpenAiCompatRefError),
 }
 
-impl From<OpenAiCompatRefError> for SaveStateError {
+impl From<OpenAiCompatRefError> for SaveRecordError {
     fn from(error: OpenAiCompatRefError) -> Self {
         Self::Ref(error)
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredOpenAiCompatRefState {
-    #[serde(default)]
-    mappings: Vec<OpenAiCompatResourceMapping>,
+struct StoredOpenAiCompatIdempotencyIndex {
+    owner: OpenAiCompatActorScope,
+    surface: OpenAiCompatRouteSurface,
+    key: OpenAiCompatIdempotencyKey,
+    public_id: OpenAiCompatPublicId,
 }
 
-impl StoredOpenAiCompatRefState {
+impl StoredOpenAiCompatIdempotencyIndex {
     fn validate(&self) -> Result<(), OpenAiCompatRefError> {
-        for mapping in &self.mappings {
-            mapping.validate()?;
+        if self.public_id.resource_kind() != self.surface.resource_kind() {
+            return Err(OpenAiCompatRefError::CorruptMapping);
         }
         Ok(())
     }
 
-    fn mapping_by_public_id(
-        &self,
-        public_id: &OpenAiCompatPublicId,
-    ) -> Option<&OpenAiCompatResourceMapping> {
-        self.mappings
-            .iter()
-            .find(|mapping| &mapping.public_id == public_id)
-    }
-
-    fn mapping_by_public_id_mut(
-        &mut self,
-        public_id: &OpenAiCompatPublicId,
-    ) -> Option<&mut OpenAiCompatResourceMapping> {
-        self.mappings
-            .iter_mut()
-            .find(|mapping| &mapping.public_id == public_id)
-    }
-
-    fn mapping_by_idempotency(
+    fn matches_request(
         &self,
         owner: &OpenAiCompatActorScope,
         surface: OpenAiCompatRouteSurface,
         key: &OpenAiCompatIdempotencyKey,
-    ) -> Option<&OpenAiCompatResourceMapping> {
-        self.mappings.iter().find(|mapping| {
-            &mapping.owner == owner
-                && mapping.surface == surface
-                && mapping.idempotency_key.as_ref() == Some(key)
-        })
+    ) -> bool {
+        &self.owner == owner && self.surface == surface && &self.key == key
     }
 }
 
-fn new_pending_mapping(
-    state: &StoredOpenAiCompatRefState,
-    request: &OpenAiCompatRefReservation,
-) -> OpenAiCompatResourceMapping {
-    loop {
-        let public_id = OpenAiCompatPublicId::generate_for(request.surface);
-        if state.mapping_by_public_id(&public_id).is_some() {
-            continue;
-        }
-        let mapping = OpenAiCompatResourceMapping {
-            public_id,
-            owner: request.owner.clone(),
-            surface: request.surface,
-            request_fingerprint: request.request_fingerprint.clone(),
-            idempotency_key: request.idempotency_key.clone(),
-            binding: OpenAiCompatResourceBinding::Pending,
-        };
-        debug_assert!(mapping.validate().is_ok());
-        return mapping;
-    }
+fn new_pending_mapping(request: &OpenAiCompatRefReservation) -> OpenAiCompatResourceMapping {
+    let mapping = OpenAiCompatResourceMapping {
+        public_id: OpenAiCompatPublicId::generate_for(request.surface),
+        owner: request.owner.clone(),
+        surface: request.surface,
+        request_fingerprint: request.request_fingerprint.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        binding: OpenAiCompatResourceBinding::Pending,
+    };
+    debug_assert!(mapping.validate().is_ok());
+    mapping
 }
 
-fn entry_for_state(state: &StoredOpenAiCompatRefState) -> Result<Entry, OpenAiCompatRefError> {
-    state.validate()?;
-    let payload = serde_json::to_value(state).map_err(corrupt_mapping(
-        "serialize OpenAI-compatible ref state payload",
+fn entry_for_mapping(mapping: &OpenAiCompatResourceMapping) -> Result<Entry, OpenAiCompatRefError> {
+    mapping.validate()?;
+    let payload = serde_json::to_value(mapping).map_err(corrupt_mapping(
+        "serialize OpenAI-compatible ref mapping payload",
     ))?;
-    let kind = RecordKind::new(REF_STATE_RECORD_KIND)
+    let kind =
+        RecordKind::new(MAPPING_RECORD_KIND).map_err(|_| OpenAiCompatRefError::StoreUnavailable)?;
+    Entry::record(kind, &payload).map_err(corrupt_mapping(
+        "serialize OpenAI-compatible ref mapping entry",
+    ))
+}
+
+fn entry_for_idempotency_index(
+    index: &StoredOpenAiCompatIdempotencyIndex,
+) -> Result<Entry, OpenAiCompatRefError> {
+    index.validate()?;
+    let payload = serde_json::to_value(index).map_err(corrupt_mapping(
+        "serialize OpenAI-compatible idempotency index payload",
+    ))?;
+    let kind = RecordKind::new(IDEMPOTENCY_INDEX_RECORD_KIND)
         .map_err(|_| OpenAiCompatRefError::StoreUnavailable)?;
     Entry::record(kind, &payload).map_err(corrupt_mapping(
-        "serialize OpenAI-compatible ref state entry",
+        "serialize OpenAI-compatible idempotency index entry",
     ))
 }
 
-fn state_path(root: &VirtualPath) -> Result<VirtualPath, OpenAiCompatRefError> {
-    VirtualPath::new(format!(
-        "{}/{}",
-        root.as_str().trim_end_matches('/'),
-        STATE_FILE_NAME
-    ))
-    .map_err(|_| OpenAiCompatRefError::StoreUnavailable)
+fn mapping_path(
+    root: &VirtualPath,
+    public_id: &OpenAiCompatPublicId,
+) -> Result<VirtualPath, OpenAiCompatRefError> {
+    let (kind_dir, id) = public_id_path_parts(public_id);
+    child_path(root, &format!("by_public_id/{kind_dir}/{id}.json"))
+}
+
+fn public_id_path_parts(public_id: &OpenAiCompatPublicId) -> (&'static str, &str) {
+    match public_id {
+        OpenAiCompatPublicId::ChatCompletion(id) => ("chat_completions", id.as_str()),
+        OpenAiCompatPublicId::Response(id) => ("responses", id.as_str()),
+    }
+}
+
+fn idempotency_index_path(
+    root: &VirtualPath,
+    owner: &OpenAiCompatActorScope,
+    surface: OpenAiCompatRouteSurface,
+    key: &OpenAiCompatIdempotencyKey,
+) -> Result<VirtualPath, OpenAiCompatRefError> {
+    let digest = idempotency_index_digest(owner, surface, key)?;
+    child_path(
+        root,
+        &format!("by_idempotency/{}/{digest}.json", surface_dir(surface)),
+    )
+}
+
+fn idempotency_index_digest(
+    owner: &OpenAiCompatActorScope,
+    surface: OpenAiCompatRouteSurface,
+    key: &OpenAiCompatIdempotencyKey,
+) -> Result<String, OpenAiCompatRefError> {
+    #[derive(Serialize)]
+    struct DigestInput<'a> {
+        owner: &'a OpenAiCompatActorScope,
+        surface: OpenAiCompatRouteSurface,
+        key: &'a OpenAiCompatIdempotencyKey,
+    }
+
+    let payload = DigestInput {
+        owner,
+        surface,
+        key,
+    };
+    let bytes = serde_json::to_vec(&payload).map_err(corrupt_mapping(
+        "serialize OpenAI-compatible idempotency index key",
+    ))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn surface_dir(surface: OpenAiCompatRouteSurface) -> &'static str {
+    match surface {
+        OpenAiCompatRouteSurface::ChatCompletions => "chat_completions",
+        OpenAiCompatRouteSurface::ResponsesApi => "responses_api",
+        OpenAiCompatRouteSurface::ResponsesV1 => "responses_v1",
+    }
+}
+
+fn child_path(root: &VirtualPath, child: &str) -> Result<VirtualPath, OpenAiCompatRefError> {
+    VirtualPath::new(format!("{}/{}", root.as_str().trim_end_matches('/'), child))
+        .map_err(|_| OpenAiCompatRefError::StoreUnavailable)
 }
 
 fn default_ref_root() -> VirtualPath {
