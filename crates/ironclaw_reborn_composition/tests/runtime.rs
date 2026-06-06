@@ -12,6 +12,8 @@ use ironclaw_reborn_composition::{
 use ironclaw_turns::TurnStatus;
 use tokio_util::sync::CancellationToken;
 
+const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[tokio::test]
 async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
     let input =
@@ -70,7 +72,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
 
     let conversation = runtime.new_conversation().await.unwrap();
     let reply = tokio::time::timeout(
-        Duration::from_secs(10),
+        SEND_USER_MESSAGE_TIMEOUT,
         runtime.send_user_message(&conversation, "hello"),
     )
     .await
@@ -84,7 +86,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     assert_eq!(reply.text, None);
 
     let second_reply = tokio::time::timeout(
-        Duration::from_secs(10),
+        SEND_USER_MESSAGE_TIMEOUT,
         runtime.send_user_message(&conversation, "hello again"),
     )
     .await

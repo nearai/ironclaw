@@ -26,9 +26,8 @@ pub struct ResolvedBinding {
     /// User scope whose agent/context/tools/memory execute the turn.
     ///
     /// Direct/personal routes set this to the actor. Shared routes set this to
-    /// the configured team/agent subject when one exists; legacy shared routes
-    /// without an explicit subject remain ownerless until their host route is
-    /// configured.
+    /// the configured team/agent subject; routes without an explicit subject
+    /// are rejected before turn submission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_user_id: Option<UserId>,
     pub thread_id: ThreadId,

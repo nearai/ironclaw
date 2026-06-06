@@ -230,9 +230,9 @@ pub use slack_egress::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_host_beta::{
-    SlackHostBetaBuildError, SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts,
-    build_slack_events_route_mount, build_slack_events_route_mount_with_actor_user_resolver,
-    build_slack_host_beta_mounts,
+    SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
+    SlackHostBetaConfigInput, SlackHostBetaMounts, build_slack_events_route_mount,
+    build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{
@@ -265,7 +265,8 @@ pub use slack_personal_binding_serve::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_serve::{
     SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
-    SlackInstallationSelector, slack_events_route_descriptors, slack_events_route_mount,
+    SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
+    slack_events_route_mount,
 };
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
