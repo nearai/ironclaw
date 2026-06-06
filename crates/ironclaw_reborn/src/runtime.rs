@@ -2,6 +2,7 @@
 
 use std::{error::Error, fmt, marker::PhantomData, sync::Arc};
 
+use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
@@ -97,6 +98,7 @@ where
     pub model_policy_guard: Option<Arc<dyn LoopModelPolicyGuard>>,
     pub model_budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
     pub safety_context: Option<InstructionSafetyContext>,
+    pub hook_security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     pub turn_event_sink: Option<Arc<dyn TurnEventSink>>,
     /// Per-run hook dispatcher builder factory. `None` (the default) leaves
     /// the hook framework dormant: no dispatcher is composed and the runtime
@@ -464,6 +466,9 @@ where
     }
     if let Some(factory) = parts.hook_dispatcher_builder_factory {
         host_factory = host_factory.with_hook_dispatcher_builder_factory(move || factory());
+    }
+    if let Some(sink) = parts.hook_security_audit_sink {
+        host_factory = host_factory.with_hook_security_audit_sink(sink);
     }
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
     let host_factory = Arc::new(host_factory);
