@@ -4,7 +4,7 @@ use std::{
 };
 
 use chrono::Utc;
-use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
+use ironclaw_approvals::{ApprovalResolver, DenyApproval, LeaseApproval};
 use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
@@ -13,7 +13,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ECHO_CAPABILITY_ID, RuntimeApprovalGate, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, SHELL_CAPABILITY_ID,
+    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
+    SHELL_CAPABILITY_ID,
 };
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
@@ -241,6 +242,79 @@ impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTranspor
             duration: Duration::from_millis(5),
         })
     }
+}
+
+#[tokio::test]
+async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev("local-dev-deny-owner", dir.path().join("local-dev"))
+            .with_runtime_policy(local_dev_policy()),
+    )
+    .await
+    .expect("local-dev services build");
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate");
+    let host_runtime = services.host_runtime.as_ref().expect("host runtime");
+    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
+    let estimate = ResourceEstimate::default();
+    let input = serde_json::json!({"command": "echo denied"});
+    let context = shell_execution_context("local-dev-deny-owner", "local-dev-deny-thread");
+
+    let blocked = host_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            capability_id.clone(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision(shell_allowed_effects()),
+        ))
+        .await
+        .expect("shell invocation returns approval gate");
+    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = blocked else {
+        panic!("expected approval gate, got {blocked:?}");
+    };
+
+    let resolver = ApprovalResolver::new(
+        local_runtime.approval_requests.as_ref(),
+        local_runtime.capability_leases.as_ref(),
+    );
+    resolver
+        .deny(
+            &context.resource_scope,
+            gate.approval_request_id,
+            DenyApproval {
+                denied_by: Principal::HostRuntime,
+            },
+        )
+        .await
+        .expect("deny approval");
+
+    let resumed = host_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            capability_id,
+            estimate,
+            input,
+            trust_decision(shell_allowed_effects()),
+        ))
+        .await
+        .expect("denied shell invocation returns failed outcome");
+    let RuntimeCapabilityOutcome::Failed(failure) = resumed else {
+        panic!("denied approval must not resume successfully, got {resumed:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert!(
+        local_runtime
+            .capability_leases
+            .leases_for_scope(&context.resource_scope)
+            .await
+            .is_empty(),
+        "denying approval must not issue a capability lease"
+    );
 }
 
 fn shell_execution_context(user_id: &str, thread_id: &str) -> ExecutionContext {

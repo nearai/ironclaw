@@ -10,6 +10,7 @@ use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuth
 use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::GrantAuthorizer;
 #[cfg(not(feature = "libsql"))]
 use ironclaw_authorization::InMemoryCapabilityLeaseStore;
