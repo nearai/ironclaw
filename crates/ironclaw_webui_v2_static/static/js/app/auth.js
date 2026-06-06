@@ -143,6 +143,7 @@ export function useAuthSession() {
       .then((nextToken) => {
         if (cancelled) return;
         storeToken(nextToken);
+        setIsSessionChecking(true);
         setToken(nextToken);
         setSession(null);
         setError("");
@@ -191,6 +192,7 @@ export function useAuthSession() {
 
   const signIn = React.useCallback((nextToken) => {
     storeToken(nextToken);
+    setIsSessionChecking(Boolean(nextToken));
     setToken(nextToken);
     setSession(null);
     setError("");
@@ -205,6 +207,7 @@ export function useAuthSession() {
     // visually signed out and can re-authenticate.
     logoutRequest().catch(() => {});
     storeToken("");
+    setIsSessionChecking(false);
     setToken("");
     setSession(null);
     setError("");

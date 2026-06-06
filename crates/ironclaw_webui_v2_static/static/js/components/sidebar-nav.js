@@ -128,7 +128,9 @@ export function SidebarNav({ onNewChat, isCreating, isAdmin = false, onNavigate 
       <nav className="mt-2 flex flex-col gap-1">
         ${visibleRoutes.map((route) => {
           const subRoutes = (EXPANDABLE_SUB_ROUTES[route.id] || []).filter(
-            (subRoute) => isAdmin || !(route.id === "settings" && subRoute.id === "users")
+            (subRoute) =>
+              isAdmin ||
+              !(route.id === "settings" && ["users", "inference"].includes(subRoute.id))
           );
           if (subRoutes.length > 0) {
             return html`

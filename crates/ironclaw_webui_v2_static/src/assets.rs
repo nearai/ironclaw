@@ -183,18 +183,31 @@ mod tests {
         let auth = asset_text("js/app/auth.js");
         assert!(auth.contains("fetchSession()"));
         assert!(auth.contains("operator_webui_config"));
+        assert!(auth.contains("setIsSessionChecking(Boolean(nextToken))"));
+        assert!(auth.contains("setIsSessionChecking(true);"));
         assert!(auth.contains("isAdmin: Boolean(session?.capabilities?.operator_webui_config)"));
         assert!(!auth.contains("isAdmin: false"));
 
         let sidebar_nav = asset_text("js/components/sidebar-nav.js");
         assert!(sidebar_nav.contains("isAdmin = false"));
+        assert!(sidebar_nav.contains("[\"users\", \"inference\"].includes(subRoute.id)"));
 
         let settings_page = asset_text("js/pages/settings/settings-page.js");
         assert!(settings_page.contains("isAdmin = false"));
+        assert!(settings_page.contains("tab === \"users\" || tab === \"inference\""));
 
         let settings_tabs = asset_text("js/pages/settings/components/settings-tabs.js");
         assert!(settings_tabs.contains("isAdmin = false"));
         assert!(!settings_tabs.contains("isAdmin = true"));
+        assert!(settings_tabs.contains("tab.id !== \"inference\""));
+
+        let layout = asset_text("js/layout/gateway-layout.js");
+        assert!(layout.contains("enabled: isAdmin"));
+        assert!(layout.contains("isAdmin && !llmProviders.isLoading"));
+
+        let onboarding = asset_text("js/pages/onboarding/onboarding-page.js");
+        assert!(onboarding.contains("if (!isAdmin)"));
+        assert!(onboarding.contains("OperatorOnboardingPage"));
     }
 
     #[test]

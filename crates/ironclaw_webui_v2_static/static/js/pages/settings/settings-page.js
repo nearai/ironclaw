@@ -15,9 +15,11 @@ import { useSettings } from "./hooks/useSettings.js";
 
 export function SettingsPage() {
   const t = useT();
-  const { tab = "inference" } = useParams();
+  const { tab: requestedTab } = useParams();
   const navigate = useNavigate();
   const { gatewayStatus, gatewayStatusQuery, isAdmin = false } = useOutletContext();
+  const defaultTab = isAdmin ? "inference" : "language";
+  const tab = requestedTab || defaultTab;
   const {
     settings,
     query,
@@ -35,8 +37,8 @@ export function SettingsPage() {
   }, [tab]);
 
   const handleBack = React.useCallback(() => {
-    navigate("/settings/inference");
-  }, [navigate]);
+    navigate(`/settings/${defaultTab}`);
+  }, [defaultTab, navigate]);
 
   const isLoading = query.isLoading;
 
@@ -70,8 +72,8 @@ export function SettingsPage() {
     language: html`<${LanguageTab} searchQuery=${searchQuery} />`,
   };
 
-  if (!tabContent[tab] || (!isAdmin && tab === "users")) {
-    return html`<${Navigate} to="/settings/inference" replace />`;
+  if (!tabContent[tab] || (!isAdmin && (tab === "users" || tab === "inference"))) {
+    return html`<${Navigate} to=${`/settings/${defaultTab}`} replace />`;
   }
 
   return html`

@@ -29,8 +29,13 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
   // avoid a redirect loop. Defaults are not treated as "configured" — the gate
   // keys off the honest `hasActiveProvider` (a persisted selection).
   const location = useLocation();
-  const llmProviders = useLlmProviders({ settings: {}, gatewayStatus: status });
-  const needsOnboarding = !llmProviders.isLoading && !llmProviders.hasActiveProvider;
+  const llmProviders = useLlmProviders({
+    settings: {},
+    gatewayStatus: status,
+    enabled: isAdmin,
+  });
+  const needsOnboarding =
+    isAdmin && !llmProviders.isLoading && !llmProviders.hasActiveProvider;
   const onboardingExempt =
     location.pathname === "/welcome" || location.pathname.startsWith("/settings");
 

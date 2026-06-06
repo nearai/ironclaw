@@ -5,7 +5,10 @@ import { SETTINGS_TABS } from "../lib/settings-schema.js";
 
 function useVisibleTabs(isAdmin) {
   return React.useMemo(
-    () => SETTINGS_TABS.filter((tab) => isAdmin || tab.id !== "users"),
+    () =>
+      SETTINGS_TABS.filter(
+        (tab) => isAdmin || (tab.id !== "users" && tab.id !== "inference")
+      ),
     [isAdmin]
   );
 }
