@@ -3,7 +3,7 @@
 mod reborn_support;
 mod support;
 
-use std::{collections::BTreeSet, time::Duration};
+use std::time::Duration;
 
 use ironclaw_host_api::CapabilityId;
 use ironclaw_host_runtime::{
@@ -18,55 +18,20 @@ use ironclaw_loop_support::{
 use ironclaw_turns::TurnStatus;
 use reborn_support::{
     config::WaitConfig,
-    harness::{
+    extension_surface::{
         BUNDLED_EXTENSION_CAPABILITY_IDS, BUNDLED_EXTENSION_IDS, EXTENSION_ACTIVATE_CAPABILITY_ID,
         EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
-        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID, RebornBinaryE2EHarness,
-        RecordingTestCapabilityPort,
+        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     },
+    harness::{RebornBinaryE2EHarness, RecordingTestCapabilityPort},
     model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
     },
 };
 
-const QA_SCENARIOS: &[&str] = &[
-    "three_step_time_write_read_summary",
-    "session_continuity_write_read_append",
-    "automation_heartbeat_smoke",
-    "paused_cron_automation_smoke",
-    "subagent_capability_smoke",
-    "skill_discovery_smoke",
-    "skill_invocation_smoke",
-    "browser_integration_smoke",
-    "local_browser_interaction_smoke",
-    "mcp_discovery_smoke",
-    "plugin_capability_smoke",
-    "github_capability_smoke",
-    "document_artifact_smoke",
-    "spreadsheet_artifact_smoke",
-    "presentation_artifact_smoke",
-    "image_generation_smoke",
-    "error_handling_smoke",
-    "long_running_process_smoke",
-    "repo_read_only_review_smoke",
-    "approval_boundary_smoke",
-    "patch_isolation_smoke",
-    "cleanup_verification_smoke",
-];
-
-const COVERED_QA_SCENARIOS: &[&str] = QA_SCENARIOS;
-
 #[test]
 fn every_pasted_qa_scenario_has_reborn_e2e_coverage() {
-    let expected = QA_SCENARIOS.iter().copied().collect::<BTreeSet<_>>();
-    let covered = COVERED_QA_SCENARIOS
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        expected, covered,
-        "each pasted QA smoke scenario must be represented in Reborn e2e coverage"
-    );
+    reborn_support::qa_scenarios::assert_all_covered();
 }
 
 #[tokio::test]
