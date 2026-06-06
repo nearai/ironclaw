@@ -11,7 +11,12 @@
 
 ## What This Crate Owns
 
-- Memory document services, backend adapters, metadata/search, filesystem projection, and prompt-context safety seams.
+- The memory-document system over host-resolved scope, currently:
+- Document repositories + backend plugin contracts: `MemoryDocumentRepository` with `FilesystemMemoryDocumentRepository`/`InMemoryMemoryDocumentRepository`, `MemoryBackend`/`RepositoryMemoryBackend`/`MemoryBackendCapabilities` (`repo`, `backend`).
+- `/memory` virtual path grammar and scope: `MemoryDocumentPath`, `MemoryDocumentScope` (`path`); document metadata/options `DocumentMetadata`, `HygieneMetadata`, `MemoryWriteOptions`, `CONFIG_FILE_NAME` (`metadata`) and internal schema validation (`schema`).
+- Chunking + content hashing (`ChunkConfig`, `chunk_document`, `content_sha256`), embedding provider seam (`EmbeddingProvider`), and the indexer hooks `MemoryDocumentIndexer`/`ChunkingMemoryDocumentIndexer`/`MemoryDocumentIndexRepository` (`chunking`, `embedding`, `indexer`).
+- Hybrid search (FTS + vector via RRF fusion): `MemorySearchRequest`, `MemorySearchResult`, `FusionStrategy` (`search`).
+- The memory-document filesystem adapter `MemoryDocumentFilesystem`/`MemoryBackendFilesystemAdapter` (`filesystem`), the significant-event sink (`MemorySignificantEvent*`, `events`), and the prompt-write safety policy `PromptWriteSafetyPolicy` + protected-path/decision/event types (`safety`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

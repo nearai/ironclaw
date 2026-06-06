@@ -11,7 +11,18 @@
 
 ## What This Crate Owns
 
-- Shared authority vocabulary and neutral host contracts: IDs, scopes, paths, actions, decisions, resources, approvals, audit, HTTP, dispatch, runtime-policy, and trust types.
+- Shared authority vocabulary and neutral host contracts, currently:
+- Validated IDs (`ids`) and the per-invocation authority envelope `ExecutionContext` (`scope`).
+- Host-internal/virtual/scoped paths (`path`) and mount permissions/grants/views (`mount`).
+- Capability descriptors, grants, sets, constraints, `EffectKind`, `PermissionMode` (`capability`), plus capability-profile schema/operation/contract types (`capability_profile`).
+- Requested effects, host decisions, obligations, and approval scopes (`action`, `decision`, `approval`).
+- Budget/resource scopes, estimates, usage, and quota contracts (`resource`).
+- Redacted durable audit envelopes (`audit`).
+- HTTP vocabulary (`http`) and host-owned ingress route/policy descriptors — `IngressPolicy`, route/listener/auth/rate-limit/CORS/streaming enums (`ingress`).
+- Dispatch port contracts (`dispatch`) and host-port catalog/grant/view types (`host_port`, incl. `HOST_RUNTIME_HTTP_EGRESS_PORT_ID`).
+- Runtime vocabulary `RuntimeKind`/`TrustClass` (`runtime`) and deployment-mode/profile/effective runtime-policy types (`runtime_policy`).
+- Requested-trust vocabulary and `PackageIdentity` (`trust`).
+- The crate error type `HostApiError` (`error`) and the canonical `Timestamp` alias.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

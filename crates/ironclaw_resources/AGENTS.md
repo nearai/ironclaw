@@ -11,7 +11,10 @@
 
 ## What This Crate Owns
 
-- Resource reservation governor for runtime/process/network/provider/artifact budgets.
+- Resource reservation, reconciliation, release, and quota accounting, currently:
+- The `ResourceGovernor` trait with `InMemoryResourceGovernor` and `PersistentResourceGovernor`; the `ResourceGovernorStore` trait with `JsonFileResourceGovernorStore` / `FilesystemResourceGovernorStore` backends.
+- Budget dimensions (`ResourceDimension`: `Usd`, `InputTokens`, `OutputTokens`, `WallClockMs`, `OutputBytes`, `NetworkEgressBytes`, `ProcessCount`, `ConcurrencySlots`) scoped by `ResourceAccount` (tenant/user/project/agent/mission/thread), with `ResourceLimits`, `ResourceValue`, `ResourceTally`, `ResourceDenial`, `ResourceError`, `ResourceGovernorSnapshot`.
+- Reservation/receipt vocabulary `ResourceReservation` / `ResourceReceipt`, re-exported from `ironclaw_host_api`.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here
