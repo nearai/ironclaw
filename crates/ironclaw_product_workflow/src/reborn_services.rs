@@ -1310,10 +1310,10 @@ impl RebornServicesApi for RebornServices {
 impl RebornServices {
     fn thread_operation_lock(&self, scope: &TurnScope) -> Arc<AsyncMutex<()>> {
         let key = thread_operation_key(scope);
-        let mut locks = self
-            .thread_operation_locks
-            .lock()
-            .expect("thread operation lock map poisoned");
+        let mut locks = match self.thread_operation_locks.lock() {
+            Ok(locks) => locks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         locks.retain(|_, lock| lock.strong_count() > 0);
         if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
             return lock;
