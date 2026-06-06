@@ -15,39 +15,14 @@ pub(crate) trait ProfileApprovalGatePolicy: Send + Sync {
     ) -> bool;
 }
 
-pub(crate) struct ProfileApprovalAuthorizerConfig {
-    pub(crate) profile_label: &'static str,
-    pub(crate) approval_policy: ApprovalPolicy,
-    pub(crate) gate_policy: Arc<dyn ProfileApprovalGatePolicy>,
-}
-
 pub(crate) fn profile_approval_authorizer(
-    config: ProfileApprovalAuthorizerConfig,
+    approval_policy: ApprovalPolicy,
+    gate_policy: Arc<dyn ProfileApprovalGatePolicy>,
 ) -> Arc<dyn TrustAwareCapabilityDispatchAuthorizer> {
-    match config.approval_policy {
-        // Minimal ~ yolo: skip approval gates entirely and delegate to
-        // the grant authorizer only. Warn so misconfiguration is visible.
-        ApprovalPolicy::Minimal => {
-            tracing::warn!(
-                profile = config.profile_label,
-                "runtime profile is using ApprovalPolicy::Minimal; all capability gates are disabled"
-            );
-            Arc::new(GrantAuthorizer::new())
-        }
-        ApprovalPolicy::AskAlways
-        | ApprovalPolicy::AskWrites
-        | ApprovalPolicy::AskDestructive
-        | ApprovalPolicy::OrgPolicy => Arc::new(ProfileApprovalPolicyAuthorizer::new(
-            config.approval_policy,
-            config.gate_policy,
-        )),
-        // Any future ApprovalPolicy variants default to the gating authorizer
-        // (fail toward requiring approval rather than disabling gates).
-        _ => Arc::new(ProfileApprovalPolicyAuthorizer::new(
-            config.approval_policy,
-            config.gate_policy,
-        )),
-    }
+    Arc::new(ProfileApprovalPolicyAuthorizer::new(
+        approval_policy,
+        gate_policy,
+    ))
 }
 
 struct ProfileApprovalPolicyAuthorizer {
@@ -314,11 +289,7 @@ mod tests {
     fn test_authorizer(
         approval_policy: ApprovalPolicy,
     ) -> Arc<dyn TrustAwareCapabilityDispatchAuthorizer> {
-        profile_approval_authorizer(ProfileApprovalAuthorizerConfig {
-            profile_label: "test-profile",
-            approval_policy,
-            gate_policy: Arc::new(TestGatePolicy),
-        })
+        profile_approval_authorizer(approval_policy, Arc::new(TestGatePolicy))
     }
 
     #[tokio::test]

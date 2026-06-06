@@ -7,10 +7,12 @@ use ironclaw_approvals::LeaseApproval;
 use ironclaw_host_api::{
     Action, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern, PackageId,
-    Principal, runtime_policy::ApprovalPolicy,
+    Principal,
 };
 use serde::Deserialize;
 use thiserror::Error;
+
+use crate::runtime_profile_approval_policy::RuntimeProfileApprovalGateEffectSets;
 
 const LOCAL_DEV_CAPABILITY_POLICY_TOML: &str = include_str!("local_dev_capability_policy.toml");
 
@@ -160,27 +162,11 @@ impl LocalDevCapabilityPolicy {
         })
     }
 
-    pub(crate) fn effects_require_approval(
-        &self,
-        approval_policy: ApprovalPolicy,
-        effects: &[EffectKind],
-    ) -> bool {
-        match approval_policy {
-            ApprovalPolicy::Minimal => false,
-            ApprovalPolicy::AskAlways => !effects.is_empty(),
-            ApprovalPolicy::AskWrites => effects
-                .iter()
-                .any(|effect| self.approval_gates.ask_writes.contains(effect)),
-            ApprovalPolicy::AskDestructive => effects
-                .iter()
-                .any(|effect| self.approval_gates.ask_destructive.contains(effect)),
-            // OrgPolicy is resolved server-side; if it reaches local composition
-            // unresolved, fail toward prompting (require approval).
-            ApprovalPolicy::OrgPolicy => !effects.is_empty(),
-            // Any future ApprovalPolicy variants default to fail-safe: require
-            // approval for non-empty effects rather than silently disabling gates.
-            _ => !effects.is_empty(),
-        }
+    pub(crate) fn approval_gate_effects(&self) -> RuntimeProfileApprovalGateEffectSets {
+        RuntimeProfileApprovalGateEffectSets::new(
+            self.approval_gates.ask_writes.clone(),
+            self.approval_gates.ask_destructive.clone(),
+        )
     }
 }
 
@@ -441,14 +427,12 @@ mod tests {
                 EffectKind::Network,
             ]
         );
+        let gate_effects = policy.approval_gate_effects();
+        assert!(gate_effects.ask_writes.contains(&EffectKind::SpawnProcess));
         assert!(
-            policy.effects_require_approval(
-                ApprovalPolicy::AskDestructive,
-                &[EffectKind::SpawnProcess]
-            )
-        );
-        assert!(
-            !policy.effects_require_approval(ApprovalPolicy::Minimal, &[EffectKind::SpawnProcess])
+            gate_effects
+                .ask_destructive
+                .contains(&EffectKind::SpawnProcess)
         );
         assert!(
             policy

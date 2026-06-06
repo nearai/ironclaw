@@ -1,27 +1,13 @@
 use std::sync::Arc;
 
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_host_api::{
-    EffectKind,
-    runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
-};
+use ironclaw_host_api::runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy, RuntimeProfile};
 
 use crate::{
     local_dev_capability_policy::LocalDevCapabilityPolicy,
-    profile_approval_authorization::{
-        ProfileApprovalAuthorizerConfig, ProfileApprovalGatePolicy, profile_approval_authorizer,
-    },
+    profile_approval_authorization::{ProfileApprovalGatePolicy, profile_approval_authorizer},
+    runtime_profile_approval_policy::RuntimeProfileApprovalGatePolicy,
 };
-
-impl ProfileApprovalGatePolicy for LocalDevCapabilityPolicy {
-    fn effects_require_approval(
-        &self,
-        approval_policy: ApprovalPolicy,
-        effects: &[EffectKind],
-    ) -> bool {
-        LocalDevCapabilityPolicy::effects_require_approval(self, approval_policy, effects)
-    }
-}
 
 pub(crate) fn local_dev_authorizer(
     runtime_policy: Option<&EffectiveRuntimePolicy>,
@@ -30,9 +16,12 @@ pub(crate) fn local_dev_authorizer(
     let approval_policy = runtime_policy
         .map(|policy| policy.approval_policy)
         .unwrap_or(ApprovalPolicy::AskDestructive);
-    profile_approval_authorizer(ProfileApprovalAuthorizerConfig {
-        profile_label: "local-dev",
-        approval_policy,
-        gate_policy: capability_policy,
-    })
+    let resolved_profile = runtime_policy
+        .map(|policy| policy.resolved_profile)
+        .unwrap_or(RuntimeProfile::LocalDev);
+    let gate_effects = capability_policy.approval_gate_effects();
+    let gate_policy: Arc<dyn ProfileApprovalGatePolicy> = Arc::new(
+        RuntimeProfileApprovalGatePolicy::new(resolved_profile, gate_effects),
+    );
+    profile_approval_authorizer(approval_policy, gate_policy)
 }
