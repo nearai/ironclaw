@@ -231,7 +231,7 @@ impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTranspor
         ironclaw_host_runtime::RuntimeProcessError,
     > {
         let command = request.command.clone();
-        self.requests.lock().unwrap().push(request);
+        self.requests.lock().unwrap().push(request); // safety: test transport records requests under #[cfg(test)].
         Ok(ironclaw_host_runtime::CommandExecutionOutput {
             output: format!("sandbox port: {command}"),
             saved_output: None,
@@ -318,8 +318,8 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
 }
 
 fn shell_execution_context(user_id: &str, thread_id: &str) -> ExecutionContext {
-    let extension_id = ExtensionId::new("local-dev-test-loop").expect("extension id");
-    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
+    let extension_id = ExtensionId::new("local-dev-test-loop").expect("extension id"); // safety: static test id is valid.
+    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: static test id is valid.
     let grantee = Principal::Extension(extension_id.clone());
     let grants = CapabilitySet {
         grants: vec![CapabilityGrant {
@@ -339,18 +339,18 @@ fn shell_execution_context(user_id: &str, thread_id: &str) -> ExecutionContext {
         }],
     };
     let mut context = ExecutionContext::local_default(
-        UserId::new(user_id).expect("user id"),
+        UserId::new(user_id).expect("user id"), // safety: callers pass static valid test ids.
         extension_id,
         RuntimeKind::FirstParty,
         TrustClass::UserTrusted,
         grants,
         MountView::default(),
     )
-    .expect("execution context");
-    let thread_id = ThreadId::new(thread_id).expect("thread id");
+    .expect("execution context"); // safety: fixed test context should validate.
+    let thread_id = ThreadId::new(thread_id).expect("thread id"); // safety: callers pass static valid test ids.
     context.thread_id = Some(thread_id.clone());
     context.resource_scope.thread_id = Some(thread_id);
-    context.validate().expect("thread-scoped context");
+    context.validate().expect("thread-scoped context"); // safety: fixed test context should validate.
     context
 }
 
@@ -392,7 +392,7 @@ async fn approve_shell_dispatch(
         shell_lease_approval(),
     )
     .await
-    .expect("approval issues shell lease");
+    .expect("approval issues shell lease"); // safety: test resolver should accept fixed approval.
 }
 
 fn shell_lease_approval() -> LeaseApproval {
@@ -637,8 +637,8 @@ async fn local_dev_ask_destructive_spawn_dispatch_only_capability_requires_appro
 }
 
 fn echo_spawn_execution_context(user_id: &str, thread_id: &str) -> ExecutionContext {
-    let extension_id = ExtensionId::new("local-dev-test-loop").expect("extension id");
-    let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
+    let extension_id = ExtensionId::new("local-dev-test-loop").expect("extension id"); // safety: static test id is valid.
+    let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability"); // safety: static test id is valid.
     let grantee = Principal::Extension(extension_id.clone());
     let grants = CapabilitySet {
         grants: vec![CapabilityGrant {
@@ -658,18 +658,18 @@ fn echo_spawn_execution_context(user_id: &str, thread_id: &str) -> ExecutionCont
         }],
     };
     let mut context = ExecutionContext::local_default(
-        UserId::new(user_id).expect("user id"),
+        UserId::new(user_id).expect("user id"), // safety: callers pass static valid test ids.
         extension_id,
         RuntimeKind::FirstParty,
         TrustClass::UserTrusted,
         grants,
         MountView::default(),
     )
-    .expect("execution context");
-    let thread_id = ThreadId::new(thread_id).expect("thread id");
+    .expect("execution context"); // safety: fixed test context should validate.
+    let thread_id = ThreadId::new(thread_id).expect("thread id"); // safety: callers pass static valid test ids.
     context.thread_id = Some(thread_id.clone());
     context.resource_scope.thread_id = Some(thread_id);
-    context.validate().expect("thread-scoped context");
+    context.validate().expect("thread-scoped context"); // safety: fixed test context should validate.
     context
 }
 

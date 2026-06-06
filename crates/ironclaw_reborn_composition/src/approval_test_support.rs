@@ -22,12 +22,12 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
     let runtime = services
         .host_runtime
         .as_ref()
-        .expect("host runtime composed");
+        .expect("host runtime composed"); // safety: test-only helper in #[cfg(test)] module.
     let local_runtime = services
         .local_runtime
         .as_ref()
-        .expect("local-dev runtime substrate");
-    let capability = CapabilityId::new(capability_id).expect("valid capability id");
+        .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
+    let capability = CapabilityId::new(capability_id).expect("valid capability id"); // safety: test-only helper in #[cfg(test)] module.
     let estimate = ResourceEstimate::default();
     let outcome = runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -38,7 +38,7 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
             trust_decision.clone(),
         ))
         .await
-        .expect("runtime invocation completes");
+        .expect("runtime invocation completes"); // safety: test-only helper in #[cfg(test)] module.
     match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
         RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
@@ -47,8 +47,8 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
                 .approval_requests
                 .get(&context.resource_scope, gate.approval_request_id)
                 .await
-                .expect("local-dev approval record read")
-                .expect("local-dev approval request persisted");
+                .expect("local-dev approval record read") // safety: test-only helper in #[cfg(test)] module.
+                .expect("local-dev approval request persisted"); // safety: test-only helper in #[cfg(test)] module.
             let policy_action = LocalDevApprovalPolicyAction::from_host_action(
                 approval_record.request.action.as_ref(),
             )
@@ -79,11 +79,11 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
                 Action::Dispatch { .. } => resolver
                     .approve_dispatch(&context.resource_scope, gate.approval_request_id, approval)
                     .await
-                    .expect("local-dev approval issues dispatch resume lease"),
+                    .expect("local-dev approval issues dispatch resume lease"), // safety: test-only helper in #[cfg(test)] module.
                 Action::SpawnCapability { .. } => resolver
                     .approve_spawn(&context.resource_scope, gate.approval_request_id, approval)
                     .await
-                    .expect("local-dev approval issues spawn resume lease"),
+                    .expect("local-dev approval issues spawn resume lease"), // safety: test-only helper in #[cfg(test)] module.
                 other => panic!("unexpected local-dev approval action: {other:?}"),
             };
 
@@ -97,7 +97,7 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
                     trust_decision,
                 ))
                 .await
-                .expect("approved runtime invocation resumes");
+                .expect("approved runtime invocation resumes"); // safety: test-only helper in #[cfg(test)] module.
             match resumed {
                 RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
                 RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
@@ -120,7 +120,7 @@ fn lease_approval_from_context(
         .grants
         .iter()
         .find(|grant| &grant.capability == capability)
-        .expect("matching test capability grant")
+        .expect("matching test capability grant") // safety: test-only helper in #[cfg(test)] module.
         .constraints
         .clone();
     LeaseApproval {
