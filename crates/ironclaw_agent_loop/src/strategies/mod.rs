@@ -27,7 +27,6 @@ pub(crate) mod gate;
 mod model;
 pub mod progress;
 pub(crate) mod recovery;
-pub(crate) mod repeated_call_guard;
 mod reply_admission;
 mod stop;
 

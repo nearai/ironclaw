@@ -45,6 +45,7 @@ pub(super) struct PromptOutput {
     pub(super) surface: VisibleCapabilitySurface,
     pub(super) messages: Vec<ironclaw_turns::run_profile::LoopModelMessage>,
     pub(super) capability_view: LoopModelCapabilityView,
+    pub(super) rendered_repeated_call_warning: bool,
 }
 
 pub(super) enum PromptStep {
@@ -222,21 +223,7 @@ impl<'a> PromptPlanningPipeline<'a> {
         if final_bundle.rendered_reply_admission_control() {
             self.state.reply_admission_state.pending_rejection_rendered = true;
         }
-        if final_bundle.rendered_repeated_call_warning() {
-            self.state.stop_state.mark_repeated_call_warning_rendered();
-            CheckpointStage
-                .emit_progress(
-                    self.ctx,
-                    LoopProgressEvent::driver_note(
-                        ironclaw_turns::run_profile::LoopDriverNoteKind::Planning,
-                        "repeated capability call warning rendered",
-                    )
-                    .map_err(|_| AgentLoopExecutorError::PlannerContract {
-                        detail: "repeated-call warning progress summary was invalid",
-                    })?,
-                )
-                .await;
-        }
+        let rendered_repeated_call_warning = final_bundle.rendered_repeated_call_warning();
 
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
             state: self.state,
@@ -244,6 +231,7 @@ impl<'a> PromptPlanningPipeline<'a> {
             surface,
             messages: final_bundle.into_messages(),
             capability_view,
+            rendered_repeated_call_warning,
         })))
     }
 

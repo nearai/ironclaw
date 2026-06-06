@@ -5,10 +5,9 @@ use ironclaw_turns::{
     LoopFailureKind, LoopMessageRef, LoopResultRef, run_profile::CapabilityProgress,
 };
 
-use crate::state::{LoopExecutionState, StopStrategyState};
-
-use super::repeated_call_guard::{
-    observe_repeated_call_warning, repeated_call_warning_is_terminal_ready,
+use crate::state::{
+    CapabilityCallSignature, LoopExecutionState, RepeatedCallWarningPhase,
+    RepeatedCallWarningState, StopStrategyState,
 };
 
 /// Observes completed turns and decides whether the loop should stop.
@@ -83,7 +82,7 @@ impl TurnSummary {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CapabilityBatchTurnSummary {
     /// Number of capability invocations in the executed batch.
     pub invocation_count: u32,
@@ -92,6 +91,12 @@ pub(crate) struct CapabilityBatchTurnSummary {
     /// Count of completed results in the batch whose typed progress said no
     /// evidence/state changed.
     pub no_progress_count: u32,
+    /// Completed-call signatures observed in this batch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_signatures: Vec<CapabilityCallSignature>,
+    /// Completed-call signatures that explicitly reported new evidence/state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub made_progress_signatures: Vec<CapabilityCallSignature>,
 }
 
 impl CapabilityBatchTurnSummary {
@@ -100,19 +105,39 @@ impl CapabilityBatchTurnSummary {
             invocation_count: invocation_count as u32,
             terminate_hint_count: 0,
             no_progress_count: 0,
+            observed_signatures: Vec::new(),
+            made_progress_signatures: Vec::new(),
         }
     }
 
-    pub(crate) fn record_result(&mut self, progress: CapabilityProgress, terminate_hint: bool) {
+    pub(crate) fn record_result(
+        &mut self,
+        signature: CapabilityCallSignature,
+        progress: CapabilityProgress,
+        terminate_hint: bool,
+    ) {
+        push_unique_signature(&mut self.observed_signatures, signature.clone());
         if matches!(
             progress,
             CapabilityProgress::NoChange | CapabilityProgress::Blocked
         ) {
             self.no_progress_count = self.no_progress_count.saturating_add(1);
         }
+        if progress == CapabilityProgress::MadeProgress {
+            push_unique_signature(&mut self.made_progress_signatures, signature);
+        }
         if terminate_hint {
             self.terminate_hint_count = self.terminate_hint_count.saturating_add(1);
         }
+    }
+}
+
+fn push_unique_signature(
+    signatures: &mut Vec<CapabilityCallSignature>,
+    signature: CapabilityCallSignature,
+) {
+    if !signatures.contains(&signature) {
+        signatures.push(signature);
     }
 }
 
@@ -348,6 +373,95 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepeatedCallObservation {
+    signature: CapabilityCallSignature,
+}
+
+fn dominant_repeated_call(
+    state: &LoopExecutionState,
+    window: usize,
+    threshold: usize,
+) -> Option<RepeatedCallObservation> {
+    let (signature, count) = state.recent_call_signatures.most_common_in(window)?;
+    if count < threshold {
+        return None;
+    }
+    Some(RepeatedCallObservation { signature })
+}
+
+fn observe_repeated_call_warning(
+    state: &LoopExecutionState,
+    just_completed: &TurnSummary,
+    mut stop_state: StopStrategyState,
+    window: usize,
+    threshold: usize,
+) -> StopStrategyState {
+    let Some(repeated) = dominant_repeated_call(state, window, threshold) else {
+        stop_state.repeated_call_warning = None;
+        return stop_state;
+    };
+
+    stop_state.repeated_call_warning = match state.stop_state.repeated_call_warning.as_ref() {
+        Some(existing) if existing.signature == repeated.signature => {
+            transition_existing_warning(existing, just_completed, repeated.signature)
+        }
+        _ => Some(RepeatedCallWarningState::pending_render(repeated.signature)),
+    };
+    stop_state
+}
+
+fn repeated_call_warning_is_terminal_ready(state: &LoopExecutionState) -> bool {
+    state
+        .stop_state
+        .repeated_call_warning
+        .as_ref()
+        .is_some_and(|warning| warning.phase == RepeatedCallWarningPhase::TerminalReady)
+}
+
+fn transition_existing_warning(
+    existing: &RepeatedCallWarningState,
+    just_completed: &TurnSummary,
+    signature: CapabilityCallSignature,
+) -> Option<RepeatedCallWarningState> {
+    match existing.phase {
+        RepeatedCallWarningPhase::PendingRender => {
+            Some(RepeatedCallWarningState::pending_render(signature))
+        }
+        RepeatedCallWarningPhase::Rendered => {
+            if signature_made_progress(just_completed, &signature) {
+                None
+            } else if signature_observed(just_completed, &signature) {
+                Some(RepeatedCallWarningState::terminal_ready(signature))
+            } else {
+                Some(RepeatedCallWarningState::rendered(signature))
+            }
+        }
+        RepeatedCallWarningPhase::TerminalReady => {
+            Some(RepeatedCallWarningState::terminal_ready(signature))
+        }
+    }
+}
+
+fn signature_observed(just_completed: &TurnSummary, signature: &CapabilityCallSignature) -> bool {
+    just_completed.kind == TurnEndKind::AfterCapabilityBatch
+        && just_completed
+            .capability_batch
+            .observed_signatures
+            .contains(signature)
+}
+
+fn signature_made_progress(
+    just_completed: &TurnSummary,
+    signature: &CapabilityCallSignature,
+) -> bool {
+    just_completed.kind == TurnEndKind::AfterCapabilityBatch
+        && just_completed
+            .capability_batch
+            .made_progress_signatures
+            .contains(signature)
+}
+
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
@@ -452,11 +566,11 @@ mod tests {
             AgentLoopDriverDescriptor, LoopFailureKind, LoopMessageRef, RunProfileId,
             RunProfileVersion, TurnId, TurnRunId, TurnScope,
             run_profile::{
-                CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-                CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
-                LoopRunContext, ModelProfileId, RedactedRunProfileProvenance, ResolvedRunProfile,
-                ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-                RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+                CancellationPolicy, CapabilityProgress, CapabilitySurfaceProfileId,
+                CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContextProfileId,
+                LoopDriverId, LoopRunContext, ModelProfileId, RedactedRunProfileProvenance,
+                ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
+                RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
             },
         };
         use serde_json::json;
@@ -615,6 +729,7 @@ mod tests {
                 invocation_count: 3,
                 terminate_hint_count: 3,
                 no_progress_count: 0,
+                ..CapabilityBatchTurnSummary::default()
             });
 
             let (state, outcome) = observe_and_decide(&strategy, state, summary).await;
@@ -636,6 +751,7 @@ mod tests {
                 invocation_count: 2,
                 terminate_hint_count: 1,
                 no_progress_count: 0,
+                ..CapabilityBatchTurnSummary::default()
             });
 
             let (_state, outcome) = observe_and_decide(&strategy, state, summary).await;
@@ -706,6 +822,7 @@ mod tests {
                         invocation_count: 0,
                         terminate_hint_count: 0,
                         no_progress_count: 0,
+                        ..CapabilityBatchTurnSummary::default()
                     },
                 },
             )
@@ -752,11 +869,9 @@ mod tests {
             }
             state.stop_state.repeated_call_warning =
                 Some(RepeatedCallWarningState::rendered(signature.clone()));
-            let summary = after_batch_with_capability_summary(CapabilityBatchTurnSummary {
-                invocation_count: 1,
-                terminate_hint_count: 0,
-                no_progress_count: 1,
-            });
+            let mut capability_batch = CapabilityBatchTurnSummary::for_invocation_count(1);
+            capability_batch.record_result(signature.clone(), CapabilityProgress::NoChange, false);
+            let summary = after_batch_with_capability_summary(capability_batch);
 
             let (state, outcome) = observe_and_decide(&strategy, state, summary).await;
 
@@ -775,6 +890,74 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn rendered_repeated_signature_warning_and_unknown_progress_triggers_no_progress() {
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            let signature = CapabilityCallSignature::from_call(
+                CapabilityId::new("demo.echo").expect("valid"),
+                &json!({"x": 1}),
+            )
+            .expect("valid call signature");
+            for _ in 0..3 {
+                state.recent_call_signatures.push(signature.clone());
+            }
+            state.stop_state.repeated_call_warning =
+                Some(RepeatedCallWarningState::rendered(signature.clone()));
+            let mut capability_batch = CapabilityBatchTurnSummary::for_invocation_count(1);
+            capability_batch.record_result(signature.clone(), CapabilityProgress::Unknown, false);
+            let summary = after_batch_with_capability_summary(capability_batch);
+
+            let (state, outcome) = observe_and_decide(&strategy, state, summary).await;
+
+            assert!(matches!(
+                outcome,
+                StopOutcome::Stop {
+                    kind: StopKind::NoProgressDetected
+                }
+            ));
+            let warning = state
+                .stop_state
+                .repeated_call_warning
+                .expect("repeated call warning should terminalize");
+            assert_eq!(warning.signature, signature);
+            assert_eq!(warning.phase, RepeatedCallWarningPhase::TerminalReady);
+        }
+
+        #[tokio::test]
+        async fn rendered_warning_ignores_no_progress_from_different_signature() {
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            let warned = CapabilityCallSignature::from_call(
+                CapabilityId::new("demo.echo").expect("valid"),
+                &json!({"x": 1}),
+            )
+            .expect("valid call signature");
+            let different = CapabilityCallSignature::from_call(
+                CapabilityId::new("demo.other").expect("valid"),
+                &json!({"x": 2}),
+            )
+            .expect("valid call signature");
+            for _ in 0..3 {
+                state.recent_call_signatures.push(warned.clone());
+            }
+            state.stop_state.repeated_call_warning =
+                Some(RepeatedCallWarningState::rendered(warned.clone()));
+            let mut capability_batch = CapabilityBatchTurnSummary::for_invocation_count(1);
+            capability_batch.record_result(different, CapabilityProgress::NoChange, false);
+            let summary = after_batch_with_capability_summary(capability_batch);
+
+            let (state, outcome) = observe_and_decide(&strategy, state, summary).await;
+
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
+            let warning = state
+                .stop_state
+                .repeated_call_warning
+                .expect("warning should remain rendered for the warned signature");
+            assert_eq!(warning.signature, warned);
+            assert_eq!(warning.phase, RepeatedCallWarningPhase::Rendered);
+        }
+
+        #[tokio::test]
         async fn three_typed_no_progress_batches_trigger_no_progress() {
             let strategy = DefaultStopConditionStrategy::default();
             let mut state = LoopExecutionState::initial_for_run(&test_run_context());
@@ -782,6 +965,7 @@ mod tests {
                 invocation_count: 1,
                 terminate_hint_count: 0,
                 no_progress_count: 1,
+                ..CapabilityBatchTurnSummary::default()
             });
 
             for _ in 0..3 {
@@ -809,6 +993,7 @@ mod tests {
                 invocation_count: 2,
                 terminate_hint_count: 0,
                 no_progress_count: 1,
+                ..CapabilityBatchTurnSummary::default()
             });
 
             let (state, outcome) = observe_and_decide(&strategy, state, summary).await;
