@@ -384,9 +384,9 @@ Spec §2.2: Ed25519 per (scope, tenant); staged at `device_keys/pending/<invite-
 **Files:**
 - Create: `crates/ironclaw_reborn_traces/src/onboarding/device_key.rs`
 - Modify: `crates/ironclaw_reborn_traces/src/onboarding/mod.rs` (`pub mod device_key;`)
-- Modify: `crates/ironclaw_reborn_traces/Cargo.toml` — add `ed25519-dalek = { workspace = true }` and `rand = { workspace = true }` (both already in the workspace table; verify `rand` is there — if not, ed25519-dalek 2.x's `SigningKey::generate` needs `rand_core::OsRng`, available via the `rand` crate's re-export or `rand_core` directly; prefer whichever the workspace already centralizes).
+- Modify: `crates/ironclaw_reborn_traces/Cargo.toml` — add `ed25519-dalek = { workspace = true }` and `rand = { workspace = true }` to `[dependencies]` (both already in the workspace table; ed25519-dalek 2.x's `SigningKey::generate` needs `rand_core::OsRng` — ed25519-dalek 2.2 pairs with rand 0.8 via `rand_core`; there is no existing ed25519 keygen in this tree to copy, so this pairing is the idiom to use). Also add `tempfile = "3"` to `[dev-dependencies]` (currently the only dev-dep is `axum`; Tasks 3, 5 and 6 all use `tempfile::tempdir()`).
 
-Key derivation rule (must match server, see #137): `device_key_id = "sha256:" + lowercase hex of SHA-256 of the raw 32-byte public key`. Tenant hash for the promoted filename: same `scope_hash()` helper style — `hex SHA-256` of the tenant_id string (a private helper here; do not reuse `scope_hash` directly unless it is exactly sha256-hex, check `contribution.rs:3952` area first and reuse if identical).
+Key derivation rule (must match server, see #137): `device_key_id = "sha256:" + lowercase hex of SHA-256 of the raw 32-byte public key`. Tenant hash for the promoted filename: a private full-width helper here — `hex::encode(Sha256::digest(tenant_id))` (64 hex chars). Do NOT reuse the existing `scope_hash()` (contribution.rs:7701): it truncates to 16 bytes / 32 hex chars, which is not what we want for the tenant filename.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -492,7 +492,7 @@ mod tests {
 }
 ```
 
-(Add `tempfile` to `[dev-dependencies]` if not present — it is widely used in this workspace; check before adding.)
+(`tempfile` was added to `[dev-dependencies]` in the Files step above.)
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -684,7 +684,7 @@ pub auth_mode: TraceUploadAuthMode,
 pub device_key_id: Option<String>,
 ```
 
-And to its `Default` impl: `auth_mode: TraceUploadAuthMode::default(), device_key_id: None,`. Fix any struct-literal construction sites that now miss fields (the CLI opt-in builder in `ironclaw_reborn_cli/src/commands/traces/mod.rs:429-475` constructs the policy — `cargo check -p ironclaw_reborn_cli` will find them; add the two defaults there explicitly).
+And to its `Default` impl: `auth_mode: TraceUploadAuthMode::default(), device_key_id: None,`. Fix any struct-literal construction sites that now miss fields: the CLI opt-in builder constructs the policy as a struct literal at `ironclaw_reborn_cli/src/commands/traces/mod.rs:440`, and there may be more — grep `StandingTraceContributionPolicy {` (with the space-brace) across all of `crates/ironclaw_reborn_cli/src/commands/traces/` (`mod.rs`, `contributor.rs`, `shared.rs`, `tests.rs`) and `crates/ironclaw_reborn_traces/`; `cargo check -p ironclaw_reborn_traces -p ironclaw_reborn_cli` is the backstop. Add the two defaults explicitly at each site.
 
 - [ ] **Step 4: Run** — `cargo test -p ironclaw_reborn_traces legacy_policy_json device_key_policy && cargo check -p ironclaw_reborn_cli` — pass.
 
@@ -1069,7 +1069,14 @@ async fn issuer_request_bearer(
 }
 ```
 
-The call site in `fetch_trace_upload_claim_from_issuer` needs the scope dir — trace where the scope/`TraceUploadClaimContext` flows into that function and pass the already-computed `trace_contribution_dir_for_scope(...)` (the surrounding code resolves scope for the cache key; reuse the same source of truth). Also: in `DeviceKey` mode, do NOT include `invite_code` in the `TraceUploadClaimIssuerRequest` (spec: the registered key is the post-invite credential) — gate the existing `invite_code: policy.upload_token_invite_code.clone()` line on `auth_mode == WorkloadTokenEnv`.
+**Scope threading — this is a real refactor, budget for it.** The claim-fetch path does NOT currently know the user scope: `TraceUploadClaimContext` (contribution.rs:4331) carries only `trace_id`/`submission_id`/`consent_scopes`/`allowed_uses`, the `TraceUploadCredentialProvider::bearer_token` trait method (~contribution.rs:4602-4615) takes `(policy, context, force_refresh)` with no scope, and the claim cache key is built from policy+context. To give `issuer_request_bearer` a real `scope_dir` you must thread the scope down explicitly:
+
+1. Add `scope_dir: PathBuf` (or `scope: Option<String>` resolved to a dir at the leaf) to `TraceUploadClaimContext` — preferred over changing the trait signature, since the context already flows everywhere it's needed. Populate it wherever a `TraceUploadClaimContext` is constructed (grep `TraceUploadClaimContext {` across the crate and the CLI; each construction site already knows its scope — the CLI commands take `--user-scope`/default, the autonomous submit path has the runtime scope).
+2. Pass `context.scope_dir` into `issuer_request_bearer` from `fetch_trace_upload_claim_from_issuer`.
+3. Update every `TraceUploadCredentialProvider` impl and test fake (e.g. `RefreshingTestUploadCredentialProvider`, contribution.rs ~7867) for the new context field.
+4. Write a focused failing test FIRST for the threading itself: construct a `TraceUploadClaimContext` with a tempdir `scope_dir`, a `DeviceKey` policy, a promoted key in that dir, and assert `issuer_request_bearer` finds the key (this is the `device_key_auth_mode_self_signs_workload_jwt` test above — just be aware making it compile requires steps 1-3, not a lookup).
+
+Also: in `DeviceKey` mode, do NOT include `invite_code` in the `TraceUploadClaimIssuerRequest` (spec: the registered key is the post-invite credential) — gate the existing `invite_code: policy.upload_token_invite_code.clone()` line on `auth_mode == WorkloadTokenEnv`.
 
 - [ ] **Step 4: Run the full crate tests** — `cargo test -p ironclaw_reborn_traces` — all pass (regression check on the env path included).
 
@@ -1079,14 +1086,16 @@ The call site in `fetch_trace_upload_claim_from_issuer` needs the scope dir — 
 
 ### Task 7: Engine tools — `trace_commons.onboard` + `trace_commons.status`
 
-First-party capability pattern: `crates/ironclaw_host_runtime/src/first_party_tools/` (echo.rs is the template), registered in `builtin_first_party_handlers()` (mod.rs:88-106). The tool layer is thin: validate input, call `ironclaw_reborn_traces::onboarding::onboard()` / read policy+queue state, shape JSON output. **No key material in any output.**
+First-party capability pattern in `crates/ironclaw_host_runtime/src/first_party_tools/`. **Dispatch model (do not assume one-handler-per-file):** there is a single `impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools` in `mod.rs` (~line 144) that routes by `match request.capability_id.as_str()` (~line 152); files like `echo.rs`/`http.rs` are helper modules exposing a `manifest()` and a dispatch function the central match calls. `builtin_first_party_handlers()` (mod.rs:88-106) registers the *same* `Arc<BuiltinFirstPartyTools>` under each capability ID. So this task = new `trace_commons.rs` module with free functions + two match arms in the central dispatch + two `.with_handler(CapabilityId::new(...)?, handler.clone())` lines.
+
+The tool layer is thin: validate input, call `ironclaw_reborn_traces::onboarding::onboard()` / read policy+queue state, shape JSON output. **No key material in any output.** Scope source: `FirstPartyCapabilityRequest` carries `scope: ResourceScope` with a `user_id: UserId` (see `ironclaw_host_api/src/resource.rs`) — use `request.scope.user_id.as_str()` as the trace scope fed to `trace_contribution_dir_for_scope(Some(...))`/`onboard(scope, ...)`.
 
 **Files:**
 - Create: `crates/ironclaw_host_runtime/src/first_party_tools/trace_commons.rs`
 - Modify: `crates/ironclaw_host_runtime/src/first_party_tools/mod.rs` (module decl + two registrations)
 - Modify: `crates/ironclaw_host_runtime/Cargo.toml` (add `ironclaw_reborn_traces` dep if absent — check first; if adding, `{ path = "../ironclaw_reborn_traces" }` following neighboring entries)
 
-Before writing code, read `first_party_tools/echo.rs` and one richer handler (e.g. `http.rs` or `shell.rs`) end-to-end to copy the exact manifest/dispatch/registration idiom, including how async handlers receive scope/user identity — the onboard tool MUST derive the trace scope from the session's user identity the same way other per-user tools do (find how existing handlers obtain the acting user/scope from `FirstPartyCapabilityRequest`; if no first-party tool is scope-aware today, this is the one integration question to resolve against `FirstPartyCapabilityRequest`'s fields before coding — check its definition in ironclaw_host_runtime).
+Before writing code, read `first_party_tools/echo.rs` and one richer module (e.g. `http.rs` or `shell.rs`) end-to-end plus the central `match` in `mod.rs`, to copy the exact manifest/dispatch-arm/registration idiom.
 
 - [ ] **Step 1: Write failing tests** (same file, `#[cfg(test)]`)
 
@@ -1212,16 +1221,20 @@ CLAUDE.md testing rule: the onboarding helper gates side effects (HTTP, policy w
 
 **Files:**
 - Create: `crates/ironclaw_host_runtime/tests/trace_commons_onboard_e2e.rs` (or extend the crate's existing integration-test layout — check `crates/ironclaw_host_runtime/tests/` first and follow it)
+- Modify: `crates/ironclaw_host_runtime/Cargo.toml` — add `axum = "0.8"` (match the version `ironclaw_reborn_traces` uses) to `[dev-dependencies]`; it is not there today, not even as a dev-dep.
+
+**Base-dir redirection hazard:** `ironclaw_common::paths` honors the `IRONCLAW_BASE_DIR` env var, but it is read ONCE per process into a `LazyLock<PathBuf>` (paths.rs:13). This e2e test works only because integration tests under `tests/` compile to their own binary, so the LazyLock is fresh — set `IRONCLAW_BASE_DIR` to a tempdir at the very top of the test, before ANY call that could touch `ironclaw_base_dir()`. Never rely on `IRONCLAW_BASE_DIR` from inline `#[cfg(test)]` unit tests in this workspace (another test in the same binary may have initialized the LazyLock first) — unit tests must use the dir-parameterized APIs (`onboard_at_dir`, `load_for_tenant` with tempdirs) instead, which is exactly how Tasks 3-6 are written.
 
 - [ ] **Step 1: Write the test**
 
 Spin up the axum mock issuer (reuse/extract the Task 5 test helper into a `#[cfg(test)]`-shared location or duplicate the ~30 lines — duplication is acceptable across crates here rather than a new shared test crate). Then:
 
-1. Build the first-party registry via `builtin_first_party_handlers()`.
-2. Dispatch `builtin.trace_commons.onboard` with a `FirstPartyCapabilityRequest` carrying `confirmed: true` and the mock issuer's invite URL, against a temp `IRONCLAW`/base dir (check how tests redirect `ironclaw_base_dir()` — `ironclaw_common::paths` likely honors an env var like `IRONCLAW_HOME`; find the existing test idiom for path redirection and use it; if tests can't redirect the base dir, dispatch a thin handler wrapper that accepts a dir override for tests — prefer the env-var idiom if it exists).
-3. Assert the JSON result reports `enrolled: true`.
-4. Dispatch `builtin.trace_commons.status` and assert it reflects enrollment (`auth_mode: "device_key"`, correct tenant).
-5. Assert dispatching onboard with `confirmed: false` fails with the consent message and the mock issuer received no second request.
+1. Set `IRONCLAW_BASE_DIR` to a tempdir (first line of the test; see hazard note above).
+2. Build the first-party registry via `builtin_first_party_handlers()`.
+3. Dispatch `builtin.trace_commons.onboard` with a `FirstPartyCapabilityRequest` carrying `confirmed: true` and the mock issuer's invite URL.
+4. Assert the JSON result reports `enrolled: true`.
+5. Dispatch `builtin.trace_commons.status` and assert it reflects enrollment (`auth_mode: "device_key"`, correct tenant).
+6. Assert dispatching onboard with `confirmed: false` fails with the consent message and the mock issuer received no second request.
 
 - [ ] **Step 2: Run** — `cargo test -p ironclaw_host_runtime --test trace_commons_onboard_e2e` — pass.
 
