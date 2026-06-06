@@ -2611,7 +2611,7 @@ mod tests {
         CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
         NewCredentialAccount, ProviderScope,
     };
-    use ironclaw_authorization::GrantAuthorizer;
+    use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer};
     use ironclaw_filesystem::FilesystemError;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     use ironclaw_filesystem::{
@@ -2637,7 +2637,11 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use crate::{
-        extension_lifecycle::ExtensionActivationMode, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
+        extension_lifecycle::ExtensionActivationMode,
+        local_dev_capability_policy::{
+            LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
+        },
+        runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
 
     struct FailingConversationActorPairingService;
@@ -3139,6 +3143,20 @@ mod tests {
             .expect("activate Google Calendar");
 
         let gmail_context = gsuite_context("gmail.send_message");
+        let gmail_scope = gmail_context.resource_scope.clone();
+        let gmail_capability =
+            CapabilityId::new("gmail.send_message").expect("valid Gmail capability id");
+        assert!(matches!(
+            local_runtime.capability_policy.lease_approval_for(
+                LocalDevApprovalPolicyAction::Dispatch {
+                    capability: &gmail_capability,
+                },
+                &local_runtime.workspace_mounts,
+                &local_runtime.skill_mounts,
+                &local_runtime.memory_mounts,
+            ),
+            Err(LocalDevCapabilityPolicyError::MissingGrant { .. })
+        ));
         let auth_scope =
             AuthProductScope::new(gmail_context.resource_scope.clone(), AuthSurface::Api);
         services
@@ -3175,6 +3193,14 @@ mod tests {
         .expect_err("missing token should fail after approval resume");
         assert_ne!(failure, RuntimeFailureKind::Authorization);
         assert_ne!(failure, RuntimeFailureKind::MissingRuntime);
+        let gmail_leases = local_runtime
+            .capability_leases
+            .leases_for_scope(&gmail_scope)
+            .await;
+        assert_eq!(gmail_leases.len(), 1);
+        assert_eq!(gmail_leases[0].grant.issued_by, Principal::HostRuntime);
+        assert_eq!(gmail_leases[0].grant.constraints.max_invocations, Some(1));
+        assert_eq!(gmail_leases[0].status, CapabilityLeaseStatus::Revoked);
 
         let calendar_context = gsuite_context("google-calendar.create_event");
         let failure = invoke_json(
