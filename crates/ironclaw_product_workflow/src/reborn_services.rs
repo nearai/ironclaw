@@ -4,7 +4,10 @@
 //! instead of reaching into turn coordination, thread stores, runtime lanes, DB
 //! stores, dispatchers, or capability hosts directly.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex as StdMutex, Weak},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -28,6 +31,7 @@ use ironclaw_turns::{
     TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 use crate::{
@@ -82,6 +86,7 @@ type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError> + Send + Sync;
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
+type ThreadOperationLocks = StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>;
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -488,6 +493,7 @@ pub struct RebornServices {
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
+    thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
 impl RebornServices {
@@ -510,6 +516,7 @@ impl RebornServices {
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
+            thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -694,6 +701,7 @@ impl RebornServicesApi for RebornServices {
         };
 
         let (scope, thread_scope) = self.resolve_webui_thread_metadata(scope, &actor).await?;
+        let _thread_operation_guard = self.lock_thread_operation(&scope).await;
         let source_binding_id = webui_source_binding_id(&scope, &actor);
         let external_event_id = client_action_id.as_str().to_string();
 
@@ -862,6 +870,7 @@ impl RebornServicesApi for RebornServices {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
         let scope = caller.turn_scope(thread_id.clone());
         let thread_scope = thread_scope_from_turn_scope(&scope, Some(caller.user_id.clone()))?;
+        let _thread_operation_guard = self.lock_thread_operation(&scope).await;
         self.reject_delete_with_active_run(&scope, &thread_scope, &thread_id)
             .await?;
         self.thread_service
@@ -1299,6 +1308,24 @@ impl RebornServicesApi for RebornServices {
 }
 
 impl RebornServices {
+    fn thread_operation_lock(&self, scope: &TurnScope) -> Arc<AsyncMutex<()>> {
+        let key = thread_operation_key(scope);
+        let mut locks = self
+            .thread_operation_locks
+            .lock()
+            .expect("thread operation lock map poisoned");
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(AsyncMutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
+    }
+
+    async fn lock_thread_operation(&self, scope: &TurnScope) -> OwnedMutexGuard<()> {
+        self.thread_operation_lock(scope).lock_owned().await
+    }
+
     async fn reject_delete_with_active_run(
         &self,
         scope: &TurnScope,
@@ -1968,6 +1995,33 @@ fn legacy_webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> Strin
         ),
         segment("thread", scope.thread_id.as_str()),
         segment("actor", actor.user_id.as_str())
+    )
+}
+
+fn thread_operation_key(scope: &TurnScope) -> String {
+    format!(
+        "{}{}{}{}{}",
+        segment("tenant", scope.tenant_id.as_str()),
+        segment(
+            "agent",
+            scope.agent_id.as_ref().map(AgentId::as_str).unwrap_or("")
+        ),
+        segment(
+            "project",
+            scope
+                .project_id
+                .as_ref()
+                .map(ProjectId::as_str)
+                .unwrap_or("")
+        ),
+        segment("thread", scope.thread_id.as_str()),
+        segment(
+            "owner",
+            scope
+                .explicit_owner_user_id()
+                .map(UserId::as_str)
+                .unwrap_or("")
+        )
     )
 }
 
