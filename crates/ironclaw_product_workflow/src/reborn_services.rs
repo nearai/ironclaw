@@ -4,7 +4,7 @@
 //! instead of reaching into turn coordination, thread stores, runtime lanes, DB
 //! stores, dispatchers, or capability hosts directly.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -862,6 +862,8 @@ impl RebornServicesApi for RebornServices {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
         let scope = caller.turn_scope(thread_id.clone());
         let thread_scope = thread_scope_from_turn_scope(&scope, Some(caller.user_id.clone()))?;
+        self.reject_delete_with_active_run(&scope, &thread_scope, &thread_id)
+            .await?;
         self.thread_service
             .delete_thread(&thread_scope, &thread_id)
             .await
@@ -1293,6 +1295,51 @@ impl RebornServicesApi for RebornServices {
             .complete_nearai_wallet_login(caller, request)
             .await
             .map_err(llm_config::map_llm_config_error)
+    }
+}
+
+impl RebornServices {
+    async fn reject_delete_with_active_run(
+        &self,
+        scope: &TurnScope,
+        thread_scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), RebornServicesError> {
+        let history = self
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .map_err(map_timeline_probe_error)?;
+        let mut seen = HashSet::new();
+        for run_id in history
+            .messages
+            .iter()
+            .filter_map(|message| message.turn_run_id.as_deref())
+            .map(parse_persisted_turn_run_id)
+        {
+            let run_id = run_id?;
+            if !seen.insert(run_id) {
+                continue;
+            }
+            match self
+                .turn_coordinator
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+            {
+                Ok(state) if state.status.keeps_active_lock() => {
+                    return Err(delete_thread_busy());
+                }
+                Ok(_) | Err(TurnError::ScopeNotFound) => {}
+                Err(error) => return Err(map_turn_error(error)),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1832,6 +1879,10 @@ fn parse_run_id_field(
         })
 }
 
+fn parse_persisted_turn_run_id(value: &str) -> Result<TurnRunId, RebornServicesError> {
+    TurnRunId::parse(value).map_err(|_| RebornServicesError::internal_invariant())
+}
+
 fn accepted_message_ref(message_id: String) -> Result<AcceptedMessageRef, RebornServicesError> {
     AcceptedMessageRef::new(format!("msg:{message_id}")).map_err(|_| {
         RebornServicesError::from_status(RebornServicesErrorCode::Internal, 500, false)
@@ -2120,6 +2171,15 @@ fn map_thread_error(error: SessionThreadError) -> RebornServicesError {
         | SessionThreadError::Deserialization(_)
         | SessionThreadError::Backend(_) => RebornServicesError::service_unavailable(true),
     }
+}
+
+fn delete_thread_busy() -> RebornServicesError {
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::Conflict,
+        RebornServicesErrorKind::Busy,
+        409,
+        false,
+    )
 }
 
 fn map_turn_error(error: TurnError) -> RebornServicesError {

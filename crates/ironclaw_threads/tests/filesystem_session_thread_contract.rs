@@ -21,8 +21,9 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus,
     CreateSummaryArtifactRequest, EnsureThreadRequest, FilesystemSessionThreadService,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, RedactMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
-    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadScope, UpdateAssistantDraftRequest,
+    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
+    ThreadScope, UpdateAssistantDraftRequest,
 };
 
 #[tokio::test]
@@ -83,6 +84,53 @@ async fn filesystem_delete_thread_removes_owned_thread_and_hides_missing_or_wron
         .await
         .expect_err("missing delete should be non-enumerating");
     assert_unknown_thread(missing_error, &missing);
+}
+
+#[tokio::test]
+async fn filesystem_delete_thread_removes_inbound_idempotency_records() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-delete-idempotency", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request_scope = scope("delete-idempotency");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-delete-idempotency").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: request_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-delete-idempotency".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-delete-idempotency".into()),
+            content: MessageContent::text("delete me"),
+        })
+        .await
+        .unwrap();
+
+    service
+        .delete_thread(&request_scope, &thread.thread_id)
+        .await
+        .expect("owned delete succeeds");
+
+    let replay = service
+        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+            scope: request_scope,
+            actor_id: "actor-a".into(),
+            source_binding_id: "binding-delete-idempotency".into(),
+            external_event_id: "event-delete-idempotency".into(),
+        })
+        .await
+        .expect("deleted thread must not leave stale idempotency records");
+
+    assert!(replay.is_none());
 }
 
 #[tokio::test]

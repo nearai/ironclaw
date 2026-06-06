@@ -2140,6 +2140,51 @@ async fn delete_thread_rejects_cross_user_access_without_deleting_owner_thread()
 }
 
 #[tokio::test]
+async fn delete_thread_rejects_thread_with_active_run() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-before-delete",
+                "thread_id": "thread-alpha",
+                "content": "keep this run alive"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+
+    let err = services
+        .delete_thread(
+            caller(),
+            RebornDeleteThreadRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect_err("active thread delete must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Busy);
+    assert_eq!(err.status_code, 409);
+    assert_eq!(coordinator.run_state_request_count(), 1);
+    services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("rejected delete must leave thread readable");
+}
+
+#[tokio::test]
 async fn stream_events_rejects_cross_user_access_before_draining_stream() {
     let stream = Arc::new(SpyProjectionStream::default());
     let services = RebornServices::new(
