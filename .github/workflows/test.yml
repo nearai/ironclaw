@@ -24,7 +24,7 @@ jobs:
   # ── Skip expensive jobs when only docs/config changed on a PR ──
   changes:
     name: Detect code changes
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.pr_check.outputs.has_code }}
     steps:
@@ -55,7 +55,7 @@ jobs:
   # ── Dynamic matrix: PRs run only all-features; full matrix on staging/push ──
   matrix-config:
     name: Configure matrix
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       test_matrix: ${{ steps.set.outputs.test_matrix }}
       windows_matrix: ${{ steps.set.outputs.windows_matrix }}
@@ -77,7 +77,7 @@ jobs:
     name: Tests (${{ matrix.name }})
     needs: [changes, matrix-config]
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -110,7 +110,7 @@ jobs:
     name: Heavy Integration Tests
     needs: changes
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - name: Checkout repository
@@ -142,7 +142,7 @@ jobs:
     if: >
       github.event_name != 'pull_request' ||
       github.base_ref != 'staging'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - name: Checkout repository
@@ -166,7 +166,7 @@ jobs:
     if: >
       github.event_name != 'pull_request' ||
       github.base_ref != 'staging'
-    runs-on: windows-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     strategy:
       fail-fast: false
       matrix:
@@ -191,7 +191,7 @@ jobs:
     if: >
       github.event_name != 'pull_request' ||
       github.base_ref != 'staging'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - name: Checkout repository
@@ -220,7 +220,7 @@ jobs:
     name: Benchmark Compilation
     needs: changes
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -241,7 +241,7 @@ jobs:
     if: >
       github.event_name != 'pull_request' ||
       github.base_ref != 'staging'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -253,7 +253,7 @@ jobs:
 
   version-check:
     name: Version Bump Check
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     if: github.event_name == 'pull_request'
     steps:
       - name: Checkout repository
@@ -270,7 +270,7 @@ jobs:
   # Roll-up job for branch protection
   run-tests:
     name: Run Tests
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: always()
     needs: [changes, matrix-config, tests, heavy-integration-tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check, bench-compile]
     steps:

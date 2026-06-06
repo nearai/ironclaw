@@ -20,7 +20,7 @@ jobs:
   # ── Skip when only docs/config changed on a PR ──
   changes:
     name: Detect code changes
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.pr_check.outputs.has_code }}
       # `has_boundary_check` fires when the gateway-boundaries guardrail
@@ -69,7 +69,7 @@ jobs:
     name: Configure clippy matrix
     needs: changes
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
     steps:
@@ -91,7 +91,7 @@ jobs:
     name: Formatting
     needs: changes
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -108,7 +108,7 @@ jobs:
     name: Gateway JS syntax
     needs: changes
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -131,7 +131,7 @@ jobs:
     name: cargo-deny
     needs: changes
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -144,7 +144,7 @@ jobs:
     name: Clippy (${{ matrix.name }})
     needs: [changes, clippy-matrix]
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
@@ -182,7 +182,7 @@ jobs:
     if: >
       needs.changes.outputs.has_code == 'true' &&
       (github.event_name == 'push' || github.base_ref == 'main')
-    runs-on: windows-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
@@ -213,7 +213,7 @@ jobs:
     # Diff is computed against the PR base SHA, which is unavailable on push.
     # Gate to PRs only; the roll-up tolerates a skipped result on push.
     if: github.event_name == 'pull_request' && needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -237,7 +237,7 @@ jobs:
     # satisfy the roll-up, weakening the guardrail. See serrrfirat's
     # review on PR #2647.
     if: needs.changes.outputs.has_code == 'true' || needs.changes.outputs.has_boundary_check == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -254,7 +254,7 @@ jobs:
   # Roll-up job for branch protection
   code-style:
     name: Code Style (fmt + gateway-js-syntax + clippy + deny)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     if: always()
     needs:
       - changes
