@@ -11,7 +11,11 @@
 
 ## What This Crate Owns
 
-- Process lifecycle, cancellation, status, result, output-ref, and ProcessHost surfaces.
+- Process lifecycle, stores, cancellation, and the background process manager, currently:
+- Lifecycle types (`types`): `ProcessRecord`/`ProcessStatus`/`ProcessStart`/`ProcessExit`, `ProcessManager`, the `ProcessExecutor` trait and `ProcessExecutionRequest`/`ProcessExecutionResult`, `ProcessResultRecord`, and `ProcessError`/`ProcessExecutionError`.
+- Stores: the `ProcessStore`/`ProcessResultStore` traits with in-memory (`memory_store`) and filesystem (`filesystem_store`) backends, plus the `EventingProcessStore` / `ResourceManagedProcessStore` wrappers (`wrappers`).
+- Cancellation (`cancellation`): `ProcessCancellationRegistry`, `ProcessCancellationToken`.
+- Host + background management: `ProcessHost`/`ProcessSubscription` (`host`); `BackgroundProcessManager`, `ProcessServices`, and `BackgroundErrorHandler`/`BackgroundFailure`/`BackgroundFailureStage` (`services`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

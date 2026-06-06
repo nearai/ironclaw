@@ -10,7 +10,17 @@
 
 ## What This Crate Owns
 
-- Shared low-dependency workspace types and utilities: app events, identity newtypes, timezone validation, preview truncation, and cross-runtime constants.
+- Shared low-dependency workspace types and utilities, currently:
+- App events: `AppEvent` plus wire DTOs (`OnboardingStateDto`, `PlanStepDto`, `ToolDecisionDto`, `JobResultStatus`, `CodeExecutionFailureCategory`, `SelfImprovementPhase`) — `event.rs`.
+- Validated identity newtypes (`CredentialName`, `ExtensionName`, `McpServerName`, `ExternalThreadId`) with their length constants and validation errors — `identity.rs`.
+- Attachment helpers (`AttachmentKind`, `IncomingAttachment`) — `attachment.rs`.
+- Base-dir/path resolution (`ironclaw_base_dir`, `compute_ironclaw_base_dir`) — `paths.rs`.
+- Platform info (`PlatformInfo`, `to_prompt_section`) — `platform.rs`.
+- Environment override helpers (`env_or_override`, `set_runtime_env`, `register_secondary_fallback`, `lock_env`) — `env_helpers.rs`.
+- Timezone validation (`ValidTimezone`, `deserialize_option_lenient`) — `timezone.rs`.
+- Preview truncation (`truncate_for_preview`, `truncate_preview`) — `util.rs`.
+- Cross-runtime constants (`MAX_WORKER_ITERATIONS`).
+- Internal Reborn trust-boundary scaffolding (`trust_boundary.rs`) — `pub(crate)` only, `#[allow(dead_code)]`, not yet consumed.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

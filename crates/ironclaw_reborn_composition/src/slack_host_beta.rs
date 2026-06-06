@@ -790,7 +790,7 @@ mod tests {
         let final_reply = wait_for_slack_post_message(&egress, "ok").await;
         assert_eq!(final_reply["channel"], "D0HOST");
         assert_eq!(final_reply["text"], "ok");
-        assert_eq!(final_reply["mrkdwn"], false);
+        assert_eq!(final_reply["mrkdwn"], true);
 
         runtime.shutdown().await.expect("runtime shuts down");
     }

@@ -18,8 +18,8 @@ use super::{
     RebornProfile, ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore,
     RunStateStore, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
     RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore,
-    SharedSecretStore, TenantSandboxProcessPort, TrustPolicy, TurnRunTransitionPort,
-    TurnRunWakeNotifier, TurnStateStore, WasmError, WasmRuntimeAdapter,
+    SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
+    TurnRunTransitionPort, TurnRunWakeNotifier, TurnStateStore, WasmError, WasmRuntimeAdapter,
     WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
     build_reborn_event_stores, production_wiring_report, set_runtime_http_egress,
     set_tool_call_http_egress,
@@ -57,6 +57,7 @@ where
             capability_leases,
             event_sink,
             audit_sink,
+            security_audit_sink,
             secret_store,
             credential_account_store,
             credential_session_store,
@@ -99,6 +100,7 @@ where
             capability_leases,
             event_sink,
             audit_sink,
+            security_audit_sink,
             secret_store,
             credential_account_store,
             credential_session_store,
@@ -162,6 +164,7 @@ where
             capability_leases,
             event_sink,
             audit_sink,
+            security_audit_sink,
             secret_store,
             credential_account_store,
             credential_session_store,
@@ -214,6 +217,7 @@ where
             capability_leases,
             event_sink,
             audit_sink,
+            security_audit_sink,
             secret_store,
             credential_account_store,
             credential_session_store,
@@ -513,6 +517,16 @@ where
     {
         self.component_types.audit_sink = Some(ProductionComponentType::of::<T>());
         self.audit_sink = Some(audit_sink);
+        self
+    }
+
+    /// Wire in a [`SecurityAuditSink`] so security-boundary decisions inside
+    /// the built-in obligation handler are recorded instead of dropped.
+    pub fn with_security_audit_sink<T>(mut self, sink: Arc<T>) -> Self
+    where
+        T: SecurityAuditSink + 'static,
+    {
+        self.security_audit_sink = Some(sink);
         self
     }
 

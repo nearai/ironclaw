@@ -12,8 +12,26 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::FutureExt;
-use ironclaw_events::{EventCursor, RuntimeEvent, RuntimeEventKind};
+use ironclaw_events::{
+    EventCursor, RuntimeEvent, RuntimeEventKind, SecurityAuditEvent, SecurityAuditSink,
+    SecurityBoundary, SecurityDecision,
+};
 use ironclaw_turns::run_profile::{HookDecisionSummary, HookMilestoneSink, LoopHostMilestoneKind};
+
+/// Stable `&'static str` reason code recorded on the
+/// [`SecurityAuditEvent`] when a `before_capability` hook explicitly
+/// returns a `Deny` decision.
+///
+/// Note: this code covers *explicit* hook-emitted denies, surfaced via
+/// [`HookDecisionSummary::Deny`] at the canonical emit point. Fail-closed
+/// denies driven by a [`crate::failure_policy::FailureDisposition::FailClosed`]
+/// (timeout/panic/malformed) already have their own milestone signal —
+/// [`LoopHostMilestoneKind::HookFailed`] — so they are *not* additionally
+/// emitted here, to avoid double-recording the same hook outcome under two
+/// different SRE codes. If the SRE need ever diverges (e.g. separate
+/// dashboards for "extension said no" vs. "extension misbehaved"), the
+/// fail-closed path can adopt its own code without affecting this one.
+pub const HOOK_DENY_PREDICATE_CODE: &str = "hook_deny_predicate";
 
 use crate::error::SanitizedReason;
 use crate::failure_policy::{FailureCategory, FailureDisposition};
@@ -39,6 +57,9 @@ use crate::trust::HookTrustClass;
 use crate::wasm::{
     WasmBeforeCapabilityHook, WasmBeforePromptHook, WasmHookFailure, WasmObserverHook,
 };
+
+mod lifecycle_owner;
+use lifecycle_owner::{LifecycleOwnerLookup, resolve_event_owner};
 
 /// Default per-hook wall-clock budget. Tunable per dispatcher.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_millis(50);
@@ -174,6 +195,13 @@ pub struct HookDispatcher {
     event_triggered: HashMap<HookId, EventTriggeredHookImpl>,
     timeout: Duration,
     milestone_sink: Option<Arc<dyn HookMilestoneSink>>,
+    /// Best-effort recording sink for security-boundary decisions made by
+    /// the dispatcher itself (today: hook-driven `Deny`). Distinct from
+    /// [`Self::milestone_sink`], which carries run-context loop telemetry;
+    /// the security-audit sink carries the payload-free
+    /// [`SecurityAuditEvent`] shape consumed by SRE/forensics retention.
+    /// Optional: when unset, the dispatcher behaves exactly as before.
+    audit_sink: Option<Arc<dyn SecurityAuditSink>>,
 }
 
 impl HookDispatcher {
@@ -193,6 +221,7 @@ impl HookDispatcher {
             event_triggered: HashMap::new(),
             timeout: DEFAULT_HOOK_TIMEOUT,
             milestone_sink: None,
+            audit_sink: None,
         }
     }
 
@@ -220,6 +249,17 @@ impl HookDispatcher {
     /// host's `LoopHostMilestoneSink`.
     pub(crate) fn with_milestone_sink(mut self, sink: Arc<dyn HookMilestoneSink>) -> Self {
         self.milestone_sink = Some(sink);
+        self
+    }
+
+    /// Attach a [`SecurityAuditSink`] for hook-driven security-boundary
+    /// decisions (currently: explicit `Deny` from `before_capability`).
+    ///
+    /// Like [`Self::with_milestone_sink`], this must be wired before the
+    /// dispatcher is Arc-wrapped; see [`HookDispatcherBuilder`] for the
+    /// type-enforced composition order.
+    pub(crate) fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.audit_sink = Some(sink);
         self
     }
 
@@ -337,6 +377,18 @@ impl HookDispatcher {
     ) -> usize {
         let registry = self.registry.lock().expect("hook registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
         registry.count_for_extension(extension)
+    }
+
+    /// Total number of bindings installed across every attach point and every
+    /// owning extension (builtin, trusted, installed), poisoned or not.
+    ///
+    /// Public counterpart to the per-extension counters above. Composition-tier
+    /// callers use this to enforce a tenant-wide aggregate cap on third-party
+    /// hook projection (the per-extension caps live in the registrar; this is
+    /// the cross-extension ceiling) before committing more bindings.
+    pub fn count_total_bindings(&self) -> usize {
+        let registry = self.registry.lock().expect("hook registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
+        registry.len()
     }
 
     /// Same as [`Self::count_bindings_for_extension`] but restricted to
@@ -857,6 +909,18 @@ impl HookDispatcher {
         let observer_facts = Vec::new();
         let mut failures = Vec::new();
         let mut short_circuited = false;
+        // Provenance tracking for the security-audit `HookDeny` event. We only
+        // record a `HookDeny` when the *winning* composed decision is an
+        // explicit `Deny` returned by a hook via
+        // `Ok(GateHookOutcome::Decision { .. })`. Fail-closed denials (a hook
+        // failing closed, a missing binding implementation) are represented by
+        // `HookFailed`, not `HookDeny`; pause/auth gates are not denials at
+        // all. Because composition keeps the *first* observed deny
+        // (`Deny > PauseAuth > PauseApproval > Allow`), this flag records the
+        // provenance of the deny that actually established the composed
+        // `Deny` state — it flips to `true` only at the transition where an
+        // explicit decision first turns `composed` into a `Deny`.
+        let mut explicit_deny = false;
 
         for (key, binding) in ordered {
             if short_circuited && !matches!(key.phase, crate::ordering::HookPhase::Telemetry) {
@@ -920,7 +984,18 @@ impl HookDispatcher {
                     let summary = telemetry::gate_decision_summary(&decision);
                     self.emit_decision_with_audit(&binding, summary, audit_reason)
                         .await;
+                    let was_deny = matches!(composed.inner(), GateDecisionInner::Deny { .. });
                     composed = compose_gate_decision(composed, decision);
+                    let is_deny = matches!(composed.inner(), GateDecisionInner::Deny { .. });
+                    // The deny that wins is the *first* one observed. If this
+                    // explicit decision is what first turned `composed` into a
+                    // `Deny`, the winning deny is explicit. A later explicit
+                    // deny that arrives after `composed` is already `Deny`
+                    // (e.g. behind a fail-closed deny) does not flip the flag,
+                    // because composition keeps the earlier deny.
+                    if is_deny && !was_deny {
+                        explicit_deny = true;
+                    }
                     if !matches!(composed.inner(), GateDecisionInner::Allow) {
                         short_circuited = true;
                     }
@@ -943,6 +1018,21 @@ impl HookDispatcher {
                     }
                 }
             }
+        }
+
+        // Record the security-audit `HookDeny` event exactly once per blocked
+        // capability invocation, at the boundary-block level. This is the
+        // correct ownership boundary: it fires off the *composed* decision
+        // after all hooks (including telemetry-exempt ones) ran, so multiple
+        // denying hooks cannot multiply the recorded event count.
+        //
+        // Narrowing (PR #3922 review): only an *explicit* hook `Deny` produces
+        // a `HookDeny` event. Fail-closed denials surface as `HookFailed`, and
+        // `PauseApproval`/`PauseAuth` gates are not denials — none of them
+        // should emit `HookDeny`. `explicit_deny` is only set when the winning
+        // composed `Deny` came from `Ok(GateHookOutcome::Decision { .. })`.
+        if explicit_deny && matches!(composed.inner(), GateDecisionInner::Deny { .. }) {
+            self.record_capability_block_audit(ctx.capability_name.as_str());
         }
 
         // NOTE: `AfterCapability` observers are NOT drained here. They fire
@@ -1257,28 +1347,18 @@ impl HookDispatcher {
         &self,
         event: &RuntimeEvent,
     ) -> Option<ironclaw_host_api::ExtensionId> {
-        if let Some(provider) = event.provider.clone() {
-            return Some(provider);
-        }
-        if !matches!(
-            event.kind,
-            RuntimeEventKind::HookDispatched
-                | RuntimeEventKind::HookDecisionEmitted
-                | RuntimeEventKind::HookFailed
-        ) {
-            return None;
-        }
-        let hook_id = event.hook_id.as_deref()?;
-        match self.registry.lock() {
-            Ok(registry) => registry.owning_extension_for_hook_hex(hook_id).cloned(),
-            Err(poisoned) => {
-                // Keep the same fail-closed posture as other registry reads:
-                // if the registry cannot be trusted, providerless OwnCapabilities
-                // hooks remain inert.
-                let _ = poisoned;
-                None
-            }
-        }
+        // The lifecycle provider-ownership security policy lives in
+        // `lifecycle_owner` (PR #3931 P2 extraction). Here we only translate
+        // the registry-lock probe into a `LifecycleOwnerLookup` value; the
+        // resolver applies the fail-closed policy. The probe closure is only
+        // invoked for lifecycle events that carry a `hook_id` anchor.
+        resolve_event_owner(event, |hook_id| match self.registry.lock() {
+            Err(_poisoned) => LifecycleOwnerLookup::Poisoned,
+            Ok(registry) => match registry.owning_extension_for_hook_hex(hook_id).cloned() {
+                Some(owner) => LifecycleOwnerLookup::Owner(owner),
+                None => LifecycleOwnerLookup::Unknown,
+            },
+        })
     }
 
     #[cfg(test)]
@@ -1705,6 +1785,19 @@ impl HookDispatcher {
         self.emit_decision_with_audit(binding, decision, None).await;
     }
 
+    /// Emit a per-hook decision to the milestone sink.
+    ///
+    /// Note: security-audit recording is intentionally NOT performed here.
+    /// Recording a [`SecurityAuditEvent`] from the per-hook decision-emit
+    /// path is the wrong ownership boundary — `Telemetry`-phase hooks keep
+    /// running after a gate short-circuit, so a later `Telemetry` `Deny`
+    /// would record an *extra* `HookDeny` event for the same logical
+    /// capability block. The audit event is
+    /// instead recorded exactly once per blocked capability invocation at
+    /// the boundary-block level, via
+    /// [`Self::record_capability_block_audit`], driven off the *composed*
+    /// decision after all hooks have run. The free-form `audit_reason` still
+    /// flows to the milestone sink (sanitized) for per-hook attribution.
     async fn emit_decision_with_audit(
         &self,
         binding: &HookBinding,
@@ -1721,6 +1814,38 @@ impl HookDispatcher {
             owning_extension: binding.owning_extension.clone(),
         })
         .await;
+    }
+
+    /// Record exactly one payload-free [`SecurityAuditEvent`] for a blocked
+    /// `before_capability` invocation, keyed on
+    /// [`SecurityBoundary::HookDeny`].
+    ///
+    /// Called once at the boundary-block decision level (after all hooks ran
+    /// and short-circuits composed), so the number of `Telemetry`-phase hooks
+    /// that also deny does not multiply the event count: a single blocked
+    /// capability invocation produces exactly one `HookDeny` event.
+    ///
+    /// `capability_name` is the raw capability name from
+    /// [`BeforeCapabilityHookContext::capability_name`]; it is converted to
+    /// [`ironclaw_host_api::CapabilityId`] on a best-effort basis. If the
+    /// conversion fails (already-validated capability names should not, but
+    /// the parse is guarded for safety), the event still records with no
+    /// capability id. No free-form reason is forwarded — the `code` field
+    /// ([`HOOK_DENY_PREDICATE_CODE`]) is the only descriptive content per the
+    /// `SecurityAuditEvent` payload-free invariant.
+    fn record_capability_block_audit(&self, capability_name: &str) {
+        let Some(sink) = &self.audit_sink else {
+            return;
+        };
+        let mut event = SecurityAuditEvent::new(
+            SecurityBoundary::HookDeny,
+            SecurityDecision::Blocked,
+            HOOK_DENY_PREDICATE_CODE,
+        );
+        if let Ok(cap_id) = ironclaw_host_api::CapabilityId::new(capability_name.to_string()) {
+            event = event.with_capability_id(cap_id);
+        }
+        sink.record(event);
     }
 
     async fn emit_failure(&self, record: &HookFailureRecord) {
@@ -1870,6 +1995,15 @@ impl HookDispatcherBuilder {
     /// the only safe time to do so.
     pub fn with_milestone_sink(mut self, sink: Arc<dyn HookMilestoneSink>) -> Self {
         self.dispatcher = self.dispatcher.with_milestone_sink(sink);
+        self
+    }
+
+    /// Attach a [`SecurityAuditSink`] for hook-driven security-boundary
+    /// decisions (explicit `Deny`). Optional: production composition wires
+    /// this via `RebornLoopDriverHostFactory` so deny decisions are
+    /// retained per the `CLAUDE.md` "LLM data is never deleted" rule.
+    pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.dispatcher = self.dispatcher.with_security_audit_sink(sink);
         self
     }
 
@@ -2107,6 +2241,15 @@ impl HookDispatcherBuilder {
         &mut self.dispatcher
     }
 
+    /// Total bindings installed into the in-flight dispatcher so far, across
+    /// every attach point and owning extension. Mirrors
+    /// [`HookDispatcher::count_total_bindings`] on the not-yet-`Arc`'d builder
+    /// so a projection loop can enforce a tenant-wide aggregate cap between
+    /// per-extension installs.
+    pub fn count_total_bindings(&self) -> usize {
+        self.dispatcher.count_total_bindings()
+    }
+
     /// Finalize: wrap the configured dispatcher in [`Arc`]. After this call
     /// the dispatcher can no longer be mutated.
     pub fn build_arc(self) -> Arc<HookDispatcher> {
@@ -2264,6 +2407,453 @@ mod tests {
         ) {
             // Deliberately returns without calling any sink method.
         }
+    }
+
+    /// Caller-level regression for the audit-sink wiring on the
+    /// `before_capability` dispatch path. Installs a `Deny`-returning hook
+    /// against a fully composed dispatcher (registry + impl + audit sink)
+    /// via the same builder API that production composition uses, drives
+    /// the dispatch end-to-end, and asserts the recorded
+    /// `SecurityAuditEvent` shape.
+    ///
+    /// Per the testing rule ("Test Through the Caller"), this is the
+    /// canonical regression for the wiring — a unit test that calls
+    /// `emit_decision_with_audit` directly would miss a missed wire-up
+    /// inside `dispatch_before_capability`'s `Decision { … }` arm.
+    #[tokio::test]
+    async fn hook_deny_records_security_audit_event_with_no_payload() {
+        use ironclaw_events::{
+            InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
+        };
+
+        // Wire a recording sink the same way production code threads it
+        // through the dispatcher builder.
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let deny_id = ext_hook_id("deny");
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                deny_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("binding insertable");
+        // Drive the dispatcher through its full builder-shaped pipeline so
+        // this regression covers the production wiring path (audit sink
+        // attached pre-`Arc`, then sealed).
+        let mut dispatcher = HookDispatcher::new(registry).with_security_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            deny_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(DenyingInstalledHook)),
+        );
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "DenyingInstalledHook must drive a non-permit composed decision"
+        );
+
+        // The boundary recorded exactly one event with the expected shape.
+        // `ctx()` uses capability name `"cap.x"` which is a valid
+        // `CapabilityId`.
+        let events = sink.snapshot();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one hook-deny event should have been recorded, got {events:?}"
+        );
+        let event = &events[0];
+        assert_eq!(event.boundary, SecurityBoundary::HookDeny);
+        assert_eq!(event.decision, SecurityDecision::Blocked);
+        assert_eq!(event.code, HOOK_DENY_PREDICATE_CODE);
+        assert_eq!(event.code, "hook_deny_predicate"); // stability lock
+        assert_eq!(
+            event
+                .capability_id
+                .as_ref()
+                .map(ironclaw_host_api::CapabilityId::as_str),
+            Some("cap.x"),
+            "capability id should propagate from ctx.capability_name"
+        );
+
+        // Payload-free invariant: `SecurityAuditEvent` has no String field
+        // for the audit reason. The hook's deny reason ("blocked by
+        // extension") does not appear anywhere on the recorded event by
+        // construction — only `code` carries descriptive content, and it
+        // is a `&'static str` (so cannot encode caller input). The reason
+        // still flows to the milestone sink (sanitized, capped) for
+        // operator-visible telemetry.
+    }
+
+    /// Edge-case regression (henrypark133 LOW on PR #3922): exercise the
+    /// `if let Ok(cap_id)` *else*-arm of `record_capability_block_audit`.
+    /// Every other audit test uses the well-formed `"cap.x"` name, so the
+    /// parse-failure branch — where `CapabilityId::new` rejects the raw name
+    /// and the event records with `capability_id = None` — was untested.
+    ///
+    /// An empty capability name fails `CapabilityId::new` (it requires a
+    /// non-empty, dotted name). The blocked invocation must still record
+    /// exactly one `HookDeny` event with the same boundary/decision/code
+    /// shape, just with no capability id attached.
+    #[tokio::test]
+    async fn hook_deny_with_unparseable_capability_name_records_event_without_capability_id() {
+        use ironclaw_events::{
+            InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
+        };
+
+        // An empty name is not a valid `CapabilityId`, so the best-effort
+        // parse in `record_capability_block_audit` falls through to the
+        // else-arm.
+        assert!(
+            ironclaw_host_api::CapabilityId::new(String::new()).is_err(),
+            "empty capability name must fail to parse for this test to exercise the else-arm"
+        );
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let deny_id = ext_hook_id("deny");
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                deny_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("binding insertable");
+        let mut dispatcher = HookDispatcher::new(registry).with_security_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            deny_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(DenyingInstalledHook)),
+        );
+
+        // Drive the recording path through the caller with an unparseable
+        // (empty) capability name.
+        let ctx = BeforeCapabilityHookContext::new_unresolved(tenant(), String::new(), [0u8; 32]);
+        let outcome = dispatcher.dispatch_before_capability(&ctx).await;
+        assert!(
+            !outcome.decision.permits(),
+            "DenyingInstalledHook must drive a non-permit composed decision"
+        );
+
+        let events = sink.snapshot();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one hook-deny event should have been recorded even with an \
+             unparseable capability name, got {events:?}"
+        );
+        let event = &events[0];
+        // The else-arm leaves `capability_id` unset.
+        assert!(
+            event.capability_id.is_none(),
+            "an unparseable capability name must record the event with no capability id, got {:?}",
+            event.capability_id,
+        );
+        // All other fields remain intact.
+        assert_eq!(event.boundary, SecurityBoundary::HookDeny);
+        assert_eq!(event.decision, SecurityDecision::Blocked);
+        assert_eq!(event.code, HOOK_DENY_PREDICATE_CODE);
+        assert_eq!(event.code, "hook_deny_predicate"); // stability lock
+    }
+
+    /// Regression for the telemetry-phase double-emit (serrrfirat MEDIUM on
+    /// PR #3922). A Policy-phase `Deny` short-circuits the gate phases, but
+    /// `Telemetry`-phase hooks are intentionally exempt and keep running — so
+    /// a `Telemetry`-phase `Deny` on the *same* capability used to record a
+    /// second `HookDeny` security-audit event. After moving recording to the
+    /// boundary-block level, exactly ONE event must be recorded regardless of
+    /// how many hooks (across phases) deny the same logical invocation.
+    #[tokio::test]
+    async fn multiple_phase_denies_record_exactly_one_hook_deny_event() {
+        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary};
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+
+        let policy_deny = ext_hook_id("policy-deny");
+        let telemetry_deny = ext_hook_id("telemetry-deny");
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                policy_deny,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("policy binding insertable");
+        registry
+            .insert(installed_binding(
+                telemetry_deny,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Telemetry,
+            ))
+            .expect("telemetry binding insertable");
+
+        let mut dispatcher = HookDispatcher::new(registry).with_security_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            policy_deny,
+            BeforeCapabilityHookImpl::Restricted(Box::new(DenyingInstalledHook)),
+        );
+        dispatcher.install_before_capability(
+            telemetry_deny,
+            BeforeCapabilityHookImpl::Restricted(Box::new(DenyingInstalledHook)),
+        );
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "composed decision must be a non-permit deny"
+        );
+
+        let events = sink.snapshot();
+        assert_eq!(
+            events.len(),
+            1,
+            "a blocked capability must record exactly one HookDeny event even \
+             when both a Policy-phase and a telemetry-exempt Telemetry-phase \
+             hook deny; got {events:?}"
+        );
+        assert_eq!(events[0].boundary, SecurityBoundary::HookDeny);
+        assert_eq!(
+            events[0]
+                .capability_id
+                .as_ref()
+                .map(ironclaw_host_api::CapabilityId::as_str),
+            Some("cap.x"),
+        );
+    }
+
+    /// A privileged (builtin) `before_capability` binding, needed by the
+    /// pause-gate negative tests below: `PauseApproval`/`PauseAuth` are only
+    /// reachable through the privileged sink.
+    fn builtin_capability_binding(id: HookId, phase: HookPhase) -> HookBinding {
+        HookBinding {
+            hook_id: id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Builtin,
+            phase,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::BeforeCapability,
+            event_kind_filter: None,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
+            poisoned: false,
+        }
+    }
+
+    /// Negative provenance contract (PR #3922 review): a `PauseApproval` gate
+    /// is NOT a denial and must not emit a `HookDeny` security-audit event,
+    /// even though the composed decision is non-permit (it short-circuits the
+    /// gate). `HookDeny` is reserved for explicit hook denies.
+    #[tokio::test]
+    async fn pause_approval_does_not_record_hook_deny_event() {
+        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let pause_id = HookId::for_builtin("test::pause-approval", HookVersion::ONE);
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(builtin_capability_binding(pause_id, HookPhase::Policy))
+            .expect("binding insertable");
+        let mut dispatcher = HookDispatcher::new(registry).with_security_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            pause_id,
+            BeforeCapabilityHookImpl::Privileged(Box::new(PauseApprovalBuiltinHook)),
+        );
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "PauseApproval is a non-permit gate"
+        );
+        assert!(
+            sink.snapshot().is_empty(),
+            "PauseApproval must not record a HookDeny event, got {:?}",
+            sink.snapshot()
+        );
+    }
+
+    /// Negative provenance contract (PR #3922 review): a `PauseAuth` gate is
+    /// not a denial and must not emit a `HookDeny` security-audit event.
+    #[tokio::test]
+    async fn pause_auth_does_not_record_hook_deny_event() {
+        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let pause_id = HookId::for_builtin("test::pause-auth", HookVersion::ONE);
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(builtin_capability_binding(pause_id, HookPhase::Policy))
+            .expect("binding insertable");
+        let mut dispatcher = HookDispatcher::new(registry).with_security_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            pause_id,
+            BeforeCapabilityHookImpl::Privileged(Box::new(PauseAuthBuiltinHook)),
+        );
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "PauseAuth is a non-permit gate"
+        );
+        assert!(
+            sink.snapshot().is_empty(),
+            "PauseAuth must not record a HookDeny event, got {:?}",
+            sink.snapshot()
+        );
+    }
+
+    /// Negative provenance contract (PR #3922 review): a hook that fails closed
+    /// via a panic produces a fail-closed `Deny`, but that denial is
+    /// represented by `HookFailed`, not `HookDeny`. No `HookDeny` security-
+    /// audit event must be recorded.
+    #[tokio::test]
+    async fn fail_closed_panic_does_not_record_hook_deny_event() {
+        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let panic_id = ext_hook_id("panic");
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                panic_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("binding insertable");
+        let mut dispatcher = HookDispatcher::new(registry).with_security_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            panic_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(PanickingHook)),
+        );
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "a panicking gate hook must fail closed (non-permit)"
+        );
+        assert_eq!(
+            outcome.failures.len(),
+            1,
+            "the panic must surface as a recorded failure (HookFailed), got {:?}",
+            outcome.failures
+        );
+        assert!(
+            sink.snapshot().is_empty(),
+            "a fail-closed (panic) deny must not record a HookDeny event, got {:?}",
+            sink.snapshot()
+        );
+    }
+
+    /// Negative provenance contract (PR #3922 review): a hook that fails closed
+    /// via a timeout produces a fail-closed `Deny` represented by
+    /// `HookFailed`, not `HookDeny`. No `HookDeny` event must be recorded.
+    #[tokio::test]
+    async fn fail_closed_timeout_does_not_record_hook_deny_event() {
+        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let slow_id = ext_hook_id("slow");
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                slow_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("binding insertable");
+        let mut dispatcher = HookDispatcher::new(registry)
+            .with_timeout(Duration::from_millis(20))
+            .with_security_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            slow_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(SlowHook)),
+        );
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "a timed-out gate hook must fail closed (non-permit)"
+        );
+        assert_eq!(
+            outcome.failures.len(),
+            1,
+            "the timeout must surface as a recorded failure (HookFailed), got {:?}",
+            outcome.failures
+        );
+        assert!(
+            sink.snapshot().is_empty(),
+            "a fail-closed (timeout) deny must not record a HookDeny event, got {:?}",
+            sink.snapshot()
+        );
+    }
+
+    /// Negative provenance contract (PR #3922 review): a missing binding
+    /// implementation is a protocol violation that fails closed (malformed).
+    /// It must surface as `HookFailed`, never `HookDeny`.
+    #[tokio::test]
+    async fn fail_closed_missing_impl_does_not_record_hook_deny_event() {
+        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let missing_id = ext_hook_id("missing-impl");
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                missing_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("binding insertable");
+        // Intentionally do NOT install an implementation for `missing_id`.
+        let dispatcher = HookDispatcher::new(registry).with_security_audit_sink(sink_dyn);
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "a missing-impl binding must fail closed (non-permit)"
+        );
+        assert!(
+            sink.snapshot().is_empty(),
+            "a fail-closed (missing-impl) deny must not record a HookDeny event, got {:?}",
+            sink.snapshot()
+        );
+    }
+
+    /// Negative half of the audit-sink wiring contract: when no audit sink
+    /// is configured, a denying hook still produces the original composed
+    /// non-permit decision. The wiring is purely additive.
+    #[tokio::test]
+    async fn hook_deny_without_audit_sink_does_not_panic() {
+        let deny_id = ext_hook_id("deny");
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                deny_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("binding insertable");
+        let mut dispatcher = HookDispatcher::new(registry);
+        dispatcher.install_before_capability(
+            deny_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(DenyingInstalledHook)),
+        );
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(!outcome.decision.permits());
     }
 
     /// Documents the load-bearing invariant introduced by the builder: from
@@ -3933,6 +4523,91 @@ mod tests {
         );
     }
 
+    /// PR #3640 followup (Bug 3, hook-lifecycle provider spoofing): a
+    /// `HookFailed` event whose `hook_id` is owned by ext-B but whose
+    /// `provider` payload claims ext-A must NOT cause ext-A's
+    /// `OwnCapabilities` hooks to fire. For hook-lifecycle event kinds the
+    /// scope provider is resolved from the registry by `hook_id`, and the
+    /// untrusted `event.provider` claim is ignored when it disagrees with the
+    /// resolved owner. Fail-closed: the spoof targets ext-A's watcher, which
+    /// must stay inert.
+    #[tokio::test]
+    async fn hook_failed_with_spoofed_provider_does_not_fire_target_extension_hooks() {
+        let ext_a = ironclaw_host_api::ExtensionId::new("ext-a").expect("valid extension id");
+        let ext_b = ironclaw_host_api::ExtensionId::new("ext-b").expect("valid extension id");
+
+        // Subject hook genuinely owned by ext-B. Its hook_id is what the
+        // spoofed event will reference.
+        let subject_id = ext_hook_id("spoof-subject");
+        let subject = HookBinding {
+            hook_id: subject_id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Installed,
+            phase: HookPhase::Policy,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::BeforeCapability,
+            event_kind_filter: None,
+            owning_extension: Some(ext_b.clone()),
+            scope: HookBindingScope::OwnCapabilities,
+            poisoned: false,
+        };
+        // Watcher owned by ext-A, scoped to OwnCapabilities, listening for
+        // HookFailed. It must only observe events whose true owner is ext-A.
+        let watcher_id = ext_hook_id("spoof-watcher");
+        let watcher = HookBinding {
+            hook_id: watcher_id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Installed,
+            phase: HookPhase::Telemetry,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::EventTriggered,
+            event_kind_filter: Some(RuntimeEventKind::HookFailed),
+            owning_extension: Some(ext_a.clone()),
+            scope: HookBindingScope::OwnCapabilities,
+            poisoned: false,
+        };
+
+        let mut registry = HookRegistry::new();
+        registry.insert(subject).expect("subject");
+        registry.insert(watcher).expect("watcher");
+        let mut dispatcher = HookDispatcher::new(registry);
+        dispatcher.install_event_triggered_impl(
+            watcher_id,
+            EventTriggeredHookImpl::Any(Box::new(NotingEventHook)),
+        );
+
+        // Spoof: event names ext-B's subject hook_id but claims provider=ext-A.
+        let mut event = RuntimeEvent::hook_failed(
+            event_resource_scope(),
+            event_capability(),
+            subject_id.to_hex(),
+            "panic",
+            "fail_isolated",
+            None,
+        );
+        event.provider = Some(ext_a.clone());
+
+        // The resolved provider must be the true owner (ext-B), never the
+        // payload claim (ext-A).
+        let resolved = dispatcher.scope_provider_for_runtime_event(&event);
+        assert_eq!(
+            resolved,
+            Some(ext_b.clone()),
+            "hook-lifecycle scope provider must resolve from hook_id, not the spoofed payload"
+        );
+
+        let outcome = dispatcher
+            .dispatch_event_triggered_at(tenant(), EventCursor::new(1), &event)
+            .await;
+        assert_eq!(
+            outcome.facts.len(),
+            0,
+            "ext-A's OwnCapabilities watcher must NOT fire for a HookFailed \
+             spoofing provider=ext-A on a hook actually owned by ext-B: {:?}",
+            outcome.facts
+        );
+    }
+
     /// PR #3640 finding D11: the registry-mutex-poison fallback path in
     /// `scope_provider_for_runtime_event` returns `None` (fail-closed) so
     /// providerless `OwnCapabilities` Installed hooks remain inert when the
@@ -3978,6 +4653,121 @@ mod tests {
         assert!(
             resolved.is_none(),
             "poisoned registry must fall back to None for scope resolution"
+        );
+    }
+
+    /// PR #3931 (Hole 2, unknown-hook spoof): a hook-lifecycle event whose
+    /// `hook_id` does NOT resolve in the registry must NOT let the carried
+    /// `provider` payload fire that extension's `OwnCapabilities` hooks. The
+    /// provider field is forgeable (it is part of the event payload, not an
+    /// unforgeable host stamp), so a synthesized lifecycle event naming an
+    /// unknown hook_id + provider=target could otherwise activate the target's
+    /// OwnCapabilities watchers. Fail-closed: provider resolves to `None`
+    /// (hook inert).
+    #[tokio::test]
+    async fn unknown_lifecycle_hook_id_with_carried_provider_stays_inert() {
+        let target = ironclaw_host_api::ExtensionId::new("target").expect("valid extension id");
+
+        // Watcher owned by `target`, OwnCapabilities-scoped, listening for
+        // HookFailed. It must only observe events whose true owner is `target`.
+        let watcher_id = ext_hook_id("hole2-unknown-watcher");
+        let watcher = HookBinding {
+            hook_id: watcher_id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Installed,
+            phase: HookPhase::Telemetry,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::EventTriggered,
+            event_kind_filter: Some(RuntimeEventKind::HookFailed),
+            owning_extension: Some(target.clone()),
+            scope: HookBindingScope::OwnCapabilities,
+            poisoned: false,
+        };
+
+        let mut registry = HookRegistry::new();
+        registry.insert(watcher).expect("watcher");
+        let mut dispatcher = HookDispatcher::new(registry);
+        dispatcher.install_event_triggered_impl(
+            watcher_id,
+            EventTriggeredHookImpl::Any(Box::new(NotingEventHook)),
+        );
+
+        // Synthesize a HookFailed naming a hook_id that is NOT in the registry,
+        // but claiming provider=target. The unknown hook_id used to fall
+        // through to the carried provider; it must now resolve to None.
+        let unknown_subject = ext_hook_id("hole2-unknown-subject");
+        let mut event = RuntimeEvent::hook_failed(
+            event_resource_scope(),
+            event_capability(),
+            unknown_subject.to_hex(),
+            "panic",
+            "fail_isolated",
+            None,
+        );
+        event.provider = Some(target.clone());
+
+        let resolved = dispatcher.scope_provider_for_runtime_event(&event);
+        assert!(
+            resolved.is_none(),
+            "unknown lifecycle hook_id must resolve to None, not the forgeable \
+             carried provider: {resolved:?}"
+        );
+
+        let outcome = dispatcher
+            .dispatch_event_triggered_at(tenant(), EventCursor::new(1), &event)
+            .await;
+        assert_eq!(
+            outcome.facts.len(),
+            0,
+            "target's OwnCapabilities watcher must NOT fire for a synthesized \
+             HookFailed naming an unknown hook_id + provider=target: {:?}",
+            outcome.facts
+        );
+    }
+
+    /// PR #3931 (Hole 2, poison + carried provider): a poisoned registry must
+    /// not be collapsed into the carried-provider fallback. The earlier
+    /// poison test used `provider: None`, so it passed even while a non-None
+    /// claim would have leaked through `(None, claimed) => claimed`. Here the
+    /// event carries `provider=target`; a poisoned registry must still resolve
+    /// to `None` (fail-closed), never the spoofable claim.
+    #[tokio::test]
+    async fn poisoned_registry_with_carried_provider_resolves_none() {
+        let target = ironclaw_host_api::ExtensionId::new("target").expect("valid extension id");
+        let id = ext_hook_id("hole2-poison-watcher");
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(event_triggered_binding(id, RuntimeEventKind::HookFailed))
+            .expect("insert");
+        let dispatcher = Arc::new(HookDispatcher::new(registry));
+
+        let poisoner = Arc::clone(&dispatcher);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.registry.lock().expect("first lock ok");
+            panic!("intentional poison");
+        })
+        .join();
+        assert!(
+            dispatcher.registry.is_poisoned(),
+            "mutex must be poisoned for this test to exercise the fallback"
+        );
+
+        let subject_id = ext_hook_id("hole2-poison-subject");
+        let mut event = RuntimeEvent::hook_failed(
+            event_resource_scope(),
+            event_capability(),
+            subject_id.to_hex(),
+            "panic",
+            "fail_isolated",
+            None,
+        );
+        event.provider = Some(target.clone());
+
+        let resolved = dispatcher.scope_provider_for_runtime_event(&event);
+        assert!(
+            resolved.is_none(),
+            "poisoned registry must resolve to None even when the event carries \
+             a provider claim, never trust the spoofable payload: {resolved:?}"
         );
     }
 

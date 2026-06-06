@@ -11,7 +11,8 @@
 
 ## What This Crate Owns
 
-- Skill metadata parsing, validation, deterministic gating/scoring/selection, registry operations, catalog lookup, and trust-aware skill type definitions.
+- Skill metadata parsing (`parser`), validation (`validation`), deterministic gating/scoring/selection (`gating`, `selector`), registry operations (`registry`), catalog lookup (`catalog`), and trust-aware v1 skill type definitions (`types`).
+- V2 engine skill types (`v2`): `V2SkillMetadata`, `CodeSnippet`, `SkillMetrics`, `SkillRevision`/`SkillRepairRecord` — serialized into `MemoryDoc.metadata` by the engine crate.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here
