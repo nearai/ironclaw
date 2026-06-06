@@ -22,6 +22,7 @@ use ironclaw_dispatcher::{
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
+    SecurityAuditSink,
 };
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime, SharedExtensionRegistry};
 #[cfg(feature = "libsql")]
@@ -138,6 +139,7 @@ where
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     secret_store: Option<Arc<dyn SecretStore>>,
     credential_account_store: Arc<dyn CredentialAccountStore>,
     credential_session_store: Arc<dyn CredentialSessionStore>,
@@ -307,6 +309,7 @@ where
             capability_leases: None,
             event_sink: None,
             audit_sink: None,
+            security_audit_sink: None,
             secret_store: None,
             credential_account_store,
             credential_session_store,
@@ -579,6 +582,9 @@ where
 
         if let Some(audit_sink) = &self.audit_sink {
             handler = handler.with_audit_sink_dyn(Arc::clone(audit_sink));
+        }
+        if let Some(security_audit_sink) = &self.security_audit_sink {
+            handler = handler.with_security_audit_sink(Arc::clone(security_audit_sink));
         }
         if let Some(secret_store) = &self.secret_store {
             handler = handler.with_secret_store_dyn(Arc::clone(secret_store));
