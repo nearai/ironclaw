@@ -14,7 +14,7 @@
 
 - ProductAdapter contracts: typed inbound/outbound DTOs, adapter trait, workflow bridge types, and fakes.
 - External refs for actor/conversation/reply identity and presentation metadata.
-- Adapter auth evidence contracts, declared egress, projection/outbound envelope DTOs, and redaction helpers.
+- Adapter auth evidence contracts, declared egress, adapter capability descriptors (`ProductAdapterCapabilities`/`ProductCapabilityFlag`), projection/outbound envelope DTOs, and redaction helpers.
 - Adapter-safe parse/render/health boundaries independent of concrete product workflow.
 
 ## Do Not Move In Here

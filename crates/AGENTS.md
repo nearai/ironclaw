@@ -36,7 +36,7 @@ Use targeted crate tests first. Add `ironclaw_architecture` when dependency edge
 - `docs/reborn/contracts/*.md` — Reborn source-of-truth contracts.
 - `crates/ironclaw_architecture` — mechanical dependency-boundary enforcement.
 
-Treat crate-local `AGENTS.md` as the first file to load when it exists. Current workspace crates without one include `ironclaw_engine`, `ironclaw_hooks`, `ironclaw_prompt_envelope`, `ironclaw_reborn_traces`, and `ironclaw_wasm_limiter`.
+Treat crate-local `AGENTS.md` as the first file to load when it exists. Current workspace crates without one include `ironclaw_hooks`, `ironclaw_prompt_envelope`, `ironclaw_reborn_traces`, and `ironclaw_wasm_limiter`.
 
 ## Dependency Mental Model
 
@@ -116,7 +116,7 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 | `ironclaw_agent_loop` | `ironclaw_agent_loop/AGENTS.md`, `ironclaw_agent_loop/CLAUDE.md` | Agent-loop framework state, planner/executor, strategy/family contracts, test support. | Product adapters, transport, concrete provider auth. |
 | `ironclaw_loop_support` | `ironclaw_loop_support/AGENTS.md`, `ironclaw_loop_support/CLAUDE.md` | Loop host support services: capability/input ports, allow sets, input queue, identity/skill context, cancellation. | Owning core loop strategy or runtime lane execution. |
 | `ironclaw_capabilities` | `ironclaw_capabilities/AGENTS.md`, `ironclaw_capabilities/CLAUDE.md` | Caller-facing `CapabilityHost` invoke/resume/spawn workflow, obligation seams, conformance helpers. | Process lifecycle APIs, direct concrete runtime dependencies. |
-| `ironclaw_engine` | `ironclaw_engine/CLAUDE.md`, `ironclaw_engine/MONTY.md`, `Cargo.toml` | Thread/capability/CodeAct engine: runtime manager, executor, gates, leases, memory retrieval, workspace mounts, traits/types. | Product transport, provider-specific auth, lower-layer host policy shortcuts. |
+| `ironclaw_engine` | `ironclaw_engine/AGENTS.md`, `ironclaw_engine/CLAUDE.md`, `ironclaw_engine/MONTY.md` | Thread/capability/CodeAct engine: runtime manager, executor, gates, leases, memory retrieval, workspace mounts, traits/types. | Product transport, provider-specific auth, lower-layer host policy shortcuts. |
 
 ### Product, adapters, Reborn binary
 

@@ -11,7 +11,11 @@
 
 ## What This Crate Owns
 
-- Script runtime lane adapter over host-mediated filesystem, events, resources, dispatcher, and HTTP surfaces.
+- The script runtime lane over host-mediated filesystem/events/resources/dispatcher/HTTP, currently:
+- Runtime + executor: `ScriptRuntime`, the `ScriptExecutor` trait, and `ScriptRuntimeConfig`.
+- Execution request/result types: `ScriptInvocation`, `ScriptExecutionRequest`, `ScriptExecutionResult`, `ScriptCapabilityResult`; `ScriptError`.
+- Backend abstraction: the `ScriptBackend` trait + `DockerScriptBackend`, with normalized `ScriptBackendRequest` / `ScriptBackendOutput` (output parsing).
+- Host-mediated HTTP: `ScriptRuntimeHttpAdapter` and `ScriptHostHttpRequest`/`ScriptHostHttpResponse`/`ScriptHostHttpError`.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

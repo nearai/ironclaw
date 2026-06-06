@@ -238,7 +238,7 @@ jobs:
   hooks-parity-tests:
     name: Hooks Predicate-Backend Parity Tests
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_core_code == 'true'
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
