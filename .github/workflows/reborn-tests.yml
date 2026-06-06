@@ -1,6 +1,12 @@
-name: Reborn Integration Binary Crate Tests
+name: Tests (Reborn)
 
 on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit SHA or ref to test
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       ref:
@@ -9,21 +15,21 @@ on:
         type: string
   pull_request:
     branches:
-      - reborn-integration
+      - main
   merge_group:
     branches:
-      - reborn-integration
+      - main
     types:
       - checks_requested
   push:
     branches:
-      - reborn-integration
+      - main
 
 permissions:
   contents: read
 
 concurrency:
-  group: reborn-integration-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  group: reborn-tests-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -34,8 +40,43 @@ env:
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
 
 jobs:
+  changes:
+    name: Detect Reborn test scope
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.non_diff.outputs.docs_only || steps.diff.outputs.docs_only }}
+      has_reborn_tests: ${{ steps.non_diff.outputs.has_reborn_tests || steps.diff.outputs.has_reborn_tests }}
+    steps:
+      - id: non_diff
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+        run: |
+          echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          echo "has_reborn_tests=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: diff
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          CHANGED_FILES="$(git diff --name-only "$BASE_SHA"...HEAD)"
+
+          echo "Changed files:"
+          if [ -n "$CHANGED_FILES" ]; then
+            printf '%s\n' "$CHANGED_FILES"
+          else
+            echo "<none>"
+          fi
+
+          printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
+
   package-matrix:
     name: Discover Reborn package crates
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
     outputs:
       packages: ${{ steps.packages.outputs.packages }}
@@ -83,7 +124,8 @@ jobs:
 
   crate-tests:
     name: Test ${{ matrix.package }}
-    needs: package-matrix
+    needs: [changes, package-matrix]
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -109,8 +151,8 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: reborn-integration-${{ matrix.package }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/reborn-integration' }}
+          key: reborn-tests-${{ matrix.package }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Run crate tests
         run: |
@@ -122,6 +164,8 @@ jobs:
 
   root-reborn-parity-tests:
     name: Reborn parity tests (${{ matrix.group }})
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -153,8 +197,8 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: reborn-integration-root-${{ matrix.group }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/reborn-integration' }}
+          key: reborn-tests-root-${{ matrix.group }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Run Reborn root parity tests
         run: |
@@ -165,26 +209,44 @@ jobs:
             echo "::endgroup::"
           done
 
-  reborn-integration-crate-tests:
-    name: Reborn Integration Binary Crate Tests
+  reborn-tests:
+    name: Tests (Reborn)
     runs-on: ubuntu-latest
     if: always()
     needs:
+      - changes
       - package-matrix
       - crate-tests
       - root-reborn-parity-tests
     steps:
-      - name: Check matrix result
+      - name: Check Reborn test result
         run: |
+          if [[ "${{ needs.changes.result }}" != "success" ]]; then
+            echo "changes failed: ${{ needs.changes.result }}"
+            exit 1
+          fi
+
+          if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
+            echo "Docs-only change detected — Reborn test roll-up passes fast"
+            exit 0
+          fi
+
+          if [[ "${{ needs.changes.outputs.has_reborn_tests }}" != "true" ]]; then
+            echo "No Reborn test scope detected — Reborn test roll-up passes fast"
+            exit 0
+          fi
+
           if [[ "${{ needs.package-matrix.result }}" != "success" ]]; then
-            echo "Reborn package matrix discovery failed"
+            echo "Reborn package matrix discovery failed: ${{ needs.package-matrix.result }}"
             exit 1
           fi
+
           if [[ "${{ needs.crate-tests.result }}" != "success" ]]; then
-            echo "One or more Reborn binary crate tests failed"
+            echo "One or more Reborn binary crate tests failed: ${{ needs.crate-tests.result }}"
             exit 1
           fi
+
           if [[ "${{ needs.root-reborn-parity-tests.result }}" != "success" ]]; then
-            echo "One or more Reborn root parity tests failed"
+            echo "One or more Reborn root parity tests failed: ${{ needs.root-reborn-parity-tests.result }}"
             exit 1
           fi
