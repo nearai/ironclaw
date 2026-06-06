@@ -274,9 +274,10 @@ rows are inventoried here, not implemented in the current PR.
   `auth_middleware`. The Reborn binary owns its own
   `WebuiAuthenticator` impl (env tokens, DB-backed sessions, OIDC,
   whatever the host wires) and supplies it via `WebuiServeConfig`.
-- **Operator LLM config** — the `/api/webchat/v2/llm/*` routes mutate
-  operator-wide provider settings and secrets. `webui_v2_app` only
-  mounts them when the host authenticator opts into operator LLM config;
+- **Operator WebUI config** — the `/api/webchat/v2/llm/*` routes and
+  Slack channel-route admin mutate operator-wide provider settings,
+  secrets, or channel ownership. `webui_v2_app` only mounts them when
+  the host authenticator opts into `allows_operator_webui_config`;
   multi-user authenticators must leave them unmounted until a real admin
   authorization boundary exists.
 - **`?token=` exception** — only `GET /api/webchat/v2/threads/{id}/events`;

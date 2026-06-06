@@ -10,7 +10,7 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use axum::{
     Json, Router,
-    extract::{Extension, State},
+    extract::{Extension, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
@@ -27,6 +27,7 @@ use ironclaw_product_workflow::{
     ProductConversationRouteKey, ProductConversationSubjectRouteResolutionRequest,
     ProductConversationSubjectRouteResolver, ProductWorkflowError, WebUiAuthenticatedCaller,
 };
+use ironclaw_safety::{SafetyConfig, SafetyLayer};
 use ironclaw_slack_v2_adapter::SLACK_V2_ADAPTER_ID;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -39,6 +40,8 @@ const SLACK_CHANNEL_ROUTES_DELETE_ROUTE_ID: &str = "webui.v2.channels.slack.rout
 const SLACK_CHANNEL_ROUTES_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(16 * 1024).unwrap(); // safety: 16 KiB is non-zero.
 const SLACK_CHANNEL_ROUTES_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 is non-zero.
 const SLACK_CHANNEL_ROUTES_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 is non-zero.
+const DEFAULT_LIST_LIMIT: usize = 100;
+const MAX_LIST_LIMIT: usize = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SlackChannelRouteKey {
@@ -266,6 +269,7 @@ pub struct SlackChannelRouteAdminRouteConfig {
     team_id: String,
     operator_user_id: UserId,
     store: Arc<dyn SlackChannelRouteStore>,
+    safety_layer: Arc<SafetyLayer>,
 }
 
 impl SlackChannelRouteAdminRouteConfig {
@@ -282,6 +286,10 @@ impl SlackChannelRouteAdminRouteConfig {
             team_id,
             operator_user_id,
             store,
+            safety_layer: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 16 * 1024,
+                injection_check_enabled: true,
+            })),
         }
     }
 
@@ -372,6 +380,13 @@ fn route_policy(body_limit: BodyLimitPolicy) -> IngressPolicy {
 #[derive(Debug, Serialize)]
 struct SlackChannelRouteListResponse {
     routes: Vec<SlackChannelRoute>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackChannelRouteListQuery {
+    limit: Option<usize>,
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -392,14 +407,28 @@ struct SlackChannelRouteDeleteResponse {
 
 async fn list_slack_channel_routes_handler(
     State(config): State<SlackChannelRouteAdminRouteConfig>,
+    Query(query): Query<SlackChannelRouteListQuery>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<SlackChannelRouteListResponse>, SlackRouteError> {
     ensure_authorized_operator(&config, &caller)?;
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .clamp(1, MAX_LIST_LIMIT);
+    let cursor = parse_list_cursor(query.cursor.as_deref())?;
     let routes = config
         .store
         .list_routes(&config.tenant_id, &config.installation_id, &config.team_id)
         .await?;
-    Ok(Json(SlackChannelRouteListResponse { routes }))
+    let next_cursor = if routes.len() > cursor + limit {
+        Some((cursor + limit).to_string())
+    } else {
+        None
+    };
+    Ok(Json(SlackChannelRouteListResponse {
+        routes: routes.into_iter().skip(cursor).take(limit).collect(),
+        next_cursor,
+    }))
 }
 
 async fn upsert_slack_channel_route_handler(
@@ -408,6 +437,8 @@ async fn upsert_slack_channel_route_handler(
     Json(request): Json<SlackChannelRouteUpsertRequest>,
 ) -> Result<Json<SlackChannelRoute>, SlackRouteError> {
     ensure_authorized_operator(&config, &caller)?;
+    scan_route_admin_field(&config, "channel_id", &request.channel_id)?;
+    scan_route_admin_field(&config, "subject_user_id", &request.subject_user_id)?;
     let subject_user_id =
         UserId::new(request.subject_user_id).map_err(|_| SlackRouteError::BadRequest)?;
     let key = config.key_for_channel(request.channel_id)?;
@@ -421,9 +452,43 @@ async fn delete_slack_channel_route_handler(
     Json(request): Json<SlackChannelRouteDeleteRequest>,
 ) -> Result<Json<SlackChannelRouteDeleteResponse>, SlackRouteError> {
     ensure_authorized_operator(&config, &caller)?;
+    scan_route_admin_field(&config, "channel_id", &request.channel_id)?;
     let key = config.key_for_channel(request.channel_id)?;
     let deleted = config.store.delete_route(&key).await?;
     Ok(Json(SlackChannelRouteDeleteResponse { deleted }))
+}
+
+fn parse_list_cursor(cursor: Option<&str>) -> Result<usize, SlackRouteError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    cursor
+        .parse::<usize>()
+        .map_err(|_| SlackRouteError::BadRequest)
+}
+
+fn scan_route_admin_field(
+    config: &SlackChannelRouteAdminRouteConfig,
+    field: &'static str,
+    value: &str,
+) -> Result<(), SlackRouteError> {
+    let validation = config.safety_layer.validate_input(value);
+    if !validation.is_valid {
+        tracing::warn!(
+            field,
+            "Slack channel route admin field failed safety validation"
+        );
+        return Err(SlackRouteError::BadRequest);
+    }
+    if config
+        .safety_layer
+        .scan_inbound_for_secrets(value)
+        .is_some()
+    {
+        tracing::warn!(field, "Slack channel route admin field failed secret scan");
+        return Err(SlackRouteError::BadRequest);
+    }
+    Ok(())
 }
 
 fn ensure_authorized_operator(
@@ -479,8 +544,11 @@ impl IntoResponse for SlackRouteError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use ironclaw_product_adapters::ProductAdapterId;
     use tower::ServiceExt;
 
     use super::*;
@@ -614,6 +682,139 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn route_admin_list_returns_empty_for_fresh_store() {
+        let mount = slack_channel_route_admin_route_mount(route_config(Arc::new(
+            InMemorySlackChannelRouteStore::new(),
+        )));
+
+        let response = mount
+            .protected
+            .oneshot(request("GET", "", TENANT))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(body["routes"], serde_json::json!([]));
+        assert_eq!(body["next_cursor"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn route_admin_list_paginates_routes() {
+        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let mount = slack_channel_route_admin_route_mount(route_config(store));
+        for channel_id in ["C0A", "C0B"] {
+            let response = mount
+                .protected
+                .clone()
+                .oneshot(request(
+                    "PUT",
+                    &format!(
+                        r#"{{"channel_id":"{channel_id}","subject_user_id":"user:eng-team-agent"}}"#
+                    ),
+                    TENANT,
+                ))
+                .await
+                .expect("upsert");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let response = mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("{WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH}?limit=1"))
+                    .header("content-length", "0")
+                    .extension(caller(TENANT, "user:admin"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("list responds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(body["routes"].as_array().expect("routes").len(), 1);
+        assert_eq!(body["next_cursor"], "1");
+    }
+
+    #[tokio::test]
+    async fn slack_subject_route_resolver_returns_none_for_non_slack_adapter_without_store_call() {
+        let store = Arc::new(CountingRouteStore::default());
+        let resolver = SlackChannelRouteSubjectResolver::new(
+            TenantId::new(TENANT).expect("tenant"),
+            AdapterInstallationId::new(INSTALLATION).expect("installation"),
+            store.clone(),
+        );
+
+        let resolved = resolver
+            .resolve_product_conversation_subject_route(
+                ProductConversationSubjectRouteResolutionRequest {
+                    adapter_id: ProductAdapterId::new("not_slack").expect("adapter"),
+                    installation_id: AdapterInstallationId::new(INSTALLATION)
+                        .expect("installation"),
+                    route_key: ProductConversationRouteKey::new(
+                        Some(TEAM.to_string()),
+                        "C0ENG".to_string(),
+                    )
+                    .expect("route key"),
+                },
+            )
+            .await
+            .expect("resolver succeeds");
+
+        assert_eq!(resolved, None);
+        assert_eq!(store.resolve_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingRouteStore {
+        resolve_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SlackChannelRouteStore for CountingRouteStore {
+        async fn list_routes(
+            &self,
+            _tenant_id: &TenantId,
+            _installation_id: &AdapterInstallationId,
+            _team_id: &str,
+        ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
+            Ok(Vec::new())
+        }
+
+        async fn upsert_route(
+            &self,
+            key: SlackChannelRouteKey,
+            subject_user_id: UserId,
+        ) -> Result<SlackChannelRoute, SlackChannelRouteError> {
+            Ok(SlackChannelRoute::new(key, subject_user_id))
+        }
+
+        async fn delete_route(
+            &self,
+            _key: &SlackChannelRouteKey,
+        ) -> Result<bool, SlackChannelRouteError> {
+            Ok(false)
+        }
+
+        async fn resolve_subject_user_id(
+            &self,
+            _key: &SlackChannelRouteKey,
+        ) -> Result<Option<UserId>, SlackChannelRouteError> {
+            self.resolve_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
     fn route_config(store: Arc<dyn SlackChannelRouteStore>) -> SlackChannelRouteAdminRouteConfig {
         SlackChannelRouteAdminRouteConfig::new(
             TenantId::new(TENANT).expect("tenant"),
@@ -633,17 +834,21 @@ mod tests {
             .method(method)
             .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
             .header("content-type", "application/json")
-            .extension(WebUiAuthenticatedCaller {
-                tenant_id: TenantId::new(tenant_id).expect("tenant"),
-                user_id: UserId::new(user_id).expect("user"),
-                agent_id: None,
-                project_id: None,
-            });
+            .extension(caller(tenant_id, user_id));
         if method == "GET" {
             builder = builder.header("content-length", "0");
         }
         builder
             .body(Body::from(body.to_string()))
             .expect("request builds")
+    }
+
+    fn caller(tenant_id: &str, user_id: &str) -> WebUiAuthenticatedCaller {
+        WebUiAuthenticatedCaller {
+            tenant_id: TenantId::new(tenant_id).expect("tenant"),
+            user_id: UserId::new(user_id).expect("user"),
+            agent_id: None,
+            project_id: None,
+        }
     }
 }

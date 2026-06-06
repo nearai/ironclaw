@@ -110,6 +110,12 @@ pub trait WebuiAuthenticator: Send + Sync + 'static {
     /// models, or Slack channel routes, so host composition only mounts them
     /// for authenticators that explicitly opt in.
     fn allows_operator_webui_config(&self) -> bool {
+        #[allow(deprecated)]
+        self.allows_operator_llm_config()
+    }
+
+    #[deprecated(since = "0.1.0", note = "Renamed to allows_operator_webui_config")]
+    fn allows_operator_llm_config(&self) -> bool {
         false
     }
 }

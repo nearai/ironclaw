@@ -613,6 +613,19 @@ mod tests {
         }
     }
 
+    struct MultiUserTokenAuthenticator;
+
+    #[async_trait]
+    impl WebuiAuthenticator for MultiUserTokenAuthenticator {
+        async fn authenticate(&self, token: &str) -> Option<UserId> {
+            if token == "operator-token" {
+                Some(UserId::new(USER).expect("user"))
+            } else {
+                None
+            }
+        }
+    }
+
     #[tokio::test]
     async fn build_slack_events_route_mount_builds_signed_route_from_reborn_runtime() {
         let (runtime, _root) = runtime().await;
@@ -1087,6 +1100,7 @@ mod tests {
         assert_eq!(upsert.status(), StatusCode::OK);
 
         let list = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("GET")
@@ -1104,6 +1118,99 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).expect("list json");
         assert_eq!(body["routes"][0]["channel_id"], "C0HOST");
         assert_eq!(body["routes"][0]["subject_user_id"], SHARED_SUBJECT);
+
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"channel_id":"C0HOST"}"#))
+                    .expect("delete request builds"),
+            )
+            .await
+            .expect("delete route responds");
+        assert_eq!(delete.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(delete.into_body(), 64 * 1024)
+            .await
+            .expect("delete body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("delete json");
+        assert_eq!(body["deleted"], true);
+
+        let list_after_delete = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .body(Body::empty())
+                    .expect("list request builds"),
+            )
+            .await
+            .expect("list route responds");
+        assert_eq!(list_after_delete.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list_after_delete.into_body(), 64 * 1024)
+            .await
+            .expect("list body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("list json");
+        assert_eq!(body["routes"], serde_json::json!([]));
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn slack_channel_routes_are_not_mounted_for_non_operator_authenticator() {
+        let (runtime, _root) = runtime().await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .expect("mounts");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
+        let app = webui_v2_app(
+            bundle,
+            WebuiServeConfig::new(
+                TenantId::new(TENANT).expect("tenant"),
+                Arc::new(MultiUserTokenAuthenticator),
+                Vec::new(),
+            )
+            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+            .with_slack_channel_routes(mounts.channel_routes),
+        )
+        .expect("webui app");
+
+        for (method, body) in [
+            ("GET", ""),
+            (
+                "PUT",
+                r#"{"channel_id":"C0HOST","subject_user_id":"user:slack-shared-subject"}"#,
+            ),
+            ("DELETE", r#"{"channel_id":"C0HOST"}"#),
+        ] {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                .header("authorization", "Bearer operator-token");
+            if method != "GET" {
+                builder = builder.header("content-type", "application/json");
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    builder
+                        .body(Body::from(body.to_string()))
+                        .expect("request builds"),
+                )
+                .await
+                .expect("route responds");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{method} route must not be mounted for non-operator auth"
+            );
+        }
 
         runtime.shutdown().await.expect("runtime shuts down");
     }

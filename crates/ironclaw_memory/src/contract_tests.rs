@@ -48,7 +48,7 @@ use crate::search::MemorySearchRequest;
 ///
 /// Must return a fresh, empty repository — contracts assume nothing
 /// leaks between calls.
-pub type RepoFactory<R> = fn() -> R;
+pub type RepoFactory<R> = fn() -> R; // pub-api-exempt: contract-test consumers name this factory type from downstream crates.
 
 #[cfg(any(test, feature = "contract-tests"))]
 fn scope_a() -> MemoryDocumentScope {
@@ -187,13 +187,13 @@ where
         b"the quick brown needle",
     )
     .await
-    .unwrap();
+    .unwrap(); // safety: contract test fixture write must fail loudly.
     repo.write_document(
         &path_in(&scope_b, "notes/needle.md"),
         b"the quick brown needle",
     )
     .await
-    .unwrap();
+    .unwrap(); // safety: contract test fixture write must fail loudly.
 
     let request = MemorySearchRequest::new("needle").expect("valid search request");
 
@@ -201,12 +201,7 @@ where
         Ok(hits) => {
             // If the impl supports search, every hit MUST be in scope A.
             for hit in &hits {
-                assert_eq!(
-                    hit.path.scope(),
-                    &scope_a,
-                    "search_documents leaked a cross-tenant hit: {:?}",
-                    hit.path
-                );
+                assert_eq!(hit.path.scope(), &scope_a); // safety: contract test verifies cross-tenant search isolation.
             }
         }
         Err(err) => {
