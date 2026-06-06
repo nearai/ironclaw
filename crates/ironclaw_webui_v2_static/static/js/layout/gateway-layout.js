@@ -1,4 +1,4 @@
-import { Navigate, Outlet, useLocation } from "react-router";
+import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
 import { useInterfaceTheme } from "../design-system/theme.js";
 import { useGatewayStatus } from "../hooks/useGatewayStatus.js";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders.js";
@@ -29,6 +29,7 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
   // avoid a redirect loop. Defaults are not treated as "configured" — the gate
   // keys off the honest `hasActiveProvider` (a persisted selection).
   const location = useLocation();
+  const navigate = useNavigate();
   const llmProviders = useLlmProviders({ settings: {}, gatewayStatus: status });
   const needsOnboarding = !llmProviders.isLoading && !llmProviders.hasActiveProvider;
   const onboardingExempt =
@@ -45,10 +46,17 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
-  // v2 has no DELETE thread endpoint, so the sidebar renders no
-  // delete affordance (SidebarThreads conditionally renders the
-  // trash button on `onDelete`).
 
+  const handleDeleteThread = React.useCallback(
+    async (threadId) => {
+      const wasActive = threadsState.activeThreadId === threadId;
+      await threadsState.deleteThread(threadId);
+      if (wasActive) {
+        navigate("/chat", { replace: true });
+      }
+    },
+    [navigate, threadsState]
+  );
   if (needsOnboarding && !onboardingExempt) {
     return html`<${Navigate} to="/welcome" replace />`;
   }
@@ -79,6 +87,7 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
           onClose=${sidebar.close}
           onNewChat=${sidebar.newChat}
           onSelectThread=${sidebar.selectThread}
+          onDeleteThread=${handleDeleteThread}
         />
       </div>
 

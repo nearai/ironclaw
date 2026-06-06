@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { listAutomations } from "./api.js";
+import { deleteThread, listAutomations } from "./api.js";
 
 test("listAutomations reads through the v2 automations route", async () => {
   const calls = [];
@@ -47,4 +47,35 @@ test("listAutomations propagates api errors from the automations route", async (
     assert.equal(error.body, "temporarily unavailable");
     return true;
   });
+});
+
+test("deleteThread sends DELETE to the encoded thread route", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(
+      JSON.stringify({ thread_id: "thread/needs encoding", deleted: true }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+  };
+
+  const response = await deleteThread({ threadId: "thread/needs encoding" });
+
+  assert.deepEqual(response, {
+    thread_id: "thread/needs encoding",
+    deleted: true,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/threads/thread%2Fneeds%20encoding");
+  assert.equal(calls[0].options.method, "DELETE");
+  assert.equal(calls[0].options.credentials, "same-origin");
+  assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
 });

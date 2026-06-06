@@ -120,6 +120,12 @@ export function listThreads({ limit, cursor } = {}) {
   return apiFetch(url.pathname + url.search);
 }
 
+export function deleteThread({ threadId } = {}) {
+  return apiFetch(`${V2_BASE}/threads/${encodeURIComponent(threadId)}`, {
+    method: "DELETE",
+  });
+}
+
 // --- Automations ---
 
 export function listAutomations({ limit } = {}) {
