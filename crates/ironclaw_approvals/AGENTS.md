@@ -11,8 +11,12 @@
 
 ## What This Crate Owns
 
-- Exact-invocation approval requests, leases, resume coordination, and approval events.
+- The approval resolution workflow: resolving a pending (run-state-owned) approval record into a scoped capability lease or a denial. Currently:
+- `ApprovalResolver` — the fail-closed resolver (persists the `approve` authority record before issuing the lease) and `ApprovalResolutionError`.
+- Resolution outcomes: `LeaseApproval` (issued scoped lease) and `DenyApproval` (no lease).
+- Best-effort, metadata-only approval audit emission (never alters resolution outcomes).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
+- Note: the durable approval *request records* are owned by `ironclaw_run_state`; this crate consumes them and produces the lease/denial decision.
 
 ## Do Not Move In Here
 

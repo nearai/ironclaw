@@ -1,4 +1,4 @@
-name: Run Tests
+name: Tests (Legacy)
 on:
   workflow_call:
     inputs:
@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: test-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  group: legacy-tests-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -50,12 +50,14 @@ jobs:
       has_wasm_abi_risk: ${{ steps.non_diff.outputs.has_wasm_abi_risk || steps.diff.outputs.has_wasm_abi_risk }}
       has_telegram_risk: ${{ steps.non_diff.outputs.has_telegram_risk || steps.diff.outputs.has_telegram_risk }}
       has_slack_risk: ${{ steps.non_diff.outputs.has_slack_risk || steps.diff.outputs.has_slack_risk }}
+      has_legacy_tests: ${{ steps.non_diff.outputs.has_legacy_tests || steps.diff.outputs.has_legacy_tests }}
     steps:
       - id: non_diff
         if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
         run: |
           echo "docs_only=false" >> "$GITHUB_OUTPUT"
           echo "has_core_code=true" >> "$GITHUB_OUTPUT"
+          echo "has_legacy_tests=true" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "workflow_call" ]; then
             echo "has_engine_replay_risk=true" >> "$GITHUB_OUTPUT"
           else
@@ -92,17 +94,7 @@ jobs:
             printf '%s\n' "$CHANGED_FILES" | grep -Eq "$1"
           }
 
-          if [ -z "$CHANGED_FILES" ] || [ -z "$(printf '%s\n' "$CHANGED_FILES" | grep -Ev '(^docs/|^\\.github/ISSUE_TEMPLATE/|^\\.github/pull_request_template\\.md$|^[^/]+\\.md$)' || true)" ]; then
-            echo "docs_only=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "docs_only=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          if has_match '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|build\.rs$|\.github/workflows/(test|nightly-deep-ci|e2e|replay-gate|code_style|docker|release|release-plz|rebuild-release-image|coverage|live-canary|pr-label-classify|pr-label-scope|claude-review)\.yml$|\.github/actions/install-cargo-component/|\.github/(dependabot|labeler)\.yml$)'; then
-            echo "has_core_code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_core_code=false" >> "$GITHUB_OUTPUT"
-          fi
+          printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
 
           if has_match '^(crates/ironclaw_(common|engine|skills)/|src/(agent|auth|bridge|context|extensions|llm|orchestrator|secrets|skills|tools|worker|workspace)/|tests/fixtures/llm_traces/|tests/snapshots/|tests/support/replay_outcome\.rs$|tests/e2e_engine_v2\.rs$|tests/e2e_live\.rs$|tests/e2e_recorded_trace\.rs$|tests/e2e_advanced_traces\.rs$|tests/e2e_trace_.*\.rs$|Cargo\.toml$|\.github/workflows/(replay-gate|test|nightly-deep-ci)\.yml$)'; then
             echo "has_engine_replay_risk=true" >> "$GITHUB_OUTPUT"
@@ -163,14 +155,14 @@ jobs:
   tests:
     name: Tests (${{ matrix.name }})
     needs: [changes, matrix-config]
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_core_code == 'true'
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include: ${{ fromJSON(needs.matrix-config.outputs.test_matrix) }}
     steps:
@@ -220,7 +212,7 @@ jobs:
   secret-store-contract-tests:
     name: Secret Store Contract Tests
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_core_code == 'true'
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -243,11 +235,60 @@ jobs:
           timeout --signal=INT --kill-after=30s 10m \
             cargo test -p ironclaw_secrets --test secret_store_contract -- --nocapture
 
+  hooks-parity-tests:
+    name: Hooks Predicate-Backend Parity Tests
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_core_code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ironclaw_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      DATABASE_URL: postgres://postgres:postgres@localhost/ironclaw_test
+      # Turn a missing/unreachable Postgres into a HARD failure so the full
+      # cross-backend matrix (in-memory + libSQL + Postgres) cannot skip-pass.
+      IRONCLAW_REQUIRE_POSTGRES: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: hooks-parity
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # Full parity matrix across all three backends: --features postgres
+      # compiles the Postgres leg, --features integration adds the multi-host
+      # adversarial suite, and IRONCLAW_REQUIRE_POSTGRES=1 (set above) makes the
+      # Postgres leg mandatory. The libSQL leg always runs (embedded temp-file).
+      - name: Run hooks parity matrix + multi-host adversarial suite (all backends)
+        run: |
+          timeout --signal=INT --kill-after=30s 15m \
+            cargo test -p ironclaw_hooks_parity --features postgres,integration -- --nocapture
+
   heavy-integration-tests:
     name: Heavy Integration Tests
     needs: changes
     if: >
       needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_runtime_heavy_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -277,11 +318,12 @@ jobs:
     needs: changes
     if: >
       needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_runtime_heavy_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         partition:
           - 1/2
@@ -320,7 +362,7 @@ jobs:
   replay-required:
     name: Replay Required
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && github.event_name != 'push' && (github.event_name == 'workflow_call' || needs.changes.outputs.has_engine_replay_risk == 'true')
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && github.event_name != 'push' && (github.event_name == 'workflow_call' || needs.changes.outputs.has_engine_replay_risk == 'true')
     uses: ./.github/workflows/replay-gate.yml
     with:
       ref: ${{ inputs.ref || github.sha }}
@@ -328,7 +370,7 @@ jobs:
   web-e2e-smoke:
     name: Web E2E Smoke
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request' && needs.changes.outputs.has_web_risk == 'true'
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && github.event_name == 'pull_request' && needs.changes.outputs.has_web_risk == 'true'
     uses: ./.github/workflows/e2e.yml
     with:
       ref: ${{ inputs.ref || github.sha }}
@@ -337,7 +379,7 @@ jobs:
   web-e2e-full:
     name: Web E2E Smoke (merge queue)
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && github.event_name == 'merge_group' && needs.changes.outputs.has_web_risk == 'true'
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && github.event_name == 'merge_group' && needs.changes.outputs.has_web_risk == 'true'
     uses: ./.github/workflows/e2e.yml
     with:
       ref: ${{ inputs.ref || github.sha }}
@@ -348,6 +390,7 @@ jobs:
     needs: changes
     if: >
       needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_telegram_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -372,6 +415,7 @@ jobs:
     needs: changes
     if: >
       needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_slack_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -399,10 +443,10 @@ jobs:
   windows-build:
     name: Windows Build (${{ matrix.name }})
     needs: [changes, matrix-config]
-    if: needs.changes.outputs.docs_only != 'true' && (github.event_name == 'push' || github.event_name == 'workflow_call')
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_call')
     runs-on: windows-latest
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include: ${{ fromJSON(needs.matrix-config.outputs.windows_matrix) }}
     steps:
@@ -425,6 +469,7 @@ jobs:
     needs: changes
     if: >
       needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_wasm_abi_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -464,6 +509,7 @@ jobs:
     needs: changes
     if: >
       needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' || github.event_name == 'workflow_call') &&
       needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
@@ -487,6 +533,7 @@ jobs:
     needs: changes
     if: >
       needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' || (github.event_name == 'workflow_call' && inputs.include_docker))
     runs-on: ubuntu-latest
     steps:
@@ -504,7 +551,8 @@ jobs:
     needs: changes
     if: >
       (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
-      needs.changes.outputs.docs_only != 'true'
+      needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_legacy_tests == 'true'
     permissions:
       contents: read
       pull-requests: read
@@ -573,13 +621,14 @@ jobs:
         run: ./scripts/check-version-bumps.sh
 
   run-tests:
-    name: Run Tests
+    name: Tests (Legacy)
     runs-on: ubuntu-latest
     if: always()
     needs:
       - changes
       - matrix-config
       - tests
+      - hooks-parity-tests
       - heavy-integration-tests
       - telegram-integration-tests
       - replay-required
@@ -615,8 +664,14 @@ jobs:
             exit 0
           fi
 
+          if [[ "${{ needs.changes.outputs.has_legacy_tests }}" != "true" ]]; then
+            echo "No legacy test scope detected — legacy test roll-up passes fast"
+            exit 0
+          fi
+
           if [[ "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
             require_success "tests" "${{ needs.tests.result }}"
+            require_success "hooks-parity-tests" "${{ needs.hooks-parity-tests.result }}"
           fi
 
           if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_runtime_heavy_risk }}" == "true" ]]; then
@@ -663,3 +718,17 @@ jobs:
           if [[ "$event" == "pull_request" || "$event" == "merge_group" ]] && [[ "${{ needs.changes.outputs.docs_only }}" != "true" ]]; then
             require_success "version-check" "${{ needs.version-check.result }}"
           fi
+
+  run-tests-compat:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - run-tests
+    steps:
+      - run: |
+          if [[ "${{ needs.run-tests.result }}" != "success" ]]; then
+            echo "Tests (Legacy) failed: ${{ needs.run-tests.result }}"
+            exit 1
+          fi
+          echo "Compatibility roll-up for the current main required check."

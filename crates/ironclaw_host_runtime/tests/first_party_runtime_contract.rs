@@ -705,6 +705,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                 runtime_credentials: Vec::new(),
                 resource_profile: None,
             }],
+            hooks: Vec::new(),
         },
         VirtualPath::new("/system/extensions/host").unwrap(),
     )

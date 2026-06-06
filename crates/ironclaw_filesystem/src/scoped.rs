@@ -194,6 +194,20 @@ where
         self.root.tail(&virtual_path, from).await
     }
 
+    /// Return the highest seq present at `path` with `seq > from`, or `None`
+    /// when the gap is empty. SQL-backed mounts serve this with an O(1)
+    /// `MAX(seq)` query; see [`RootFilesystem::head_seq`].
+    pub async fn head_seq(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        from: SeqNo,
+    ) -> Result<Option<SeqNo>, FilesystemError> {
+        let virtual_path =
+            self.resolve_with_permission(scope, path, FilesystemOperation::HeadSeq)?;
+        self.root.head_seq(&virtual_path, from).await
+    }
+
     // ─── Legacy bytes-plane methods (DEPRECATED — transitional) ───────────
 
     /// **DEPRECATED — use [`read_bytes`](Self::read_bytes) or
@@ -400,7 +414,7 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
         FilesystemOperation::Delete => permissions.delete,
         FilesystemOperation::MountLocal => false,
         FilesystemOperation::Query => permissions.read && permissions.list,
-        FilesystemOperation::Tail => permissions.read,
+        FilesystemOperation::Tail | FilesystemOperation::HeadSeq => permissions.read,
     }
 }
 

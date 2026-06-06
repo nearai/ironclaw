@@ -123,6 +123,10 @@ with the running assistant (not during the wizard). The `## First-Run Bootstrap`
 prompt on first run. Once the agent writes a profile via `memory_write` and deletes
 `BOOTSTRAP.md`, the block stops injecting.
 
+**Web UI onboarding** (`/onboarding` in WebUI v2) presents a curated provider
+picker for first-run browser users. NEAR AI setup offers both API-key entry and
+SSO; SSO choices (NEAR Wallet, GitHub, Google) are kept behind the setup menu.
+
 ---
 
 ### Step 1: Database Connection
