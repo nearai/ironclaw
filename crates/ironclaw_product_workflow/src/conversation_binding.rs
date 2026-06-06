@@ -304,6 +304,11 @@ impl ProductInstallationScope {
         let route_key = ProductConversationRouteKey::from_external_conversation_ref(
             &request.external_conversation_ref,
         );
+        if route_key.space_id.is_none() && !self.conversation_subject_routes.is_empty() {
+            tracing::warn!(
+                "conversation ref has no space_id; channel route lookup will not match configured routes"
+            );
+        }
         Ok(self
             .conversation_subject_routes
             .get(&route_key)
@@ -325,7 +330,7 @@ impl ProductInstallationScope {
 /// Static tenant map for product adapter installations.
 #[derive(Debug, Clone, Default)]
 pub struct StaticProductInstallationResolver {
-    scopes: HashMap<ProductInstallationKey, ProductInstallationScope>,
+    scopes: HashMap<ProductInstallationKey, Arc<ProductInstallationScope>>,
 }
 
 impl StaticProductInstallationResolver {
@@ -333,19 +338,22 @@ impl StaticProductInstallationResolver {
         scopes: impl IntoIterator<Item = (ProductInstallationKey, ProductInstallationScope)>,
     ) -> Self {
         Self {
-            scopes: scopes.into_iter().collect(),
+            scopes: scopes
+                .into_iter()
+                .map(|(key, scope)| (key, Arc::new(scope)))
+                .collect(),
         }
     }
 
     pub fn insert(&mut self, key: ProductInstallationKey, scope: ProductInstallationScope) {
-        self.scopes.insert(key, scope);
+        self.scopes.insert(key, Arc::new(scope));
     }
 
     fn resolve(
         &self,
         adapter_id: &ProductAdapterId,
         installation_id: &AdapterInstallationId,
-    ) -> Result<ProductInstallationScope, ProductWorkflowError> {
+    ) -> Result<Arc<ProductInstallationScope>, ProductWorkflowError> {
         self.scopes
             .get(&ProductInstallationKey::new(
                 adapter_id.clone(),

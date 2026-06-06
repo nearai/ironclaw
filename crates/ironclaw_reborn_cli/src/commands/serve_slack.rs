@@ -8,7 +8,7 @@ use std::path::Path;
 
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
-    SlackHostBetaChannelRoute, SlackHostBetaConfig, SlackHostBetaConfigInput,
+    SlackHostBetaChannelRoute, SlackHostBetaConfig, SlackHostBetaConfigInput, SlackTeamId,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use secrecy::SecretString;
@@ -102,7 +102,7 @@ pub(crate) fn resolve_slack_host_beta_config(
         agent_id: default_agent_id.clone(),
         project_id: default_project_id.cloned(),
         installation_id,
-        team_id,
+        team_id: SlackTeamId::new(team_id),
         api_app_id: Some(api_app_id),
         slack_user_id,
         user_id: mapped_user_id,
@@ -168,10 +168,7 @@ fn parse_slack_channel_route_config(
     let subject_user_id =
         optional_slack_user_id_config_value(&subject_field, &route.subject_user_id)?
             .ok_or_else(|| anyhow!("[slack].{subject_field} must be set"))?;
-    Ok(SlackHostBetaChannelRoute {
-        channel_id,
-        subject_user_id,
-    })
+    Ok(SlackHostBetaChannelRoute::new(channel_id, subject_user_id))
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -577,6 +574,105 @@ mod tests {
         assert_eq!(
             resolved.channel_routes[0].subject_user_id,
             user_id("eng-team-agent")
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_config_channel_route_rejects_missing_channel_id() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
+            channel_routes: vec![ironclaw_reborn_config::SlackChannelRouteSection {
+                channel_id: None,
+                subject_user_id: Some("eng-team-agent".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let error = resolve_slack_host_beta_config(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("channel route must require channel_id");
+
+        assert!(
+            error
+                .to_string()
+                .contains("[slack].channel_routes[0].channel_id must be set"),
+            "message: {error}"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_config_channel_route_rejects_missing_subject_user_id() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
+            channel_routes: vec![ironclaw_reborn_config::SlackChannelRouteSection {
+                channel_id: Some("CENG".to_string()),
+                subject_user_id: None,
+            }],
+            ..Default::default()
+        };
+
+        let error = resolve_slack_host_beta_config(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("channel route must require subject_user_id");
+
+        assert!(
+            error
+                .to_string()
+                .contains("[slack].channel_routes[0].subject_user_id must be set"),
+            "message: {error}"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_config_channel_route_rejects_invalid_subject_user_id() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
+            channel_routes: vec![ironclaw_reborn_config::SlackChannelRouteSection {
+                channel_id: Some("CENG".to_string()),
+                subject_user_id: Some("invalid\nuser".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let error = resolve_slack_host_beta_config(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("channel route subject_user_id must be valid");
+
+        assert!(
+            error
+                .to_string()
+                .contains("[slack].channel_routes[0].subject_user_id"),
+            "message: {error}"
         );
     }
 

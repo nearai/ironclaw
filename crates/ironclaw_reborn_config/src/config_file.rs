@@ -465,6 +465,12 @@ pub enum RebornConfigFileError {
         #[source]
         source: InlineSecretError,
     },
+    #[error("config file `{path}` field `{field}` validation failed: {reason}")]
+    InvalidField {
+        path: String,
+        field: String,
+        reason: String,
+    },
     #[error("config file `{path}` api_version `{found}` could not be parsed: {reason}")]
     InvalidApiVersion {
         path: String,
@@ -547,6 +553,25 @@ impl RebornConfigFile {
                 }
             })
         };
+        let check_non_empty_trimmed =
+            |label: Cow<'static, str>, value: &str| -> Result<(), RebornConfigFileError> {
+                check(label.clone(), value)?;
+                if value.trim().is_empty() {
+                    return Err(RebornConfigFileError::InvalidField {
+                        path: path_str(),
+                        field: label.into_owned(),
+                        reason: "must not be empty".to_string(),
+                    });
+                }
+                if value.trim() != value {
+                    return Err(RebornConfigFileError::InvalidField {
+                        path: path_str(),
+                        field: label.into_owned(),
+                        reason: "must not contain leading or trailing whitespace".to_string(),
+                    });
+                }
+                Ok(())
+            };
 
         if let Some(api_version) = self.api_version.as_deref() {
             check(Cow::Borrowed("api_version"), api_version)?;
@@ -665,13 +690,13 @@ impl RebornConfigFile {
             }
             for (index, route) in slack.channel_routes.iter().enumerate() {
                 if let Some(channel_id) = &route.channel_id {
-                    check(
+                    check_non_empty_trimmed(
                         Cow::Owned(format!("slack.channel_routes[{index}].channel_id")),
                         channel_id,
                     )?;
                 }
                 if let Some(subject_user_id) = &route.subject_user_id {
-                    check(
+                    check_non_empty_trimmed(
                         Cow::Owned(format!("slack.channel_routes[{index}].subject_user_id")),
                         subject_user_id,
                     )?;
@@ -1231,6 +1256,46 @@ signing_secret_env = "sk-proj-1234567890abcdef1234567890"
         assert!(
             err.to_string().contains("slack.signing_secret_env"),
             "error should identify Slack field: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_padded_slack_channel_route_channel_id() {
+        let toml = r#"
+[slack]
+enabled = true
+
+[[slack.channel_routes]]
+channel_id = " CENG"
+subject_user_id = "eng-team-agent"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("padded Slack channel route id must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string()
+                .contains("slack.channel_routes[0].channel_id"),
+            "error should identify Slack channel route field: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_slack_channel_route_subject_user_id() {
+        let toml = r#"
+[slack]
+enabled = true
+
+[[slack.channel_routes]]
+channel_id = "CENG"
+subject_user_id = " "
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("empty Slack channel route subject must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string()
+                .contains("slack.channel_routes[0].subject_user_id"),
+            "error should identify Slack channel route subject field: {err}"
         );
     }
 

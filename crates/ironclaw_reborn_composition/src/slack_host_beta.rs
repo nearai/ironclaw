@@ -4,6 +4,7 @@
 //! the CLI supplies explicit host config, and this module reuses the already
 //! assembled Reborn runtime services instead of creating a second agent loop.
 
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,7 +56,7 @@ use crate::slack_personal_binding_pairing::{
 };
 use crate::slack_personal_binding_pairing_serve::SlackPersonalBindingPairingRouteConfig;
 use crate::slack_serve::{
-    SlackEventsRouteState, SlackInstallationRecord, SlackInstallationSelector,
+    SlackEventsRouteState, SlackInstallationRecord, SlackInstallationSelector, SlackTeamId,
     StaticSlackInstallationResolver, slack_events_route_mount,
 };
 use crate::webui_serve::PublicRouteMount;
@@ -80,15 +81,15 @@ pub struct SlackHostBetaConfig {
     pub agent_id: AgentId,
     pub project_id: Option<ProjectId>,
     pub installation_id: AdapterInstallationId,
-    pub team_id: String,
+    pub team_id: SlackTeamId,
     pub installation_selector: SlackInstallationSelector,
     /// Optional Slack actor retained only for legacy static personal-binding
     /// tests/config. Tenant app host-beta resolution uses durable personal
     /// bindings and does not require a preselected Slack user.
     pub slack_actor: Option<ExternalActorRef>,
-    /// Host/runtime user used for Slack host-mediated state and legacy static
-    /// Slack actor mapping. Shared channel execution is owned only by
-    /// `shared_subject_user_id` when explicitly configured.
+    /// Host/runtime user used for Slack host-mediated state, legacy static
+    /// Slack actor mapping, and backward-compatible shared-route fallback when
+    /// `shared_subject_user_id` is not configured.
     pub user_id: UserId,
     /// Optional user scope that owns Slack shared-channel execution, tools,
     /// skills, and memory in this beta route. Personal DM routes still use the
@@ -105,12 +106,21 @@ pub struct SlackHostBetaChannelRoute {
     pub subject_user_id: UserId,
 }
 
+impl SlackHostBetaChannelRoute {
+    pub fn new(channel_id: impl Into<String>, subject_user_id: UserId) -> Self {
+        Self {
+            channel_id: channel_id.into(),
+            subject_user_id,
+        }
+    }
+}
+
 pub struct SlackHostBetaConfigInput {
     pub tenant_id: TenantId,
     pub agent_id: AgentId,
     pub project_id: Option<ProjectId>,
     pub installation_id: String,
-    pub team_id: String,
+    pub team_id: SlackTeamId,
     pub api_app_id: Option<String>,
     pub slack_user_id: Option<String>,
     pub user_id: UserId,
@@ -126,12 +136,20 @@ impl SlackHostBetaConfig {
             .map_err(|reason| invalid_config("installation_id", reason.to_string()))?;
         let team_id = input.team_id;
         let installation_selector = match input.api_app_id {
-            Some(api_app_id) => SlackInstallationSelector::app_team(api_app_id, team_id.clone()),
-            None => SlackInstallationSelector::team(team_id.clone()),
+            Some(api_app_id) => {
+                SlackInstallationSelector::app_team(api_app_id, team_id.as_str().to_string())
+            }
+            None => SlackInstallationSelector::team(team_id.as_str().to_string()),
         };
+        let mut seen_channel_ids = HashSet::new();
         for route in &input.channel_routes {
-            ProductConversationRouteKey::new(Some(team_id.clone()), route.channel_id.clone())
-                .map_err(|reason| invalid_config("channel_routes", reason.to_string()))?;
+            if !seen_channel_ids.insert(route.channel_id.as_str()) {
+                return Err(invalid_config(
+                    "channel_routes",
+                    format!("duplicate channel_id '{}'", route.channel_id),
+                ));
+            }
+            slack_channel_route_key(&team_id, route)?;
         }
         let slack_actor = input
             .slack_user_id
@@ -270,7 +288,7 @@ pub fn build_slack_host_beta_mounts(
     let channel_routes = SlackChannelRouteAdminRouteConfig::new(
         config.tenant_id.clone(),
         config.installation_id.clone(),
-        config.team_id.clone(),
+        config.team_id.as_str().to_string(),
         config.user_id.clone(),
         channel_route_store,
     );
@@ -322,18 +340,17 @@ fn build_slack_events_route_mount_with_resolvers(
         config.agent_id.clone(),
         config.project_id.clone(),
     );
-    if let Some(shared_subject_user_id) = config.shared_subject_user_id.clone() {
-        scope = scope.with_default_subject_user_id(shared_subject_user_id);
-    }
+    scope = scope.with_default_subject_user_id(
+        config
+            .shared_subject_user_id
+            .clone()
+            .unwrap_or_else(|| config.user_id.clone()),
+    );
     if let Some(subject_route_resolver) = subject_route_resolver {
         scope = scope.with_conversation_subject_route_resolver(subject_route_resolver);
     }
     for route in &config.channel_routes {
-        let route_key = ProductConversationRouteKey::new(
-            Some(config.team_id.clone()),
-            route.channel_id.clone(),
-        )
-        .map_err(|reason| invalid_config("channel_routes", reason.to_string()))?;
+        let route_key = slack_channel_route_key(&config.team_id, route)?;
         scope = scope.with_conversation_subject_route(route_key, route.subject_user_id.clone());
     }
     let scope = scope.with_actor_user_resolver(actor_user_resolver, actor_pairings);
@@ -409,6 +426,14 @@ fn build_slack_events_route_mount_with_resolvers(
     Ok(slack_events_route_mount(
         SlackEventsRouteState::from_resolver(Arc::new(slack_resolver)),
     ))
+}
+
+fn slack_channel_route_key(
+    team_id: &SlackTeamId,
+    route: &SlackHostBetaChannelRoute,
+) -> Result<ProductConversationRouteKey, SlackHostBetaBuildError> {
+    ProductConversationRouteKey::new(Some(team_id.as_str().to_string()), route.channel_id.clone())
+        .map_err(|reason| invalid_config("channel_routes", reason.to_string()))
 }
 
 fn slack_bot_token_handle() -> Result<EgressCredentialHandle, SlackHostBetaBuildError> {
@@ -1259,7 +1284,7 @@ mod tests {
             agent_id: AgentId::new(AGENT).expect("agent"),
             project_id: Some(ProjectId::new(PROJECT).expect("project")),
             installation_id: INSTALLATION.to_string(),
-            team_id: TEAM.to_string(),
+            team_id: SlackTeamId::new(TEAM),
             api_app_id: None,
             slack_user_id: Some(SLACK_USER.to_string()),
             user_id: UserId::new(USER).expect("user"),
@@ -1293,6 +1318,39 @@ mod tests {
         assert_eq!(config.user_id, UserId::new(USER).expect("user id"));
         assert_eq!(config.signing_secret.expose_secret(), SECRET);
         assert_eq!(config.bot_token.expose_secret(), "xoxb-host-token");
+    }
+
+    #[test]
+    fn slack_host_beta_config_rejects_duplicate_channel_routes() {
+        let error = SlackHostBetaConfig::new(SlackHostBetaConfigInput {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            installation_id: INSTALLATION.to_string(),
+            team_id: SlackTeamId::new(TEAM),
+            api_app_id: Some(API_APP.to_string()),
+            slack_user_id: Some(SLACK_USER.to_string()),
+            user_id: UserId::new(USER).expect("user"),
+            shared_subject_user_id: None,
+            channel_routes: vec![
+                SlackHostBetaChannelRoute::new(
+                    "C0HOST",
+                    UserId::new("first-subject").expect("first subject"),
+                ),
+                SlackHostBetaChannelRoute::new(
+                    "C0HOST",
+                    UserId::new("second-subject").expect("second subject"),
+                ),
+            ],
+            signing_secret: SecretString::from(SECRET),
+            bot_token: SecretString::from("xoxb-host-token"),
+        })
+        .expect_err("duplicate channel routes must fail closed");
+
+        assert!(
+            error.to_string().contains("duplicate channel_id 'C0HOST'"),
+            "message: {error}"
+        );
     }
 
     #[test]
@@ -1343,15 +1401,15 @@ mod tests {
             agent_id: AgentId::new(AGENT).expect("agent"),
             project_id: Some(ProjectId::new(PROJECT).expect("project")),
             installation_id: INSTALLATION.to_string(),
-            team_id: TEAM.to_string(),
+            team_id: SlackTeamId::new(TEAM),
             api_app_id: Some(API_APP.to_string()),
             slack_user_id: Some(SLACK_USER.to_string()),
             user_id: UserId::new(USER).expect("user"),
             shared_subject_user_id: None,
-            channel_routes: vec![SlackHostBetaChannelRoute {
-                channel_id: "C0HOST".to_string(),
-                subject_user_id: UserId::new(SHARED_SUBJECT).expect("shared subject"),
-            }],
+            channel_routes: vec![SlackHostBetaChannelRoute::new(
+                "C0HOST",
+                UserId::new(SHARED_SUBJECT).expect("shared subject"),
+            )],
             signing_secret: SecretString::from(SECRET),
             bot_token: SecretString::from("xoxb-host-token"),
         })
@@ -1364,7 +1422,7 @@ mod tests {
             agent_id: AgentId::new(AGENT).expect("agent"),
             project_id: Some(ProjectId::new(PROJECT).expect("project")),
             installation_id: INSTALLATION.to_string(),
-            team_id: TEAM.to_string(),
+            team_id: SlackTeamId::new(TEAM),
             api_app_id: Some(API_APP.to_string()),
             slack_user_id: None,
             user_id: UserId::new(USER).expect("user"),
@@ -1382,7 +1440,7 @@ mod tests {
             agent_id: AgentId::new(AGENT).expect("agent"),
             project_id: Some(ProjectId::new(PROJECT).expect("project")),
             installation_id: INSTALLATION.to_string(),
-            team_id: TEAM.to_string(),
+            team_id: SlackTeamId::new(TEAM),
             api_app_id: Some(API_APP.to_string()),
             slack_user_id: Some(SLACK_USER.to_string()),
             user_id: UserId::new(USER).expect("user"),
