@@ -46,7 +46,7 @@ use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
     EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus,
 };
-use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
+use ironclaw_webui_v2::{WebUiV2Capabilities, WebUiV2State, webui_v2_router};
 use serde_json::Value;
 use tokio::sync::Notify;
 use tower::ServiceExt;
@@ -61,7 +61,14 @@ fn caller() -> WebUiAuthenticatedCaller {
 }
 
 fn router_with(services: Arc<dyn RebornServicesApi>) -> Router {
-    webui_v2_router(WebUiV2State::new(services))
+    router_with_capabilities(services, WebUiV2Capabilities::default())
+}
+
+fn router_with_capabilities(
+    services: Arc<dyn RebornServicesApi>,
+    capabilities: WebUiV2Capabilities,
+) -> Router {
+    webui_v2_router(WebUiV2State::with_capabilities(services, capabilities))
         // Production composition runs the bearer-token middleware that
         // constructs this `Extension`; tests bypass auth and inject the
         // caller directly so the regression target is the handler itself.
@@ -1021,6 +1028,34 @@ async fn list_connectable_channels_dispatches_through_facade() {
             .expect("lock"),
         1
     );
+}
+
+#[tokio::test]
+async fn get_session_returns_caller_identity_and_capabilities() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services,
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["tenant_id"], "tenant-alpha");
+    assert_eq!(body["user_id"], "user-alpha");
+    assert_eq!(body["capabilities"]["operator_webui_config"], true);
 }
 
 #[tokio::test]

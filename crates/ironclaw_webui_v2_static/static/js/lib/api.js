@@ -104,6 +104,10 @@ export async function apiFetch(path, options = {}) {
 
 // --- Threads ---
 
+export function fetchSession() {
+  return apiFetch(`${V2_BASE}/session`);
+}
+
 export function createThread({ clientActionId: clientId, requestedThreadId } = {}) {
   const body = { client_action_id: clientId || clientActionId() };
   if (requestedThreadId) body.requested_thread_id = requestedThreadId;

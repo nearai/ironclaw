@@ -175,6 +175,19 @@ mod tests {
     }
 
     #[test]
+    fn auth_session_assets_use_server_capabilities_for_admin_status() {
+        let api = asset_text("js/lib/api.js");
+        assert!(api.contains("fetchSession"));
+        assert!(api.contains("/session"));
+
+        let auth = asset_text("js/app/auth.js");
+        assert!(auth.contains("fetchSession()"));
+        assert!(auth.contains("operator_webui_config"));
+        assert!(auth.contains("isAdmin: Boolean(session?.capabilities?.operator_webui_config)"));
+        assert!(!auth.contains("isAdmin: false"));
+    }
+
+    #[test]
     fn chat_projection_text_preserves_pending_gate() {
         let events = asset_text("js/pages/chat/lib/useChatEvents.js");
         let text_branch = events

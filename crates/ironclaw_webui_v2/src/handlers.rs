@@ -43,6 +43,33 @@ use crate::router::WebUiV2State;
 use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
+#[derive(Debug, Clone, Serialize)]
+pub struct WebUiV2SessionResponse {
+    pub tenant_id: String,
+    pub user_id: String,
+    pub capabilities: WebUiV2SessionCapabilities,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct WebUiV2SessionCapabilities {
+    pub operator_webui_config: bool,
+}
+
+/// `GET /api/webchat/v2/session`
+pub async fn get_session(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Json<WebUiV2SessionResponse> {
+    let capabilities = state.capabilities();
+    Json(WebUiV2SessionResponse {
+        tenant_id: caller.tenant_id.to_string(),
+        user_id: caller.user_id.to_string(),
+        capabilities: WebUiV2SessionCapabilities {
+            operator_webui_config: capabilities.operator_webui_config,
+        },
+    })
+}
+
 /// `POST /api/webchat/v2/threads`
 ///
 /// Body shape: [`WebUiCreateThreadRequest`].

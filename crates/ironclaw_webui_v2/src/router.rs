@@ -16,11 +16,12 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_CANCEL_RUN,
     WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_PATTERN_CREATE_THREAD,
     WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER, WEBUI_V2_PATTERN_GET_LLM_CONFIG,
-    WEBUI_V2_PATTERN_GET_TIMELINE, WEBUI_V2_PATTERN_INSTALL_EXTENSION,
-    WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS,
-    WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
-    WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_REMOVE_EXTENSION,
-    WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
+    WEBUI_V2_PATTERN_GET_SESSION, WEBUI_V2_PATTERN_GET_TIMELINE,
+    WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
+    WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS, WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
+    WEBUI_V2_PATTERN_LIST_EXTENSIONS, WEBUI_V2_PATTERN_LIST_LLM_MODELS,
+    WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
+    WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
     WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_START_CODEX_LOGIN,
     WEBUI_V2_PATTERN_START_NEARAI_LOGIN, WEBUI_V2_PATTERN_STREAM_EVENTS,
     WEBUI_V2_PATTERN_STREAM_EVENTS_WS, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
@@ -58,6 +59,12 @@ impl WebUiV2RouteOptions {
 pub struct WebUiV2State {
     services: Arc<dyn RebornServicesApi>,
     sse_capacity: Arc<SseCapacity>,
+    capabilities: WebUiV2Capabilities,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WebUiV2Capabilities {
+    pub operator_webui_config: bool,
 }
 
 impl WebUiV2State {
@@ -67,15 +74,39 @@ impl WebUiV2State {
         Self::with_sse_concurrency_limit(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
     }
 
+    pub fn with_capabilities(
+        services: Arc<dyn RebornServicesApi>,
+        capabilities: WebUiV2Capabilities,
+    ) -> Self {
+        Self::with_sse_concurrency_limit_and_capabilities(
+            services,
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+            capabilities,
+        )
+    }
+
     /// Build state with a custom per-caller SSE concurrency cap. Use
     /// from host composition or tests that want to tune the ceiling.
     pub fn with_sse_concurrency_limit(
         services: Arc<dyn RebornServicesApi>,
         max_concurrent_streams_per_caller: usize,
     ) -> Self {
+        Self::with_sse_concurrency_limit_and_capabilities(
+            services,
+            max_concurrent_streams_per_caller,
+            WebUiV2Capabilities::default(),
+        )
+    }
+
+    pub fn with_sse_concurrency_limit_and_capabilities(
+        services: Arc<dyn RebornServicesApi>,
+        max_concurrent_streams_per_caller: usize,
+        capabilities: WebUiV2Capabilities,
+    ) -> Self {
         Self {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
+            capabilities,
         }
     }
 
@@ -85,6 +116,10 @@ impl WebUiV2State {
 
     pub(crate) fn sse_capacity(&self) -> &Arc<SseCapacity> {
         &self.sse_capacity
+    }
+
+    pub(crate) fn capabilities(&self) -> WebUiV2Capabilities {
+        self.capabilities
     }
 }
 
@@ -107,6 +142,7 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             WEBUI_V2_PATTERN_CREATE_THREAD,
             post(handlers::create_thread).get(handlers::list_threads),
         )
+        .route(WEBUI_V2_PATTERN_GET_SESSION, get(handlers::get_session))
         .route(WEBUI_V2_PATTERN_SEND_MESSAGE, post(handlers::send_message))
         .route(WEBUI_V2_PATTERN_GET_TIMELINE, get(handlers::get_timeline))
         .route(WEBUI_V2_PATTERN_STREAM_EVENTS, get(handlers::stream_events))
