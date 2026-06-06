@@ -1531,6 +1531,23 @@ struct HostRuntimeCapabilityHarness {
     network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
 }
 
+struct HostRuntimeHarnessOptions {
+    mounts: MountView,
+    runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+}
+
+impl HostRuntimeHarnessOptions {
+    fn new(
+        mounts: MountView,
+        runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+    ) -> Self {
+        Self {
+            mounts,
+            runtime_policy,
+        }
+    }
+}
+
 impl HostRuntimeCapabilityHarness {
     async fn file_tools() -> HarnessResult<Self> {
         Self::file_tools_with_runtime_policy(Some(
@@ -1592,7 +1609,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     async fn process_tools() -> HarnessResult<Self> {
-        Self::new_with_mounts(
+        Self::new_with_options(
             "reborn-e2e-process-tools",
             vec![
                 CapabilityId::new(ECHO_CAPABILITY_ID)?,
@@ -1610,14 +1627,13 @@ impl HostRuntimeCapabilityHarness {
             Vec::new(),
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-process-user")?,
-            MountView::default(),
-            None,
+            HostRuntimeHarnessOptions::new(MountView::default(), None),
         )
         .await
     }
 
     async fn skill_management_tools() -> HarnessResult<Self> {
-        let mut harness = Self::new_with_mounts(
+        let mut harness = Self::new_with_options(
             "reborn-e2e-skill-management-tools",
             vec![
                 CapabilityId::new(SKILL_LIST_CAPABILITY_ID)?,
@@ -1634,8 +1650,7 @@ impl HostRuntimeCapabilityHarness {
             Vec::new(),
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-skill-management-user")?,
-            skill_mounts()?,
-            None,
+            HostRuntimeHarnessOptions::new(skill_mounts()?, None),
         )
         .await?;
         harness.network_policy = http_test_policy();
@@ -1643,7 +1658,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     async fn trigger_management_tools() -> HarnessResult<Self> {
-        Self::new_with_mounts(
+        Self::new_with_options(
             "reborn-e2e-trigger-management-tools",
             vec![
                 CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
@@ -1654,8 +1669,7 @@ impl HostRuntimeCapabilityHarness {
             Vec::new(),
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-trigger-management-user")?,
-            MountView::default(),
-            None,
+            HostRuntimeHarnessOptions::new(MountView::default(), None),
         )
         .await
     }
@@ -1669,29 +1683,34 @@ impl HostRuntimeCapabilityHarness {
         user_id: UserId,
         runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     ) -> HarnessResult<Self> {
-        Self::new_with_mounts(
+        Self::new_with_options(
             service_label,
             capability_ids,
             effect_kinds,
             secrets,
             provider_id,
             user_id,
-            workspace_mounts(MountPermissions::read_write_list_delete())?,
-            runtime_policy,
+            HostRuntimeHarnessOptions::new(
+                workspace_mounts(MountPermissions::read_write_list_delete())?,
+                runtime_policy,
+            ),
         )
         .await
     }
 
-    async fn new_with_mounts(
+    async fn new_with_options(
         service_label: &'static str,
         capability_ids: Vec<CapabilityId>,
         effect_kinds: Vec<EffectKind>,
         secrets: Vec<SecretHandle>,
         provider_id: ExtensionId,
         user_id: UserId,
-        mounts: MountView,
-        runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+        options: HostRuntimeHarnessOptions,
     ) -> HarnessResult<Self> {
+        let HostRuntimeHarnessOptions {
+            mounts,
+            runtime_policy,
+        } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
