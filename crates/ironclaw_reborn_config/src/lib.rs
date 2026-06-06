@@ -22,6 +22,7 @@
 mod boot;
 mod budget;
 mod config_file;
+mod config_seed;
 mod doctor;
 mod home;
 mod profile;
@@ -40,6 +41,9 @@ pub use config_file::{
     REBORN_CONFIG_API_VERSION, RebornConfigFile, RebornConfigFileError,
     RebornConfigFileUpdateError, RunnerSection, SlackSection, TriggerPollerConfigSection,
     begin_default_llm_slot_update, update_default_llm_slot,
+};
+pub use config_seed::{
+    RebornConfigSeedError, RebornConfigSeedOutcome, seed_default_config_file_if_missing,
 };
 pub use doctor::RebornDoctorReport;
 pub use home::{REBORN_HOME_ENV, RebornConfigError, RebornHome, RebornHomeSource};

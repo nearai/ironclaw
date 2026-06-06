@@ -1463,13 +1463,14 @@ fn repl_piped_message_exits_nonzero_when_runtime_does_not_produce_reply() {
 #[test]
 fn run_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
 
     let output = Command::new(reborn_bin())
         .arg("run")
         .arg("--message")
         .arg("hello")
         .env_clear()
-        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .output()
         .expect("ironclaw-reborn run --message should run");
@@ -1484,6 +1485,26 @@ fn run_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     assert!(
         stderr.contains("reborn run did not produce an assistant reply"),
         "stderr: {stderr}"
+    );
+
+    let config_path = reborn_home.join("config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap_or_else(|err| {
+        panic!(
+            "first real run should seed {}: {err}",
+            config_path.display()
+        )
+    });
+    assert!(
+        config.contains("api_version = \"ironclaw.runtime/v1\""),
+        "seeded config should stamp api_version: {config}"
+    );
+    assert!(
+        config.contains("profile = \"local-dev\""),
+        "seeded config should record default profile: {config}"
+    );
+    assert!(
+        !config.contains("[llm.default]"),
+        "first-run seed must preserve no-LLM behavior: {config}"
     );
 }
 
