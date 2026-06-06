@@ -2,6 +2,7 @@
 
 use std::{error::Error, fmt, marker::PhantomData, sync::Arc};
 
+use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
@@ -31,7 +32,9 @@ use ironclaw_turns::{
 use crate::{
     app_loop_family::build_loop_family_registry,
     driver_registry::{DriverRegistry, DriverRegistryError},
-    loop_driver_host::{RebornLoopDriverHostFactory, TextOnlyLoopHostConfig},
+    loop_driver_host::{
+        HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
+    },
     loop_exit_applier::{LoopExitApplier, ThreadCheckpointLoopExitEvidencePort},
     model_routes::ModelRouteResolver,
     planned_driver_factory::{
@@ -95,7 +98,12 @@ where
     pub model_policy_guard: Option<Arc<dyn LoopModelPolicyGuard>>,
     pub model_budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
     pub safety_context: Option<InstructionSafetyContext>,
+    pub hook_security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     pub turn_event_sink: Option<Arc<dyn TurnEventSink>>,
+    /// Per-run hook dispatcher builder factory. `None` (the default) leaves
+    /// the hook framework dormant: no dispatcher is composed and the runtime
+    /// behaves exactly as it did before hooks existed.
+    pub hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
 }
 
 pub trait RuntimeSubagentGoalStore:
@@ -455,6 +463,12 @@ where
     }
     if let Some(accountant) = parts.model_budget_accountant {
         host_factory = host_factory.with_model_budget_accountant(accountant);
+    }
+    if let Some(factory) = parts.hook_dispatcher_builder_factory {
+        host_factory = host_factory.with_hook_dispatcher_builder_factory(move || factory());
+    }
+    if let Some(sink) = parts.hook_security_audit_sink {
+        host_factory = host_factory.with_hook_security_audit_sink(sink);
     }
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
     let host_factory = Arc::new(host_factory);

@@ -3,6 +3,7 @@
 ## Start Here
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
+- Read `CONTRACT.md` — the co-located cross-crate contract (evaluation matrix, requested-vs-effective split, mutation/invalidation orchestration).
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these Reborn contracts as the source of truth before changing behavior:
 - `docs/reborn/contracts/kernel-boundary.md`
@@ -11,7 +12,11 @@
 
 ## What This Crate Owns
 
-- Host-controlled trust-class assignment, invalidation, and authority-ceiling policy.
+- Host-controlled trust evaluation, currently:
+- Trust-decision vocabulary: `EffectiveTrustClass`, `TrustDecision`, `AuthorityCeiling`, `HostTrustAssignment`, `TrustProvenance` (`decision`). Privileged variants (FirstParty, System) are crate-internal to construct.
+- Trust policy and layered sources: `TrustPolicy`, `HostTrustPolicy`, `TrustPolicyInput` (`policy`); `PolicySource`, `AdminConfig`/`AdminEntry`, `BundledRegistry`/`BundledEntry` (`sources`).
+- Synchronous fail-closed invalidation: `InvalidationBus`, `TrustChange`, `TrustChangeListener` (`invalidation`).
+- The `Clock` abstraction (`clock`), `TrustError` (`error`), and test fixtures (`fixtures`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

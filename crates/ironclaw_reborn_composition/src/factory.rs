@@ -395,11 +395,18 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) host_state_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    /// Tenant-scoped root filesystem used for third-party extension hook
+    /// discovery (`/system/extensions/<tenant>`). The runtime derives the
+    /// discovery root from the authenticated tenant id; this is the same
+    /// backend the rest of local-dev composition uses.
+    pub(crate) extension_filesystem: Arc<LocalDevRootFilesystem>,
     pub(crate) workspace_mounts: MountView,
     pub(crate) local_dev_storage_root: PathBuf,
     pub(crate) default_system_prompt_path: PathBuf,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
+    /// Canonical registry shared by capability dispatch and hook activation.
+    pub(crate) extension_registry: Arc<ExtensionRegistry>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -641,8 +648,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
     let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
+    let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
     let mut services = HostRuntimeServices::new(
-        Arc::new(local_dev_builtin_extension_registry()?),
+        Arc::clone(&extension_registry),
         Arc::clone(&filesystem),
         Arc::clone(&store_graph.resource_governor),
         Arc::new(GrantAuthorizer::new()),
@@ -791,6 +799,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
+        local_runtime.extension_registry = Arc::clone(&extension_registry);
         let host_runtime_http_egress = services.host_runtime_http_egress_port();
         #[cfg(all(test, feature = "slack-v2-host-beta"))]
         let host_runtime_http_egress =
@@ -901,7 +910,8 @@ fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
-    let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
+    let skill_management =
+        build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
@@ -931,11 +941,13 @@ fn build_local_dev_store_graph(
         #[cfg(feature = "slack-v2-host-beta")]
         host_state_filesystem: Arc::clone(&scoped_filesystem),
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
+        extension_filesystem: Arc::clone(&filesystem),
         workspace_mounts,
         local_dev_storage_root,
         default_system_prompt_path,
         event_log,
         audit_log,
+        extension_registry: Arc::new(ExtensionRegistry::new()),
     });
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
 
@@ -997,7 +1009,8 @@ fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
-    let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
+    let skill_management =
+        build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let trigger_conversation_services = local_dev_trigger_conversation_services();
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
@@ -1030,11 +1043,13 @@ fn build_local_dev_store_graph(
         host_state_filesystem: Arc::clone(&subagent_goal_filesystem),
         #[cfg(feature = "postgres")]
         subagent_goal_filesystem,
+        extension_filesystem: Arc::clone(&filesystem),
         workspace_mounts,
         local_dev_storage_root,
         default_system_prompt_path,
         event_log,
         audit_log,
+        extension_registry: Arc::new(ExtensionRegistry::new()),
     });
     let process_services = ProcessServices::in_memory();
 
@@ -1743,7 +1758,7 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
-fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
+pub(crate) fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
     // Shared by local-dev and production composition so host-owned first-party
     // capabilities expose the same built-in package contract in both profiles.
     let mut registry = ExtensionRegistry::new();
@@ -2190,6 +2205,7 @@ where
     .with_trust_policy(trust_policy)
     .with_runtime_policy(runtime_policy)
     .with_capability_leases(capability_leases)
+    .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
     .with_secret_store(Arc::clone(&secret_credentials.secret_store))
     .with_credential_broker(secret_credentials.credential_broker)
     .with_turn_run_wake_notifier(turn_run_wake_notifier)
@@ -2372,6 +2388,7 @@ where
     .with_capability_leases(stores.leases)
     .with_secret_store(Arc::clone(&stores.secret_credentials.secret_store))
     .with_credential_broker(stores.secret_credentials.credential_broker)
+    .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
     .try_with_host_http_egress_with_body_store(
         ironclaw_network::PolicyNetworkHttpEgress::new(
             ironclaw_network::ReqwestNetworkTransport::default(),
@@ -2726,11 +2743,13 @@ mod tests {
                 )])
                 .expect("mount view"),
             )),
+            extension_filesystem: Arc::clone(&base_runtime.extension_filesystem),
             workspace_mounts: base_runtime.workspace_mounts.clone(),
             local_dev_storage_root: base_runtime.local_dev_storage_root.clone(),
             default_system_prompt_path: base_runtime.default_system_prompt_path.clone(),
             event_log: Arc::clone(&base_runtime.event_log),
             audit_log: Arc::clone(&base_runtime.audit_log),
+            extension_registry: Arc::clone(&base_runtime.extension_registry),
         })
     }
 

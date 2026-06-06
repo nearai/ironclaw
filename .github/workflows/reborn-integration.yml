@@ -35,7 +35,7 @@ env:
 
 jobs:
   package-matrix:
-    name: Discover Reborn binary crates
+    name: Discover Reborn package crates
     runs-on: ubuntu-latest
     outputs:
       packages: ${{ steps.packages.outputs.packages }}
@@ -50,45 +50,35 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - id: packages
-        name: Build package matrix from ironclaw_reborn_cli manifest
+        name: Build package matrix from Reborn crate families
         run: |
           packages="$(
             cargo metadata --no-deps --format-version 1 \
               | jq -c '
-                  (
-                    (
-                      .packages[]
-                      | select(.name == "ironclaw_reborn_cli")
-                      | (
-                          [.name]
-                          + [
-                              .dependencies[]
-                              | select(
-                                  .source == null
-                                  and (.path // "" | contains("/crates/"))
-                                  and (.name | startswith("ironclaw_"))
-                                )
-                              | .name
-                            ]
-                        )
-                    )
-                    + [
-                        "ironclaw_product_adapters",
-                        "ironclaw_product_workflow",
-                        "ironclaw_slack_v2_adapter"
-                      ]
-                  )
+                  [
+                    .packages[]
+                    | select(
+                        (.name | startswith("ironclaw_reborn"))
+                        or (.name | startswith("ironclaw_product"))
+                        or (.name == "ironclaw_architecture")
+                        or (.name == "ironclaw_slack_v2_adapter")
+                        or (.name == "ironclaw_telegram_v2_adapter")
+                        or (.name == "ironclaw_wasm_product_adapters")
+                        or (.name | startswith("ironclaw_webui_v2"))
+                      )
+                    | .name
+                  ]
                   | unique
                 '
           )"
 
           if [ -z "${packages}" ] || [ "${packages}" = "[]" ]; then
-            echo "No Reborn workspace crates discovered from crates/ironclaw_reborn_cli/Cargo.toml" >&2
+            echo "No Reborn workspace crates discovered" >&2
             exit 1
           fi
 
           echo "packages=${packages}" >> "$GITHUB_OUTPUT"
-          echo "Testing packages from crates/ironclaw_reborn_cli/Cargo.toml:"
+          echo "Testing Reborn package crates:"
           printf '%s\n' "${packages}" | jq -r '.[] | "- " + .'
 
   crate-tests:
@@ -103,7 +93,7 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         package: ${{ fromJSON(needs.package-matrix.outputs.packages) }}
     steps:
@@ -124,16 +114,56 @@ jobs:
 
       - name: Run crate tests
         run: |
-          feature_flags=""
-          if [ "${{ matrix.package }}" = "ironclaw_reborn_cli" ]; then
-            feature_flags="--features webui-v2-beta"
-          elif [ "${{ matrix.package }}" = "ironclaw_product_adapters" ]; then
-            feature_flags="--features test-support"
-          fi
+          feature_flags="$(scripts/ci/package-feature-flags.sh "${{ matrix.package }}")"
 
           # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
           timeout --signal=INT --kill-after=30s 28m \
             cargo test -p "${{ matrix.package }}" ${feature_flags} --all-targets -- --nocapture
+
+  root-reborn-parity-tests:
+    name: Reborn parity tests (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ""
+      LLM_BACKEND: ""
+      LLM_USE_CODEX_AUTH: "false"
+      OLLAMA_BASE_URL: ""
+      OPENAI_API_KEY: ""
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - group: scope-isolation
+            tests: "reborn_agent_scope_isolation_parity reborn_direct_chat_user_scope_isolation_parity reborn_wrong_scope_access_isolation_parity"
+          - group: trace-parity
+            tests: "reborn_approval_traces_parity reborn_trace_core_builtin_tools_parity reborn_trace_file_tools_parity"
+          - group: runtime-parity
+            tests: "reborn_minimal_dispatch_parity reborn_response_order_parity reborn_subagent_spawn_e2e"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: reborn-integration-root-${{ matrix.group }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/reborn-integration' }}
+
+      - name: Run Reborn root parity tests
+        run: |
+          for test_name in ${{ matrix.tests }}; do
+            echo "::group::cargo test --test ${test_name}"
+            timeout --signal=INT --kill-after=30s 9m \
+              cargo test --test "${test_name}" -- --nocapture
+            echo "::endgroup::"
+          done
 
   reborn-integration-crate-tests:
     name: Reborn Integration Binary Crate Tests
@@ -142,6 +172,7 @@ jobs:
     needs:
       - package-matrix
       - crate-tests
+      - root-reborn-parity-tests
     steps:
       - name: Check matrix result
         run: |
@@ -151,5 +182,9 @@ jobs:
           fi
           if [[ "${{ needs.crate-tests.result }}" != "success" ]]; then
             echo "One or more Reborn binary crate tests failed"
+            exit 1
+          fi
+          if [[ "${{ needs.root-reborn-parity-tests.result }}" != "success" ]]; then
+            echo "One or more Reborn root parity tests failed"
             exit 1
           fi

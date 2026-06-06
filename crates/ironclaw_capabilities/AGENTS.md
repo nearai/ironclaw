@@ -12,7 +12,10 @@
 
 ## What This Crate Owns
 
-- Caller-facing CapabilityHost invoke/resume/spawn workflow and obligation seam.
+- The single caller-facing `CapabilityHost` authority path, currently:
+- `CapabilityHost` (`host`) and the invoke/resume/spawn requests/results: `CapabilityInvocationRequest`/`CapabilityInvocationResult`, `CapabilityResumeRequest`, `CapabilitySpawnRequest`/`CapabilitySpawnResult` (`requests`); `CapabilityInvocationError`/`ResumeContextMismatchKind` (`error`).
+- The obligation seam (`obligations`): `CapabilityObligationHandler`, `CapabilityObligationRequest`/`CapabilityObligationOutcome`, abort/completion requests, `CapabilityObligationPhase`/`CapabilityObligationFailureKind`/`CapabilityObligationError`.
+- Capability-profile conformance evaluation (`conformance`): `CapabilityProfileClaim`/`CapabilityProfileClaimedOperation`, the conformance report/findings, and `evaluate_profile_conformance`.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

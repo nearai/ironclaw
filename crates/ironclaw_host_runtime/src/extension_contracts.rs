@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ironclaw_extensions::{
     CapabilityProviderHostApiContract, ExtensionDiscovery, ExtensionError, ExtensionRegistry,
-    HostApiContractRegistry, ManifestV2Error,
+    HostApiContractRegistry, ManifestV2Error, TolerantBoundedDiscovery,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
@@ -67,6 +67,36 @@ where
         ironclaw_extensions::ManifestSource::InstalledLocal,
         host_port_catalog,
         &contracts,
+    )
+    .await
+}
+
+/// Tolerant + bounded discovery through host-runtime's default contracts.
+///
+/// Wraps [`ExtensionDiscovery::discover_with_manifest_contracts_tolerant_bounded`]
+/// with the default host API contracts + port catalog. Bounds the read/parse
+/// work to `max_extensions` directory entries and quarantines per-package
+/// failures instead of aborting the whole discovery; only failure to LIST the
+/// root surfaces as the outer `Err`. The hook-projection composition path uses
+/// this so a single malformed third-party manifest (or thousands of extension
+/// directories) cannot drop or DoS the rest of a tenant's hook set.
+pub async fn discover_extensions_tolerant_bounded<F>(
+    fs: &F,
+    root: &VirtualPath,
+    max_extensions: usize,
+) -> Result<TolerantBoundedDiscovery, ExtensionError>
+where
+    F: RootFilesystem,
+{
+    let host_port_catalog = default_host_port_catalog()?;
+    let contracts = default_host_api_contract_registry()?;
+    ExtensionDiscovery::discover_with_manifest_contracts_tolerant_bounded(
+        fs,
+        root,
+        ironclaw_extensions::ManifestSource::InstalledLocal,
+        &host_port_catalog,
+        &contracts,
+        max_extensions,
     )
     .await
 }

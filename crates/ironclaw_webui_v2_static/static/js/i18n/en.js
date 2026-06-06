@@ -266,7 +266,7 @@ registerPack("en", {
   "onboarding.ready": "Ready",
   "onboarding.moreInSettings": "Need a different provider? Configure any of them in",
   "onboarding.providerNearai": "NEAR AI",
-  "onboarding.providerNearaiDesc": "Free hosted models. Sign in with GitHub or Google.",
+  "onboarding.providerNearaiDesc": "Free hosted models. Use an API key or SSO.",
   "onboarding.providerCodex": "ChatGPT subscription",
   "onboarding.providerCodexDesc": "Use your existing ChatGPT Plus or Pro plan.",
   "onboarding.providerOpenai": "OpenAI API",
