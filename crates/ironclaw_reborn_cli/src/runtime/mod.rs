@@ -77,6 +77,7 @@ pub(crate) fn execute(
 ) -> anyhow::Result<()> {
     let runtime_input =
         build_runtime_input_with_options(context.boot_config(), RuntimeInputCaller::Run, options)?;
+    context.seed_config_if_missing()?;
     let boot_config = context.boot_config().clone();
 
     let rt = tokio::runtime::Builder::new_multi_thread()

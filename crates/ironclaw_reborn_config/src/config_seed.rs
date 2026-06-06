@@ -1,4 +1,4 @@
-//! First-run `config.toml` seeding for stateful Reborn commands.
+//! First-run `config.toml` seeding for Reborn runtime startup.
 //!
 //! Keep this separate from `config_file.rs`: parsing/editing the operator TOML
 //! and deciding when to create a first-run file are different responsibilities.
@@ -49,10 +49,11 @@ pub enum RebornConfigSeedOutcome {
 /// Atomically seed a sparse first-run `config.toml` if the file is missing.
 ///
 /// The first-run seed is intentionally smaller than `ironclaw-reborn config
-/// init`: it records stable boot/profile defaults without installing an active
-/// LLM slot or example provider overlay. That preserves the existing "missing
-/// config" behavior for env-driven provider selection while giving operators
-/// an editable TOML on first real runtime start.
+/// init`: it records only the API version and selected boot profile without
+/// installing an active LLM slot or pinning compiled runtime defaults. That
+/// preserves the existing "missing config" behavior for env-driven provider
+/// selection while giving operators an editable TOML on first real runtime
+/// start.
 pub fn seed_default_config_file_if_missing(
     path: &Path,
     profile: RebornProfile,
@@ -110,9 +111,10 @@ fn first_run_config_toml(profile: RebornProfile) -> String {
     format!(
         r#"# IronClaw Reborn first-run configuration.
 #
-# This sparse file is created automatically the first time a stateful
+# This sparse file is created automatically the first time an
 # `ironclaw-reborn` command starts the runtime. It records stable,
-# non-secret boot choices only.
+# non-secret boot choices only; other omitted fields continue to use
+# compiled defaults unless you set them here.
 #
 # Precedence on each field:
 #   compiled defaults < this file < env vars < CLI flags.
@@ -127,16 +129,6 @@ api_version = "{api_version}"
 
 [boot]
 profile = "{profile}"
-
-[identity]
-default_owner = "reborn-cli"
-
-[runner]
-heartbeat_interval_secs = 5
-poll_interval_ms = 200
-
-[skills]
-regex_activation_enabled = true
 "#,
         api_version = REBORN_CONFIG_API_VERSION,
         profile = profile.as_str(),
@@ -168,6 +160,12 @@ mod tests {
         assert!(
             !text.contains("[llm.default]"),
             "first-run seed must not force an active LLM slot: {text}"
+        );
+        assert!(
+            !text.contains("[runner]")
+                && !text.contains("[skills]")
+                && !text.contains("[identity]"),
+            "first-run seed must not pin compiled defaults: {text}"
         );
         let parsed = RebornConfigFile::load(&path)
             .expect("load seeded config")

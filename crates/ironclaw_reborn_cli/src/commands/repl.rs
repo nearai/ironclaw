@@ -14,7 +14,6 @@ pub(crate) struct ReplCommand {
 impl ReplCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         crate::runtime::init_tracing();
-        let context = context.with_seeded_config()?;
         crate::runtime::execute(
             context,
             None,

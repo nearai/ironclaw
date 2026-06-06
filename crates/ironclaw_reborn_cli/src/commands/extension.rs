@@ -53,7 +53,6 @@ struct ExtensionPackageCommand {
 impl ExtensionCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         crate::runtime::init_tracing();
-        let context = context.with_seeded_config()?;
         let (command, json, label) = match self.command {
             ExtensionSubcommand::Search(command) => (
                 RebornExtensionLifecycleCommand::Search {

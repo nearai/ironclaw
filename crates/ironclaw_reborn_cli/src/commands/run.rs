@@ -30,7 +30,6 @@ impl RunCommand {
         if self.dry_run {
             return run_dry(context);
         }
-        let context = context.with_seeded_config()?;
 
         crate::runtime::execute(
             context,

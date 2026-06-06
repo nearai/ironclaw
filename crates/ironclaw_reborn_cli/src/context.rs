@@ -17,13 +17,13 @@ impl RebornCliContext {
         &self.boot_config
     }
 
-    pub(crate) fn with_seeded_config(self) -> anyhow::Result<Self> {
+    pub(crate) fn seed_config_if_missing(&self) -> anyhow::Result<()> {
         let path = self.boot_config.home().config_file_path();
         ironclaw_reborn_config::seed_default_config_file_if_missing(
             &path,
             self.boot_config.profile(),
         )
         .map_err(anyhow::Error::from)?;
-        Ok(self)
+        Ok(())
     }
 }

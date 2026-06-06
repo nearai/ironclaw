@@ -62,7 +62,6 @@ pub(crate) struct ServeCommand {
 impl ServeCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         crate::runtime::init_tracing();
-        let context = context.with_seeded_config()?;
 
         // Build the runtime config from the operator's TOML. Built first so
         // the local-dev-yolo host-access disclosure gate fires before any
@@ -333,6 +332,7 @@ impl ServeCommand {
                 "binding WebChat v2 listener on a non-loopback interface",
             );
         }
+        context.seed_config_if_missing()?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()

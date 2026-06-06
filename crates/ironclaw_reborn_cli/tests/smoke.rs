@@ -65,6 +65,30 @@ fn help_mentions_reborn_commands() {
 }
 
 #[test]
+fn extension_search_does_not_seed_reborn_config() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .args(["extension", "search", "--json"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", temp.path().join("home"))
+        .output()
+        .expect("ironclaw-reborn extension search should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !reborn_home.join("config.toml").exists(),
+        "extension search must not seed runtime config"
+    );
+}
+
+#[test]
 fn profile_list_shows_supported_profiles_without_reborn_home() {
     let output = Command::new(reborn_bin())
         .arg("profile")
@@ -2020,6 +2044,7 @@ fn run_warns_when_falling_back_to_stub_gateway() {
 #[test]
 fn run_confirm_host_access_flag_gates_local_dev_yolo() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
     let missing = local_yolo_command(&temp, &["run", "-m", "ping"])
         .output()
         .expect("ironclaw-reborn run should not crash");
@@ -2028,6 +2053,10 @@ fn run_confirm_host_access_flag_gates_local_dev_yolo() {
     assert!(
         missing_stderr.contains("requires explicit disclosure acknowledgement"),
         "stderr should require disclosure acknowledgement; got: {missing_stderr}"
+    );
+    assert!(
+        !reborn_home.join("config.toml").exists(),
+        "failed host-access preflight must not seed runtime config"
     );
 
     let confirmed = local_yolo_command(&temp, &["run", "--confirm-host-access", "-m", "ping"])
@@ -2120,6 +2149,7 @@ fn repl_confirm_host_access_flag_gates_local_dev_yolo() {
 #[test]
 fn serve_confirm_host_access_flag_gates_local_dev_yolo() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
     let missing = local_yolo_command(&temp, &["serve"])
         .output()
         .expect("ironclaw-reborn serve should not crash");
@@ -2128,6 +2158,10 @@ fn serve_confirm_host_access_flag_gates_local_dev_yolo() {
     assert!(
         missing_stderr.contains("requires explicit disclosure acknowledgement"),
         "stderr should require disclosure acknowledgement; got: {missing_stderr}"
+    );
+    assert!(
+        !reborn_home.join("config.toml").exists(),
+        "failed host-access preflight must not seed runtime config"
     );
 
     let confirmed = local_yolo_command(&temp, &["serve", "--confirm-host-access"])
@@ -2142,6 +2176,10 @@ fn serve_confirm_host_access_flag_gates_local_dev_yolo() {
         !confirmed_stderr.contains("requires explicit disclosure acknowledgement")
             && !confirmed_stderr.contains("requires --confirm-host-access"),
         "confirmed serve should pass the host-access gate; got: {confirmed_stderr}"
+    );
+    assert!(
+        !reborn_home.join("config.toml").exists(),
+        "failed WebUI token preflight must not seed runtime config"
     );
     assert!(
         confirmed_stderr.contains("IRONCLAW_REBORN_WEBUI_TOKEN"),
