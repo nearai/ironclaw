@@ -26,6 +26,66 @@ use ironclaw_threads::{
 };
 
 #[tokio::test]
+async fn filesystem_delete_thread_removes_owned_thread_and_hides_missing_or_wrong_scope() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-delete", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let owned_scope = scope("delete-owned");
+    let wrong_scope = scope("delete-wrong");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owned_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-delete-owned").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let wrong_scope_error = service
+        .delete_thread(&wrong_scope, &thread.thread_id)
+        .await
+        .expect_err("wrong-scope delete should hide thread existence");
+    assert_unknown_thread(wrong_scope_error, &thread.thread_id);
+
+    service
+        .read_thread(ThreadHistoryRequest {
+            scope: owned_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .expect("wrong-scope delete must not remove owned thread");
+
+    service
+        .delete_thread(&owned_scope, &thread.thread_id)
+        .await
+        .expect("owned delete succeeds");
+
+    let deleted_error = service
+        .read_thread(ThreadHistoryRequest {
+            scope: owned_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .expect_err("deleted thread should no longer be readable");
+    assert_unknown_thread(deleted_error, &thread.thread_id);
+
+    let repeat_error = service
+        .delete_thread(&owned_scope, &thread.thread_id)
+        .await
+        .expect_err("repeat delete should be non-enumerating missing shape");
+    assert_unknown_thread(repeat_error, &thread.thread_id);
+
+    let missing = ThreadId::new("thread-delete-missing").unwrap();
+    let missing_error = service
+        .delete_thread(&owned_scope, &missing)
+        .await
+        .expect_err("missing delete should be non-enumerating");
+    assert_unknown_thread(missing_error, &missing);
+}
+
+#[tokio::test]
 async fn durable_history_round_trips_through_filesystem_store() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-a", "alice");
@@ -168,6 +228,151 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
         .await
         .unwrap();
     assert!(direct_context.messages.is_empty());
+}
+
+#[tokio::test]
+async fn filesystem_store_exact_compaction_replacement_summary_replay_is_idempotent() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-summary", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let thread_scope = scope("fs-summary");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for text in ["one", "two"] {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: thread_scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text(text),
+            })
+            .await
+            .unwrap();
+    }
+
+    let first = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+    let replay = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+    assert_eq!(replay.summary_id, first.summary_id);
+
+    let changed_content = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("different summary"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await;
+    assert!(matches!(
+        changed_content,
+        Err(SessionThreadError::OverlappingSummaryRange { .. })
+    ));
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.summary_artifacts.len(), 1);
+    assert_eq!(history.summary_artifacts[0].summary_id, first.summary_id);
+}
+
+#[tokio::test]
+async fn filesystem_store_overlapping_replacement_summaries_are_rejected() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-overlap", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let thread_scope = scope("fs-overlap");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for text in ["one", "two", "three"] {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: thread_scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text(text),
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+
+    let overlapping = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: thread_scope,
+            thread_id: thread.thread_id,
+            start_sequence: 2,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("two and three summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await;
+
+    assert!(matches!(
+        overlapping,
+        Err(SessionThreadError::OverlappingSummaryRange { .. })
+    ));
 }
 
 #[tokio::test]
@@ -685,6 +890,132 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
     assert_eq!(ids_b, ["t-b-001"]);
 }
 
+#[tokio::test]
+async fn filesystem_list_threads_for_scope_derives_title_from_first_user_message() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-title-fs", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-title");
+
+    // Thread #1: title-less, assistant speaks before the first user message.
+    // Derivation must skip assistant records and pick the first non-empty
+    // trimmed line from the earliest user message.
+    let derived = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("t-derived").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: derived.thread_id.clone(),
+            turn_run_id: "run-derived-1".into(),
+            content: MessageContent::text("assistant text must not become the title"),
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: derived.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("evt-derived-1".into()),
+            content: MessageContent::text("  hello there  \nsecond line"),
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: derived.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("evt-derived-2".into()),
+            content: MessageContent::text("later user message must not replace the title"),
+        })
+        .await
+        .unwrap();
+
+    // Thread #2: title-less and has no messages at all → must stay None
+    // (the derive helper has nothing to extract from).
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("t-empty").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Thread #3: caller supplied an explicit title → list MUST preserve
+    // it untouched. This is the "creator-supplied wins over derivation"
+    // invariant.
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("t-explicit").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("Caller-supplied title".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: ThreadId::new("t-explicit").unwrap(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("evt-explicit-1".into()),
+            content: MessageContent::text("user message that must NOT replace the title"),
+        })
+        .await
+        .unwrap();
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let by_id: std::collections::HashMap<&str, Option<&str>> = listed
+        .threads
+        .iter()
+        .map(|record| (record.thread_id.as_str(), record.title.as_deref()))
+        .collect();
+
+    assert_eq!(
+        by_id.get("t-derived").copied().flatten(),
+        Some("hello there"),
+        "first user message should seed a trimmed first-line title",
+    );
+    assert!(
+        by_id.get("t-empty").copied().flatten().is_none(),
+        "thread with no user messages must stay title: None",
+    );
+    assert_eq!(
+        by_id.get("t-explicit").copied().flatten(),
+        Some("Caller-supplied title"),
+        "explicit EnsureThreadRequest.title must not be overwritten by derivation",
+    );
+}
+
 fn scope(label: &str) -> ThreadScope {
     ThreadScope {
         tenant_id: TenantId::new(format!("tenant-{label}")).unwrap(),
@@ -692,6 +1023,13 @@ fn scope(label: &str) -> ThreadScope {
         project_id: Some(ProjectId::new(format!("project-{label}")).unwrap()),
         owner_user_id: Some(UserId::new(format!("user-{label}")).unwrap()),
         mission_id: None,
+    }
+}
+
+fn assert_unknown_thread(error: SessionThreadError, thread_id: &ThreadId) {
+    match error {
+        SessionThreadError::UnknownThread { thread_id: actual } => assert_eq!(actual, *thread_id),
+        other => panic!("expected UnknownThread for {thread_id}, got {other:?}"),
     }
 }
 

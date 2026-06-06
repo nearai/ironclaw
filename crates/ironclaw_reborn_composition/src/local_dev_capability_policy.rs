@@ -74,11 +74,19 @@ impl LocalDevCapabilityPolicy {
             .map(|grant| &grant.capability)
     }
 
+    pub(crate) fn memory_capability_ids(&self) -> impl Iterator<Item = &CapabilityId> {
+        self.grants
+            .iter()
+            .filter(|grant| grant.mounts == LocalDevMountProfile::Memory)
+            .map(|grant| &grant.capability)
+    }
+
     pub(crate) fn builtin_grants(
         &self,
         grantee: &ExtensionId,
         workspace_mounts: &MountView,
         skill_mounts: &MountView,
+        memory_mounts: &MountView,
     ) -> CapabilitySet {
         let grants = self
             .grants
@@ -88,7 +96,13 @@ impl LocalDevCapabilityPolicy {
                 capability: grant.capability.clone(),
                 grantee: Principal::Extension(grantee.clone()),
                 issued_by: Principal::HostRuntime,
-                constraints: constraint_terms(grant, workspace_mounts, skill_mounts, None),
+                constraints: constraint_terms(
+                    grant,
+                    workspace_mounts,
+                    skill_mounts,
+                    memory_mounts,
+                    None,
+                ),
             })
             .collect();
         CapabilitySet { grants }
@@ -99,12 +113,14 @@ impl LocalDevCapabilityPolicy {
         capability: &CapabilityId,
         workspace_mounts: &MountView,
         skill_mounts: &MountView,
+        memory_mounts: &MountView,
     ) -> Result<GrantConstraints, LocalDevCapabilityPolicyError> {
         let grant = self.grant(capability)?;
         Ok(constraint_terms(
             grant,
             workspace_mounts,
             skill_mounts,
+            memory_mounts,
             None,
         ))
     }
@@ -114,17 +130,22 @@ impl LocalDevCapabilityPolicy {
         action: LocalDevApprovalPolicyAction<'_>,
         workspace_mounts: &MountView,
         skill_mounts: &MountView,
+        memory_mounts: &MountView,
     ) -> Result<LeaseApproval, LocalDevCapabilityPolicyError> {
         let constraints = match action {
-            LocalDevApprovalPolicyAction::Dispatch { capability } => {
-                self.grant_constraints_for(capability, workspace_mounts, skill_mounts)?
-            }
+            LocalDevApprovalPolicyAction::Dispatch { capability } => self.grant_constraints_for(
+                capability,
+                workspace_mounts,
+                skill_mounts,
+                memory_mounts,
+            )?,
             LocalDevApprovalPolicyAction::SpawnCapability { capability } => {
                 match self.grant(capability) {
                     Ok(grant) => constraint_terms(
                         grant,
                         workspace_mounts,
                         skill_mounts,
+                        memory_mounts,
                         Some(EffectKind::SpawnProcess),
                     ),
                     Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {
@@ -136,6 +157,7 @@ impl LocalDevCapabilityPolicy {
                             &self.approval_defaults.spawn_capability,
                             workspace_mounts,
                             skill_mounts,
+                            memory_mounts,
                             None,
                         )
                     }
@@ -214,6 +236,7 @@ pub(crate) enum LocalDevMountProfile {
     Workspace,
     Ambient,
     SkillManagement,
+    Memory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -362,12 +385,14 @@ fn constraint_terms(
     source: &impl LocalDevConstraintSource,
     workspace_mounts: &MountView,
     skill_mounts: &MountView,
+    memory_mounts: &MountView,
     required_effect: Option<EffectKind>,
 ) -> GrantConstraints {
     let mounts = match source.mounts() {
         LocalDevMountProfile::Workspace => workspace_mounts.clone(),
         LocalDevMountProfile::Ambient => MountView::default(),
         LocalDevMountProfile::SkillManagement => skill_mounts.clone(),
+        LocalDevMountProfile::Memory => memory_mounts.clone(),
     };
     let network = match source.network() {
         LocalDevNetworkProfile::Default => NetworkPolicy::default(),
@@ -425,6 +450,7 @@ mod tests {
                 EffectKind::SpawnProcess,
                 EffectKind::ExecuteCode,
                 EffectKind::Network,
+                EffectKind::ExternalWrite,
             ]
         );
         let gate_effects = policy.approval_gate_effects();
@@ -464,6 +490,34 @@ mod tests {
                 .grant(&CapabilityId::new("builtin.skill_install").expect("capability id"))
                 .is_ok()
         );
+        assert_trigger_grant(
+            &policy,
+            "builtin.trigger_create",
+            &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+        );
+        assert_trigger_grant(
+            &policy,
+            "builtin.trigger_list",
+            &[EffectKind::DispatchCapability],
+        );
+        assert_trigger_grant(
+            &policy,
+            "builtin.trigger_remove",
+            &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+        );
+    }
+
+    fn assert_trigger_grant(
+        policy: &LocalDevCapabilityPolicy,
+        capability: &str,
+        effects: &[EffectKind],
+    ) {
+        let grant = policy
+            .grant(&CapabilityId::new(capability).expect("capability id"))
+            .expect("trigger grant");
+        assert_eq!(grant.effects, effects);
+        assert_eq!(grant.mounts, LocalDevMountProfile::Ambient);
+        assert_eq!(grant.network, LocalDevNetworkProfile::Default);
     }
 
     #[test]
@@ -475,6 +529,7 @@ mod tests {
                 LocalDevApprovalPolicyAction::SpawnCapability {
                     capability: &capability,
                 },
+                &MountView::default(),
                 &MountView::default(),
                 &MountView::default(),
             )
@@ -500,6 +555,7 @@ mod tests {
                 LocalDevApprovalPolicyAction::SpawnCapability {
                     capability: &capability,
                 },
+                &MountView::default(),
                 &MountView::default(),
                 &MountView::default(),
             )

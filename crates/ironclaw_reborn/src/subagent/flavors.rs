@@ -331,7 +331,7 @@ mod tests {
     // These drive the SAME production path a real subagent spawn uses:
     //   flavor.tool_allowlist
     //     -> RebornSubagentPromptMaterialSource::material_for_run (production)
-    //     -> SubagentPromptComposer::capability_filter_for_run (production)
+    //     -> SubagentCapabilitySurfaceResolver (production)
     //     -> CapabilitySurfaceProfileFilter (the real runtime LoopCapabilityPort
     //        wrapper that enforces visibility + invocation denial).
     //
@@ -346,15 +346,23 @@ mod tests {
         use async_trait::async_trait;
         use ironclaw_agent_loop::test_support::test_run_context;
         use ironclaw_host_api::{CapabilityId, RuntimeKind};
-        use ironclaw_loop_support::SubagentPromptComposer;
-        use ironclaw_turns::LoopResultRef;
+        use ironclaw_loop_support::{
+            CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
+            CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
+        };
         use ironclaw_turns::run_profile::{
             AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
             CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
             CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-            ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+            LoopDriverId, ProviderToolDefinition, VisibleCapabilityRequest,
+            VisibleCapabilitySurface,
         };
+        use ironclaw_turns::{LoopResultRef, RunProfileId, RunProfileVersion};
 
+        use crate::planned_driver_factory::{
+            PLANNED_DRIVER_DEFAULT_VERSION, SUBAGENT_PLANNED_DRIVER_ID, SUBAGENT_PLANNED_PROFILE_ID,
+        };
+        use crate::subagent::capability_surface::SubagentCapabilitySurfaceResolver;
         use crate::subagent::flavors::{SubagentFlavorId, lookup_flavor};
         use crate::subagent::goal_store::{
             InMemoryBoundedSubagentGoalStore, SubagentGoal, SubagentGoalStore,
@@ -386,6 +394,18 @@ mod tests {
         #[derive(Default)]
         struct HostSurfaceSpy {
             invoked: Mutex<Vec<String>>,
+        }
+
+        struct StaticProfileResolver(CapabilityAllowSet);
+
+        #[async_trait]
+        impl CapabilitySurfaceProfileResolver for StaticProfileResolver {
+            async fn resolve(
+                &self,
+                _run_context: &ironclaw_turns::run_profile::LoopRunContext,
+            ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+                Ok(self.0.clone())
+            }
         }
 
         #[async_trait]
@@ -435,6 +455,7 @@ mod tests {
                 Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:ok").expect("valid result ref"),
                     safe_summary: "ok".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                 }))
             }
@@ -451,17 +472,33 @@ mod tests {
         }
 
         /// Build the production `CapabilitySurfaceProfileFilter` for a flavor by
-        /// driving the real material source + composer, exactly as a subagent
-        /// spawn does, then return both the filter and the inner spy so callers
-        /// can assert which capabilities actually reached the host.
+        /// driving the real material source + surface resolver, exactly as a
+        /// subagent spawn does, then return both the filter and the inner spy so
+        /// callers can assert which capabilities actually reached the host.
         async fn filter_for_flavor(
             flavor: SubagentFlavorId,
         ) -> (
             ironclaw_loop_support::CapabilitySurfaceProfileFilter,
             Arc<HostSurfaceSpy>,
         ) {
+            filter_for_flavor_with_base(flavor, CapabilityAllowSet::All).await
+        }
+
+        async fn filter_for_flavor_with_base(
+            flavor: SubagentFlavorId,
+            base_allow_set: CapabilityAllowSet,
+        ) -> (
+            ironclaw_loop_support::CapabilitySurfaceProfileFilter,
+            Arc<HostSurfaceSpy>,
+        ) {
             let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
-            let context = test_run_context("caller-level-attenuation");
+            let mut context = test_run_context("caller-level-attenuation");
+            context.resolved_run_profile.profile_id =
+                RunProfileId::new(SUBAGENT_PLANNED_PROFILE_ID).expect("subagent profile id");
+            context.resolved_run_profile.loop_driver.id =
+                LoopDriverId::new(SUBAGENT_PLANNED_DRIVER_ID).expect("subagent driver id");
+            context.resolved_run_profile.loop_driver.version =
+                RunProfileVersion::new(PLANNED_DRIVER_DEFAULT_VERSION);
             goal_store
                 .put_goal(
                     &context.scope,
@@ -473,13 +510,18 @@ mod tests {
                 )
                 .await
                 .expect("seed goal");
-            let source = Arc::new(RebornSubagentPromptMaterialSource::new(goal_store, flavor));
-            let composer = SubagentPromptComposer::new(source);
+            let source: Arc<dyn SubagentPromptMaterialSource> =
+                Arc::new(RebornSubagentPromptMaterialSource::new(goal_store, flavor));
+            let resolver = SubagentCapabilitySurfaceResolver::new(
+                Arc::new(StaticProfileResolver(base_allow_set)),
+                source,
+            );
             let spy = Arc::new(HostSurfaceSpy::default());
-            let filter = composer
-                .capability_filter_for_run(&context, spy.clone())
+            let allow_set = resolver
+                .resolve(&context)
                 .await
-                .expect("production composer builds the capability filter");
+                .expect("production resolver builds the subagent allowlist");
+            let filter = CapabilitySurfaceProfileFilter::new(spy.clone(), Arc::new(allow_set));
             (filter, spy)
         }
 
@@ -622,6 +664,66 @@ mod tests {
 
             let invoked = spy.invoked.lock().expect("invoked lock").clone();
             assert_eq!(invoked, expected, "only allowlisted caps reach the host");
+        }
+
+        #[tokio::test]
+        async fn subagent_surface_intersects_outer_profile_surface() {
+            let (filter, spy) = filter_for_flavor_with_base(
+                SubagentFlavorId::Coder,
+                CapabilityAllowSet::allowlist([
+                    cap("builtin.read_file"),
+                    cap("builtin.shell"),
+                    cap("builtin.http"),
+                ]),
+            )
+            .await;
+
+            let expected = vec!["builtin.read_file".to_string(), "builtin.shell".to_string()];
+            assert_eq!(visible_ids(&filter).await, expected);
+            assert_eq!(definition_ids(&filter), expected);
+
+            for denied in ["builtin.apply_patch", "builtin.http"] {
+                let outcome = filter
+                    .invoke_capability(invocation(denied))
+                    .await
+                    .expect("outcome");
+                assert!(
+                    is_denied(&outcome),
+                    "{denied} must be denied outside the intersected surface"
+                );
+            }
+
+            let outcome = filter
+                .invoke_capability(invocation("builtin.shell"))
+                .await
+                .expect("outcome");
+            assert!(!is_denied(&outcome), "shell must remain allowed");
+            assert_eq!(
+                spy.invoked.lock().expect("invoked lock").clone(),
+                vec!["builtin.shell".to_string()]
+            );
+        }
+
+        #[tokio::test]
+        async fn non_subagent_surface_preserves_outer_profile_surface() {
+            let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+            let context = test_run_context("caller-level-non-subagent");
+            let base_allow_set =
+                CapabilityAllowSet::allowlist([cap("builtin.read_file"), cap("builtin.http")]);
+            let source: Arc<dyn SubagentPromptMaterialSource> = Arc::new(
+                RebornSubagentPromptMaterialSource::new(goal_store, SubagentFlavorId::Coder),
+            );
+            let resolver = SubagentCapabilitySurfaceResolver::new(
+                Arc::new(StaticProfileResolver(base_allow_set.clone())),
+                source,
+            );
+
+            let resolved = resolver
+                .resolve(&context)
+                .await
+                .expect("non-subagent should preserve the base capability surface");
+
+            assert_eq!(resolved, base_allow_set);
         }
 
         #[tokio::test]

@@ -65,6 +65,8 @@ pub struct RebornConfigFile {
     pub drivers: Option<DriversSection>,
     pub harness: Option<HarnessSection>,
     pub runner: Option<RunnerSection>,
+    /// Skill activation selection settings for local-dev runtime skill context.
+    pub skills: Option<SkillsSection>,
     /// Per-slot LLM selection. Keyed by Reborn model slot name. Today
     /// composition wires only the `default` slot; the `mission` slot
     /// becomes live when the planned driver lands. Operators are free
@@ -75,11 +77,19 @@ pub struct RebornConfigFile {
     /// `serve` subcommand is invoked. Optional — sparse configs
     /// fall back to compiled defaults documented on each field.
     pub webui: Option<WebuiSection>,
+    /// Slack Events API host-beta route settings. Consumed by
+    /// `ironclaw-reborn serve` only when the binary is built with the
+    /// Slack host-beta feature. Secrets are env-only; this section stores
+    /// IDs and environment variable names.
+    pub slack: Option<SlackSection>,
     /// Cost-based budgets. Composition seeds defaults on first reservation
     /// for each user/project; per-account overrides happen through the
     /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
     /// "unlimited" for that dimension.
     pub budget: Option<BudgetSection>,
+    /// Trigger poller lifecycle settings. All fields optional; absent section
+    /// leaves the worker at the compiled defaults in the composition root.
+    pub trigger_poller: Option<TriggerPollerConfigSection>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -138,6 +148,14 @@ pub struct HarnessSection {
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsSection {
+    /// When false, regex activation criteria no longer auto-load full skill context.
+    /// Keyword/tag activation and explicit skill mentions still work.
+    pub regex_activation_enabled: Option<bool>,
 }
 
 /// WebChat v2 HTTP gateway configuration.
@@ -204,6 +222,38 @@ pub struct WebuiSection {
     pub canonical_host: Option<String>,
 }
 
+/// Slack Events API host-beta configuration.
+///
+/// `enabled = true` is required before the standalone Reborn listener mounts
+/// `/webhooks/slack/events`; the route is never enabled by ambient Slack
+/// environment variables alone. Signing secret and bot token values stay
+/// env-only: `signing_secret_env` and `bot_token_env` are variable names.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlackSection {
+    /// Explicit host-beta enablement gate. Omitted/false means the Slack route
+    /// is not mounted by `ironclaw-reborn serve`.
+    pub enabled: Option<bool>,
+    /// Adapter installation id for this Slack workspace/app installation.
+    pub installation_id: Option<String>,
+    /// Slack team id used to select this installation from signed envelopes.
+    pub team_id: Option<String>,
+    /// Slack app id for tenant app-scoped pairing. Required by the
+    /// host-beta personal-binding pairing path.
+    pub api_app_id: Option<String>,
+    /// Optional legacy static Slack user id to map directly to `user_id`.
+    /// Omit this for the pairing-code flow, where unknown Slack actors are
+    /// prompted to bind in WebUI.
+    pub slack_user_id: Option<String>,
+    /// Reborn user id the configured Slack user maps to. Defaults in the CLI
+    /// to the same user as the WebUI env-bearer authenticator.
+    pub user_id: Option<String>,
+    /// Environment variable name containing the Slack signing secret.
+    pub signing_secret_env: Option<String>,
+    /// Environment variable name containing the Slack bot token.
+    pub bot_token_env: Option<String>,
+}
+
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
 ///
 /// Composition uses these as defaults when first seeding a user/project
@@ -237,6 +287,39 @@ pub struct BudgetSection {
     /// Default `1.20` (20% safety margin); reconcile releases the
     /// overshoot.
     pub overestimate_factor: Option<f64>,
+}
+
+/// `[trigger_poller]` section. Controls the background trigger-poller worker.
+///
+/// All fields are optional so a sparse or absent section is valid; the
+/// composition root applies its own compiled defaults for any field not set
+/// here. Env vars (`IRONCLAW_TRIGGER_POLLER_*`) override this section.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerPollerConfigSection {
+    /// Enable or disable the trigger poller. Default `false` (off) in
+    /// composition; operators MUST set `enabled = true` to activate it.
+    pub enabled: Option<bool>,
+    /// How often the poller ticks, in seconds. Default in composition is 30.
+    /// Range `1..=3600` is enforced at boot by the CLI settings layer;
+    /// values outside the range are a fatal startup error.
+    pub poll_interval_secs: Option<u64>,
+    /// Maximum triggers to fire per tick. Default in composition is 32.
+    /// Range `1..=1000` is enforced at boot by the CLI settings layer;
+    /// values outside the range are a fatal startup error.
+    pub fires_per_tick: Option<u32>,
+    /// Maximum concurrent fires allowed for a single trigger. Default in
+    /// composition is 1. V1 invariant: must equal 1, enforced at boot by
+    /// the CLI settings layer; any other value is a fatal startup error.
+    pub max_concurrent_fires_per_trigger: Option<u32>,
+    /// Upper bound (seconds) of a random jitter delay before the first tick.
+    /// Spreads startup load across instances. Default in composition is 0.
+    /// Range `0..=3600` is enforced at boot by the CLI settings layer.
+    pub startup_jitter_max_secs: Option<u64>,
+    /// Upper bound (seconds) of a random jitter added to each tick interval.
+    /// Prevents synchronized thundering-herd across instances. Default 0.
+    /// Range `0..=3600` is enforced at boot by the CLI settings layer.
+    pub tick_jitter_max_secs: Option<u64>,
 }
 
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
@@ -541,6 +624,32 @@ impl RebornConfigFile {
                 check(Cow::Borrowed("webui.canonical_host"), host)?;
             }
         }
+        if let Some(slack) = &self.slack {
+            if let Some(installation_id) = &slack.installation_id {
+                check(Cow::Borrowed("slack.installation_id"), installation_id)?;
+            }
+            if let Some(team_id) = &slack.team_id {
+                check(Cow::Borrowed("slack.team_id"), team_id)?;
+            }
+            if let Some(api_app_id) = &slack.api_app_id {
+                check(Cow::Borrowed("slack.api_app_id"), api_app_id)?;
+            }
+            if let Some(slack_user_id) = &slack.slack_user_id {
+                check(Cow::Borrowed("slack.slack_user_id"), slack_user_id)?;
+            }
+            if let Some(user_id) = &slack.user_id {
+                check(Cow::Borrowed("slack.user_id"), user_id)?;
+            }
+            if let Some(signing_secret_env) = &slack.signing_secret_env {
+                check(
+                    Cow::Borrowed("slack.signing_secret_env"),
+                    signing_secret_env,
+                )?;
+            }
+            if let Some(bot_token_env) = &slack.bot_token_env {
+                check(Cow::Borrowed("slack.bot_token_env"), bot_token_env)?;
+            }
+        }
         if let Some(budget) = &self.budget {
             if let Some(tz) = &budget.default_tz {
                 check(Cow::Borrowed("budget.default_tz"), tz)?;
@@ -834,7 +943,9 @@ mod tests {
         assert!(cfg.drivers.is_none());
         assert!(cfg.harness.is_none());
         assert!(cfg.runner.is_none());
+        assert!(cfg.skills.is_none());
         assert!(cfg.llm.is_none());
+        assert!(cfg.slack.is_none());
     }
 
     #[test]
@@ -866,6 +977,9 @@ id = "red-team"
 heartbeat_interval_secs = 5
 poll_interval_ms = 200
 
+[skills]
+regex_activation_enabled = false
+
 [llm.default]
 provider_id = "openai"
 model = "gpt-4o-mini"
@@ -875,6 +989,16 @@ api_key_env = "OPENAI_API_KEY"
 provider_id = "anthropic"
 model = "claude-3-5-sonnet-latest"
 api_key_env = "ANTHROPIC_API_KEY"
+
+[slack]
+enabled = true
+installation_id = "install-alpha"
+team_id = "T123"
+api_app_id = "A123"
+slack_user_id = "U123"
+user_id = "operator"
+signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
+bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         assert_eq!(cfg.api_version.as_deref(), Some("ironclaw.runtime/v1"));
@@ -890,12 +1014,23 @@ api_key_env = "ANTHROPIC_API_KEY"
             cfg.drivers.as_ref().unwrap().additional.as_deref(),
             Some(&["planned".to_string()][..])
         );
+        assert_eq!(
+            cfg.skills.as_ref().unwrap().regex_activation_enabled,
+            Some(false)
+        );
         let default_slot = cfg.default_llm_slot().expect("default slot present");
         assert_eq!(default_slot.provider_id.as_deref(), Some("openai"));
         assert_eq!(default_slot.model.as_deref(), Some("gpt-4o-mini"));
         assert_eq!(default_slot.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         let llm = cfg.llm.as_ref().unwrap();
         assert!(llm.contains_key("mission"));
+        let slack = cfg.slack.as_ref().expect("slack section present");
+        assert_eq!(slack.enabled, Some(true));
+        assert_eq!(slack.team_id.as_deref(), Some("T123"));
+        assert_eq!(
+            slack.signing_secret_env.as_deref(),
+            Some("IRONCLAW_REBORN_SLACK_SIGNING_SECRET")
+        );
     }
 
     #[test]
@@ -1032,6 +1167,22 @@ api_key_env = "sk-proj-1234567890abcdef1234567890"
         assert!(
             rendered.contains("llm.default.api_key_env"),
             "slot-specific label should guide operator to the bad field: {rendered}"
+        );
+    }
+
+    #[test]
+    fn rejects_inline_secret_in_slack_secret_env_name() {
+        let toml = r#"
+[slack]
+enabled = true
+signing_secret_env = "sk-proj-1234567890abcdef1234567890"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("inline Slack secret must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InlineSecret { .. }));
+        assert!(
+            err.to_string().contains("slack.signing_secret_env"),
+            "error should identify Slack field: {err}"
         );
     }
 
@@ -1230,6 +1381,72 @@ not_a_field = 1.0
 "#;
         let err = RebornConfigFile::parse_text(toml, &attributed())
             .expect_err("deny_unknown_fields must catch typos in [budget]");
+        assert!(matches!(err, RebornConfigFileError::Toml { .. }));
+    }
+
+    #[test]
+    fn trigger_poller_full_section_parses() {
+        let toml = r#"
+[trigger_poller]
+enabled = true
+poll_interval_secs = 30
+fires_per_tick = 50
+max_concurrent_fires_per_trigger = 3
+startup_jitter_max_secs = 10
+tick_jitter_max_secs = 5
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("full trigger_poller section must parse");
+        let tp = cfg
+            .trigger_poller
+            .as_ref()
+            .expect("trigger_poller section present");
+        assert_eq!(tp.enabled, Some(true));
+        assert_eq!(tp.poll_interval_secs, Some(30));
+        assert_eq!(tp.fires_per_tick, Some(50));
+        // max_concurrent_fires_per_trigger is intentionally not 1 here: this test
+        // exercises the parse layer, which deliberately accepts any u32. The CLI
+        // settings layer (trigger_poller_settings) enforces the V1 invariant that
+        // the value must equal 1 — see runtime/trigger_poller.rs.
+        assert_eq!(tp.max_concurrent_fires_per_trigger, Some(3));
+        assert_eq!(tp.startup_jitter_max_secs, Some(10));
+        assert_eq!(tp.tick_jitter_max_secs, Some(5));
+    }
+
+    #[test]
+    fn trigger_poller_absent_section_yields_none() {
+        let cfg = RebornConfigFile::parse_text("", &attributed()).expect("empty TOML must parse");
+        assert!(cfg.trigger_poller.is_none());
+    }
+
+    #[test]
+    fn trigger_poller_partial_section_other_fields_none() {
+        let toml = r#"
+[trigger_poller]
+enabled = true
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("partial trigger_poller section must parse");
+        let tp = cfg
+            .trigger_poller
+            .as_ref()
+            .expect("trigger_poller section present");
+        assert_eq!(tp.enabled, Some(true));
+        assert_eq!(tp.poll_interval_secs, None);
+        assert_eq!(tp.fires_per_tick, None);
+        assert_eq!(tp.max_concurrent_fires_per_trigger, None);
+        assert_eq!(tp.startup_jitter_max_secs, None);
+        assert_eq!(tp.tick_jitter_max_secs, None);
+    }
+
+    #[test]
+    fn trigger_poller_rejects_unknown_key() {
+        let toml = r#"
+[trigger_poller]
+not_a_field = true
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("deny_unknown_fields must catch typos in [trigger_poller]");
         assert!(matches!(err, RebornConfigFileError::Toml { .. }));
     }
 }

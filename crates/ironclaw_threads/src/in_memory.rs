@@ -9,6 +9,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::summary_artifacts::find_overlapping_summary;
+use crate::title::derive_thread_title;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -543,6 +545,24 @@ impl SessionThreadService for InMemorySessionThreadService {
             .map(history_message))
     }
 
+    async fn finalized_assistant_message_by_run(
+        &self,
+        request: crate::FinalizedAssistantMessageByRunRequest,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let state = self.state.lock().await;
+        let thread = get_thread(&state, &request.scope, &request.thread_id)?;
+        Ok(thread
+            .messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message.kind == MessageKind::Assistant
+                    && message.status == MessageStatus::Finalized
+                    && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+            })
+            .map(history_message))
+    }
+
     async fn read_thread(
         &self,
         request: ThreadHistoryRequest,
@@ -550,6 +570,31 @@ impl SessionThreadService for InMemorySessionThreadService {
         let state = self.state.lock().await;
         let thread = get_thread(&state, &request.scope, &request.thread_id)?;
         Ok(thread.record.clone())
+    }
+
+    async fn delete_thread(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let existing =
+            state
+                .threads
+                .get(thread_id)
+                .ok_or_else(|| SessionThreadError::UnknownThread {
+                    thread_id: thread_id.clone(),
+                })?;
+        if &existing.record.scope != scope {
+            return Err(SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            });
+        }
+        state.threads.remove(thread_id);
+        state
+            .inbound_idempotency
+            .retain(|_, record| &record.thread_id != thread_id);
+        Ok(())
     }
 
     async fn create_summary_artifact(
@@ -578,22 +623,11 @@ impl SessionThreadService for InMemorySessionThreadService {
                 end_sequence: request.end_sequence,
             });
         }
-        if request.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-            && thread.summary_artifacts.iter().any(|summary| {
-                summary.model_context_policy
-                    == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-                    && ranges_overlap(
-                        request.start_sequence,
-                        request.end_sequence,
-                        summary.start_sequence,
-                        summary.end_sequence,
-                    )
-            })
+        let content = request.content.as_text().to_string();
+        if let Some(overlapping) =
+            find_overlapping_summary(&thread.summary_artifacts, &request, &content)?
         {
-            return Err(SessionThreadError::OverlappingSummaryRange {
-                start_sequence: request.start_sequence,
-                end_sequence: request.end_sequence,
-            });
+            return Ok(overlapping.clone());
         }
         let artifact = SummaryArtifact {
             summary_id: SummaryArtifactId::new(),
@@ -601,7 +635,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             start_sequence: request.start_sequence,
             end_sequence: request.end_sequence,
             summary_kind: request.summary_kind,
-            content: request.content.into_text(),
+            content,
             model_context_policy: request.model_context_policy,
         };
         thread.summary_artifacts.push(artifact.clone());
@@ -634,11 +668,26 @@ impl SessionThreadService for InMemorySessionThreadService {
         // scan is still acceptable here; a scope-indexed secondary
         // map would help with very large stores but local-dev never
         // gets close to that scale.
+        //
+        // Derive a sidebar-friendly title from the first user message
+        // when the record itself has none. Matches v1's libSQL list
+        // semantics: titles aren't stored, they're computed on read
+        // from the first user message in the transcript. The
+        // filesystem backend does the same thing via
+        // `list_thread_messages` + `derive_title_from_message`.
         let mut matching: Vec<SessionThreadRecord> = state
             .threads
             .values()
             .filter(|stored| stored.record.scope == request.scope)
-            .map(|stored| stored.record.clone())
+            .map(|stored| {
+                let mut record = stored.record.clone();
+                if record.title.is_none()
+                    && let Some(title) = derive_thread_title(&stored.messages)
+                {
+                    record.title = Some(title);
+                }
+                record
+            })
             .collect();
         // Stable order so opaque cursor → resumption is deterministic.
         matching.sort_by(|a, b| a.thread_id.as_str().cmp(b.thread_id.as_str()));
@@ -802,10 +851,6 @@ fn ensure_user_accepted(
         from: message.status,
         attempted,
     })
-}
-
-fn ranges_overlap(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> bool {
-    left_start <= right_end && right_start <= left_end
 }
 
 fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<ContextMessage> {

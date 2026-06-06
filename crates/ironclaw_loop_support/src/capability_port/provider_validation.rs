@@ -101,6 +101,28 @@ mod tests {
     }
 
     #[test]
+    fn provider_tool_call_validation_allows_multiline_response_reasoning() {
+        let mut call = provider_tool_call();
+        call.response_reasoning = Some(
+            "**Investigating root cause**\n\nChecked provider output and projection flow."
+                .to_string(),
+        );
+
+        validate_provider_tool_call(&call)
+            .expect("multiline provider response reasoning should be valid");
+    }
+
+    #[test]
+    fn provider_tool_call_validation_rejects_non_whitespace_response_reasoning_controls() {
+        let mut call = provider_tool_call();
+        call.response_reasoning = Some("line one\u{0001}line two".to_string());
+
+        let error = validate_provider_tool_call(&call)
+            .expect_err("non-whitespace response reasoning control should fail");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
     fn provider_tool_call_validation_allows_multiline_argument_text() {
         let mut call = provider_tool_call();
         call.arguments = serde_json::json!({

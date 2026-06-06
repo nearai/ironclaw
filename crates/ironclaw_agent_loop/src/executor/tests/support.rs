@@ -7,21 +7,21 @@ use ironclaw_turns::{
     AgentLoopDriverDescriptor, LoopFailureKind, LoopMessageRef, RunProfileId, RunProfileVersion,
     TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, CancellationPolicy,
-        CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityDescriptorView,
-        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceProfileId,
-        CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-        ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind, LoopCancellationPort,
-        LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef,
-        LoopCompactionError, LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
-        LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
+        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
+        CancellationPolicy, CapabilityBatchInvocation, CapabilityCallCandidate,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
+        ConcurrencyClass, ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind,
+        LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
+        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
+        LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
         LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput, ProviderToolCallReplay,
-        RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-        RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
-        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
+        ProviderToolCallReplay, RedactedRunProfileProvenance, ResolvedRunProfile,
+        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -31,8 +31,9 @@ use crate::{
     state::{CheckpointKind, GateStrategyState, LoopExecutionState, StopStrategyState},
     strategies::{
         CapabilityErrorClass, CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy,
-        DefaultCompactionStrategy, GateHandlingStrategy, GateOutcome, GateSummary,
-        InputDrainStrategy, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryScope,
+        ContextStrategy, DefaultCompactionStrategy, GateHandlingStrategy, GateOutcome, GateSummary,
+        InputDrainStrategy, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy,
+        ReplyAdmissionOutcome, ReplyAdmissionStrategy, RetryAlteration, RetryScope,
         StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
     },
 };
@@ -296,6 +297,60 @@ impl GateHandlingStrategy for FixedGateStrategy {
     }
 }
 
+pub(super) enum FixedReplyAdmissionPolicy {
+    RejectFirst,
+    RejectAlways,
+}
+
+pub(super) struct FixedReplyAdmissionStrategy {
+    policy: FixedReplyAdmissionPolicy,
+}
+
+#[async_trait]
+impl ReplyAdmissionStrategy for FixedReplyAdmissionStrategy {
+    async fn admit_reply(
+        &self,
+        state: &LoopExecutionState,
+        _reply: &AssistantReply,
+    ) -> ReplyAdmissionOutcome {
+        let should_reject = match self.policy {
+            FixedReplyAdmissionPolicy::RejectFirst => {
+                state.reply_admission_state.rejected_reply_candidates == 0
+            }
+            FixedReplyAdmissionPolicy::RejectAlways => true,
+        };
+        if should_reject {
+            return ReplyAdmissionOutcome::RejectFinal {
+                rejection: crate::state::ReplyAdmissionRejection::stop_condition_not_met(),
+            };
+        }
+        ReplyAdmissionOutcome::AcceptFinal
+    }
+}
+
+pub(super) struct NoInlineContextStrategy;
+
+#[async_trait]
+impl ContextStrategy for NoInlineContextStrategy {
+    async fn plan_context_request(
+        &self,
+        _state: &LoopExecutionState,
+    ) -> crate::strategies::ContextPlan {
+        crate::strategies::ContextPlan {
+            request: LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: None,
+                checkpoint_state_ref: None,
+                max_messages: Some(16),
+                inline_messages: Vec::new(),
+                capability_view: None,
+            },
+            emitted_admission_control: false,
+        }
+    }
+}
+
 pub(super) struct StopAfterObservedTurns {
     turns_completed: u32,
 }
@@ -358,6 +413,34 @@ impl RecoveryStrategy for RetryPolicyDeniedRecoveryStrategy {
         RecoveryOutcome::Abort {
             recovery: state.recovery_state.clone(),
             failure_kind: LoopFailureKind::DriverBug,
+        }
+    }
+}
+
+pub(super) struct ShrinkContextCallScopeRecoveryStrategy;
+
+#[async_trait]
+impl RecoveryStrategy for ShrinkContextCallScopeRecoveryStrategy {
+    async fn on_capability_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &CapabilityErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Abort {
+            recovery: state.recovery_state.clone(),
+            failure_kind: LoopFailureKind::CapabilityProtocolError,
+        }
+    }
+
+    async fn on_model_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &ModelErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Retry {
+            recovery: state.recovery_state.clone(),
+            scope: RetryScope::Call,
+            alter: Some(RetryAlteration::ShrinkContext),
         }
     }
 }
@@ -641,7 +724,7 @@ impl ironclaw_turns::run_profile::LoopCompactionPort for MockHost {
     async fn compact_loop_context(
         &self,
         request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
         self.compact_loop_context_for_tests(request).await
     }
 }
@@ -662,15 +745,20 @@ impl LoopCancellationPort for MockHost {
 }
 
 pub(super) fn reply_response() -> LoopModelResponse {
+    reply_response_with_text("hello")
+}
+
+pub(super) fn reply_response_with_text(text: &str) -> LoopModelResponse {
     LoopModelResponse {
         chunks: vec![ModelStreamChunk {
-            safe_text_delta: "hello".to_string(),
+            safe_text_delta: text.to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::AssistantReply(ironclaw_turns::run_profile::AssistantReply {
-            content: "hello".to_string(),
+            content: text.to_string(),
         }),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
     }
 }
 
@@ -686,6 +774,7 @@ pub(super) fn calls_response() -> LoopModelResponse {
             provider_replay: None,
         }]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
     }
 }
 
@@ -710,6 +799,7 @@ pub(super) fn two_calls_response() -> LoopModelResponse {
             },
         ]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"), // safety: test-only fixture
+        usage: None,
     }
 }
 
@@ -735,6 +825,7 @@ pub(super) fn provider_calls_response() -> LoopModelResponse {
             }),
         }]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
     }
 }
 
@@ -779,6 +870,7 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
             },
         ]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
     }
 }
 
@@ -794,6 +886,7 @@ pub(super) fn stale_surface_calls_response() -> LoopModelResponse {
             provider_replay: None,
         }]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
     }
 }
 
@@ -818,6 +911,7 @@ pub(super) fn mixed_surface_calls_response() -> LoopModelResponse {
             },
         ]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
     }
 }
 
@@ -897,6 +991,30 @@ pub(super) fn family_with_stop_after_observed_turns(turns_completed: u32) -> Loo
     LoopFamily::new(id, version, Arc::new(planner))
 }
 
+pub(super) fn family_with_reply_admission(policy: FixedReplyAdmissionPolicy) -> LoopFamily {
+    let planner = DefaultPlanner::compose_default()
+        .with_reply_admission(Arc::new(FixedReplyAdmissionStrategy { policy }));
+    let id = LoopFamilyId::new("executor-reply-admission-test").expect("valid test family id");
+    let version =
+        ComponentIdentity::from_static("executor-reply-admission-test", ComponentDigest([7; 32]));
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn family_with_reply_admission_without_inline_context(
+    policy: FixedReplyAdmissionPolicy,
+) -> LoopFamily {
+    let planner = DefaultPlanner::compose_default()
+        .with_reply_admission(Arc::new(FixedReplyAdmissionStrategy { policy }))
+        .with_context(Arc::new(NoInlineContextStrategy));
+    let id =
+        LoopFamilyId::new("executor-reply-admission-no-inline-test").expect("valid test family id");
+    let version = ComponentIdentity::from_static(
+        "executor-reply-admission-no-inline-test",
+        ComponentDigest([8; 32]),
+    );
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
 pub(super) fn empty_gate_state() -> GateStrategyState {
     GateStrategyState::default()
 }
@@ -908,6 +1026,18 @@ pub(super) fn family_with_retry_policy_denied_recovery() -> LoopFamily {
     let version = ComponentIdentity::from_static(
         "executor-retry-policy-denied-test",
         ComponentDigest([3; 32]),
+    );
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn family_with_shrink_context_call_scope_recovery() -> LoopFamily {
+    let planner = DefaultPlanner::compose_default()
+        .with_recovery(Arc::new(ShrinkContextCallScopeRecoveryStrategy));
+    let id =
+        LoopFamilyId::new("executor-shrink-context-call-scope-test").expect("valid test family id");
+    let version = ComponentIdentity::from_static(
+        "executor-shrink-context-call-scope-test",
+        ComponentDigest([9; 32]),
     );
     LoopFamily::new(id, version, Arc::new(planner))
 }

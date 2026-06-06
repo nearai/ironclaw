@@ -1,5 +1,6 @@
 //! Subagent static data and isolated stores.
 
+pub(crate) mod capability_surface;
 pub mod completion_observer;
 pub mod directions;
 pub mod flavors;

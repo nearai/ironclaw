@@ -10,6 +10,7 @@
 #![warn(unreachable_pub)]
 
 mod anthropic_oauth;
+mod anthropic_thinking;
 pub mod auth;
 #[cfg(feature = "bedrock")]
 mod bedrock;
@@ -34,6 +35,7 @@ pub mod registry;
 #[cfg(feature = "registry-provider-factory")]
 mod resolution;
 pub mod response_cache;
+mod responses_reasoning;
 pub mod retry;
 mod rig_adapter;
 pub mod runtime;
@@ -69,7 +71,7 @@ pub use host::{
 };
 pub use nearai_chat::{DEFAULT_MODEL, ModelInfo, NearAiChatProvider, default_models};
 pub use openai_codex_provider::OpenAiCodexProvider;
-pub(crate) use openai_codex_session::OpenAiCodexSessionManager;
+pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
@@ -82,7 +84,11 @@ pub use reasoning::{
     TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
     user_signals_execution_intent,
 };
-pub use reasoning::{clean_response, recover_tool_calls_from_content};
+pub use reasoning::{
+    clean_response, contains_codex_text_tool_call_syntax,
+    recover_codex_text_tool_calls_from_content, recover_codex_text_tool_calls_from_tool_names,
+    recover_tool_calls_from_content,
+};
 pub use recording::{MemorySnapshotEntry, RecordingLlm};
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 #[cfg(feature = "registry-provider-factory")]
@@ -97,7 +103,7 @@ pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
 pub use runtime::{LlmReloadHandle, SwappableLlmProvider};
-pub use session::{SessionConfig, SessionManager, create_session_manager};
+pub use session::{NearWalletSignedMessage, SessionConfig, SessionManager, create_session_manager};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
 pub use token_refreshing::TokenRefreshingProvider;
 

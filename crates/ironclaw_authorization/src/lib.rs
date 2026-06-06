@@ -27,7 +27,8 @@ use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
     EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, MissionId,
     NetworkPolicy, Obligation, Obligations, Principal, ProjectId, ResourceCeiling,
-    ResourceEstimate, ResourceScope, SandboxQuota, ScopedPath, TenantId, ThreadId, UserId,
+    ResourceEstimate, ResourceScope, RuntimeCredentialRequirementSource, RuntimeKind, SandboxQuota,
+    ScopedPath, TenantId, ThreadId, UserId,
 };
 use ironclaw_trust::{AuthorityCeiling, TrustDecision};
 use serde::{Deserialize, Serialize};
@@ -1159,20 +1160,46 @@ fn obligations_for_grant(
             return None;
         }
         for credential in &descriptor.runtime_credentials {
-            if grant.constraints.secrets.contains(&credential.handle) {
-                obligations.push(Obligation::InjectSecretOnce {
-                    handle: credential.handle.clone(),
-                });
-            } else if credential.required {
-                return None;
+            match &credential.source {
+                RuntimeCredentialRequirementSource::SecretHandle => {
+                    if grant.constraints.secrets.contains(&credential.handle) {
+                        obligations.push(Obligation::InjectSecretOnce {
+                            handle: credential.handle.clone(),
+                        });
+                    } else if credential.required {
+                        return None;
+                    }
+                }
+                RuntimeCredentialRequirementSource::ProductAuthAccount { provider, .. } => {
+                    // Mirror SecretHandle: only mandate the obligation when the credential is
+                    // required. An optional product-auth credential is skipped rather than
+                    // injected so that a missing account does not hard-fail dispatch.
+                    if credential.required {
+                        obligations.push(Obligation::InjectCredentialAccountOnce {
+                            handle: credential.handle.clone(),
+                            provider: provider.clone(),
+                            provider_scopes: credential.provider_scopes.clone(),
+                            requester_extension: descriptor.provider.clone(),
+                        });
+                    }
+                }
             }
         }
     } else if descriptor.effects.contains(&EffectKind::UseSecret) {
-        match grant.constraints.secrets.as_slice() {
-            [handle] => obligations.push(Obligation::InjectSecretOnce {
-                handle: handle.clone(),
-            }),
-            _ => return None,
+        // Some first-party handlers choose account-scoped credentials at
+        // dispatch time and stage the selected secret through their own
+        // host-runtime port, so there is no static grant handle to inject here.
+        if descriptor.runtime == RuntimeKind::FirstParty && grant.constraints.secrets.is_empty() {
+            obligations.push(Obligation::FirstPartyCredentialStagedViaHostPort {
+                capability_id: descriptor.id.clone(),
+            });
+        } else {
+            match grant.constraints.secrets.as_slice() {
+                [handle] => obligations.push(Obligation::InjectSecretOnce {
+                    handle: handle.clone(),
+                }),
+                _ => return None,
+            }
         }
     }
 

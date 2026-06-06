@@ -13,12 +13,12 @@ use crate::{
     TurnAdmissionPolicy, TurnCommittedEventObserver, TurnError, TurnEventKind, TurnEventSink,
     TurnLifecycleEvent, TurnRunId, TurnRunRecord, TurnRunState, TurnSpawnTreeStateStore,
     TurnStateStore, TurnStatus,
-    events::EventCursor,
+    events::{EventCursor, lifecycle_owner_user_id},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
+        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
     },
     store::SpawnTreeReservation,
 };
@@ -358,7 +358,7 @@ fn submit_event(request: &SubmitTurnRequest, response: &SubmitTurnResponse) -> T
         cursor: *event_cursor,
         scope: request.scope.clone(),
         occurred_at: Some(request.received_at),
-        owner_user_id: Some(request.actor.user_id.clone()),
+        owner_user_id: lifecycle_owner_user_id(&request.scope, Some(&request.actor.user_id)),
         run_id: *run_id,
         status: *status,
         kind: TurnEventKind::Submitted,
@@ -381,7 +381,7 @@ fn child_submit_event(
         cursor: *event_cursor,
         scope: request.child_scope.clone(),
         occurred_at: Some(request.received_at),
-        owner_user_id: Some(request.actor.user_id.clone()),
+        owner_user_id: lifecycle_owner_user_id(&request.child_scope, Some(&request.actor.user_id)),
         run_id: *run_id,
         status: *status,
         kind: TurnEventKind::Submitted,
@@ -395,7 +395,7 @@ fn resume_event(request: &ResumeTurnRequest, response: &ResumeTurnResponse) -> T
         cursor: response.event_cursor,
         scope: request.scope.clone(),
         occurred_at: Some(Utc::now()),
-        owner_user_id: Some(request.actor.user_id.clone()),
+        owner_user_id: lifecycle_owner_user_id(&request.scope, Some(&request.actor.user_id)),
         run_id: response.run_id,
         status: response.status,
         kind: TurnEventKind::Resumed,
@@ -420,7 +420,10 @@ fn cancel_event(
         cursor: response.event_cursor,
         scope: request.scope.clone(),
         occurred_at: Some(Utc::now()),
-        owner_user_id: response.actor.as_ref().map(|actor| actor.user_id.clone()),
+        owner_user_id: lifecycle_owner_user_id(
+            &request.scope,
+            response.actor.as_ref().map(|actor| &actor.user_id),
+        ),
         run_id: response.run_id,
         status: response.status,
         kind,
@@ -598,8 +601,8 @@ where
         for state in &response.recovered {
             let event = TurnLifecycleEvent::from_run_state(
                 state,
-                TurnEventKind::RecoveryRequired,
-                Some("lease_expired".to_string()),
+                event_kind_for_state(state),
+                sanitized_reason_for_state(state),
             );
             self.publish_state_once_best_effort(state.clone(), event, "committed lease recovery")
                 .await;
@@ -649,14 +652,28 @@ where
         Ok(state)
     }
 
-    async fn record_recovery_required(
+    async fn record_runner_failure(
         &self,
-        request: RecordRecoveryRequiredRequest,
+        request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        let state = self.inner.record_recovery_required(request).await?;
+        let state = self.inner.record_runner_failure(request).await?;
         let event = TurnLifecycleEvent::from_run_state(
             &state,
-            TurnEventKind::RecoveryRequired,
+            event_kind_for_state(&state),
+            sanitized_reason_for_state(&state),
+        );
+        self.publish_state_once(state.clone(), event).await?;
+        Ok(state)
+    }
+
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let state = self.inner.relinquish_run(request).await?;
+        let event = TurnLifecycleEvent::from_run_state(
+            &state,
+            event_kind_for_state(&state),
             sanitized_reason_for_state(&state),
         );
         self.publish_state_once(state.clone(), event).await?;

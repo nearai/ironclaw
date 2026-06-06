@@ -27,6 +27,11 @@ const MAX_TAG_SCORE: u32 = 15;
 /// 20 points each could yield 100 points, dominating keyword+tag scores.
 const MAX_REGEX_SCORE: u32 = 40;
 
+/// Maximum message length (in bytes) against which regex patterns are run.
+/// Messages longer than this skip regex scoring to avoid O(n) work per skill
+/// on a hot path (the regex crate is linear but the constant matters at scale).
+const MAX_REGEX_MATCH_MESSAGE_BYTES: usize = 64 * 1024;
+
 /// Result of prefiltering with score information.
 #[derive(Debug)]
 pub struct ScoredSkill<'a> {
@@ -46,6 +51,20 @@ pub struct ScoredSkill<'a> {
 pub struct SelectionOutcome<'a> {
     pub selected: Vec<&'a LoadedSkill>,
     pub notes: Vec<String>,
+}
+
+/// Selection policy for deterministic skill prefiltering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillSelectionOptions {
+    pub regex_activation_enabled: bool,
+}
+
+impl Default for SkillSelectionOptions {
+    fn default() -> Self {
+        Self {
+            regex_activation_enabled: true,
+        }
+    }
 }
 
 /// Reason a `try_select` call didn't add a skill. Callers use this to
@@ -155,12 +174,13 @@ fn try_select<'a>(
 ///
 /// Pass an empty set to disable marker filtering (the legacy behavior
 /// where every skill competes regardless of workspace state).
-pub fn prefilter_skills<'a>(
+pub fn prefilter_skills_with_options<'a>(
     message: &str,
     available_skills: &'a [LoadedSkill],
     max_candidates: usize,
     max_context_tokens: usize,
     satisfied_setup_markers: &std::collections::HashSet<String>,
+    options: SkillSelectionOptions,
 ) -> SelectionOutcome<'a> {
     if available_skills.is_empty() || message.is_empty() {
         return SelectionOutcome::default();
@@ -185,7 +205,7 @@ pub fn prefilter_skills<'a>(
             {
                 return None;
             }
-            let score = score_skill(skill, &message_lower, message);
+            let score = score_skill(skill, &message_lower, message, options);
             if score > 0 {
                 Some(ScoredSkill { skill, score })
             } else {
@@ -289,7 +309,12 @@ pub fn prefilter_skills<'a>(
 }
 
 /// Score a skill against a user message.
-fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str) -> u32 {
+fn score_skill(
+    skill: &LoadedSkill,
+    message_lower: &str,
+    message_original: &str,
+    options: SkillSelectionOptions,
+) -> u32 {
     // Exclusion veto: if any exclude_keyword is present in the message, score 0
     if skill
         .lowercased_exclude_keywords
@@ -326,14 +351,16 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
     }
     score += tag_score.min(MAX_TAG_SCORE);
 
-    // Regex pattern scoring using pre-compiled patterns (cached at load time), with cap
-    let mut regex_score: u32 = 0;
-    for re in &skill.compiled_patterns {
-        if re.is_match(message_original) {
-            regex_score += 20;
+    if options.regex_activation_enabled && message_original.len() <= MAX_REGEX_MATCH_MESSAGE_BYTES {
+        // Regex pattern scoring using pre-compiled patterns (cached at load time), with cap
+        let mut regex_score: u32 = 0;
+        for re in &skill.compiled_patterns {
+            if re.is_match(message_original) {
+                regex_score += 20;
+            }
         }
+        score += regex_score.min(MAX_REGEX_SCORE);
     }
-    score += regex_score.min(MAX_REGEX_SCORE);
 
     score
 }
@@ -457,14 +484,37 @@ mod tests {
         max_candidates: usize,
         max_context_tokens: usize,
     ) -> Vec<&'a LoadedSkill> {
-        super::prefilter_skills(
+        super::prefilter_skills_with_options(
             message,
             available,
             max_candidates,
             max_context_tokens,
             &HashSet::new(),
+            super::SkillSelectionOptions::default(),
         )
         .selected
+    }
+
+    /// Internal test shim: forward to `prefilter_skills_with_options` with
+    /// the default selection policy. The non-options public wrapper was
+    /// removed; tests that don't exercise the policy keep using this
+    /// shim to avoid restating `SkillSelectionOptions::default()` at
+    /// every call site.
+    fn prefilter_skills<'a>(
+        message: &str,
+        available: &'a [LoadedSkill],
+        max_candidates: usize,
+        max_context_tokens: usize,
+        satisfied_setup_markers: &HashSet<String>,
+    ) -> super::SelectionOutcome<'a> {
+        super::prefilter_skills_with_options(
+            message,
+            available,
+            max_candidates,
+            max_context_tokens,
+            satisfied_setup_markers,
+            super::SkillSelectionOptions::default(),
+        )
     }
 
     fn make_skill(name: &str, keywords: &[&str], tags: &[&str], patterns: &[&str]) -> LoadedSkill {
@@ -531,6 +581,52 @@ mod tests {
         );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name(), "writing");
+    }
+
+    #[test]
+    fn test_regex_activation_disabled_suppresses_pattern_only_selection() {
+        let skills = vec![make_skill(
+            "writing",
+            &[],
+            &[],
+            &[r"(?i)\bwrite\b.*\bemail\b"],
+        )];
+        let result = super::prefilter_skills_with_options(
+            "Please write an email",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+            super::SkillSelectionOptions {
+                regex_activation_enabled: false,
+            },
+        );
+
+        assert!(result.selected.is_empty());
+        assert!(result.notes.is_empty());
+    }
+
+    #[test]
+    fn test_regex_activation_disabled_keeps_keyword_selection() {
+        let skills = vec![make_skill(
+            "writing",
+            &["write"],
+            &[],
+            &[r"(?i)\bwrite\b.*\bemail\b"],
+        )];
+        let result = super::prefilter_skills_with_options(
+            "Please write an email",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+            super::SkillSelectionOptions {
+                regex_activation_enabled: false,
+            },
+        );
+
+        assert_eq!(result.selected.len(), 1);
+        assert_eq!(result.selected[0].name(), "writing");
     }
 
     #[test]

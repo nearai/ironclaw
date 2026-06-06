@@ -38,7 +38,7 @@ impl<T: Clone + Eq, const N: usize> BoundedRing<T, N> {
         self.items.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
         self.items.iter()
     }
 
@@ -129,6 +129,15 @@ impl<'de, T: serde::Deserialize<'de>, const N: usize> serde::Deserialize<'de>
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("a bounded ring with an items array")
+            }
+
+            /// Support non-self-describing formats (e.g. Bincode, Postcard) that
+            /// serialize structs as sequences rather than maps.
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let items = seq
+                    .next_element_seed(BoundedItemsVisitor::<T, N> { item: PhantomData })?
+                    .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                Ok(BoundedRing { items })
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {

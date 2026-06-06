@@ -14,6 +14,8 @@ use std::{
 };
 
 mod budget_accountant;
+mod budget_cost_table;
+mod budget_seeding;
 mod cancellation_port;
 mod capability_allow_set;
 mod capability_info;
@@ -25,6 +27,7 @@ mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
+mod model_capability_view;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
@@ -34,9 +37,9 @@ mod system_inference;
 mod token_estimator;
 mod turn_event_publisher;
 
-pub use budget_accountant::{
-    BudgetSeedingPolicy, GovernorBackedAccountant, ModelCost, ModelCostTable, ZeroCostTable,
-};
+pub use budget_accountant::GovernorBackedAccountant;
+pub use budget_cost_table::{ModelCost, ModelCostTable, StaticModelCostTable, ZeroCostTable};
+pub use budget_seeding::BudgetSeedingPolicy;
 pub use cancellation_port::{
     AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory,
     CompositeTurnRunWakeNotifier, ProductLiveCancellationProbe, ProductLiveCancellationReadiness,
@@ -48,8 +51,9 @@ pub use capability_allow_set::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
 };
 pub use capability_port::{
-    HostRuntimeLoopCapabilityPort, HostRuntimeLoopCapabilityPortFactory,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, concurrency_hint_from_effects,
+    CapabilityResultWrite, DecoratingLoopCapabilityPortFactory, HostRuntimeLoopCapabilityPort,
+    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortDecorator,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, concurrency_hint_from_effects,
     loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
@@ -94,6 +98,8 @@ pub use subagent_spawn_port::{
     SubagentThreadMetadata,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
+    include_str!("../prompts/failure_explanation.md");
 pub use token_estimator::{
     CHARS_PER_TOKEN_DEFAULT, EstimatedTokenCount, estimate_tokens_from_chars,
 };
@@ -113,16 +119,16 @@ use ironclaw_turns::{
     LoopMessageRef, TurnId, TurnRunId,
     run_profile::ModelProfileId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
-        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-        LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor,
-        LoopModelBudgetAccountant, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort,
-        LoopSafeSummary, LoopTranscriptPort, ModelCallOutcome, ModelStreamChunk, ParentLoopOutput,
+        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
+        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
+        CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
+        InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
+        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage,
+        LoopContextPort, LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter,
+        LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
+        LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRunContext,
+        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
         PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
         sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
@@ -814,11 +820,6 @@ where
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
-    /// Optional budget accountant. When set, every model call goes through
-    /// `pre_model_call` (reserve) → gateway → `post_model_call`
-    /// (reconcile/release). When `None`, no budget enforcement happens —
-    /// this preserves v1-era behavior for hosts that have not opted in.
-    budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -845,7 +846,6 @@ where
             skill_context_source: None,
             instruction_materialization_store: None,
             identity_context_source: None,
-            budget_accountant: None,
         }
     }
 
@@ -869,20 +869,7 @@ where
             skill_context_source: None,
             instruction_materialization_store: None,
             identity_context_source: None,
-            budget_accountant: None,
         }
-    }
-
-    /// Inject a budget accountant. Each `stream_model` call passes through
-    /// `pre_model_call` and `post_model_call` so a [`GovernorBackedAccountant`]
-    /// (or any custom impl) can reserve/reconcile against the resource
-    /// governor.
-    pub fn with_budget_accountant(
-        mut self,
-        accountant: Arc<dyn LoopModelBudgetAccountant>,
-    ) -> Self {
-        self.budget_accountant = Some(accountant);
-        self
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
@@ -954,22 +941,14 @@ where
             &request.surface_version,
         )?;
 
-        // Resolve messages *before* the budget reservation so a message-
-        // resolution failure here cannot orphan an active hold. The
-        // reservation must only be taken once we know the call is going
-        // to reach the provider.
+        // Resolve messages *before* the budget reservation in the outer
+        // `HostManagedLoopModelPort` so a message-resolution failure here
+        // cannot orphan a reservation taken by the outer port. The inner
+        // port itself never holds a reservation — budget accounting lives
+        // exclusively in the outer port (see #3841 follow-up "delete dead
+        // with_budget_accountant").
         let resolved_messages = self.resolve_model_messages(prompt_grant.messages).await?;
 
-        // Pre-call budget check: reserve estimated cost against the
-        // governor cascade. A denial here short-circuits before any
-        // provider/credential touch. Anything fallible after this point
-        // must funnel through `finalize_post_model_call` so the hold is
-        // reconciled or released.
-        if let Some(accountant) = &self.budget_accountant
-            && let Err(budget_error) = accountant.pre_model_call(&self.run_context, &request).await
-        {
-            return Err(budget_error.into_host_error());
-        }
         self.emit_model_started(requested_model_profile_id).await;
         let host_request = HostManagedModelRequest {
             model_profile_id: model_profile_id.clone(),
@@ -998,8 +977,13 @@ where
 
         let host_response_result = match gateway_result {
             Ok(response) => {
-                let chunks = response
-                    .safe_text_deltas
+                let HostManagedModelResponse {
+                    safe_text_deltas,
+                    safe_reasoning_deltas,
+                    output,
+                    usage,
+                } = response;
+                let chunks = safe_text_deltas
                     .into_iter()
                     .map(|safe_text_delta| ModelStreamChunk {
                         safe_text_delta: sanitize_model_visible_text(safe_text_delta),
@@ -1007,58 +991,15 @@ where
                     .collect::<Vec<_>>();
                 let loop_response = LoopModelResponse {
                     chunks,
-                    safe_reasoning_deltas: response.safe_reasoning_deltas,
-                    output: response.output,
+                    safe_reasoning_deltas,
+                    output,
                     effective_model_profile_id: model_profile_id.clone(),
+                    usage,
                 };
                 Ok(loop_response)
             }
             Err(error) => Err(model_gateway_error(error)),
         };
-
-        // Post-call accounting fires on BOTH success and failure paths so
-        // the in-flight reservation never leaks.
-        if let Some(accountant) = &self.budget_accountant {
-            let outcome = match &host_response_result {
-                Ok(response) => ModelCallOutcome::Success(response),
-                Err(host_error) => {
-                    // Construct a sanitized gateway error mirroring the
-                    // host-error kind for the accountant. We do not expose
-                    // the host_error's full diagnostic_ref to the
-                    // accountant — the accountant only needs the kind.
-                    let gateway_error = ironclaw_turns::run_profile::LoopModelGatewayError::new(
-                        host_error.kind,
-                        host_error.safe_summary.clone(),
-                    )
-                    .unwrap_or_else(|_| {
-                        ironclaw_turns::run_profile::LoopModelGatewayError::new(
-                            AgentLoopHostErrorKind::Internal,
-                            "budget accountant invalid summary",
-                        )
-                        .unwrap_or_else(|_| {
-                            panic!(
-                                "internal budget-accountant invariant: cannot build safe summary"
-                            )
-                        })
-                    });
-                    return self
-                        .finalize_post_model_call(
-                            accountant,
-                            &request,
-                            ModelCallOutcome::Failure(&gateway_error),
-                            host_response_result,
-                        )
-                        .await;
-                }
-            };
-            if let Err(acc_error) = accountant
-                .post_model_call(&self.run_context, &request, outcome)
-                .await
-            {
-                self.emit_model_failed(acc_error.kind).await;
-                return Err(acc_error.into_host_error());
-            }
-        }
 
         match host_response_result {
             Ok(response) => {
@@ -1078,38 +1019,6 @@ where
     S: SessionThreadService + ?Sized + Send + Sync,
     G: HostManagedModelGateway + ?Sized + Send + Sync,
 {
-    async fn finalize_post_model_call(
-        &self,
-        accountant: &Arc<dyn LoopModelBudgetAccountant>,
-        request: &LoopModelRequest,
-        outcome: ModelCallOutcome<'_>,
-        host_response_result: Result<LoopModelResponse, AgentLoopHostError>,
-    ) -> Result<LoopModelResponse, AgentLoopHostError> {
-        // Accountant contract: durable accounting/release failures must fail
-        // closed. Swallowing on the provider-error path would hide stuck
-        // reservations and misreport the failure cause, so the accountant
-        // error takes precedence over the original model error.
-        if let Err(acc_error) = accountant
-            .post_model_call(&self.run_context, request, outcome)
-            .await
-        {
-            tracing::warn!(
-                kind = ?acc_error.kind,
-                diagnostic_ref = ?acc_error.diagnostic_ref,
-                "budget accountant post-call failed during error path; reporting as host error"
-            );
-            self.emit_model_failed(acc_error.kind).await;
-            return Err(acc_error.into_host_error());
-        }
-        match host_response_result {
-            Ok(response) => Ok(response),
-            Err(error) => {
-                self.emit_model_failed(error.kind).await;
-                Err(error)
-            }
-        }
-    }
-
     async fn emit_model_started(&self, requested_model_profile_id: Option<ModelProfileId>) {
         if let Some(milestone_sink) = &self.milestone_sink {
             let milestones =
@@ -1458,6 +1367,11 @@ pub struct HostManagedModelResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub safe_reasoning_deltas: Vec<String>,
     pub output: ParentLoopOutput,
+    /// Provider-reported token usage. Forwarded to [`LoopModelResponse::usage`]
+    /// by the inner port wrapper, so the budget accountant can record actual
+    /// USD spend instead of the conservative reservation estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LoopModelUsage>,
 }
 
 impl HostManagedModelResponse {
@@ -1470,6 +1384,7 @@ impl HostManagedModelResponse {
             output: ParentLoopOutput::AssistantReply(AssistantReply {
                 content: sanitized_content,
             }),
+            usage: None,
         }
     }
 
@@ -1495,6 +1410,7 @@ impl HostManagedModelResponse {
             },
             safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::CapabilityCalls(calls),
+            usage: None,
         }
     }
 
@@ -1506,6 +1422,13 @@ impl HostManagedModelResponse {
         let mut response = Self::capability_calls(calls, safe_text_delta);
         response.safe_reasoning_deltas = sanitized_reasoning_deltas(reasoning);
         response
+    }
+
+    /// Attach provider-reported token usage. Returns the response so call
+    /// sites can chain into [`assistant_reply`] / [`capability_calls`].
+    pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
+        self.usage = Some(usage);
+        self
     }
 }
 
@@ -1520,7 +1443,13 @@ fn sanitized_reasoning_deltas(reasoning: Option<String>) -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostManagedModelErrorKind {
+    /// Caller-side misuse of the host model port (unknown tool, malformed request).
     InvalidRequest,
+    /// Provider/model output was structurally invalid for the active loop contract.
+    /// This is model-side bad output, not caller misuse — mapped to Unavailable so
+    /// loops can retry on transient provider anomalies.
+    #[serde(alias = "invalid_output")]
+    InvalidOutput,
     PolicyDenied,
     ConfigurationError,
     BudgetExceeded,
@@ -1535,6 +1464,7 @@ pub enum HostManagedModelErrorKind {
 pub struct HostManagedModelError {
     pub kind: HostManagedModelErrorKind,
     pub safe_summary: String,
+    pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
 }
 
 impl HostManagedModelError {
@@ -1542,6 +1472,7 @@ impl HostManagedModelError {
         Self {
             kind,
             safe_summary: safe_model_summary(kind).to_string(),
+            reason_kind: None,
         }
     }
 
@@ -1549,7 +1480,13 @@ impl HostManagedModelError {
         Self {
             kind,
             safe_summary: safe_summary.into(),
+            reason_kind: None,
         }
+    }
+
+    pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
+        self.reason_kind = Some(reason_kind);
+        self
     }
 }
 
@@ -1564,6 +1501,29 @@ fn validate_thread_scope_for_run(
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::ScopeMismatch,
             "thread scope does not match loop run scope",
+        ));
+    }
+    // The thread store keys threads by `owner_user_id` (via the MountView in
+    // `ThreadScope::to_resource_scope`), but that axis is absent from the
+    // on-disk thread path, so a wrong owner silently reads an empty subtree
+    // and surfaces as `UnknownThread`. Explicit-owner runs intentionally allow
+    // actor/subject divergence for shared conversation routes, but the explicit
+    // owner must still match the resolved thread owner. Legacy actor-fallback
+    // runs continue to require owner=actor.
+    if run_context.scope.has_explicit_thread_owner() {
+        if run_context.scope.explicit_owner_user_id() != thread_scope.owner_user_id.as_ref() {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "thread scope owner does not match the explicit loop run subject",
+            ));
+        }
+    } else if let (Some(thread_owner), Some(actor)) =
+        (thread_scope.owner_user_id.as_ref(), run_context.actor())
+        && thread_owner != &actor.user_id
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ScopeMismatch,
+            "thread scope owner does not match the loop run actor",
         ));
     }
     Ok(())
@@ -1810,12 +1770,17 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     } else {
         safe_model_summary(error.kind).to_string()
     };
-    AgentLoopHostError::new(model_error_kind(error.kind), safe_summary)
+    let mut host_error = AgentLoopHostError::new(model_error_kind(error.kind), safe_summary);
+    if let Some(reason_kind) = error.reason_kind {
+        host_error = host_error.with_reason_kind(reason_kind);
+    }
+    host_error
 }
 
 fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => AgentLoopHostErrorKind::InvalidInvocation,
+        HostManagedModelErrorKind::InvalidOutput => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
@@ -1830,6 +1795,7 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
 fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => "model request is invalid",
+        HostManagedModelErrorKind::InvalidOutput => "model output was structurally invalid",
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",

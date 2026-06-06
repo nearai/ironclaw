@@ -10,7 +10,7 @@ use tracing::debug;
 
 use crate::{
     state::{CheckpointKind, LoopExecutionState},
-    strategies::{ModelErrorSummary, RecoveryOutcome},
+    strategies::{ModelErrorSummary, RecoveryOutcome, RetryAlteration, RetryScope},
 };
 
 use super::prompt::build_prompt_bundle_for_surface;
@@ -35,7 +35,14 @@ pub(super) enum ModelStep {
         Box<LoopExecutionState>,
         ironclaw_turns::run_profile::LoopModelResponse,
     ),
+    RetryIteration(Box<LoopExecutionState>),
     Exit(LoopExit),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelRetryAction {
+    RetryCall,
+    RetryIteration,
 }
 
 #[async_trait]
@@ -116,6 +123,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             kind: error.kind,
                             safe_summary: LoopSafeSummary::new(error.safe_summary)
                                 .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
+                            reason_kind: error.reason_kind,
                             diagnostic_ref: error.diagnostic_ref,
                         });
                     };
@@ -135,14 +143,18 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         .await
                     {
                         RecoveryOutcome::Retry {
-                            recovery, alter, ..
+                            recovery,
+                            scope,
+                            alter,
                         } => {
                             state.recovery_state = recovery;
                             match CheckpointStage.cancel_if_requested(ctx, state).await? {
                                 CancelCheck::Continue(next) => state = *next,
                                 CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
                             }
-                            honor_retry_alteration(alter.as_ref())?;
+                            let retry_action =
+                                apply_model_retry_alteration(&mut state, scope, alter.as_ref())
+                                    .await?;
                             CheckpointStage
                                 .emit_progress(
                                     ctx,
@@ -157,6 +169,9 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                     })?,
                                 )
                                 .await;
+                            if retry_action == ModelRetryAction::RetryIteration {
+                                return Ok(ModelStep::RetryIteration(Box::new(state)));
+                            }
                             let bundle = build_prompt_bundle_for_surface(
                                 ctx,
                                 &state,
@@ -209,4 +224,32 @@ impl ExecutorStage<ModelInput> for ModelStage {
             Some(checked.checkpoint_id),
         )?))
     }
+}
+
+async fn apply_model_retry_alteration(
+    state: &mut LoopExecutionState,
+    scope: RetryScope,
+    alteration: Option<&RetryAlteration>,
+) -> Result<ModelRetryAction, AgentLoopExecutorError> {
+    honor_retry_alteration(alteration)?;
+    match alteration {
+        Some(RetryAlteration::Backoff { delay_ms }) => {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms.as_u64())).await;
+        }
+        Some(RetryAlteration::ShrinkContext) => {
+            if scope != RetryScope::Iteration {
+                return Err(AgentLoopExecutorError::PlannerContract {
+                    detail: "context shrink retry requires iteration scope",
+                });
+            }
+            state.compaction_state.force_compact_on_next_iteration = true;
+            return Ok(ModelRetryAction::RetryIteration);
+        }
+        Some(RetryAlteration::AdvanceFallback) | None => {}
+    }
+
+    Ok(match scope {
+        RetryScope::Call => ModelRetryAction::RetryCall,
+        RetryScope::Iteration => ModelRetryAction::RetryIteration,
+    })
 }

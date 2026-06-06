@@ -15,6 +15,11 @@ inbound envelopes and protocol-translate projection-derived outbound
 envelopes back to the external surface. Adapters do NOT own canonical
 thread/run/transcript state, do NOT call `TurnCoordinator` directly, and do
 NOT expose raw protocol secrets to themselves or to WASM components.
+Outbound policy selects and revalidates a sendable target before rendering.
+`ProductAdapter::render_outbound` translates the authorized outbound envelope
+for the product surface and may only use host-provided `ProtocolHttpEgress` for
+network I/O. It does not choose the delivery target, own communication
+resolution, or bypass outbound delivery-attempt recording.
 
 ## Layering
 
@@ -45,6 +50,12 @@ projection update
   `ironclaw_product_adapters::auth` (which take a crate-private
   `HostAuthSeal`) can construct one. WASM components and downstream adapters
   cannot fabricate verification.
+- Product adapters must not construct host-trusted trigger ingress markers or
+  witnesses. Trigger and scheduler fires use the host-trusted ingress seam in
+  `ironclaw_conversations`, not a public adapter payload or a reserved string
+  in adapter-controlled DTOs. PR18 enforces this with dependency-boundary tests;
+  trigger delivery must harden the seam with a compile-time host facade or
+  equivalent sealed factory before launch.
 - `ProtocolHttpEgress` is the only network capability. Adapters declare
   egress hosts up front (`DeclaredEgressHost`) and address credentials via
   opaque handles (`EgressCredentialHandle`). The host resolves credential
@@ -78,6 +89,13 @@ projection update
 - `payload: ProductInboundPayload` — UserMessage / Command /
   ApprovalResolution / AuthResolution / SubscriptionRequest / NoOp.
 
+`ProductInboundEnvelope` does not model host-internal trigger or scheduler
+ingress. Synthetic trusted trigger ingress is handled by the conversation-owned
+trusted trigger submitter returned to host composition as a
+`TrustedTriggerFireSubmitter` trait object; the raw `TrustedInboundTurnRequest`
+constructor, concrete submitter type, and trusted scope mapping stay private
+inside `ironclaw_conversations` and are not constructible by product adapters.
+
 `ProductInboundAck` outcomes:
 
 - `Accepted { accepted_message_ref, submitted_run_id }`
@@ -97,6 +115,11 @@ Webhook ack semantics:
 | `WorkflowTransient` failure | 5xx/429 (retryable) |
 
 ## Outbound
+
+Outbound delivery enters here only after outbound policy has already selected a
+candidate `ReplyTargetBindingRef` and revalidated it for the current scope.
+`ProductAdapter::render_outbound` turns that validated envelope into a protocol
+payload; it does not decide which target should receive the message.
 
 `ProductOutboundEnvelope` fields:
 

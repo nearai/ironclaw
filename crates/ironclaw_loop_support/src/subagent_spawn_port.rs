@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     str::FromStr,
     sync::{
@@ -10,7 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{CapabilityId, InvocationId, ThreadId};
+use ironclaw_host_api::{CapabilityId, InvocationId, RuntimeKind, ThreadId};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
     ThreadMessageId, ThreadScope,
@@ -23,20 +23,51 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        LoopCapabilityPort, LoopRunContext, LoopSafeSummary, ProviderToolCall,
-        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        sanitize_model_visible_text,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, ConcurrencyHint, LoopCapabilityPort,
+        LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
+        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{LoopCapabilityInputResolver, LoopCapabilityResultWriter};
+use crate::{
+    CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    subagent_prompt_port::DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
+};
 
 pub const DEFAULT_SUBAGENT_MAX_DEPTH: u32 = 1;
 pub const DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN: u32 = 4;
 pub const DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS: u32 = 16;
 pub const DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID: &str = "builtin.spawn_subagent";
+const SPAWN_SUBAGENT_PROVIDER_TOOL_NAME: &str = "builtin__spawn_subagent";
+pub(crate) const SPAWN_SUBAGENT_DESCRIPTION: &str =
+    "Spawn a scoped child subagent to handle a focused task and return its result.";
+
+fn spawn_subagent_parameters_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["flavor_id", "task"],
+        "additionalProperties": false,
+        "properties": {
+            "flavor_id": {
+                "type": "string",
+                "description": "Subagent flavor id for the child run."
+            },
+            "task": {
+                "type": "string",
+                "maxLength": DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
+                "description": "Self-contained task for the child subagent run. Runtime enforces a UTF-8 byte budget; maxLength is a provider-facing character-count hint."
+            },
+            "handoff": {
+                "type": "string",
+                "maxLength": DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
+                "description": "Optional context appended to the child subagent prompt. Runtime enforces a UTF-8 byte budget; maxLength is a provider-facing character-count hint."
+            }
+        }
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -155,6 +186,14 @@ impl TryFrom<SpawnSubagentWireArgs> for SpawnSubagentArgs {
         }
         if value.mode == Some(SpawnSubagentWireMode::Background) {
             return Err(background_subagents_disabled());
+        }
+        if value.task.len() > DEFAULT_SUBAGENT_GOAL_MAX_BYTES {
+            return Err(spawn_goal_field_too_large("task", value.task.len()));
+        }
+        if let Some(handoff) = value.handoff.as_deref()
+            && handoff.len() > DEFAULT_SUBAGENT_GOAL_MAX_BYTES
+        {
+            return Err(spawn_goal_field_too_large("handoff", handoff.len()));
         }
         Ok(Self {
             subagent_kind: value.subagent_kind,
@@ -314,7 +353,7 @@ pub struct SubagentSpawnCapabilityPort {
     spawn_id: CapabilityId,
     limits: SubagentSpawnLimits,
     deps: Arc<SubagentSpawnDeps>,
-    auth_input_refs: Mutex<HashMap<CapabilityInputRef, CapabilityInputRef>>,
+    auth_input_refs: Mutex<HashSet<CapabilityInputRef>>,
     spawned_this_turn: AtomicU32,
 }
 
@@ -332,10 +371,40 @@ struct SpawnCompensationState {
     gate_written: Option<GateRef>,
     result_written: Option<LoopResultRef>,
     submitted_child_tree: Option<(TurnScope, TurnRunId)>,
+    submitted_child_run: Option<(TurnScope, TurnActor, TurnRunId)>,
+    thread_written: Option<(ThreadScope, ThreadId)>,
+    spawn_slot_committed: bool,
 }
 
 impl SpawnCompensationState {
     async fn rollback(&mut self, deps: &SubagentSpawnDeps, run_context: &LoopRunContext) {
+        if let Some((scope, actor, run_id)) = self.submitted_child_run.as_ref() {
+            match IdempotencyKey::new(format!(
+                "subagent-rollback-cancel:{}:{}",
+                run_context.run_id, run_id
+            )) {
+                Ok(idempotency_key) => {
+                    let _ = deps
+                        .turn_state_store
+                        .request_cancel(CancelRunRequest {
+                            scope: scope.clone(),
+                            actor: actor.clone(),
+                            run_id: *run_id,
+                            reason: SanitizedCancelReason::Superseded,
+                            idempotency_key,
+                        })
+                        .await;
+                }
+                Err(reason) => {
+                    tracing::warn!(
+                        run_id = %run_context.run_id,
+                        child_run_id = %run_id,
+                        %reason,
+                        "subagent rollback skipped child-run cancel because idempotency key was invalid"
+                    );
+                }
+            }
+        }
         if let Some(gate_ref) = self.gate_written.as_ref() {
             let _ = deps.gate_store.delete_awaited_child(gate_ref).await;
         }
@@ -353,6 +422,9 @@ impl SpawnCompensationState {
                 .turn_state_store
                 .release_tree_descendants(scope, *tree_root, 1)
                 .await;
+        }
+        if let Some((scope, thread_id)) = self.thread_written.as_ref() {
+            let _ = deps.thread_service.delete_thread(scope, thread_id).await;
         }
     }
 }
@@ -390,13 +462,53 @@ impl SubagentSpawnCapabilityPort {
             spawn_id,
             limits,
             deps,
-            auth_input_refs: Mutex::new(HashMap::new()),
+            auth_input_refs: Mutex::new(HashSet::new()),
             spawned_this_turn: AtomicU32::new(0),
         }
     }
 
     fn is_spawn(&self, capability_id: &CapabilityId) -> bool {
         capability_id == &self.spawn_id
+    }
+
+    fn is_spawn_provider_tool_name(&self, tool_name: &str) -> bool {
+        tool_name == SPAWN_SUBAGENT_PROVIDER_TOOL_NAME
+    }
+
+    fn spawn_tool_definition(&self) -> ProviderToolDefinition {
+        ProviderToolDefinition {
+            capability_id: self.spawn_id.clone(),
+            name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
+            description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+            parameters: spawn_subagent_parameters_schema(),
+        }
+    }
+
+    fn spawn_descriptor(&self) -> CapabilityDescriptorView {
+        CapabilityDescriptorView {
+            capability_id: self.spawn_id.clone(),
+            provider: None,
+            runtime: RuntimeKind::FirstParty,
+            safe_name: self.spawn_id.as_str().to_string(),
+            safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+            concurrency_hint: ConcurrencyHint::Exclusive,
+            parameters_schema: spawn_subagent_parameters_schema(),
+        }
+    }
+
+    fn validate_spawn_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        serde_json::from_value::<SpawnSubagentWireArgs>(tool_call.arguments.clone())
+            .map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    format!("invalid spawn_subagent input: {error}"),
+                )
+            })?
+            .try_into()
+            .map(|_: SpawnSubagentArgs| ())
     }
 
     fn try_reserve_spawn_slot(&self) -> bool {
@@ -438,6 +550,18 @@ impl SubagentSpawnCapabilityPort {
         invocation: &CapabilityInvocation,
         args: SpawnSubagentArgs,
         gate_override: Option<GateRef>,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        let mut compensation = SpawnCompensationState::default();
+        self.handle_spawn_with_gate_recording(invocation, args, gate_override, &mut compensation)
+            .await
+    }
+
+    async fn handle_spawn_with_gate_recording(
+        &self,
+        invocation: &CapabilityInvocation,
+        args: SpawnSubagentArgs,
+        gate_override: Option<GateRef>,
+        compensation: &mut SpawnCompensationState,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         let Some(spawn_slot) = self.reserve_spawn_slot() else {
             return Ok(spawn_rejected("fanout_cap_exceeded"));
@@ -501,7 +625,6 @@ impl SubagentSpawnCapabilityPort {
         let tree_root = parent_record
             .spawn_tree_root_run_id
             .unwrap_or(self.run_context.run_id);
-        let mut compensation = SpawnCompensationState::default();
         let spawn_ctx = SpawnContext {
             definition,
             child_scope,
@@ -511,11 +634,12 @@ impl SubagentSpawnCapabilityPort {
         };
 
         let result = self
-            .finish_spawn(args, spawn_ctx, actor, invocation, &mut compensation)
+            .finish_spawn(args, spawn_ctx, actor, invocation, compensation)
             .await;
         match result {
             Ok(outcome) => {
                 spawn_slot.commit();
+                compensation.spawn_slot_committed = true;
                 Ok(outcome)
             }
             Err(error) => {
@@ -531,36 +655,20 @@ impl SubagentSpawnCapabilityPort {
         &self,
         invocation: &CapabilityInvocation,
     ) -> Result<Option<CapabilityOutcome>, AgentLoopHostError> {
-        let auth_input_ref = {
+        let is_registered = {
             let auth_input_refs = self.auth_input_refs.lock().map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Unavailable,
                     "subagent spawn authorization input store is unavailable",
                 )
             })?;
-            auth_input_refs.get(&invocation.input_ref).cloned()
+            auth_input_refs.contains(&invocation.input_ref)
         };
-        let Some(auth_input_ref) = auth_input_ref else {
+        if !is_registered {
             return Ok(Some(spawn_rejected("spawn_requires_provider_registration")));
-        };
-        let mut auth_invocation = invocation.clone();
-        auth_invocation.input_ref = auth_input_ref;
-        match self.inner.invoke_capability(auth_invocation).await? {
-            CapabilityOutcome::Completed(result) => {
-                let _ = self
-                    .deps
-                    .result_writer
-                    .delete_capability_result(&self.run_context, &result.result_ref)
-                    .await;
-                self.remove_auth_input_ref(&invocation.input_ref)?;
-                Ok(None)
-            }
-            other if other.is_suspension() => Ok(Some(other)),
-            other => {
-                self.remove_auth_input_ref(&invocation.input_ref)?;
-                Ok(Some(other))
-            }
         }
+        self.remove_auth_input_ref(&invocation.input_ref)?;
+        Ok(None)
     }
 
     fn remove_auth_input_ref(
@@ -617,13 +725,14 @@ impl SubagentSpawnCapabilityPort {
         let result_ref = self
             .deps
             .result_writer
-            .write_capability_result(
-                &self.run_context,
-                &invocation.input_ref,
-                InvocationId::new(),
-                &self.spawn_id,
-                payload,
-            )
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &self.run_context,
+                input_ref: &invocation.input_ref,
+                invocation_id: InvocationId::new(),
+                capability_id: &self.spawn_id,
+                output: payload,
+                display_preview: None,
+            })
             .await?;
         compensation.result_written = Some(result_ref.clone());
         let child_thread = self
@@ -648,6 +757,7 @@ impl SubagentSpawnCapabilityPort {
             })
             .await
             .map_err(map_thread_error)?;
+        compensation.thread_written = Some((child_scope.clone(), child_thread.thread_id.clone()));
         let child_turn_scope = TurnScope::new(
             child_scope.tenant_id.clone(),
             Some(child_scope.agent_id.clone()),
@@ -733,6 +843,7 @@ impl SubagentSpawnCapabilityPort {
             .await
             .map_err(map_turn_error)?;
         compensation.submitted_child_tree = Some((self.run_context.scope.clone(), tree_root));
+        compensation.submitted_child_run = Some((child_turn_scope.clone(), actor.clone(), run_id));
         if let Err(error) = self
             .deps
             .thread_service
@@ -745,8 +856,6 @@ impl SubagentSpawnCapabilityPort {
             )
             .await
         {
-            self.cancel_child_after_submission_failure(&child_turn_scope, actor, run_id)
-                .await?;
             return Err(map_thread_error(error));
         }
 
@@ -758,41 +867,53 @@ impl SubagentSpawnCapabilityPort {
         })
     }
 
-    async fn cancel_child_after_submission_failure(
-        &self,
-        child_scope: &TurnScope,
-        actor: TurnActor,
-        child_run_id: TurnRunId,
-    ) -> Result<(), AgentLoopHostError> {
-        self.deps
-            .turn_state_store
-            .request_cancel(CancelRunRequest {
-                scope: child_scope.clone(),
-                actor,
-                run_id: child_run_id,
-                reason: SanitizedCancelReason::Superseded,
-                idempotency_key: IdempotencyKey::new(format!(
-                    "subagent-cancel:{}:{}",
-                    self.run_context.run_id, child_run_id
-                ))
-                .map_err(invalid_static_ref)?,
-            })
-            .await
-            .map(|_| ())
-            .map_err(map_turn_error)
+    async fn rollback_batch_compensation(&self, compensations: &mut Vec<SpawnCompensationState>) {
+        // Roll back in reverse creation order. Each compensation performs
+        // destructive best-effort cleanup, so keeping this serial preserves a
+        // deterministic unwind order across child runs and their resources.
+        while let Some(mut compensation) = compensations.pop() {
+            let release_spawn_slot = compensation.spawn_slot_committed;
+            compensation
+                .rollback(self.deps.as_ref(), &self.run_context)
+                .await;
+            if release_spawn_slot {
+                self.release_spawn_slot();
+            }
+        }
     }
 }
 
 #[async_trait]
 impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-        self.inner.tool_definitions()
+        let mut definitions = self.inner.tool_definitions()?;
+        if !definitions
+            .iter()
+            .any(|definition| definition.capability_id == self.spawn_id)
+        {
+            definitions.push(self.spawn_tool_definition());
+            definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        }
+        Ok(definitions)
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        if self.is_spawn_provider_tool_name(&tool_call.name) {
+            return Ok(ProviderToolCallCapabilityIds::single(self.spawn_id.clone()));
+        }
+        self.inner.provider_tool_call_capability_ids(tool_call)
     }
 
     fn validate_provider_tool_call(
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<(), AgentLoopHostError> {
+        if self.is_spawn_provider_tool_name(&tool_call.name) {
+            return self.validate_spawn_provider_tool_call(tool_call);
+        }
         self.inner.validate_provider_tool_call(tool_call)
     }
 
@@ -800,11 +921,18 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         &self,
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        let inner_candidate = self
-            .inner
-            .register_provider_tool_call(tool_call.clone())
-            .await?;
-        if inner_candidate.capability_id == self.spawn_id {
+        if self.is_spawn_provider_tool_name(&tool_call.name) {
+            let surface = self
+                .inner
+                .visible_capabilities(VisibleCapabilityRequest)
+                .await?;
+            self.validate_spawn_provider_tool_call(&tool_call)?;
+            let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "provider tool call is missing a provider turn id",
+                )
+            })?;
             let input_ref = self
                 .deps
                 .spawn_input_codec
@@ -818,12 +946,26 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                         "subagent spawn authorization input store is unavailable",
                     )
                 })?
-                .insert(input_ref.clone(), inner_candidate.input_ref);
+                .insert(input_ref.clone());
             return Ok(CapabilityCallCandidate {
+                surface_version: surface.version,
+                capability_id: self.spawn_id.clone(),
+                effective_capability_ids: vec![self.spawn_id.clone()],
                 input_ref,
-                ..inner_candidate
+                provider_replay: Some(ProviderToolCallReplay {
+                    provider_id: tool_call.provider_id,
+                    provider_model_id: tool_call.provider_model_id,
+                    provider_turn_id,
+                    provider_call_id: tool_call.id,
+                    provider_tool_name: tool_call.name,
+                    arguments: tool_call.arguments,
+                    response_reasoning: tool_call.response_reasoning,
+                    reasoning: tool_call.reasoning,
+                    signature: tool_call.signature,
+                }),
             });
         }
+        let inner_candidate = self.inner.register_provider_tool_call(tool_call).await?;
         Ok(inner_candidate)
     }
 
@@ -831,7 +973,15 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        self.inner.visible_capabilities(request).await
+        let mut surface = self.inner.visible_capabilities(request).await?;
+        if !surface
+            .descriptors
+            .iter()
+            .any(|descriptor| descriptor.capability_id == self.spawn_id)
+        {
+            surface.descriptors.push(self.spawn_descriptor());
+        }
+        Ok(surface)
     }
 
     async fn invoke_capability(
@@ -857,6 +1007,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
         let mut outcomes = Vec::with_capacity(request.invocations.len());
+        let mut batch_compensations = Vec::new();
         // Pre-decode every spawn invocation before allocating the shared batch
         // gate. Only batches with at least two valid blocking spawns benefit
         // from gate coalescing; otherwise the gate would be created and never
@@ -887,18 +1038,47 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         while index < request.invocations.len() {
             let invocation = &request.invocations[index];
             if self.is_spawn(&invocation.capability_id) {
-                let outcome = if let Some(outcome) = self.authorize_spawn(invocation).await? {
-                    outcome
-                } else {
-                    let args = spawn_args.remove(&index).ok_or_else(|| {
-                        AgentLoopHostError::new(
-                            AgentLoopHostErrorKind::Invalid,
-                            "subagent spawn args missing from pre-decode pass",
-                        )
-                    })?;
-                    let gate_override = batch_blocking_gate.clone();
-                    self.handle_spawn_with_gate(invocation, args, gate_override)
-                        .await?
+                let outcome = match self.authorize_spawn(invocation).await {
+                    Ok(Some(outcome)) => outcome,
+                    Ok(None) => {
+                        let args = match spawn_args.remove(&index) {
+                            Some(args) => args,
+                            None => {
+                                let error = AgentLoopHostError::new(
+                                    AgentLoopHostErrorKind::Invalid,
+                                    "subagent spawn args missing from pre-decode pass",
+                                );
+                                self.rollback_batch_compensation(&mut batch_compensations)
+                                    .await;
+                                return Err(error);
+                            }
+                        };
+                        let gate_override = batch_blocking_gate.clone();
+                        let mut compensation = SpawnCompensationState::default();
+                        let outcome = match self
+                            .handle_spawn_with_gate_recording(
+                                invocation,
+                                args,
+                                gate_override,
+                                &mut compensation,
+                            )
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => {
+                                self.rollback_batch_compensation(&mut batch_compensations)
+                                    .await;
+                                return Err(error);
+                            }
+                        };
+                        batch_compensations.push(compensation);
+                        outcome
+                    }
+                    Err(error) => {
+                        self.rollback_batch_compensation(&mut batch_compensations)
+                            .await;
+                        return Err(error);
+                    }
                 };
                 let batch_await_dependent = matches!(
                     &outcome,
@@ -910,6 +1090,9 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 let suspended = outcome.is_suspension();
                 outcomes.push(outcome);
                 if suspended && request.stop_on_first_suspension && !batch_await_dependent {
+                    // Suspension is a partial-success boundary, not a failed
+                    // batch; prior successful spawns remain committed.
+                    batch_compensations.clear();
                     return Ok(CapabilityBatchOutcome {
                         outcomes,
                         stopped_on_suspension: true,
@@ -931,10 +1114,21 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                     invocations: request.invocations[start..index].to_vec(),
                     stop_on_first_suspension: request.stop_on_first_suspension,
                 })
-                .await?;
+                .await;
+            let inner = match inner {
+                Ok(inner) => inner,
+                Err(error) => {
+                    self.rollback_batch_compensation(&mut batch_compensations)
+                        .await;
+                    return Err(error);
+                }
+            };
             let stopped = inner.stopped_on_suspension;
             outcomes.extend(inner.outcomes);
             if stopped && request.stop_on_first_suspension {
+                // Propagate the inner partial-success stop without rolling back
+                // earlier successful spawns from this outer batch.
+                batch_compensations.clear();
                 return Ok(CapabilityBatchOutcome {
                     outcomes,
                     stopped_on_suspension: true,
@@ -1030,6 +1224,15 @@ fn background_subagents_disabled() -> AgentLoopHostError {
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::InvalidInvocation,
         "background subagents are disabled pending durable completion delivery design (#4147)",
+    )
+}
+
+fn spawn_goal_field_too_large(field: &'static str, len: usize) -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        format!(
+            "spawn_subagent {field} is too large: {len} bytes (max {DEFAULT_SUBAGENT_GOAL_MAX_BYTES})"
+        ),
     )
 }
 

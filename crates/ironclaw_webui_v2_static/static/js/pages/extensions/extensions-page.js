@@ -21,6 +21,7 @@ export function ExtensionsPage() {
     channelRegistry,
     mcpRegistry,
     toolRegistry,
+    connectableChannels,
     isLoading,
     isBusy,
     actionResult,
@@ -31,9 +32,17 @@ export function ExtensionsPage() {
     invalidate,
   } = useExtensions();
 
-  const handleConfigure = React.useCallback((name) => setConfiguring(name), []);
+  const handleConfigure = React.useCallback((extension) => setConfiguring(extension), []);
   const handleCloseModal = React.useCallback(() => setConfiguring(null), []);
   const handleSaved = React.useCallback(() => invalidate(), [invalidate]);
+  const handleActivateFromModal = React.useCallback(
+    (extension) => {
+      if (!extension) return;
+      activate(extension);
+      setConfiguring(null);
+    },
+    [activate]
+  );
 
   if (isLoading) {
     return html`
@@ -71,6 +80,7 @@ export function ExtensionsPage() {
     channels: html`<${ChannelsTab}
       status=${status}
       channels=${channels}
+      connectableChannels=${connectableChannels}
       channelRegistry=${channelRegistry}
       onActivate=${activate}
       onConfigure=${handleConfigure}
@@ -112,7 +122,8 @@ export function ExtensionsPage() {
       ${configuring &&
       html`
         <${ConfigureModal}
-          extensionName=${configuring}
+          extension=${configuring}
+          onActivate=${handleActivateFromModal}
           onClose=${handleCloseModal}
           onSaved=${handleSaved}
         />

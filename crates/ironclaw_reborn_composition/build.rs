@@ -59,8 +59,12 @@ fn embed_reborn_skills(repo_root: &Path) -> BuildResult<()> {
         }
 
         let skill_md_content = fs::read_to_string(&skill_md)?;
-        let parsed = parse_skill_md(&skill_md_content)
-            .map_err(|error| build_error(format!("parse bundled SKILL.md: {error}")))?;
+        let parsed = parse_skill_md(&skill_md_content).map_err(|error| {
+            build_error(format!(
+                "parse bundled Reborn skill `{dir_name}` at {}: {error}",
+                skill_md.display()
+            ))
+        })?;
         if parsed.manifest.name != dir_name {
             return Err(build_error(format!(
                 "bundled Reborn skill `{}` manifest name `{}` must match directory name",

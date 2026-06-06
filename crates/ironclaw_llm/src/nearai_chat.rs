@@ -17,12 +17,16 @@ use rust_decimal::prelude::MathematicalOps;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
+use self::nearai_tool_message_flattening::flatten_tool_messages;
 use crate::config::NearAiConfig;
 use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
+
+#[path = "nearai_tool_message_flattening.rs"]
+mod nearai_tool_message_flattening;
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use crate::{costs, session::SessionManager};
 
@@ -311,29 +315,8 @@ impl NearAiChatProvider {
                 });
             }
 
-            // Payload too large — the accumulated context exceeds the provider's
-            // request size limit. Map to ContextLengthExceeded so the dispatcher
-            // can trigger automatic compaction instead of crashing.
-            if status_code == 413 {
-                let lower = response_text.to_ascii_lowercase();
-                let (used, limit) = crate::rig_adapter::parse_token_counts(&lower);
-                return Err(LlmError::ContextLengthExceeded { used, limit });
-            }
-
-            // Some providers return 400 with "context_length_exceeded" in the body
-            // (e.g., OpenAI-compatible endpoints behind NEAR AI).
-            if status_code == 400 {
-                let lower = response_text.to_ascii_lowercase();
-                const CONTEXT_PATTERNS: &[&str] = &[
-                    "context_length_exceeded",
-                    "maximum context length",
-                    "too many tokens",
-                    "payload too large",
-                ];
-                if CONTEXT_PATTERNS.iter().any(|p| lower.contains(p)) {
-                    let (used, limit) = crate::rig_adapter::parse_token_counts(&lower);
-                    return Err(LlmError::ContextLengthExceeded { used, limit });
-                }
+            if let Some(error) = crate::error::context_length_error(status_code, &response_text) {
+                return Err(error);
             }
 
             // Any HTTP 5xx from the upstream LLM gateway — map to BadGateway
@@ -644,6 +627,7 @@ impl LlmProvider for NearAiChatProvider {
             .filter(|s| !s.trim().is_empty())
             .or_else(|| reasoning.filter(|s| !s.trim().is_empty()));
         emit_reasoning_trace(reasoning_fallback.as_deref());
+        let provider_reasoning = reasoning_fallback.clone();
 
         let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
@@ -697,7 +681,7 @@ impl LlmProvider for NearAiChatProvider {
             output_tokens,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
-            reasoning: None,
+            reasoning: provider_reasoning,
         })
     }
 
@@ -970,67 +954,6 @@ async fn fetch_pricing(
     Ok(map)
 }
 
-/// Rewrite tool-call / tool-result messages into plain assistant/user text.
-///
-/// NEAR AI cloud-api does not support the OpenAI multi-turn tool-calling
-/// protocol (`role: "tool"` messages). This function converts:
-///   - Assistant messages with `tool_calls` → assistant text describing the calls
-///   - Tool result messages (`role: "tool"`) → user messages with the result
-///
-/// Non-tool messages pass through unchanged.
-fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatCompletionMessage> {
-    let has_tool_msgs = messages.iter().any(|m| m.role == "tool");
-    if !has_tool_msgs {
-        return messages;
-    }
-
-    tracing::debug!("Flattening tool messages for NEAR AI compatibility");
-
-    messages
-        .into_iter()
-        .map(|msg| {
-            if let (true, Some(calls)) = (msg.role == "assistant", &msg.tool_calls) {
-                // Convert assistant tool_calls into descriptive text
-                let mut parts: Vec<String> = Vec::new();
-                if let Some(text) = msg.content.as_ref().and_then(|c| c.as_text()) {
-                    parts.push(text.to_string());
-                }
-                for tc in calls {
-                    parts.push(format!(
-                        "[Called tool `{}` with arguments: {}]",
-                        tc.function.name, tc.function.arguments
-                    ));
-                }
-                ChatCompletionMessage {
-                    role: "assistant".to_string(),
-                    content: Some(MessageContent::Text(parts.join("\n"))),
-
-                    tool_call_id: None,
-                    name: None,
-                    tool_calls: None,
-                }
-            } else if msg.role == "tool" {
-                // Convert tool result into a user message
-                let tool_name = msg.name.as_deref().unwrap_or("unknown");
-                let result = msg.content.as_ref().and_then(|c| c.as_text()).unwrap_or("");
-                ChatCompletionMessage {
-                    role: "user".to_string(),
-                    content: Some(MessageContent::Text(format!(
-                        "[Tool `{}` returned: {}]",
-                        tool_name, result
-                    ))),
-
-                    tool_call_id: None,
-                    name: None,
-                    tool_calls: None,
-                }
-            } else {
-                msg
-            }
-        })
-        .collect()
-}
-
 impl From<ChatMessage> for ChatCompletionMessage {
     fn from(msg: ChatMessage) -> Self {
         let role = match msg.role {
@@ -1281,6 +1204,81 @@ mod tests {
     }
 
     #[test]
+    fn context_length_error_detects_provider_longer_than_context_wording() {
+        let body = r#"{"error":{"message":"Provider failed for model 'Qwen/Qwen3.6-35B-A3B-FP8': The input (314325 tokens) is longer than the model's context length (262144 tokens).","type":"invalid_request_error"}}"#;
+        match crate::error::context_length_error(400, body) {
+            Some(LlmError::ContextLengthExceeded { used, limit }) => {
+                assert_eq!(used, 314325);
+                assert_eq!(limit, 262144);
+            }
+            other => panic!("expected context-length error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_length_error_does_not_treat_all_bad_requests_as_overflow() {
+        let body = r#"{"error":{"message":"invalid tool schema"}}"#;
+        assert!(crate::error::context_length_error(400, body).is_none());
+    }
+
+    #[tokio::test]
+    async fn complete_maps_context_overflow_http_400_to_context_length_exceeded() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0_u8; 4096];
+                let Ok(n) = socket.read(&mut request).await else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&request[..n]);
+                let (status, body) = if request.starts_with("POST /v1/chat/completions ") {
+                    (
+                        "400 Bad Request",
+                        serde_json::json!({
+                            "error": {
+                                "message": "Provider failed: The input (314325 tokens) is longer than the model's context length (262144 tokens)."
+                            }
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    ("200 OK", serde_json::json!({ "models": [] }).to_string())
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let err = provider
+            .complete(CompletionRequest::new(vec![ChatMessage::user(
+                "read my email",
+            )]))
+            .await
+            .expect_err("context overflow should fail the completion");
+
+        match err {
+            LlmError::ContextLengthExceeded { used, limit } => {
+                assert_eq!(used, 314325);
+                assert_eq!(limit, 262144);
+            }
+            other => panic!("expected context-length error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_api_url_with_base_already_v1() {
         let cfg = test_nearai_config("http://127.0.0.1:8318/v1");
 
@@ -1493,127 +1491,6 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&calls[0].function.arguments).expect("valid JSON string");
         assert_eq!(parsed["key"], "value");
-    }
-
-    #[test]
-    fn test_flatten_no_tool_messages_passthrough() {
-        let messages = vec![
-            ChatCompletionMessage {
-                role: "system".to_string(),
-                content: Some(MessageContent::Text("You are helpful.".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-            ChatCompletionMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("Hello".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-        ];
-        let result = flatten_tool_messages(messages);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].role, "system");
-        assert_eq!(result[1].role, "user");
-    }
-
-    #[test]
-    fn test_flatten_tool_call_and_result() {
-        let messages = vec![
-            ChatCompletionMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("test".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-            ChatCompletionMessage {
-                role: "assistant".to_string(),
-                content: None,
-                tool_call_id: None,
-                name: None,
-                tool_calls: Some(vec![ChatCompletionToolCall {
-                    id: "call_1".to_string(),
-                    call_type: "function".to_string(),
-                    function: ChatCompletionToolCallFunction {
-                        name: "echo".to_string(),
-                        arguments: r#"{"message":"hi"}"#.to_string(),
-                    },
-                }]),
-            },
-            ChatCompletionMessage {
-                role: "tool".to_string(),
-                content: Some(MessageContent::Text("hi".to_string())),
-                tool_call_id: Some("call_1".to_string()),
-                name: Some("echo".to_string()),
-                tool_calls: None,
-            },
-        ];
-
-        let result = flatten_tool_messages(messages);
-        assert_eq!(result.len(), 3);
-
-        // Assistant tool_calls → plain assistant text
-        assert_eq!(result[1].role, "assistant");
-        assert!(result[1].tool_calls.is_none());
-        assert!(
-            result[1]
-                .content
-                .as_ref()
-                .and_then(|c| c.as_text())
-                .unwrap()
-                .contains("[Called tool `echo`")
-        );
-
-        // Tool result → user message
-        assert_eq!(result[2].role, "user");
-        assert!(result[2].tool_call_id.is_none());
-        assert!(
-            result[2]
-                .content
-                .as_ref()
-                .and_then(|c| c.as_text())
-                .unwrap()
-                .contains("[Tool `echo` returned: hi]")
-        );
-    }
-
-    #[test]
-    fn test_flatten_preserves_assistant_text_with_tool_calls() {
-        let messages = vec![
-            ChatCompletionMessage {
-                role: "assistant".to_string(),
-                content: Some(MessageContent::Text("Let me check that.".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: Some(vec![ChatCompletionToolCall {
-                    id: "call_1".to_string(),
-                    call_type: "function".to_string(),
-                    function: ChatCompletionToolCallFunction {
-                        name: "search".to_string(),
-                        arguments: r#"{"q":"test"}"#.to_string(),
-                    },
-                }]),
-            },
-            ChatCompletionMessage {
-                role: "tool".to_string(),
-                content: Some(MessageContent::Text("found it".to_string())),
-                tool_call_id: Some("call_1".to_string()),
-                name: Some("search".to_string()),
-                tool_calls: None,
-            },
-        ];
-
-        let result = flatten_tool_messages(messages);
-        let text = result[0]
-            .content
-            .as_ref()
-            .and_then(|c| c.as_text())
-            .unwrap();
-        assert!(text.starts_with("Let me check that."));
-        assert!(text.contains("[Called tool `search`"));
     }
 
     #[test]
@@ -1948,6 +1825,92 @@ mod tests {
             "emission should use ironclaw_llm::reasoning target"
         );
         assert!(logs_contain("trace-target-marker"));
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_preserves_provider_reasoning_without_content_leak() {
+        use crate::provider::ToolDefinition;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0_u8; 4096];
+                let Ok(n) = socket.read(&mut request).await else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&request[..n]);
+                let body = if request.starts_with("POST /v1/chat/completions ") {
+                    serde_json::json!({
+                        "id": "chatcmpl-test",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": null,
+                                "reasoning_content": "Thinking Steps\n[] Inspect context.",
+                                "tool_calls": [{
+                                    "id": "call_abc123",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search",
+                                        "arguments": "{\"query\":\"test\"}"
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": { "prompt_tokens": 100, "completion_tokens": 50 }
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({ "models": [] }).to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let provider = NearAiChatProvider::new_with_options(
+            test_nearai_config(&base_url),
+            test_session(),
+            false,
+            5,
+        )
+        .expect("provider");
+        let response = provider
+            .complete_with_tools(ToolCompletionRequest::new(
+                vec![ChatMessage::user("Search for test")],
+                vec![ToolDefinition {
+                    name: "search".to_string(),
+                    description: "Search".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" }
+                        },
+                        "required": ["query"]
+                    }),
+                }],
+            ))
+            .await
+            .expect("tool completion");
+
+        assert_eq!(response.content, None);
+        assert_eq!(
+            response.reasoning.as_deref(),
+            Some("Thinking Steps\n[] Inspect context.")
+        );
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "search");
     }
 
     /// Regression: payloads that include BOTH reasoning fields must parse
@@ -2601,106 +2564,6 @@ mod tests {
         assert_eq!(resp.data.unwrap().len(), 2);
     }
 
-    // -- flatten_tool_messages edge cases -------------------------------------
-
-    #[test]
-    fn test_flatten_tool_result_missing_name_uses_unknown() {
-        let messages = vec![ChatCompletionMessage {
-            role: "tool".to_string(),
-            content: Some(MessageContent::Text("result data".to_string())),
-            tool_call_id: Some("call_1".to_string()),
-            name: None,
-            tool_calls: None,
-        }];
-        let result = flatten_tool_messages(messages);
-        assert_eq!(result[0].role, "user");
-        assert!(
-            result[0]
-                .content
-                .as_ref()
-                .unwrap()
-                .as_text()
-                .unwrap()
-                .contains("[Tool `unknown` returned:")
-        );
-    }
-
-    #[test]
-    fn test_flatten_tool_result_missing_content_uses_empty() {
-        let messages = vec![ChatCompletionMessage {
-            role: "tool".to_string(),
-            content: None,
-            tool_call_id: Some("call_1".to_string()),
-            name: Some("my_tool".to_string()),
-            tool_calls: None,
-        }];
-        let result = flatten_tool_messages(messages);
-        assert_eq!(result[0].role, "user");
-        assert!(
-            result[0]
-                .content
-                .as_ref()
-                .unwrap()
-                .as_text()
-                .unwrap()
-                .contains("[Tool `my_tool` returned: ]")
-        );
-    }
-
-    #[test]
-    fn test_flatten_multiple_tool_calls_in_single_assistant_message() {
-        let messages = vec![
-            ChatCompletionMessage {
-                role: "assistant".to_string(),
-                content: None,
-                tool_call_id: None,
-                name: None,
-                tool_calls: Some(vec![
-                    ChatCompletionToolCall {
-                        id: "call_1".to_string(),
-                        call_type: "function".to_string(),
-                        function: ChatCompletionToolCallFunction {
-                            name: "search".to_string(),
-                            arguments: r#"{"q":"a"}"#.to_string(),
-                        },
-                    },
-                    ChatCompletionToolCall {
-                        id: "call_2".to_string(),
-                        call_type: "function".to_string(),
-                        function: ChatCompletionToolCallFunction {
-                            name: "fetch".to_string(),
-                            arguments: r#"{"url":"http://x"}"#.to_string(),
-                        },
-                    },
-                ]),
-            },
-            ChatCompletionMessage {
-                role: "tool".to_string(),
-                content: Some(MessageContent::Text("found".to_string())),
-                tool_call_id: Some("call_1".to_string()),
-                name: Some("search".to_string()),
-                tool_calls: None,
-            },
-            ChatCompletionMessage {
-                role: "tool".to_string(),
-                content: Some(MessageContent::Text("fetched".to_string())),
-                tool_call_id: Some("call_2".to_string()),
-                name: Some("fetch".to_string()),
-                tool_calls: None,
-            },
-        ];
-        let result = flatten_tool_messages(messages);
-        assert_eq!(result.len(), 3);
-        // Assistant message has both calls described
-        let assistant_text = result[0].content.as_ref().unwrap().as_text().unwrap();
-        assert!(assistant_text.contains("[Called tool `search`"));
-        assert!(assistant_text.contains("[Called tool `fetch`"));
-        assert!(result[0].tool_calls.is_none());
-        // Both tool results become user messages
-        assert_eq!(result[1].role, "user");
-        assert_eq!(result[2].role, "user");
-    }
-
     // -- ChatMessage → ChatCompletionMessage edge cases -----------------------
 
     #[test]
@@ -2782,65 +2645,6 @@ mod tests {
         assert_eq!(deserialized.call_type, "function");
         assert_eq!(deserialized.function.name, "get_weather");
         assert_eq!(deserialized.function.arguments, r#"{"city":"London"}"#);
-    }
-
-    // -- flatten_tool_messages in complete() path ----------------------------
-
-    #[test]
-    fn test_flatten_applied_on_text_only_path() {
-        // Verify that flatten_tool_messages converts tool-role messages to user
-        // messages (mirrors the complete_with_tools path).
-        let messages = vec![
-            ChatCompletionMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("run it".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-            ChatCompletionMessage {
-                role: "tool".to_string(),
-                content: Some(MessageContent::Text("ok".to_string())),
-                tool_call_id: Some("call_1".to_string()),
-                name: Some("run_cmd".to_string()),
-                tool_calls: None,
-            },
-        ];
-        let flattened = flatten_tool_messages(messages);
-        assert_eq!(flattened.len(), 2);
-        assert_eq!(flattened[1].role, "user");
-        let text = flattened[1]
-            .content
-            .as_ref()
-            .and_then(|c| c.as_text())
-            .unwrap();
-        assert!(text.contains("run_cmd"), "should reference tool name");
-        assert!(text.contains("ok"), "should include tool result");
-    }
-
-    #[test]
-    fn test_no_flatten_when_no_tool_messages() {
-        // When there are no tool-role messages, flatten_tool_messages is a no-op.
-        let messages = vec![
-            ChatCompletionMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("hi".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-            ChatCompletionMessage {
-                role: "assistant".to_string(),
-                content: Some(MessageContent::Text("hello".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-        ];
-        let result = flatten_tool_messages(messages);
-        // No tool messages → unchanged roles
-        assert_eq!(result[0].role, "user");
-        assert_eq!(result[1].role, "assistant");
     }
 
     // -- api_url edge cases ---------------------------------------------------

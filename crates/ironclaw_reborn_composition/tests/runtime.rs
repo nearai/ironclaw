@@ -5,8 +5,9 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_reborn_composition::{
-    PollSettings, RebornBuildInput, RebornRuntimeError, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornSkillSourceKind, TurnRunnerSettings, build_reborn_runtime,
+    HooksActivationConfig, PollSettings, RebornBuildInput, RebornRuntimeError,
+    RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind, TurnRunnerSettings,
+    build_reborn_runtime,
 };
 use ironclaw_turns::TurnStatus;
 use tokio_util::sync::CancellationToken;
@@ -76,7 +77,10 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     .unwrap()
     .unwrap();
 
-    assert_eq!(reply.status, TurnStatus::Cancelled);
+    // With no LLM gateway configured the driver returns Unavailable, which
+    // maps to a terminal Failed turn instead of the pre-PR RecoveryRequired
+    // path that cancelled via the standalone-runtime cancel guard.
+    assert_eq!(reply.status, TurnStatus::Failed);
     assert_eq!(reply.text, None);
 
     let second_reply = tokio::time::timeout(
@@ -87,7 +91,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     .unwrap()
     .unwrap();
 
-    assert_eq!(second_reply.status, TurnStatus::Cancelled);
+    assert_eq!(second_reply.status, TurnStatus::Failed);
     assert_eq!(second_reply.text, None);
 
     runtime.shutdown().await.unwrap();
@@ -201,6 +205,122 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     assert_eq!(asset.into_utf8().unwrap(), "filesystem policy");
 
     runtime.shutdown().await.unwrap();
+}
+
+/// Drives `build_reborn_runtime` through the third-party hook activation wiring
+/// (runtime.rs: third-party discovery input + projection registry + tenant
+/// threading) with BOTH flags on and a real `/system/extensions` manifest tree
+/// on the local-dev host filesystem.
+///
+/// This is the only test that exercises the `build_reborn_runtime` third-party
+/// path end-to-end: `tests/third_party_hook_projection.rs` calls
+/// `build_hook_projection_registry` + `build_hook_dispatcher_builder_factory_for_tenant`
+/// directly against a fake filesystem, and every other `build_reborn_runtime`
+/// call here uses the default disabled `HooksActivationConfig`. A regression in
+/// the wiring (dropped `hooks_config`, wrong `extension_filesystem`, mis-threaded
+/// tenant) would surface here as a build/start failure rather than going
+/// uncovered.
+#[tokio::test]
+async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
+    let root = tempfile::tempdir().unwrap();
+    let storage_root = root.path().join("local-dev");
+
+    // Plant a discoverable third-party extension carrying a `[[hooks]]` block at
+    // the per-owner `/system/extensions` discovery root that local-dev mounts.
+    // The third-party projection path must read this manifest; with the wiring
+    // broken (e.g. `extension_filesystem` not threaded), the runtime would not
+    // build/start cleanly through `build_default_planned_runtime`.
+    let extension_dir = storage_root.join("system/extensions/example-hook-ext");
+    std::fs::create_dir_all(&extension_dir).unwrap();
+    std::fs::write(
+        extension_dir.join("manifest.toml"),
+        third_party_hook_manifest("example-hook-ext"),
+    )
+    .unwrap();
+
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev("runtime-hooks-owner", storage_root)
+            .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-hooks-tenant".to_string(),
+        agent_id: "runtime-hooks-agent".to_string(),
+        source_binding_id: "runtime-hooks-source".to_string(),
+        reply_target_binding_id: "runtime-hooks-reply".to_string(),
+    })
+    .with_hooks_config(HooksActivationConfig::enabled().with_third_party_enabled(true))
+    .with_runner_settings(TurnRunnerSettings {
+        heartbeat_interval: Duration::from_millis(25),
+        poll_interval: Duration::from_secs(60),
+    });
+
+    // Build succeeds: the third-party discovery + projection + dispatcher factory
+    // composed into the planned runtime without error.
+    let runtime = build_reborn_runtime(input).await.unwrap();
+    assert_eq!(runtime.default_run_profile_id(), "reborn-planned-default");
+
+    // Runtime starts: a conversation turn runs through the composed dispatcher
+    // and reaches a terminal state without hanging.
+    let conversation = runtime.new_conversation().await.unwrap();
+    let reply = tokio::time::timeout(
+        Duration::from_secs(2),
+        runtime.send_user_message(&conversation, "hello"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // TODO(coverage gap, inherited from the removed test): the stub local-dev
+    // gateway terminates the turn before any capability call dispatches, so this
+    // asserts terminal progress rather than observing the projected `deny-run`
+    // hook actually firing on `example-hook-ext.run`. The wiring (discovery +
+    // projection + tenant threading) is exercised at build/start; end-to-end
+    // hook *enforcement* through `build_reborn_runtime` still needs a harness
+    // that drives a real capability call to completion.
+    assert!(reply.status.is_terminal(), "got {:?}", reply.status);
+
+    runtime.shutdown().await.unwrap();
+}
+
+/// A discoverable v2 installed-extension manifest carrying a single
+/// `before_capability` hook over its own capability. Mirrors the canonical
+/// shape in `tests/third_party_hook_projection.rs`.
+fn third_party_hook_manifest(id: &str) -> String {
+    format!(
+        r#"schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+description = "{id} extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{id}.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.run"
+description = "Run {id}"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/{id}/run.input.v1.json"
+output_schema_ref = "schemas/{id}/run.output.v1.json"
+prompt_doc_ref = "prompts/{id}/run.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[hooks]]
+id = "deny-run"
+kind = "before_capability"
+scope = "own_capabilities"
+body = {{ mode = "predicate", spec = {{ type = "deny_capability", reason = "blocked", when = {{ type = "name_equals", name = "{id}.run" }} }} }}
+"#
+    )
 }
 
 fn skill_md(name: &str, keyword: &str, prompt: &str) -> String {

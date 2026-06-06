@@ -10,7 +10,7 @@ use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     DefaultTurnCoordinator, IdempotencyKey, InMemoryTurnStateStore, LoopBlocked, LoopBlockedKind,
     LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
-    ReplyTargetBindingRef, RunProfileRequest, RunProfileVersion, SourceBindingRef,
+    LoopResultRef, ReplyTargetBindingRef, RunProfileRequest, RunProfileVersion, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
     TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnStatus,
     events::EventCursor,
@@ -18,28 +18,71 @@ use ironclaw_turns::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint,
-        FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        CapabilityInvocation, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
+        CapabilitySurfaceVersion, ConcurrencyHint, FinalizeAssistantMessage,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
         InstructionMaterializationStore, InstructionSafetyContext,
         LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionPort, LoopCompactionRequest,
-        LoopCompactionResponse, LoopContextBundle, LoopContextMessage, LoopContextPort,
-        LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverId,
-        LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
-        LoopModelCapabilityView, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
-        LoopModelMessage, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
-        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
-        PromptMode, PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
+        LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle, LoopContextMessage,
+        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
+        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
+        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelCapabilityView, LoopModelGateway,
+        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
+        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
+        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
+        ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
+        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
+
+#[test]
+fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
+    let compacted = LoopCompactionOutcome::Compacted(LoopCompactionResponse {
+        summary_artifact_id: "summary:contract"
+            .to_string()
+            .try_into()
+            .expect("valid summary id"),
+        compression_ratio_ppm: 250_000,
+    });
+    let compacted_json = serde_json::to_value(&compacted).expect("compacted should serialize");
+    assert_eq!(
+        compacted_json,
+        serde_json::json!({
+            "compacted": {
+                "summary_artifact_id": "summary:contract",
+                "compression_ratio_ppm": 250000
+            }
+        })
+    );
+    let restored_compacted: LoopCompactionOutcome =
+        serde_json::from_value(compacted_json).expect("compacted should deserialize");
+    assert_eq!(restored_compacted, compacted);
+
+    let deferred = LoopCompactionOutcome::Deferred {
+        safe_summary: LoopSafeSummary::new("compaction deferred until transcript stabilizes")
+            .expect("valid safe summary"),
+    };
+    let deferred_json = serde_json::to_value(&deferred).expect("deferred should serialize");
+    assert_eq!(
+        deferred_json,
+        serde_json::json!({
+            "deferred": {
+                "safe_summary": "compaction deferred until transcript stabilizes"
+            }
+        })
+    );
+    let restored_deferred: LoopCompactionOutcome =
+        serde_json::from_value(deferred_json).expect("deferred should deserialize");
+    assert_eq!(restored_deferred, deferred);
+}
 
 #[tokio::test]
 async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
@@ -51,6 +94,7 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
             content: "done".to_string(),
         }),
         effective_model_profile_id: host.context.resolved_run_profile.model_profile_id.clone(),
+        usage: None,
     });
     host.push_capability_outcome(CapabilityOutcome::ApprovalRequired {
         gate_ref: LoopGateRef::new("gate:approval-needed").unwrap(),
@@ -132,6 +176,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
             content: "RAW_ASSISTANT_CONTENT_SENTINEL".to_string(),
         }),
         effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+        usage: None,
     }));
     let port =
         HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
@@ -185,6 +230,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
             content: "model response survived start milestone failure".to_string(),
         }),
         effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+        usage: None,
     }));
     let port =
         HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
@@ -224,6 +270,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
             content: "model response survived milestone failure".to_string(),
         }),
         effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+        usage: None,
     }));
     let port =
         HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
@@ -1767,6 +1814,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
+        credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
     };
@@ -1974,6 +2022,24 @@ fn capability_denied_reason_kind_is_typed_and_wire_compatible() {
     assert!(CapabilityDeniedReasonKind::unknown("secret_policy").is_err());
 }
 
+#[test]
+fn capability_progress_accepts_legacy_complete_wire_value() {
+    let legacy_result = serde_json::json!({
+        "result_ref": "result:legacy-complete",
+        "safe_summary": "legacy host completed the requested objective",
+        "progress": "complete"
+    });
+
+    let decoded = serde_json::from_value::<CapabilityResultMessage>(legacy_result).unwrap();
+
+    assert_eq!(
+        decoded.result_ref,
+        LoopResultRef::new("result:legacy-complete").unwrap()
+    );
+    assert_eq!(decoded.progress, CapabilityProgress::MadeProgress);
+    assert!(!decoded.terminate_hint);
+}
+
 #[tokio::test]
 async fn input_cursors_are_bound_to_the_claimed_run_context() {
     let context = claimed_run_context().await;
@@ -2118,6 +2184,7 @@ impl AgentLoopDriver for CapabilityDriver {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeBlock,
                 state_ref: state_ref.clone(),
+                gate_ref: None,
             })
             .await
             .map_err(driver_error)?;
@@ -2130,6 +2197,7 @@ impl AgentLoopDriver for CapabilityDriver {
         Ok(LoopExit::Blocked(LoopBlocked {
             kind: LoopBlockedKind::Approval,
             gate_ref,
+            credential_requirements: Vec::new(),
             checkpoint_id,
             state_ref,
             exit_id: LoopExitId::new("exit:capability-driver").unwrap(),
@@ -2619,7 +2687,7 @@ impl LoopCompactionPort for RecordingAgentLoopHost {
     async fn compact_loop_context(
         &self,
         _request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
         Err(LoopCompactionError::InputTooLarge)
     }
 }
@@ -2833,6 +2901,7 @@ fn success_response(context: &LoopRunContext) -> LoopModelResponse {
             content: "hello".to_string(),
         }),
         effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+        usage: None,
     }
 }
 
@@ -2925,6 +2994,7 @@ async fn redaction_sentinels_never_leak_through_serialized_surfaces() {
             content: "sk-test-key-12345 leaked content".to_string(),
         }),
         effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+        usage: None,
     }));
 
     let port =

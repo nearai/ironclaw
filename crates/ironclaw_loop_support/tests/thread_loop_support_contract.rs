@@ -36,10 +36,11 @@ use ironclaw_turns::{
     LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
     TurnId, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
+        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
+        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
+        FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
@@ -93,6 +94,101 @@ async fn thread_context_port_loads_policy_filtered_transcript_messages() {
     assert_eq!(compaction.kind, LoopContextCompactionKind::User);
     assert!(compaction.estimated_tokens > 0);
     assert!(bundle.memory_snippets.is_empty());
+}
+
+#[tokio::test]
+async fn thread_context_port_rejects_run_actor_owner_mismatch() {
+    // Defense in depth for the thread-owner MountView divergence: the store
+    // keys threads by owner, so reading a thread whose scope owner differs
+    // from the run's authenticated actor silently targets the wrong
+    // `owners/<user>` subtree. The port must fail loud before that read.
+    let fixture = ThreadFixture::new().await;
+    let mismatched_run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(UserId::new("intruder-user").unwrap()));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        mismatched_run_context,
+        16,
+    );
+
+    let error = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .expect_err("owner mismatch must be rejected before the thread read");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+}
+
+#[tokio::test]
+async fn thread_context_port_accepts_explicit_owner_with_distinct_actor() {
+    // Shared routes pin the transcript to an explicit subject while preserving
+    // the submitting actor for identity/policy decisions.
+    let fixture = ThreadFixture::new().await;
+    let explicit_scope = TurnScope::new_with_owner(
+        fixture.run_context.scope.tenant_id.clone(),
+        fixture.run_context.scope.agent_id.clone(),
+        fixture.run_context.scope.project_id.clone(),
+        fixture.thread_id.clone(),
+        fixture.thread_scope.owner_user_id.clone(),
+    );
+    let run_context = LoopRunContext::new(
+        explicit_scope,
+        fixture.run_context.turn_id,
+        fixture.run_context.run_id,
+        fixture.run_context.resolved_run_profile,
+    )
+    .with_actor(TurnActor::new(UserId::new("room-participant").unwrap()));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .expect("explicit owner should allow actor/owner divergence");
+
+    assert_eq!(bundle.messages.len(), 1);
+}
+
+#[tokio::test]
+async fn thread_context_port_accepts_matching_run_actor_owner() {
+    // The same path must still succeed when the run actor owns the thread.
+    let fixture = ThreadFixture::new().await;
+    let matched_run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(UserId::new("user-loop-support").unwrap()));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        matched_run_context,
+        16,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .expect("matching run actor owner must load context");
+
+    assert_eq!(bundle.messages.len(), 1);
 }
 
 #[tokio::test]
@@ -951,6 +1047,42 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
             .collect::<Vec<_>>(),
         vec!["demo__allowed"]
     );
+}
+
+#[tokio::test]
+async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
+    let fixture = ThreadFixture::new().await;
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let gateway = Arc::new(RecordingGateway::model_error(
+        HostManagedModelErrorKind::InvalidOutput,
+        "model returned a tool call outside the advertised capability surface",
+    ));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+
+    let error = model_port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    assert_eq!(
+        error.safe_summary,
+        "model returned a tool call outside the advertised capability surface"
+    );
+    assert_eq!(gateway.calls.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -2979,6 +3111,41 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
     }
 }
 
+#[tokio::test]
+async fn model_port_preserves_gateway_safe_reason_kind() {
+    let fixture = ThreadFixture::new().await;
+    let gateway = Arc::new(RecordingGateway::model_error_with_reason_kind(
+        HostManagedModelErrorKind::CredentialUnavailable,
+        "display summary can change without changing the reason",
+        AgentLoopHostErrorReasonKind::ModelCreditsExhausted,
+    ));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::CredentialUnavailable);
+    assert_eq!(
+        error.reason_kind,
+        Some(AgentLoopHostErrorReasonKind::ModelCreditsExhausted)
+    );
+}
+
 #[derive(Clone)]
 struct StaticLoopContextPort {
     bundle: LoopContextBundle,
@@ -3837,6 +4004,28 @@ impl RecordingGateway {
                 HostManagedModelErrorKind::PolicyDenied,
                 safe_summary,
             )),
+        }
+    }
+
+    fn model_error(kind: HostManagedModelErrorKind, safe_summary: &str) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Err(HostManagedModelError::safe(kind, safe_summary)),
+        }
+    }
+
+    fn model_error_with_reason_kind(
+        kind: HostManagedModelErrorKind,
+        safe_summary: &str,
+        reason_kind: AgentLoopHostErrorReasonKind,
+    ) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Err(
+                HostManagedModelError::safe(kind, safe_summary).with_reason_kind(reason_kind)
+            ),
         }
     }
 

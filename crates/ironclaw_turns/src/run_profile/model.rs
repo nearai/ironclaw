@@ -7,8 +7,9 @@ use thiserror::Error;
 use crate::LoopDiagnosticRef;
 
 use super::host::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopModelPort, LoopModelRequest, LoopModelResponse,
-    LoopRunContext, LoopSafeSummary, ParentLoopOutput, sanitize_model_visible_text,
+    AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, LoopModelPort,
+    LoopModelRequest, LoopModelResponse, LoopRunContext, LoopSafeSummary, ParentLoopOutput,
+    sanitize_model_visible_text,
 };
 use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
 use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
@@ -75,6 +76,17 @@ pub trait LoopModelBudgetAccountant: Send + Sync {
         )
         .await
     }
+
+    /// Best-effort synchronous release of any in-flight reservation for this
+    /// run. Invoked from cancellation paths (parent task drop, timeout)
+    /// where awaiting [`Self::post_model_call`] is impossible. Default impl
+    /// is a no-op for accountants that do not hold per-run state.
+    ///
+    /// This is *the* cancellation-safety hook: when the model future is
+    /// dropped mid-await, the surrounding port's [`Drop`] runs synchronously
+    /// and calls `release_in_flight` so the reservation does not orphan
+    /// until period rollover.
+    fn release_in_flight(&self, _context: &LoopRunContext) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +107,8 @@ pub struct LoopModelGatewayRequest {
 pub struct LoopModelGatewayError {
     pub kind: AgentLoopHostErrorKind,
     pub safe_summary: LoopSafeSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -106,8 +120,14 @@ impl LoopModelGatewayError {
         Ok(Self {
             kind,
             safe_summary: LoopSafeSummary::new(safe_summary)?,
+            reason_kind: None,
             diagnostic_ref: None,
         })
+    }
+
+    pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
+        self.reason_kind = Some(reason_kind);
+        self
     }
 
     pub fn with_diagnostic_ref(mut self, diagnostic_ref: LoopDiagnosticRef) -> Self {
@@ -117,6 +137,9 @@ impl LoopModelGatewayError {
 
     pub fn into_host_error(self) -> AgentLoopHostError {
         let mut error = AgentLoopHostError::new(self.kind, self.safe_summary.as_str().to_string());
+        if let Some(reason_kind) = self.reason_kind {
+            error = error.with_reason_kind(reason_kind);
+        }
         if let Some(diagnostic_ref) = self.diagnostic_ref {
             error = error.with_diagnostic_ref(diagnostic_ref);
         }
@@ -293,6 +316,13 @@ where
             return Err(budget_error.into_host_error());
         }
 
+        // From here forward, a reservation has been taken. The guard below
+        // ensures it is released if `stream_model` is cancelled mid-await
+        // (tokio drop, parent timeout) without ever reaching the explicit
+        // `post_model_call` below.
+        let mut release_guard =
+            ReservationReleaseGuard::new(self.accountant.as_ref(), &self.context);
+
         if let Err(error) = self
             .milestones
             .model_started(request.model_preference.clone())
@@ -314,20 +344,28 @@ where
             .await
             .map(sanitize_model_response);
 
-        // Post-call accounting fires on BOTH success and failure.
+        // Post-call accounting fires on BOTH success and failure. The
+        // RAII guard stays armed across this await — if the future is
+        // cancelled mid-`post_model_call`, the Drop path calls
+        // `release_in_flight` to clean up. `release_in_flight` is
+        // idempotent against a successful post-call (the in-flight
+        // entry is already gone), so disarming after success isn't
+        // strictly required — but we still disarm on the happy path so
+        // the Drop log doesn't fire on every successful run.
         let outcome = match &gateway_result {
             Ok(response) => ModelCallOutcome::Success(response),
             Err(error) => ModelCallOutcome::Failure(error),
         };
-        if let Err(post_error) = self
+        let post_result = self
             .accountant
-            .post_model_work(
-                &self.context,
-                &work_request,
-                ModelWorkOutcome::from_model_call(outcome),
-            )
-            .await
-        {
+            .post_model_call(&self.context, &request, outcome)
+            .await;
+        // Disarm only AFTER post_model_call returns. If we're past this
+        // line the in-flight entry is either reconciled, released, or
+        // retained on a storage error — in any of those cases the
+        // guard's Drop call would be a no-op against the same entry.
+        release_guard.disarm();
+        if let Err(post_error) = post_result {
             let host_error = post_error.into_host_error();
             if let Err(milestone_error) = self.milestones.model_failed(host_error.kind).await {
                 tracing::debug!(
@@ -379,6 +417,43 @@ where
             );
         }
         Ok(response)
+    }
+}
+
+/// RAII guard that releases the in-flight reservation if the surrounding
+/// future is cancelled before `post_model_call` runs.
+///
+/// On Drop, when still armed, the guard calls
+/// [`LoopModelBudgetAccountant::release_in_flight`] — a synchronous
+/// best-effort path that the accountant uses to drop the per-run reservation
+/// id and call `governor.release` without awaiting. Callers MUST `disarm()`
+/// the guard before delegating cleanup to the async `post_model_call` path,
+/// otherwise the release would fire twice.
+struct ReservationReleaseGuard<'a> {
+    accountant: &'a dyn LoopModelBudgetAccountant,
+    context: &'a LoopRunContext,
+    armed: bool,
+}
+
+impl<'a> ReservationReleaseGuard<'a> {
+    fn new(accountant: &'a dyn LoopModelBudgetAccountant, context: &'a LoopRunContext) -> Self {
+        Self {
+            accountant,
+            context,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReservationReleaseGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.accountant.release_in_flight(self.context);
+        }
     }
 }
 

@@ -14,8 +14,9 @@ mod skills;
 
 pub use activation::{
     DEFAULT_MAX_ACTIVE_SKILLS, DEFAULT_MAX_SKILL_CONTEXT_TOKENS, SelectableSkillContextSource,
-    SkillActivationMode, SkillActivationPlan, SkillActivationRequest, SkillActivationSelection,
-    SkillActivationSelectionError, SkillActivationSelectorConfig,
+    SkillActivationMode, SkillActivationObservedEvent, SkillActivationObserver,
+    SkillActivationPlan, SkillActivationRequest, SkillActivationSelection,
+    SkillActivationSelectionError, SkillActivationSelectionMode, SkillActivationSelectorConfig,
 };
 pub use assets::{SkillBundleAsset, SkillBundleAssetReadError, SkillBundleAssetReader};
 pub use error::FirstPartySkillsExtensionError;

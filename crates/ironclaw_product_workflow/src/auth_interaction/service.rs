@@ -15,10 +15,9 @@ use super::{
     AuthGateRecord, AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionScope,
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, auth_rejected,
-    auth_reply_binding_ref, auth_source_binding_ref,
 };
-use crate::binding_ref::binding_ref_segment;
 use crate::error::ProductWorkflowError;
+use crate::gate_state::{BlockedGateState, BlockedGateStateError, blocked_gate_state};
 
 #[async_trait]
 pub trait AuthInteractionReadModel: Send + Sync {
@@ -74,12 +73,6 @@ pub struct DefaultAuthInteractionService {
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
-#[derive(Clone, Copy)]
-enum AuthTurnGateState {
-    ParkedOnGate,
-    NotParkedOnGate,
-}
-
 impl DefaultAuthInteractionService {
     pub fn new(
         read_model: Arc<dyn AuthInteractionReadModel>,
@@ -131,26 +124,17 @@ impl DefaultAuthInteractionService {
         &self,
         request: &ResolveAuthInteractionRequest,
         run_id: TurnRunId,
-    ) -> Result<AuthTurnGateState, ProductWorkflowError> {
-        let state = self
-            .turn_coordinator
-            .get_run_state(GetRunStateRequest {
-                scope: request.scope.clone(),
-                run_id,
-            })
-            .await
-            .map_err(map_gate_state_error)?;
-        if state.actor.as_ref() != Some(&request.actor) {
-            return Err(auth_rejected(
-                AuthInteractionRejectionKind::CrossScopeDenied,
-            ));
-        }
-        if state.status != TurnStatus::BlockedAuth
-            || state.gate_ref.as_ref() != Some(&request.gate_ref)
-        {
-            return Ok(AuthTurnGateState::NotParkedOnGate);
-        }
-        Ok(AuthTurnGateState::ParkedOnGate)
+    ) -> Result<BlockedGateState, ProductWorkflowError> {
+        blocked_gate_state(
+            self.turn_coordinator.as_ref(),
+            &request.scope,
+            &request.actor,
+            run_id,
+            &request.gate_ref,
+            TurnStatus::BlockedAuth,
+        )
+        .await
+        .map_err(map_blocked_gate_state_error)
     }
 
     async fn resume_completed_auth(
@@ -173,7 +157,14 @@ impl DefaultAuthInteractionService {
             }
         };
         validate_completion_ref(&gate, completion)?;
-        let binding_id = auth_interaction_binding_id(gate.flow().id, &run_id, gate.gate_ref());
+        let state = self
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: request.scope.clone(),
+                run_id,
+            })
+            .await
+            .map_err(map_auth_resume_error)?;
         let response = self
             .turn_coordinator
             .resume_turn(ResumeTurnRequest {
@@ -182,8 +173,8 @@ impl DefaultAuthInteractionService {
                 run_id,
                 gate_resolution_ref: request.gate_ref,
                 precondition: ResumeTurnPrecondition::BlockedAuthGate,
-                source_binding_ref: auth_source_binding_ref(&binding_id)?,
-                reply_target_binding_ref: auth_reply_binding_ref(&binding_id)?,
+                source_binding_ref: state.source_binding_ref,
+                reply_target_binding_ref: state.reply_target_binding_ref,
                 idempotency_key: request.idempotency_key,
             })
             .await
@@ -237,6 +228,14 @@ impl DefaultAuthInteractionService {
                 return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
             }
         }
+        self.cancel_auth_run(request, run_id).await
+    }
+
+    async fn cancel_auth_run(
+        &self,
+        request: ResolveAuthInteractionRequest,
+        run_id: TurnRunId,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
         let response = self
             .turn_coordinator
             .cancel_run(CancelRunRequest {
@@ -249,6 +248,20 @@ impl DefaultAuthInteractionService {
             .await
             .map_err(map_auth_resume_error)?;
         Ok(ResolveAuthInteractionResponse::Canceled(response))
+    }
+
+    async fn cancel_parked_auth_without_flow(
+        &self,
+        request: ResolveAuthInteractionRequest,
+        run_id: TurnRunId,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        match self.turn_gate_state(&request, run_id).await? {
+            BlockedGateState::ParkedOnGate => {}
+            BlockedGateState::NotParkedOnGate => {
+                return Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth));
+            }
+        }
+        self.cancel_auth_run(request, run_id).await
     }
 }
 
@@ -287,20 +300,32 @@ impl AuthInteractionService for DefaultAuthInteractionService {
         request: ResolveAuthInteractionRequest,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
         let scope = AuthInteractionScope::from_turn(&request.scope, &request.actor);
-        let gate = self
+        let gate = match self
             .find_gate(&scope, request.run_id_hint, &request.gate_ref)
-            .await?;
+            .await
+        {
+            Ok(gate) => gate,
+            Err(ProductWorkflowError::AuthInteractionRejected {
+                kind: AuthInteractionRejectionKind::MissingAuth,
+            }) if matches!(request.decision, AuthInteractionDecision::Deny) => {
+                let Some(run_id) = request.run_id_hint else {
+                    return Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth));
+                };
+                return self.cancel_parked_auth_without_flow(request, run_id).await;
+            }
+            Err(error) => return Err(error),
+        };
         let run_id = request.run_id_hint.unwrap_or_else(|| gate.run_id());
         match (
             self.turn_gate_state(&request, run_id).await?,
             request.decision.clone(),
         ) {
-            (AuthTurnGateState::ParkedOnGate, AuthInteractionDecision::Deny) => {
+            (BlockedGateState::ParkedOnGate, AuthInteractionDecision::Deny) => {
                 let gate = self.refresh_gate(&gate).await?;
                 self.cancel_auth(request, gate, run_id).await
             }
             (
-                AuthTurnGateState::ParkedOnGate,
+                BlockedGateState::ParkedOnGate,
                 AuthInteractionDecision::CredentialProvided { credential_ref },
             ) => {
                 let gate = self.refresh_gate(&gate).await?;
@@ -309,28 +334,34 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                     .await?;
                 self.resume_completed_auth(request, gate, run_id).await
             }
-            (
-                AuthTurnGateState::ParkedOnGate,
-                AuthInteractionDecision::CallbackCompleted { .. },
-            ) => {
+            (BlockedGateState::ParkedOnGate, AuthInteractionDecision::CallbackCompleted { .. }) => {
                 let gate = self.refresh_gate(&gate).await?;
                 self.resume_completed_auth(request, gate, run_id).await
             }
             (
-                AuthTurnGateState::NotParkedOnGate,
+                BlockedGateState::NotParkedOnGate,
                 AuthInteractionDecision::CredentialProvided { .. }
                 | AuthInteractionDecision::CallbackCompleted { .. },
             ) => {
                 let gate = self.refresh_gate(&gate).await?;
                 self.resume_completed_auth(request, gate, run_id).await
             }
-            (AuthTurnGateState::NotParkedOnGate, AuthInteractionDecision::Deny) => {
+            (BlockedGateState::NotParkedOnGate, AuthInteractionDecision::Deny) => {
                 let gate = self.refresh_gate(&gate).await?;
                 if gate.status() != AuthFlowStatus::Canceled {
                     return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
                 }
                 self.cancel_auth(request, gate, run_id).await
             }
+        }
+    }
+}
+
+fn map_blocked_gate_state_error(error: BlockedGateStateError) -> ProductWorkflowError {
+    match error {
+        BlockedGateStateError::Turn(error) => map_gate_state_error(error),
+        BlockedGateStateError::ActorMismatch => {
+            auth_rejected(AuthInteractionRejectionKind::CrossScopeDenied)
         }
     }
 }
@@ -370,20 +401,6 @@ fn validate_completion_ref(
     }
 }
 
-fn auth_interaction_binding_id(
-    flow_id: ironclaw_auth::AuthFlowId,
-    run_id: &TurnRunId,
-    gate_ref: &GateRef,
-) -> String {
-    format!(
-        "{}{}{}{}",
-        binding_ref_segment("surface", "auth-interaction"),
-        binding_ref_segment("flow", &flow_id.to_string()),
-        binding_ref_segment("run", &run_id.to_string()),
-        binding_ref_segment("gate", gate_ref.as_str())
-    )
-}
-
 fn map_auth_product_error(error: AuthProductError) -> ProductWorkflowError {
     match error {
         AuthProductError::UnknownOrExpiredFlow => {
@@ -392,7 +409,9 @@ fn map_auth_product_error(error: AuthProductError) -> ProductWorkflowError {
         AuthProductError::CrossScopeDenied => {
             auth_rejected(AuthInteractionRejectionKind::CrossScopeDenied)
         }
-        AuthProductError::BackendUnavailable => {
+        AuthProductError::BackendUnavailable
+        | AuthProductError::BackendConflict
+        | AuthProductError::MalformedConfig => {
             auth_rejected(AuthInteractionRejectionKind::FlowUnavailable)
         }
         AuthProductError::Canceled
@@ -417,7 +436,9 @@ fn map_credential_selection_error(error: AuthProductError) -> ProductWorkflowErr
         AuthProductError::CrossScopeDenied => {
             auth_rejected(AuthInteractionRejectionKind::CrossScopeDenied)
         }
-        AuthProductError::BackendUnavailable => {
+        AuthProductError::BackendUnavailable
+        | AuthProductError::BackendConflict
+        | AuthProductError::MalformedConfig => {
             auth_rejected(AuthInteractionRejectionKind::FlowUnavailable)
         }
         AuthProductError::CredentialMissing

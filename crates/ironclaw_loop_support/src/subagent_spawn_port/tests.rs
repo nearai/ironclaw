@@ -30,8 +30,15 @@ struct StaticSpawnInputCodec {
     args: SpawnSubagentArgs,
 }
 
+struct RegisteringSpawnInputCodec;
+
 struct RejectingSpawnInputCodec {
     error: AgentLoopHostError,
+}
+
+struct FixedToolPort {
+    definition: ProviderToolDefinition,
+    capability_ids: ProviderToolCallCapabilityIds,
 }
 
 struct StaticDefinitionResolver {
@@ -42,7 +49,26 @@ struct StaticDefinitionResolver {
 struct AuthPassPort;
 
 #[derive(Default)]
+struct SurfacePrimedSpawnAuthPort {
+    visible_calls: std::sync::Mutex<u32>,
+    register_calls: std::sync::Mutex<Vec<ProviderToolCall>>,
+}
+
+#[derive(Default)]
+struct StrictSpawnAuthPort {
+    visible_calls: std::sync::Mutex<u32>,
+    register_calls: std::sync::Mutex<Vec<ProviderToolCall>>,
+}
+
+#[derive(Default)]
 struct RecordingBatchPort {
+    batches: std::sync::Mutex<Vec<CapabilityBatchInvocation>>,
+}
+
+struct FailingBatchPort;
+
+#[derive(Default)]
+struct SuspendedBatchPort {
     batches: std::sync::Mutex<Vec<CapabilityBatchInvocation>>,
 }
 
@@ -127,6 +153,25 @@ impl SpawnSubagentInputCodec for StaticSpawnInputCodec {
 }
 
 #[async_trait]
+impl SpawnSubagentInputCodec for RegisteringSpawnInputCodec {
+    async fn decode(
+        &self,
+        _run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+    ) -> Result<SpawnSubagentArgs, AgentLoopHostError> {
+        Ok(default_spawn_args())
+    }
+
+    async fn register_provider_tool_call_input(
+        &self,
+        _run_context: &LoopRunContext,
+        _tool_call: &ProviderToolCall,
+    ) -> Result<CapabilityInputRef, AgentLoopHostError> {
+        Ok(CapabilityInputRef::new("input:spawn-provider").unwrap())
+    }
+}
+
+#[async_trait]
 impl SpawnSubagentInputCodec for RejectingSpawnInputCodec {
     async fn decode(
         &self,
@@ -134,6 +179,147 @@ impl SpawnSubagentInputCodec for RejectingSpawnInputCodec {
         _input_ref: &CapabilityInputRef,
     ) -> Result<SpawnSubagentArgs, AgentLoopHostError> {
         Err(self.error.clone())
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        if *self.visible_calls.lock().unwrap() == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(vec![spawn_tool_definition()])
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        if *self.visible_calls.lock().unwrap() == 0 {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "surface not primed",
+            ));
+        }
+        self.register_calls.lock().unwrap().push(tool_call);
+        Ok(CapabilityCallCandidate {
+            surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            effective_capability_ids: vec![
+                CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            ],
+            input_ref: CapabilityInputRef::new("input:auth").unwrap(),
+            provider_replay: None,
+        })
+    }
+
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        *self.visible_calls.lock().unwrap() += 1;
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            descriptors: vec![CapabilityDescriptorView {
+                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+                provider: None,
+                runtime: RuntimeKind::FirstParty,
+                safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
+                safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+                concurrency_hint: ConcurrencyHint::Exclusive,
+                parameters_schema: spawn_subagent_parameters_schema(),
+            }],
+        })
+    }
+
+    async fn invoke_capability(
+        &self,
+        _request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
+            result_ref: LoopResultRef::new("result:auth").unwrap(),
+            safe_summary: "authorized".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            terminate_hint: false,
+        }))
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        let mut outcomes = Vec::with_capacity(request.invocations.len());
+        for invocation in request.invocations {
+            outcomes.push(self.invoke_capability(invocation).await?);
+        }
+        Ok(CapabilityBatchOutcome {
+            outcomes,
+            stopped_on_suspension: false,
+        })
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPort for StrictSpawnAuthPort {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        if *self.visible_calls.lock().unwrap() == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(vec![spawn_tool_definition()])
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        self.register_calls.lock().unwrap().push(tool_call);
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "strict inner does not accept spawn provider tool names",
+        ))
+    }
+
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        *self.visible_calls.lock().unwrap() += 1;
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            descriptors: vec![CapabilityDescriptorView {
+                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+                provider: None,
+                runtime: RuntimeKind::FirstParty,
+                safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
+                safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+                concurrency_hint: ConcurrencyHint::Exclusive,
+                parameters_schema: spawn_subagent_parameters_schema(),
+            }],
+        })
+    }
+
+    async fn invoke_capability(
+        &self,
+        _request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "strict inner should not authorize synthetic spawn provider calls",
+        ))
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        let mut outcomes = Vec::with_capacity(request.invocations.len());
+        for invocation in request.invocations {
+            outcomes.push(self.invoke_capability(invocation).await?);
+        }
+        Ok(CapabilityBatchOutcome {
+            outcomes,
+            stopped_on_suspension: false,
+        })
     }
 }
 
@@ -173,8 +359,60 @@ impl LoopCapabilityPort for AuthPassPort {
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
             result_ref: LoopResultRef::new("result:auth").unwrap(),
             safe_summary: "authorized".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
         }))
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        let mut outcomes = Vec::with_capacity(request.invocations.len());
+        for invocation in request.invocations {
+            outcomes.push(self.invoke_capability(invocation).await?);
+        }
+        Ok(CapabilityBatchOutcome {
+            outcomes,
+            stopped_on_suspension: false,
+        })
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPort for FixedToolPort {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        Ok(vec![self.definition.clone()])
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        if tool_call.name != self.definition.name {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is outside the visible capability surface",
+            ));
+        }
+        Ok(self.capability_ids.clone())
+    }
+
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            descriptors: Vec::new(),
+        })
+    }
+
+    async fn invoke_capability(
+        &self,
+        request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        Ok(completed_outcome(request.capability_id.as_str()))
     }
 
     async fn invoke_capability_batch(
@@ -228,16 +466,79 @@ impl LoopCapabilityPort for RecordingBatchPort {
 }
 
 #[async_trait]
+impl LoopCapabilityPort for SuspendedBatchPort {
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            descriptors: Vec::new(),
+        })
+    }
+
+    async fn invoke_capability(
+        &self,
+        _request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        Ok(CapabilityOutcome::ApprovalRequired {
+            gate_ref: LoopGateRef::new("gate:inner-suspended").unwrap(),
+            safe_summary: "approval required".to_string(),
+        })
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        self.batches.lock().unwrap().push(request);
+        Ok(CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:inner-suspended").unwrap(),
+                safe_summary: "approval required".to_string(),
+            }],
+            stopped_on_suspension: true,
+        })
+    }
+}
+
+#[async_trait]
 impl LoopCapabilityResultWriter for NoopResultWriter {
     async fn write_capability_result(
         &self,
-        _run_context: &LoopRunContext,
-        _input_ref: &CapabilityInputRef,
-        _invocation_id: InvocationId,
-        _capability_id: &CapabilityId,
-        _output: serde_json::Value,
+        _write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
         Ok(LoopResultRef::new("result:spawn").unwrap())
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPort for FailingBatchPort {
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            descriptors: Vec::new(),
+        })
+    }
+
+    async fn invoke_capability(
+        &self,
+        request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        Ok(completed_outcome(request.capability_id.as_str()))
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        _request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "forced batch failure",
+        ))
     }
 }
 
@@ -490,6 +791,14 @@ impl SessionThreadService for FailingMarkThreadService {
         self.inner.read_thread(request).await
     }
 
+    async fn delete_thread(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        self.inner.delete_thread(scope, thread_id).await
+    }
+
     async fn create_summary_artifact(
         &self,
         request: CreateSummaryArtifactRequest,
@@ -602,6 +911,45 @@ fn input_ref() -> CapabilityInputRef {
     CapabilityInputRef::new("input:spawn").unwrap()
 }
 
+fn provider_tool_call(name: &str) -> ProviderToolCall {
+    ProviderToolCall {
+        provider_id: "test-provider".to_string(),
+        provider_model_id: "test-model".to_string(),
+        turn_id: Some("provider-turn:test".to_string()),
+        id: "call-spawn".to_string(),
+        name: name.to_string(),
+        arguments: json!({
+            "flavor_id": "general",
+            "task": "investigate"
+        }),
+        response_reasoning: None,
+        reasoning: None,
+        signature: None,
+    }
+}
+
+fn spawn_provider_tool_call() -> ProviderToolCall {
+    provider_tool_call(SPAWN_SUBAGENT_PROVIDER_TOOL_NAME)
+}
+
+fn spawn_tool_definition() -> ProviderToolDefinition {
+    ProviderToolDefinition {
+        capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
+        description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+        parameters: spawn_subagent_parameters_schema(),
+    }
+}
+
+fn custom_tool_definition() -> ProviderToolDefinition {
+    ProviderToolDefinition {
+        capability_id: CapabilityId::new("builtin.custom_tool").unwrap(),
+        name: "demo__custom".to_string(),
+        description: "Custom delegated tool".to_string(),
+        parameters: json!({"type": "object"}),
+    }
+}
+
 fn invocation(capability_id: &str) -> CapabilityInvocation {
     CapabilityInvocation {
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
@@ -666,6 +1014,7 @@ fn turn_record(run_context: &LoopRunContext, subagent_depth: u32) -> TurnRunReco
         resolved_model_route: None,
         checkpoint_id: None,
         gate_ref: None,
+        credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(1),
         runner_id: None,
@@ -711,11 +1060,39 @@ async fn spawn_test_port(
         limits,
         deps,
     );
-    port.auth_input_refs
-        .lock()
-        .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+    port.auth_input_refs.lock().unwrap().insert(input_ref());
     port
+}
+
+fn spawn_test_port_with_inner(
+    run_context: LoopRunContext,
+    inner: Arc<dyn LoopCapabilityPort>,
+    codec: Arc<dyn SpawnSubagentInputCodec>,
+) -> SubagentSpawnCapabilityPort {
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: Arc::new(StaticCoordinator),
+        turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(
+            &run_context,
+            0,
+        )))),
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        goal_store: Arc::new(NoopGoalStore),
+        gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: codec,
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    SubagentSpawnCapabilityPort::new(
+        inner,
+        run_context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    )
 }
 
 struct SpawnPortWithRecorders {
@@ -756,10 +1133,7 @@ fn spawn_test_port_with_codec_and_recorders(
         SubagentSpawnLimits::default(),
         deps,
     );
-    port.auth_input_refs
-        .lock()
-        .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+    port.auth_input_refs.lock().unwrap().insert(input_ref());
     SpawnPortWithRecorders {
         port,
         child_runs,
@@ -782,6 +1156,7 @@ fn completed_outcome(label: &str) -> CapabilityOutcome {
     CapabilityOutcome::Completed(CapabilityResultMessage {
         result_ref: LoopResultRef::new(format!("result:{label}")).unwrap(),
         safe_summary: "completed".to_string(),
+        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
         terminate_hint: false,
     })
 }
@@ -791,6 +1166,423 @@ fn denied_reason(outcome: CapabilityOutcome) -> String {
         panic!("expected denied outcome");
     };
     denied.reason_kind.as_str().to_string()
+}
+
+#[tokio::test]
+async fn spawn_descriptor_is_present_in_visible_capabilities() {
+    let context = test_run_context("spawn-visible").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(AuthPassPort),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+
+    let surface = port
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .expect("visible capabilities");
+    let descriptors = surface
+        .descriptors
+        .iter()
+        .filter(|descriptor| {
+            descriptor.capability_id.as_str() == DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(
+        descriptors[0].safe_name,
+        DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
+    );
+    assert_eq!(descriptors[0].runtime, RuntimeKind::FirstParty);
+    assert_eq!(descriptors[0].concurrency_hint, ConcurrencyHint::Exclusive);
+}
+
+#[tokio::test]
+async fn spawn_descriptor_is_not_duplicated_when_inner_already_has_it() {
+    let context = test_run_context("spawn-visible-dedup").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(SurfacePrimedSpawnAuthPort::default()),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+
+    let surface = port
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .expect("visible capabilities");
+
+    assert_eq!(
+        surface
+            .descriptors
+            .iter()
+            .filter(|descriptor| {
+                descriptor.capability_id.as_str() == DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
+            })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn spawn_tool_definition_is_not_duplicated_when_inner_already_has_it() {
+    let context = test_run_context("spawn-tools-dedup").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(FixedToolPort {
+            definition: spawn_tool_definition(),
+            capability_ids: ProviderToolCallCapabilityIds::single(
+                CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            ),
+        }),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+
+    let definitions = port.tool_definitions().expect("tool definitions");
+
+    assert_eq!(
+        definitions
+            .iter()
+            .filter(|definition| {
+                definition.capability_id.as_str() == DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
+            })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn spawn_tool_definition_is_present_in_structured_tools() {
+    let context = test_run_context("spawn-tools").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(AuthPassPort),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+
+    let definitions = port.tool_definitions().expect("tool definitions");
+    let definition = definitions
+        .iter()
+        .find(|definition| {
+            definition.capability_id.as_str() == DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
+        })
+        .expect("spawn tool definition");
+
+    assert_eq!(definition.name, SPAWN_SUBAGENT_PROVIDER_TOOL_NAME);
+    assert_eq!(
+        definition.parameters["required"],
+        json!(["flavor_id", "task"])
+    );
+    assert_eq!(
+        definition.parameters["properties"]["task"]["maxLength"],
+        json!(DEFAULT_SUBAGENT_GOAL_MAX_BYTES)
+    );
+    assert_eq!(
+        definition.parameters["properties"]["handoff"]["maxLength"],
+        json!(DEFAULT_SUBAGENT_GOAL_MAX_BYTES)
+    );
+    assert!(
+        definition.parameters["properties"]["task"]["description"]
+            .as_str()
+            .expect("task description")
+            .contains("UTF-8 byte budget")
+    );
+    assert!(
+        definition.parameters["properties"]["handoff"]["description"]
+            .as_str()
+            .expect("handoff description")
+            .contains("UTF-8 byte budget")
+    );
+    assert!(definition.parameters["properties"].get("handoff").is_some());
+    assert!(definition.parameters["properties"].get("mode").is_none());
+    assert!(
+        definition.parameters["properties"]
+            .get("run_in_background")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_capability_ids_use_spawn_branch() {
+    let context = test_run_context("spawn-capability-ids").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(AuthPassPort),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+
+    let ids = port
+        .provider_tool_call_capability_ids(&spawn_provider_tool_call())
+        .expect("spawn capability ids");
+
+    assert_eq!(
+        ids.provider_capability_id.as_str(),
+        DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
+    );
+    assert_eq!(
+        ids.effective_capability_ids,
+        vec![CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap()]
+    );
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_capability_ids_delegate_non_spawn_calls() {
+    let context = test_run_context("spawn-capability-ids-delegate").await;
+    let expected = ProviderToolCallCapabilityIds {
+        provider_capability_id: CapabilityId::new("builtin.custom_tool").unwrap(),
+        effective_capability_ids: vec![
+            CapabilityId::new("builtin.custom_tool").unwrap(),
+            CapabilityId::new("builtin.custom_tool.audit").unwrap(),
+        ],
+    };
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(FixedToolPort {
+            definition: custom_tool_definition(),
+            capability_ids: expected.clone(),
+        }),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+
+    let ids = port
+        .provider_tool_call_capability_ids(&provider_tool_call("demo__custom"))
+        .expect("delegated capability ids");
+
+    assert_eq!(ids, expected);
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_validation_accepts_valid_spawn_args() {
+    let context = test_run_context("spawn-validate").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(AuthPassPort),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+
+    port.validate_provider_tool_call(&spawn_provider_tool_call())
+        .expect("valid spawn provider tool call");
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_validation_rejects_invalid_spawn_args() {
+    let context = test_run_context("spawn-validate-invalid").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(AuthPassPort),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+    let mut call = spawn_provider_tool_call();
+    call.arguments = json!({
+        "flavor_id": "general",
+        "task": "background task",
+        "mode": "background"
+    });
+
+    let error = port
+        .validate_provider_tool_call(&call)
+        .expect_err("background spawn provider call rejects");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("background subagents are disabled")
+    );
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_validation_rejects_missing_or_malformed_flavor_id() {
+    let context = test_run_context("spawn-validate-flavor").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(AuthPassPort),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+
+    for arguments in [
+        json!({
+            "task": "investigate"
+        }),
+        json!({
+            "flavor_id": 42,
+            "task": "investigate"
+        }),
+    ] {
+        let mut call = spawn_provider_tool_call();
+        call.arguments = arguments;
+
+        let error = port
+            .validate_provider_tool_call(&call)
+            .expect_err("invalid spawn provider tool call rejects");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.safe_summary.contains("invalid spawn_subagent input"));
+    }
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_validation_rejects_oversized_goal_fields() {
+    let context = test_run_context("spawn-validate-goal-size").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(AuthPassPort),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+    let oversized = "x".repeat(DEFAULT_SUBAGENT_GOAL_MAX_BYTES + 1);
+
+    for (field, arguments) in [
+        (
+            "task",
+            json!({
+                "flavor_id": "general",
+                "task": oversized.clone(),
+            }),
+        ),
+        (
+            "handoff",
+            json!({
+                "flavor_id": "general",
+                "task": "investigate",
+                "handoff": oversized,
+            }),
+        ),
+    ] {
+        let mut call = spawn_provider_tool_call();
+        call.arguments = arguments;
+
+        let error = port
+            .validate_provider_tool_call(&call)
+            .expect_err("oversized spawn provider tool call rejects");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            error
+                .safe_summary
+                .contains(&format!("spawn_subagent {field} is too large")),
+            "unexpected error for {field}: {}",
+            error.safe_summary
+        );
+    }
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_is_registered_for_spawn_dispatch() {
+    let context = test_run_context("spawn-register").await;
+    let inner = Arc::new(SurfacePrimedSpawnAuthPort::default());
+    let port =
+        spawn_test_port_with_inner(context, inner.clone(), Arc::new(RegisteringSpawnInputCodec));
+
+    let candidate = port
+        .register_provider_tool_call(spawn_provider_tool_call())
+        .await
+        .expect("provider tool call registration");
+
+    assert_eq!(
+        candidate.capability_id.as_str(),
+        DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
+    );
+    assert_eq!(candidate.input_ref.as_str(), "input:spawn-provider");
+    assert!(
+        port.auth_input_refs
+            .lock()
+            .unwrap()
+            .contains(&candidate.input_ref)
+    );
+    assert_eq!(*inner.visible_calls.lock().unwrap(), 1);
+    assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_registration_rejects_missing_turn_id() {
+    let context = test_run_context("spawn-register-missing-turn-id").await;
+    let inner = Arc::new(SurfacePrimedSpawnAuthPort::default());
+    let port =
+        spawn_test_port_with_inner(context, inner.clone(), Arc::new(RegisteringSpawnInputCodec));
+    let mut call = spawn_provider_tool_call();
+    call.turn_id = None;
+
+    let error = port
+        .register_provider_tool_call(call)
+        .await
+        .expect_err("provider tool call missing turn id rejects");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("provider tool call is missing a provider turn id")
+    );
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_registration_does_not_require_inner_spawn_name() {
+    let context = test_run_context_with_agent_actor("spawn-register-strict").await;
+    let inner = Arc::new(StrictSpawnAuthPort::default());
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let port = SubagentSpawnCapabilityPort::new(
+        inner.clone(),
+        context.clone(),
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        Arc::new(SubagentSpawnDeps {
+            coordinator: Arc::new(StaticCoordinator),
+            child_runs: child_runs.clone(),
+            turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0)))),
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
+            goal_store: Arc::new(NoopGoalStore),
+            gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+            definition_resolver: Arc::new(StaticDefinitionResolver {
+                resolved: Some(subagent_definition(false)),
+                parent: None,
+            }),
+            spawn_input_codec: Arc::new(RegisteringSpawnInputCodec),
+            result_writer: Arc::new(NoopResultWriter),
+        }),
+    );
+
+    let candidate = port
+        .register_provider_tool_call(spawn_provider_tool_call())
+        .await
+        .expect("provider tool call registration");
+
+    assert_eq!(
+        candidate.capability_id.as_str(),
+        DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
+    );
+    assert_eq!(candidate.input_ref.as_str(), "input:spawn-provider");
+    assert_eq!(
+        candidate
+            .provider_replay
+            .as_ref()
+            .expect("provider replay")
+            .provider_tool_name
+            .as_str(),
+        SPAWN_SUBAGENT_PROVIDER_TOOL_NAME
+    );
+    assert!(
+        port.auth_input_refs
+            .lock()
+            .unwrap()
+            .contains(&candidate.input_ref)
+    );
+    assert_eq!(*inner.visible_calls.lock().unwrap(), 1);
+    assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
+
+    let outcome = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: candidate.surface_version.clone(),
+            capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            input_ref: candidate.input_ref.clone(),
+        })
+        .await
+        .expect("registered spawn invocation");
+
+    assert!(matches!(
+        outcome,
+        CapabilityOutcome::AwaitDependentRun { .. }
+    ));
+    assert_eq!(child_runs.requests().len(), 1);
 }
 
 #[test]
@@ -963,10 +1755,7 @@ async fn invoke_spawn_submits_child_run_through_spawn_tree_port() {
         SubagentSpawnLimits::default(),
         deps,
     );
-    port.auth_input_refs
-        .lock()
-        .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+    port.auth_input_refs.lock().unwrap().insert(input_ref());
 
     let outcome = invoke_spawn(&port).await;
 
@@ -1043,10 +1832,7 @@ async fn invoke_capability_batch_handles_mixed_spawn_and_non_spawn_invocations()
         SubagentSpawnLimits::default(),
         deps,
     );
-    port.auth_input_refs
-        .lock()
-        .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+    port.auth_input_refs.lock().unwrap().insert(input_ref());
 
     let outcome = port
         .invoke_capability_batch(CapabilityBatchInvocation {
@@ -1079,17 +1865,109 @@ async fn invoke_capability_batch_handles_mixed_spawn_and_non_spawn_invocations()
 }
 
 #[tokio::test]
+async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failure() {
+    let context = test_run_context_with_agent_actor("spawn-batch-rollback").await;
+    let actor = context.actor.clone().unwrap();
+    let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let goal_store = Arc::new(RecordingGoalStore::default());
+    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        turn_state_store: turn_store.clone(),
+        thread_service: thread_service.clone(),
+        goal_store: goal_store.clone(),
+        gate_store: gate_store.clone(),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: default_spawn_args(),
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(FailingBatchPort),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits {
+            max_spawn_per_turn: 1,
+            ..SubagentSpawnLimits::default()
+        },
+        deps,
+    );
+    port.auth_input_refs.lock().unwrap().insert(input_ref());
+
+    let error = port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![
+                invocation(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
+                invocation("regular.fails"),
+            ],
+            stop_on_first_suspension: false,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    let child_requests = child_runs.requests();
+    assert_eq!(child_requests.len(), 1);
+    let child_request = &child_requests[0];
+    let cancels = turn_store.cancels();
+    assert_eq!(cancels.len(), 1);
+    assert_eq!(Some(cancels[0].run_id), child_request.requested_run_id);
+    assert!(gate_store.records().is_empty());
+    assert_eq!(goal_store.deletes().len(), 1);
+    assert_eq!(turn_store.releases.lock().unwrap().len(), 1);
+
+    let child_thread_scope = ThreadScope {
+        tenant_id: child_request.child_scope.tenant_id.clone(),
+        agent_id: child_request.child_scope.agent_id.clone().unwrap(),
+        project_id: child_request.child_scope.project_id.clone(),
+        owner_user_id: Some(actor.user_id),
+        mission_id: None,
+    };
+    let read = thread_service
+        .read_thread(ThreadHistoryRequest {
+            scope: child_thread_scope,
+            thread_id: child_request.child_scope.thread_id.clone(),
+        })
+        .await;
+    assert!(matches!(
+        read,
+        Err(SessionThreadError::UnknownThread { .. })
+    ));
+
+    port.auth_input_refs.lock().unwrap().insert(input_ref());
+    assert!(
+        matches!(
+            invoke_spawn(&port).await,
+            CapabilityOutcome::AwaitDependentRun { .. }
+        ),
+        "rolled-back batch spawns must release their per-turn spawn slot"
+    );
+}
+
+#[tokio::test]
 async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested() {
     let context = test_run_context_with_agent_actor("spawn-batch-stop").await;
+    let actor = context.actor.clone().unwrap();
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let goal_store = Arc::new(RecordingGoalStore::default());
+    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
     let inner = Arc::new(RecordingBatchPort::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
-        child_runs: Arc::new(RecordingChildRuns::default()),
-        turn_state_store: turn_store,
-        thread_service: Arc::new(InMemorySessionThreadService::default()),
-        goal_store: Arc::new(NoopGoalStore),
-        gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+        child_runs: child_runs.clone(),
+        turn_state_store: turn_store.clone(),
+        thread_service: thread_service.clone(),
+        goal_store: goal_store.clone(),
+        gate_store: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -1106,10 +1984,7 @@ async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested(
         SubagentSpawnLimits::default(),
         deps,
     );
-    port.auth_input_refs
-        .lock()
-        .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+    port.auth_input_refs.lock().unwrap().insert(input_ref());
 
     let outcome = port
         .invoke_capability_batch(CapabilityBatchInvocation {
@@ -1125,20 +2000,126 @@ async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested(
     assert_eq!(outcome.outcomes.len(), 1);
     assert!(outcome.stopped_on_suspension);
     assert!(inner.batches.lock().unwrap().is_empty());
+    let child_requests = child_runs.requests();
+    assert_eq!(child_requests.len(), 1);
+    assert!(turn_store.cancels().is_empty());
+    assert!(turn_store.releases.lock().unwrap().is_empty());
+    assert!(goal_store.deletes().is_empty());
+    assert_eq!(goal_store.puts().len(), 1);
+    assert_eq!(gate_store.records().len(), 1);
+
+    let child_request = &child_requests[0];
+    let child_thread_scope = ThreadScope {
+        tenant_id: child_request.child_scope.tenant_id.clone(),
+        agent_id: child_request.child_scope.agent_id.clone().unwrap(),
+        project_id: child_request.child_scope.project_id.clone(),
+        owner_user_id: Some(actor.user_id),
+        mission_id: None,
+    };
+    let read = thread_service
+        .read_thread(ThreadHistoryRequest {
+            scope: child_thread_scope,
+            thread_id: child_request.child_scope.thread_id.clone(),
+        })
+        .await;
+    assert!(
+        read.is_ok(),
+        "partial-success suspension must keep the child thread committed"
+    );
+}
+
+#[tokio::test]
+async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
+    let context = test_run_context_with_agent_actor("spawn-inner-batch-stop").await;
+    let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let goal_store = Arc::new(RecordingGoalStore::default());
+    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let inner = Arc::new(SuspendedBatchPort::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        turn_state_store: turn_store.clone(),
+        thread_service,
+        goal_store: goal_store.clone(),
+        gate_store: gate_store.clone(),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: default_spawn_args(),
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        inner.clone(),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    );
+    let input_ref_a = CapabilityInputRef::new("input:spawn-a").unwrap();
+    let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
+    {
+        let mut refs = port.auth_input_refs.lock().unwrap();
+        refs.insert(input_ref_a.clone());
+        refs.insert(input_ref_b.clone());
+    }
+
+    let spawn_id = CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap();
+    let inner_id = CapabilityId::new("inner.suspended").unwrap();
+    let surface_version = CapabilitySurfaceVersion::new("surface:test").unwrap();
+    let outcome = port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![
+                CapabilityInvocation {
+                    surface_version: surface_version.clone(),
+                    capability_id: spawn_id.clone(),
+                    input_ref: input_ref_a,
+                },
+                CapabilityInvocation {
+                    surface_version: surface_version.clone(),
+                    capability_id: spawn_id,
+                    input_ref: input_ref_b,
+                },
+                CapabilityInvocation {
+                    surface_version,
+                    capability_id: inner_id,
+                    input_ref: CapabilityInputRef::new("input:inner").unwrap(),
+                },
+            ],
+            stop_on_first_suspension: true,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.outcomes.len(), 3);
+    assert!(outcome.stopped_on_suspension);
+    assert_eq!(inner.batches.lock().unwrap().len(), 1);
+    assert_eq!(child_runs.requests().len(), 2);
+    assert!(turn_store.cancels().is_empty());
+    assert!(turn_store.releases.lock().unwrap().is_empty());
+    assert!(goal_store.deletes().is_empty());
+    assert_eq!(goal_store.puts().len(), 2);
+    assert_eq!(gate_store.records().len(), 1);
 }
 
 #[tokio::test]
 async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
     let context = test_run_context_with_agent_actor("spawn-mark-fails").await;
+    let actor = context.actor.clone().unwrap();
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
     let child_runs = Arc::new(RecordingChildRuns::default());
     let goal_store = Arc::new(RecordingGoalStore::default());
     let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let thread_service = Arc::new(FailingMarkThreadService::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
         child_runs: child_runs.clone(),
         turn_state_store: turn_store.clone(),
-        thread_service: Arc::new(FailingMarkThreadService::default()),
+        thread_service: thread_service.clone(),
         goal_store: goal_store.clone(),
         gate_store: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
@@ -1157,10 +2138,7 @@ async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
         SubagentSpawnLimits::default(),
         deps,
     );
-    port.auth_input_refs
-        .lock()
-        .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+    port.auth_input_refs.lock().unwrap().insert(input_ref());
 
     let error = port
         .invoke_capability(CapabilityInvocation {
@@ -1182,6 +2160,25 @@ async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
     );
     assert!(gate_store.records().is_empty());
     assert_eq!(goal_store.deletes().len(), 1);
+    let child_requests = child_runs.requests();
+    let child_request = &child_requests[0];
+    let child_thread_scope = ThreadScope {
+        tenant_id: child_request.child_scope.tenant_id.clone(),
+        agent_id: child_request.child_scope.agent_id.clone().unwrap(),
+        project_id: child_request.child_scope.project_id.clone(),
+        owner_user_id: Some(actor.user_id),
+        mission_id: None,
+    };
+    let read = thread_service
+        .read_thread(ThreadHistoryRequest {
+            scope: child_thread_scope,
+            thread_id: child_request.child_scope.thread_id.clone(),
+        })
+        .await;
+    assert!(matches!(
+        read,
+        Err(SessionThreadError::UnknownThread { .. })
+    ));
 }
 
 #[tokio::test]
@@ -1419,6 +2416,69 @@ async fn json_spawn_input_codec_rejects_invalid_shape() {
 }
 
 #[tokio::test]
+async fn json_spawn_input_codec_rejects_oversized_goal_fields() {
+    let context = test_run_context("spawn-codec-oversized-goal").await;
+    let oversized = "x".repeat(DEFAULT_SUBAGENT_GOAL_MAX_BYTES + 1);
+    for (field, value) in [
+        (
+            "task",
+            json!({
+                "flavor_id": "general",
+                "task": oversized.clone(),
+            }),
+        ),
+        (
+            "handoff",
+            json!({
+                "flavor_id": "general",
+                "task": "investigate",
+                "handoff": oversized,
+            }),
+        ),
+    ] {
+        let codec =
+            JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver { value: Ok(value) }));
+
+        let error = codec.decode(&context, &input_ref()).await.unwrap_err();
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            error
+                .safe_summary
+                .contains(&format!("spawn_subagent {field} is too large")),
+            "unexpected error for {field}: {}",
+            error.safe_summary
+        );
+    }
+}
+
+#[tokio::test]
+async fn json_spawn_input_codec_uses_utf8_byte_budget_for_multibyte_goal_fields() {
+    let context = test_run_context("spawn-codec-multibyte-goal").await;
+    let multibyte = "\u{8a9e}";
+    let oversized = multibyte.repeat(DEFAULT_SUBAGENT_GOAL_MAX_BYTES / multibyte.len() + 1);
+    assert!(oversized.chars().count() <= DEFAULT_SUBAGENT_GOAL_MAX_BYTES);
+    assert!(oversized.len() > DEFAULT_SUBAGENT_GOAL_MAX_BYTES);
+
+    let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
+        value: Ok(json!({
+            "flavor_id": "general",
+            "task": oversized,
+        })),
+    }));
+
+    let error = codec.decode(&context, &input_ref()).await.unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("spawn_subagent task is too large")
+    );
+    assert!(error.safe_summary.contains("bytes"));
+}
+
+#[tokio::test]
 async fn json_spawn_input_codec_rejects_invalid_subagent_kind_ids() {
     let context = test_run_context("spawn-codec-invalid-kind").await;
     for flavor_id in [
@@ -1505,14 +2565,8 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
     let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
     {
         let mut refs = port.auth_input_refs.lock().unwrap();
-        refs.insert(
-            input_ref_a.clone(),
-            CapabilityInputRef::new("input:auth-a").unwrap(),
-        );
-        refs.insert(
-            input_ref_b.clone(),
-            CapabilityInputRef::new("input:auth-b").unwrap(),
-        );
+        refs.insert(input_ref_a.clone());
+        refs.insert(input_ref_b.clone());
     }
 
     let make_invocation = |input_ref: CapabilityInputRef| CapabilityInvocation {
@@ -1596,14 +2650,8 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
     let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
     {
         let mut refs = port.auth_input_refs.lock().unwrap();
-        refs.insert(
-            input_ref_a.clone(),
-            CapabilityInputRef::new("input:auth-a").unwrap(),
-        );
-        refs.insert(
-            input_ref_b.clone(),
-            CapabilityInputRef::new("input:auth-b").unwrap(),
-        );
+        refs.insert(input_ref_a.clone());
+        refs.insert(input_ref_b.clone());
     }
 
     let spawn_id = CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap();
@@ -1696,10 +2744,7 @@ async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
         SubagentSpawnLimits::default(),
         deps,
     );
-    port.auth_input_refs
-        .lock()
-        .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+    port.auth_input_refs.lock().unwrap().insert(input_ref());
 
     let batch_outcome = port
         .invoke_capability_batch(CapabilityBatchInvocation {

@@ -1002,6 +1002,13 @@ pub trait SecretStore: Send + Sync {
         handle: &SecretHandle,
     ) -> Result<Option<SecretMetadata>, SecretStoreError>;
 
+    /// Deletes a scoped secret if it exists. Returns whether a stored secret was removed.
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError>;
+
     /// Creates a one-shot lease for later secret consumption.
     async fn lease_once(
         &self,
@@ -1179,6 +1186,25 @@ where
             Err(SecretError::NotFound(_)) => Ok(None),
             Err(error) => Err(map_legacy_secret_error(error)),
         }
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        let legacy_user_id = scoped_legacy_user_id(scope);
+        let removed = self
+            .inner
+            .delete(&legacy_user_id, handle.as_str())
+            .await
+            .map_err(map_legacy_secret_error)?;
+        if removed {
+            self.lock_leases()?.retain(|key, record| {
+                !(key.matches_scope(scope) && record.lease.handle == *handle)
+            });
+        }
+        Ok(removed)
     }
 
     async fn lease_once(
@@ -1388,6 +1414,14 @@ impl SecretStore for InMemorySecretStore {
         self.inner.metadata(scope, handle).await
     }
 
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        self.inner.delete(scope, handle).await
+    }
+
     async fn lease_once(
         &self,
         scope: &ResourceScope,
@@ -1459,6 +1493,36 @@ mod tests {
             scoped_legacy_user_id(&delimiter_scope)
         );
         assert!(scoped_legacy_user_id(&none_agent).contains("\"agent_id\":null"));
+    }
+
+    #[tokio::test]
+    async fn scoped_secret_delete_removes_only_matching_scope() {
+        let store = InMemorySecretStore::new();
+        let owner = sample_scope("tenant-a", "user-a");
+        let other = sample_scope("tenant-a", "user-b");
+        let handle = SecretHandle::new("google-refresh").unwrap();
+
+        store
+            .put(
+                owner.clone(),
+                handle.clone(),
+                SecretMaterial::from("owner-secret"),
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                other.clone(),
+                handle.clone(),
+                SecretMaterial::from("other-secret"),
+            )
+            .await
+            .unwrap();
+
+        assert!(store.delete(&owner, &handle).await.unwrap());
+        assert!(!store.delete(&owner, &handle).await.unwrap());
+        assert!(store.metadata(&owner, &handle).await.unwrap().is_none());
+        assert!(store.metadata(&other, &handle).await.unwrap().is_some());
     }
 
     #[test]

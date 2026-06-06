@@ -93,6 +93,213 @@ fn reborn_crate_dependency_boundaries_hold() {
 }
 
 #[test]
+fn conversation_trusted_trigger_submitter_stays_conversation_or_composition_owned() {
+    let root = workspace_root();
+    let mut uses = Vec::new();
+    collect_forbidden_string_uses(
+        &root.join("crates"),
+        "ConversationTrustedTriggerSubmitter",
+        &root,
+        &mut uses,
+    );
+    let allowed = BTreeSet::from([
+        "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs",
+        "crates/ironclaw_conversations/src/inbound.rs",
+    ]);
+    let violations = uses
+        .into_iter()
+        .filter(|path| !allowed.contains(path.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "Conversation trusted trigger submission must stay conversations/composition-owned; \
+         product adapters and capabilities must use untrusted inbound requests. \
+         Unexpected call sites:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn conversation_trusted_trigger_submitter_stays_out_of_root_exports() {
+    let root = workspace_root();
+    let lib_source = std::fs::read_to_string(root.join("crates/ironclaw_conversations/src/lib.rs"))
+        .expect("conversation lib source must be readable");
+
+    assert!(
+        !lib_source.contains("ConversationTrustedTriggerSubmitter"),
+        "ConversationTrustedTriggerSubmitter must not be re-exported from ironclaw_conversations; \
+         composition should use the trusted_trigger_fire_submitter factory returning the trait object"
+    );
+}
+
+#[test]
+fn conversation_trusted_trigger_classifier_stays_out_of_root_exports() {
+    let root = workspace_root();
+    let lib_source = std::fs::read_to_string(root.join("crates/ironclaw_conversations/src/lib.rs"))
+        .expect("conversation lib source must be readable");
+
+    assert!(
+        !lib_source.contains("classify_trusted_trigger_inbound_error"),
+        "classify_trusted_trigger_inbound_error is submitter policy and must not be re-exported \
+         from ironclaw_conversations; composition-owned materialization should classify its own \
+         local errors"
+    );
+    assert!(
+        !lib_source.contains("classify_inbound_error"),
+        "trusted trigger inbound classification must not be re-exported from \
+         ironclaw_conversations; keep it private to conversations-owned submitter policy"
+    );
+    assert!(
+        !lib_source.contains("TrustedTriggerInboundFailureKind"),
+        "trusted trigger inbound classification types must not be re-exported from \
+         ironclaw_conversations; keep them private to conversations-owned submitter policy"
+    );
+    assert!(
+        !lib_source.contains("pub mod trusted_trigger"),
+        "trusted_trigger must stay a private implementation module; root exports should name only \
+         the narrow symbols downstream composition needs"
+    );
+}
+
+#[test]
+fn trusted_trigger_submit_request_minting_stays_worker_owned() {
+    let root = workspace_root();
+    let mut struct_literal_uses = Vec::new();
+    collect_forbidden_string_uses(
+        &root.join("crates"),
+        "TrustedTriggerSubmitRequest {",
+        &root,
+        &mut struct_literal_uses,
+    );
+    let allowed_struct_literals = BTreeSet::from([
+        "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs",
+        "crates/ironclaw_triggers/src/worker/ports.rs",
+    ]);
+    let struct_literal_violations = struct_literal_uses
+        .into_iter()
+        .filter(|path| !allowed_struct_literals.contains(path.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(
+        struct_literal_violations.is_empty(),
+        "TrustedTriggerSubmitRequest fields must stay private; trusted trigger requests \
+         are minted by the trigger worker, not by downstream submitter callers. \
+         Unexpected struct literal use:\n{}",
+        struct_literal_violations.join("\n")
+    );
+}
+
+#[test]
+fn retired_host_trusted_ingress_token_crate_stays_removed() {
+    let root = workspace_root();
+    let retired_crate_name = ["ironclaw", "trusted", "ingress"].join("_");
+    assert!(
+        !root
+            .join("crates")
+            .join(&retired_crate_name)
+            .join("Cargo.toml")
+            .exists(),
+        "a separate trusted ingress crate must stay absent; trusted trigger \
+         submission is sealed by ironclaw_triggers and privately converted inside \
+         ironclaw_conversations"
+    );
+
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let package_names = packages
+        .iter()
+        .filter_map(|package| package["name"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !package_names.contains(retired_crate_name.as_str()),
+        "a separate trusted ingress crate must not be introduced as a workspace crate"
+    );
+
+    let dependencies = packages
+        .iter()
+        .filter_map(package_dependencies)
+        .collect::<HashMap<_, _>>();
+    let violations = dependencies
+        .iter()
+        .filter_map(|(crate_name, deps)| {
+            deps.iter()
+                .any(|dependency| dependency == retired_crate_name.as_str())
+                .then_some(crate_name.as_str())
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "a separate trusted ingress crate must not be introduced as a production dependency; \
+         trusted trigger submission is now sealed by ironclaw_triggers and privately \
+         converted inside ironclaw_conversations. Unexpected dependents:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
+    let root = workspace_root();
+    let forbidden = [
+        ForbiddenUse {
+            pattern: "ConversationTrustedTriggerSubmitter",
+            reason: "untrusted ingress paths must not construct conversation-owned trusted trigger submitters",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "trusted_trigger_fire_submitter",
+            reason: "untrusted ingress paths must not build host-trusted trigger submitters",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "TrustedTriggerSubmitRequest",
+            reason: "untrusted ingress paths must not submit host-trusted trigger fires",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "TrustedTriggerFireSubmitter",
+            reason: "untrusted ingress paths must not implement host-trusted trigger submission",
+            exempt: None,
+        },
+    ];
+    let untrusted_src_roots = [
+        "crates/ironclaw_capabilities/src",
+        "crates/ironclaw_first_party_extension_ports/src",
+        "crates/ironclaw_first_party_extensions/src",
+        "crates/ironclaw_host_api/src",
+        "crates/ironclaw_host_runtime/src",
+        "crates/ironclaw_product_adapters/src",
+        "crates/ironclaw_product_adapter_registry/src",
+        "crates/ironclaw_product_workflow/src",
+        "crates/ironclaw_product_workflow_storage/src",
+        "crates/ironclaw_reborn_webui_ingress/src",
+        "crates/ironclaw_wasm_product_adapters/src",
+        "crates/ironclaw_webui_v2/src",
+        "crates/ironclaw_telegram_v2_adapter/src",
+        "crates/ironclaw_slack_v2_adapter/src",
+    ];
+
+    let mut violations = Vec::new();
+    for relative_root in untrusted_src_roots {
+        let dir = root.join(relative_root);
+        if !dir.exists() {
+            continue;
+        }
+        collect_forbidden_uses(&dir, &root, &forbidden, &mut violations);
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Untrusted ingress, product, and capability paths must not submit or construct host-trusted synthetic inbound requests; \
+         those operations belong to the conversations/composition boundary only:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
@@ -174,9 +381,9 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "ironclaw_reborn_config must remain a standalone boot contract crate with no IronClaw workspace dependencies of any dependency kind",
     );
 
-    let cli_runtime_source =
-        std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/src/runtime.rs"))
-            .expect("Reborn CLI runtime.rs must be readable");
+    let runtime_dir = root.join("crates/ironclaw_reborn_cli/src/runtime");
+    let mut cli_runtime_source = String::new();
+    collect_runtime_rs(&runtime_dir, &mut cli_runtime_source);
     assert!(
         cli_runtime_source.contains("build_reborn_runtime"),
         "Reborn CLI should enter the assembled runtime through ironclaw_reborn_composition::build_reborn_runtime"
@@ -191,7 +398,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     ] {
         assert!(
             !cli_runtime_source.contains(forbidden),
-            "Reborn CLI runtime.rs must not wire lower-level Reborn runtime pieces directly via `{forbidden}`; keep REPL as a UX shell over ironclaw_reborn_composition."
+            "Reborn CLI runtime/ must not wire lower-level Reborn runtime pieces directly via `{forbidden}`; keep REPL as a UX shell over ironclaw_reborn_composition."
         );
     }
 }
@@ -524,8 +731,9 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
         );
     }
     assert!(
-        composition_runtime_sources.contains("use ironclaw_reborn::loop_driver_host::"),
-        "composition runtime module set missing `use ironclaw_reborn::loop_driver_host::` -- \
+        composition_runtime_sources.contains("use ironclaw_loop_support::")
+            && composition_runtime_sources.contains("LoopCapabilityPortFactory"),
+        "composition runtime module set missing loop-support capability factory wiring -- \
          the host adapter assembly may live in a runtime submodule, but it must stay inside \
          `ironclaw_reborn_composition` rather than the CLI or other ingress points."
     );
@@ -1010,30 +1218,37 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         ForbiddenUse {
             pattern: "tokio::net::TcpListener::bind",
             reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "std::net::TcpListener::bind",
             reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "TcpListener::bind",
             reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "axum::serve",
             reason: "Reborn product/API crates must not own server lifecycle",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "hyper::Server",
             reason: "Reborn product/API crates must not own server lifecycle",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "Server::bind",
             reason: "Reborn product/API crates must not own server lifecycle",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "axum_server::bind",
             reason: "Reborn product/API crates must not own server lifecycle",
+            exempt: None,
         },
     ];
 
@@ -1050,6 +1265,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_product_workflow/src",
         "crates/ironclaw_wasm_product_adapters/src",
         "crates/ironclaw_telegram_v2_adapter/src",
+        "crates/ironclaw_slack_v2_adapter/src",
         "crates/ironclaw_outbound/src",
         "crates/ironclaw_conversations/src",
         "crates/ironclaw_turns/src",
@@ -1085,78 +1301,97 @@ fn reborn_product_auth_contract_stays_reborn_native() {
         ForbiddenUse {
             pattern: "ironclaw::",
             reason: "Reborn product auth must not depend on the v1 root crate",
+            exempt: Some(is_reborn_tracing_target_line),
         },
         ForbiddenUse {
             pattern: "src/extensions",
             reason: "v1 extension paths are inventory only, not Reborn auth implementation",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "src/channels/web",
             reason: "v1 web routes are inventory only, not Reborn auth implementation",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "ExtensionManager",
             reason: "Reborn product auth must not call through the v1 extension manager",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "PendingOAuth",
             reason: "Reborn product auth must not reuse v1 pending OAuth maps",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "PendingGate",
             reason: "Reborn product auth must not reuse v1 pending gate maps",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "SecretsStore",
             reason: "Reborn product auth must use opaque handles, not raw v1 secrets storage",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "get_decrypted",
             reason: "Reborn product auth must not retrieve raw secret material directly",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "auth-token",
             reason: "Reborn manual-token setup must not fall back to v1 chat token route names",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "auth_token",
             reason: "Reborn manual-token setup must not fall back to v1 chat token command paths",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "IncomingMessage",
             reason: "Reborn product auth must not capture manual tokens through chat transcripts",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "ChatMessage",
             reason: "Reborn product auth must not capture manual tokens through chat transcripts",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "secret_name",
             reason: "Reborn product auth must use scoped credential accounts and opaque handles, not raw v1 secret names",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "SecretName",
             reason: "Reborn product auth must use scoped credential accounts and opaque handles, not raw v1 secret names",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "reqwest",
             reason: "Reborn product auth must not own outbound HTTP transport",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "authorization_code: String",
             reason: "raw OAuth codes must be one-shot non-serializable provider inputs",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "pkce_verifier: String",
             reason: "raw PKCE verifiers must be one-shot non-serializable provider inputs",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "access_token: String",
             reason: "raw provider tokens must not enter product auth contract records",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "refresh_token: String",
             reason: "raw provider tokens must not enter product auth contract records",
+            exempt: None,
         },
     ];
 
@@ -1183,7 +1418,8 @@ fn reborn_product_auth_contract_stays_reborn_native() {
         &forbidden,
         &mut violations,
     );
-    collect_forbidden_reborn_auth_file_uses(
+    collect_forbidden_reborn_auth_path_uses(
+        &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve"),
         &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve.rs"),
         &root,
         &forbidden,
@@ -1205,6 +1441,7 @@ struct ForbiddenRuntimeNetworkUse {
 struct ForbiddenUse {
     pattern: &'static str,
     reason: &'static str,
+    exempt: Option<fn(&str) -> bool>,
 }
 
 fn collect_forbidden_turns_identifier_uses(
@@ -1233,6 +1470,37 @@ fn collect_forbidden_turns_identifier_uses(
                     path.strip_prefix(root).unwrap_or(&path).display()
                 ));
             }
+        }
+    }
+}
+
+fn collect_forbidden_string_uses(
+    dir: &std::path::Path,
+    needle: &str,
+    root: &std::path::Path,
+    matches: &mut Vec<String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_forbidden_string_uses(&path, needle, root, matches);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        if contents.contains(needle) {
+            matches.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string(),
+            );
         }
     }
 }
@@ -1798,6 +2066,60 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // Concrete Slack protocol adapter owns only Slack payload
+            // normalization/rendering over the ProductAdapter DTO surface.
+            // Host auth verification, credential resolution, delivery fanout,
+            // workflow admission, and runtime/network authority stay outside
+            // the adapter crate.
+            crate_name: "ironclaw_slack_v2_adapter",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_auth",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_api",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_workflow",
+                "ironclaw_product_workflow_storage",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_telegram_v2_adapter",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_webui_v2",
+            ],
+        },
+        BoundaryRule {
             crate_name: "ironclaw_outbound",
             forbidden: vec![
                 "ironclaw",
@@ -1826,6 +2148,53 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_skills",
                 "ironclaw_tui",
                 "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            // Trigger core owns source evaluation and trigger-domain state.
+            // Durable storage, poller lifecycle, capability registration,
+            // product adapters, and outbound delivery are wired by later
+            // owners, not by reaching upward from this crate.
+            crate_name: "ironclaw_triggers",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_product_workflow_storage",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
@@ -2297,6 +2666,38 @@ fn assert_no_normal_workspace_deps<'a>(
     }
 }
 
+/// Recursively concatenate every `.rs` file under `dir` into `out`,
+/// descending into subdirectories. Matches the recursion pattern used by
+/// `collect_forbidden_*` walkers above so future boundary checks over
+/// `runtime/` can reuse the same helper. Used by
+/// `reborn_cli_binary_crate_stays_separate_from_v1_root` to scan the
+/// entire `runtime/` module tree for forbidden imports.
+fn collect_runtime_rs(dir: &std::path::Path, out: &mut String) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|err| {
+        panic!(
+            "Reborn CLI runtime directory must be readable at {}: {err}",
+            dir.display()
+        )
+    }) {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_runtime_rs(&path, out);
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!(
+                "Reborn CLI runtime file {} unreadable: {err}",
+                path.display()
+            )
+        });
+        out.push_str(&content);
+        out.push('\n');
+    }
+}
+
 fn collect_forbidden_runtime_network_uses(
     dir: &std::path::Path,
     root: &std::path::Path,
@@ -2356,6 +2757,9 @@ fn collect_forbidden_uses(
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         for (line_number, line) in contents.lines().enumerate() {
             for rule in forbidden {
+                if rule.exempt.is_some_and(|exempt| exempt(line)) {
+                    continue;
+                }
                 if line.contains(rule.pattern) {
                     let relative = path.strip_prefix(root).unwrap_or(&path);
                     violations.push(format!(
@@ -2371,6 +2775,20 @@ fn collect_forbidden_uses(
     }
 }
 
+fn collect_forbidden_reborn_auth_path_uses(
+    module_dir: &std::path::Path,
+    legacy_file: &std::path::Path,
+    root: &std::path::Path,
+    forbidden: &[ForbiddenUse],
+    violations: &mut Vec<String>,
+) {
+    if module_dir.is_dir() {
+        collect_forbidden_uses(module_dir, root, forbidden, violations);
+        return;
+    }
+    collect_forbidden_reborn_auth_file_uses(legacy_file, root, forbidden, violations);
+}
+
 fn collect_forbidden_reborn_auth_file_uses(
     path: &std::path::Path,
     root: &std::path::Path,
@@ -2382,16 +2800,27 @@ fn collect_forbidden_reborn_auth_file_uses(
         path.display()
     );
     let contents = std::fs::read_to_string(path).expect(&message);
-    for rule in forbidden {
-        if contents.contains(rule.pattern) {
+    for (line_number, line) in contents.lines().enumerate() {
+        for rule in forbidden {
+            if rule.exempt.is_some_and(|exempt| exempt(line)) {
+                continue;
+            }
+            if !line.contains(rule.pattern) {
+                continue;
+            }
             violations.push(format!(
-                "{} contains forbidden product-auth implementation pattern `{}`: {}",
+                "{}:{} contains forbidden product-auth implementation pattern `{}`: {}",
                 path.strip_prefix(root).unwrap_or(path).display(),
+                line_number + 1,
                 rule.pattern,
                 rule.reason
             ));
         }
     }
+}
+
+fn is_reborn_tracing_target_line(line: &str) -> bool {
+    line.contains("target: \"ironclaw::reborn::") || line.contains("target = \"ironclaw::reborn::")
 }
 
 #[test]
@@ -2413,6 +2842,7 @@ fn collect_forbidden_reborn_auth_file_uses_detects_violation() {
         &[ForbiddenUse {
             pattern: "reqwest",
             reason: "provider transport must stay outside product auth composition",
+            exempt: None,
         }],
         &mut violations,
     );
@@ -2423,6 +2853,117 @@ fn collect_forbidden_reborn_auth_file_uses_detects_violation() {
     assert!(
         violations[0].contains("crates/ironclaw_reborn_composition/src/auth.rs"),
         "violation should report the relative auth.rs path: {:?}",
+        violations
+    );
+    assert!(
+        violations[0].contains("provider transport must stay outside product auth composition"),
+        "violation should report the forbidden-use reason: {:?}",
+        violations
+    );
+}
+
+#[test]
+fn collect_forbidden_reborn_auth_file_uses_allows_reborn_tracing_targets() {
+    let root = std::env::temp_dir().join(format!(
+        "ironclaw-reborn-auth-boundary-tracing-test-{}",
+        std::process::id()
+    ));
+    let src = root.join("crates/ironclaw_reborn_composition/src");
+    std::fs::create_dir_all(&src).expect("test source directory must be created");
+    let auth_rs = src.join("auth.rs");
+    std::fs::write(
+        &auth_rs,
+        "fn allowed() { tracing::warn!(target: \"ironclaw::reborn::product_auth::oauth\"); }\n",
+    )
+    .expect("test auth.rs must be written");
+
+    let mut violations = Vec::new();
+    collect_forbidden_reborn_auth_file_uses(
+        &auth_rs,
+        &root,
+        &[ForbiddenUse {
+            pattern: "ironclaw::",
+            reason: "Reborn product auth must not depend on the v1 root crate",
+            exempt: Some(is_reborn_tracing_target_line),
+        }],
+        &mut violations,
+    );
+
+    std::fs::remove_dir_all(&root).expect("test source directory must be removed");
+
+    assert!(
+        violations.is_empty(),
+        "Reborn tracing targets are log namespaces, not v1 root crate references: {:?}",
+        violations
+    );
+}
+
+#[test]
+fn collect_forbidden_uses_allows_reborn_tracing_targets() {
+    let root = std::env::temp_dir().join(format!(
+        "ironclaw-reborn-auth-boundary-dir-tracing-test-{}",
+        std::process::id()
+    ));
+    let src = root.join("crates/ironclaw_reborn_composition/src/product_auth_serve");
+    std::fs::create_dir_all(&src).expect("test source directory must be created");
+    let mod_rs = src.join("mod.rs");
+    std::fs::write(
+        &mod_rs,
+        "fn allowed() { tracing::warn!(target: \"ironclaw::reborn::product_auth::oauth\"); }\n",
+    )
+    .expect("test mod.rs must be written");
+
+    let mut violations = Vec::new();
+    collect_forbidden_uses(
+        &src,
+        &root,
+        &[ForbiddenUse {
+            pattern: "ironclaw::",
+            reason: "Reborn product auth must not depend on the v1 root crate",
+            exempt: Some(is_reborn_tracing_target_line),
+        }],
+        &mut violations,
+    );
+
+    std::fs::remove_dir_all(&root).expect("test source directory must be removed");
+
+    assert!(
+        violations.is_empty(),
+        "Directory scanner should treat Reborn tracing targets as log namespaces: {:?}",
+        violations
+    );
+}
+
+#[test]
+fn collect_forbidden_uses_detects_violation() {
+    let root = std::env::temp_dir().join(format!(
+        "ironclaw-forbidden-use-dir-test-{}",
+        std::process::id()
+    ));
+    let src = root.join("crates/example/src");
+    std::fs::create_dir_all(&src).expect("test source directory must be created");
+    let mod_rs = src.join("mod.rs");
+    std::fs::write(&mod_rs, "fn forbidden() { let _ = \"reqwest\"; }\n")
+        .expect("test mod.rs must be written");
+
+    let mut violations = Vec::new();
+    collect_forbidden_uses(
+        &src,
+        &root,
+        &[ForbiddenUse {
+            pattern: "reqwest",
+            reason: "provider transport must stay outside product auth composition",
+            exempt: None,
+        }],
+        &mut violations,
+    );
+
+    std::fs::remove_dir_all(&root).expect("test source directory must be removed");
+
+    assert_eq!(violations.len(), 1);
+    assert!(
+        violations[0].contains("crates/example/src/mod.rs"),
+        "violation should report the relative mod.rs path: {:?}",
         violations
     );
     assert!(

@@ -4,14 +4,13 @@ use ironclaw_host_api::ThreadId;
 use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
 use ironclaw_threads::{
     CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadService,
-    SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest, ThreadMessageRecord,
-    ThreadScope,
+    SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest, ThreadScope,
 };
 use ironclaw_turns::run_profile::{
-    LoopCompactionError, LoopCompactionMode, LoopCompactionPort, LoopCompactionRequest,
-    LoopCompactionResponse, LoopSafeSummary, LoopSummaryArtifactId, SystemInferenceError,
-    SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest, SystemInferenceTaskId,
-    SystemPromptSource, SystemTaskKind,
+    LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome, LoopCompactionPort,
+    LoopCompactionRequest, LoopCompactionResponse, LoopSafeSummary, LoopSummaryArtifactId,
+    SystemInferenceError, SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
+    SystemInferenceResponse, SystemInferenceTaskId, SystemPromptSource, SystemTaskKind,
 };
 use thiserror::Error;
 
@@ -35,6 +34,30 @@ pub(crate) enum CompactionError {
     Cancelled,
     #[error("compaction persistence failed: {safe_summary}")]
     PersistenceFailed { safe_summary: LoopSafeSummary },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionMessageDisposition {
+    Include,
+    SkipEphemeral(CompactionSkipReason),
+    DeferUntilStable(CompactionDeferralReason),
+    RejectInvalid(CompactionRejectReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionSkipReason {
+    CapabilityDisplayPreview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionDeferralReason {
+    UnstableTranscriptStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionRejectReason {
+    UnsupportedStatus,
+    UnsupportedKind,
 }
 
 pub(crate) struct CompactionTask<S>
@@ -67,6 +90,34 @@ pub(crate) struct CompactionTaskRequest {
     pub(crate) _preserve_tail_tokens: u64,
     pub(crate) mode: LoopCompactionMode,
     pub(crate) deadline_ms: u64,
+}
+
+struct ValidatedCompactionRange {
+    thread_id: ThreadId,
+    thread_scope: ThreadScope,
+    start_sequence: u64,
+    end_sequence: u64,
+    messages: Vec<ValidatedCompactionMessage>,
+}
+
+enum CompactionRangeDecision {
+    Ready(ValidatedCompactionRange),
+    Deferred { safe_summary: LoopSafeSummary },
+}
+
+struct ValidatedCompactionMessage {
+    sequence: u64,
+    kind: MessageKind,
+    body: String,
+}
+
+struct CompactionInput {
+    text: String,
+}
+
+struct SanitizedSummary {
+    content: String,
+    compression_ratio_ppm: u32,
 }
 
 impl<S> HostManagedLoopCompactionPort<S>
@@ -119,9 +170,8 @@ where
     async fn compact_loop_context(
         &self,
         request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
-        let response = self
-            .task
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
+        self.task
             .run(CompactionTaskRequest {
                 task_id: request.task_id,
                 thread_id: request.thread_id,
@@ -133,8 +183,7 @@ where
                 deadline_ms: request.deadline_ms,
             })
             .await
-            .map_err(compaction_error_to_loop)?;
-        Ok(response)
+            .map_err(compaction_error_to_loop)
     }
 }
 
@@ -163,27 +212,36 @@ where
     async fn run(
         &self,
         request: CompactionTaskRequest,
-    ) -> Result<LoopCompactionResponse, CompactionError> {
-        let CompactionTaskRequest {
-            task_id,
-            thread_id,
-            expected_scope,
-            last_compacted_through_seq,
-            drop_through_seq,
-            _preserve_tail_tokens: _,
-            mode,
-            deadline_ms,
-        } = request;
-        if drop_through_seq == 0 {
+    ) -> Result<LoopCompactionOutcome, CompactionError> {
+        let range = match self.validate_range(&request).await? {
+            CompactionRangeDecision::Ready(range) => range,
+            CompactionRangeDecision::Deferred { safe_summary } => {
+                return Ok(LoopCompactionOutcome::Deferred { safe_summary });
+            }
+        };
+        let input = self.build_input(&range)?;
+        let input_bytes = input.text.len();
+        let response = self.run_inference(&request, input).await?;
+        let summary = self.sanitize_summary(&response, input_bytes)?;
+        self.persist_summary(range, summary)
+            .await
+            .map(LoopCompactionOutcome::Compacted)
+    }
+
+    async fn validate_range(
+        &self,
+        request: &CompactionTaskRequest,
+    ) -> Result<CompactionRangeDecision, CompactionError> {
+        if request.drop_through_seq == 0 {
             return Err(CompactionError::InvalidCutPoint);
         }
-        if mode != LoopCompactionMode::Fresh {
+        if request.mode != LoopCompactionMode::Fresh {
             return Err(CompactionError::UnsupportedMode);
         }
-        let start_exclusive = last_compacted_through_seq.unwrap_or(0);
+        let start_exclusive = request.last_compacted_through_seq.unwrap_or(0);
         if self.threads.supports_resolve_scope() {
-            match self.threads.resolve_scope(thread_id.clone()).await {
-                Ok(scope) if scope == expected_scope => {}
+            match self.threads.resolve_scope(request.thread_id.clone()).await {
+                Ok(scope) if scope == request.expected_scope => {}
                 Ok(_) => {
                     return Err(CompactionError::PersistenceFailed {
                         safe_summary: safe("thread scope mismatch"),
@@ -199,70 +257,115 @@ where
         let range = self
             .threads
             .list_thread_messages_range(ThreadMessageRangeRequest {
-                scope: expected_scope.clone(),
-                thread_id: thread_id.clone(),
+                scope: request.expected_scope.clone(),
+                thread_id: request.thread_id.clone(),
                 after_sequence: start_exclusive,
-                through_sequence: drop_through_seq,
+                through_sequence: request.drop_through_seq,
             })
             .await
             .map_err(|_| CompactionError::PersistenceFailed {
                 safe_summary: safe("thread message range unavailable"),
             })?;
-        if range.thread.scope != expected_scope {
+        if range.thread.scope != request.expected_scope {
             return Err(CompactionError::PersistenceFailed {
                 safe_summary: safe("thread scope mismatch"),
             });
         }
         let thread_scope = range.thread.scope.clone();
         let messages = range.messages;
-        if !messages.iter().any(|message| {
-            message.sequence == drop_through_seq
-                && message.kind == MessageKind::User
-                && is_compaction_model_visible(message.kind, message.status)
-        }) {
-            return Err(CompactionError::InvalidCutPoint);
+        let terminal = messages
+            .iter()
+            .find(|message| message.sequence == request.drop_through_seq)
+            .ok_or(CompactionError::InvalidCutPoint)?;
+        let mut deferred_reason = None;
+        match classify_compaction_message(terminal.kind, terminal.status) {
+            CompactionMessageDisposition::DeferUntilStable(reason) => {
+                deferred_reason = Some(reason);
+            }
+            CompactionMessageDisposition::Include if terminal.kind == MessageKind::User => {}
+            CompactionMessageDisposition::Include
+            | CompactionMessageDisposition::SkipEphemeral(_)
+            | CompactionMessageDisposition::RejectInvalid(_) => {
+                return Err(CompactionError::InvalidCutPoint);
+            }
         }
 
-        let mut input = String::new();
-        for message in &messages {
-            if message.kind == MessageKind::CapabilityDisplayPreview {
-                return Err(CompactionError::InvalidCutPoint);
+        let mut validated_messages = Vec::with_capacity(messages.len());
+        for message in messages {
+            match classify_compaction_message(message.kind, message.status) {
+                CompactionMessageDisposition::Include => {}
+                CompactionMessageDisposition::SkipEphemeral(_) => continue,
+                CompactionMessageDisposition::DeferUntilStable(reason) => {
+                    deferred_reason.get_or_insert(reason);
+                    continue;
+                }
+                CompactionMessageDisposition::RejectInvalid(_) => {
+                    return Err(CompactionError::InvalidCutPoint);
+                }
             }
-            if !is_compaction_model_visible(message.kind, message.status) {
-                return Err(CompactionError::InvalidCutPoint);
-            }
-            let body = compaction_message_body(message)?;
+            let body = message.content.ok_or(CompactionError::InvalidCutPoint)?;
+            validated_messages.push(ValidatedCompactionMessage {
+                sequence: message.sequence,
+                kind: message.kind,
+                body,
+            });
+        }
+
+        if let Some(reason) = deferred_reason {
+            return Ok(defer_compaction(reason));
+        }
+
+        Ok(CompactionRangeDecision::Ready(ValidatedCompactionRange {
+            thread_id: request.thread_id.clone(),
+            thread_scope,
+            start_sequence: start_exclusive.saturating_add(1),
+            end_sequence: request.drop_through_seq,
+            messages: validated_messages,
+        }))
+    }
+
+    fn build_input(
+        &self,
+        range: &ValidatedCompactionRange,
+    ) -> Result<CompactionInput, CompactionError> {
+        let mut text = String::new();
+        for message in &range.messages {
+            let body = message.body.as_str();
             if !self.injection_scanner.scan_injection(body).is_empty() {
                 return Err(CompactionError::InjectionDetected);
             }
             if !self.leak_detector.scan_leaks(body).is_clean() {
                 return Err(CompactionError::LeakDetected);
             }
-            let observed_bytes = input.len().saturating_add(escaped_message_len(
+            append_escaped_message_checked(
+                &mut text,
                 message.sequence,
                 message.kind,
                 body,
-            ));
-            if observed_bytes > self.max_input_bytes {
-                return Err(CompactionError::InputTooLarge {
-                    cap: self.max_input_bytes,
-                    observed_bytes,
-                });
-            }
-            append_escaped_message(&mut input, message.sequence, message.kind, body);
+                self.max_input_bytes,
+            )?;
         }
-        if !self.injection_scanner.scan_injection(&input).is_empty() {
+        // The raw per-message scan is the primary guard. This second pass is
+        // intentionally over the exact serialized input that reaches system
+        // inference, catching delimiter/escaping interactions in the final
+        // model-visible shape.
+        if !self.injection_scanner.scan_injection(&text).is_empty() {
             return Err(CompactionError::InjectionDetected);
         }
-        if !self.leak_detector.scan_leaks(&input).is_clean() {
+        if !self.leak_detector.scan_leaks(&text).is_clean() {
             return Err(CompactionError::LeakDetected);
         }
-        let input_bytes = input.len();
+        Ok(CompactionInput { text })
+    }
 
-        let response = self
-            .inference
+    async fn run_inference(
+        &self,
+        request: &CompactionTaskRequest,
+        input: CompactionInput,
+    ) -> Result<SystemInferenceResponse, CompactionError> {
+        self.inference
             .call_system_inference(SystemInferenceRequest {
-                task_id,
+                task_id: request.task_id,
                 identity: SystemInferenceIdentity {
                     task_kind: SystemTaskKind::Compaction,
                     prompt_source: SystemPromptSource::Static {
@@ -275,13 +378,19 @@ where
                     },
                     system_prompt: self.system_prompt.clone(),
                 },
-                input_text: input,
+                input_text: input.text,
                 max_input_tokens: self.max_input_tokens,
-                deadline_ms,
+                deadline_ms: request.deadline_ms,
             })
             .await
-            .map_err(map_inference_error)?;
+            .map_err(map_inference_error)
+    }
 
+    fn sanitize_summary(
+        &self,
+        response: &SystemInferenceResponse,
+        input_bytes: usize,
+    ) -> Result<SanitizedSummary, CompactionError> {
         if !self
             .injection_scanner
             .scan_injection(&response.output_text)
@@ -301,15 +410,26 @@ where
             escape_xml(&response.output_text)
         );
         let compression_ratio_ppm = compression_ratio_ppm(input_bytes, content.len());
+        Ok(SanitizedSummary {
+            content,
+            compression_ratio_ppm,
+        })
+    }
+
+    async fn persist_summary(
+        &self,
+        range: ValidatedCompactionRange,
+        summary: SanitizedSummary,
+    ) -> Result<LoopCompactionResponse, CompactionError> {
         let artifact = self
             .threads
             .create_summary_artifact(CreateSummaryArtifactRequest {
-                scope: thread_scope,
-                thread_id,
-                start_sequence: start_exclusive.saturating_add(1),
-                end_sequence: drop_through_seq,
+                scope: range.thread_scope,
+                thread_id: range.thread_id,
+                start_sequence: range.start_sequence,
+                end_sequence: range.end_sequence,
                 summary_kind: SummaryKind::Compaction,
-                content: MessageContent::text(content),
+                content: MessageContent::text(summary.content),
                 model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
             })
             .await
@@ -321,7 +441,7 @@ where
                 .map_err(|_| CompactionError::PersistenceFailed {
                     safe_summary: safe("summary artifact id is invalid"),
                 })?,
-            compression_ratio_ppm,
+            compression_ratio_ppm: summary.compression_ratio_ppm,
         })
     }
 }
@@ -343,14 +463,49 @@ where
     ))
 }
 
+#[cfg(test)]
 fn is_compaction_model_visible(kind: MessageKind, status: MessageStatus) -> bool {
+    matches!(
+        classify_compaction_message(kind, status),
+        CompactionMessageDisposition::Include
+    )
+}
+
+fn classify_compaction_message(
+    kind: MessageKind,
+    status: MessageStatus,
+) -> CompactionMessageDisposition {
+    if matches!(status, MessageStatus::Redacted | MessageStatus::Deleted) {
+        return CompactionMessageDisposition::RejectInvalid(
+            CompactionRejectReason::UnsupportedStatus,
+        );
+    }
+    if matches!(
+        status,
+        MessageStatus::DeferredBusy
+            | MessageStatus::Draft
+            | MessageStatus::Interrupted
+            | MessageStatus::Superseded
+    ) {
+        return CompactionMessageDisposition::DeferUntilStable(
+            CompactionDeferralReason::UnstableTranscriptStatus,
+        );
+    }
     if !matches!(
         status,
         MessageStatus::Accepted | MessageStatus::Submitted | MessageStatus::Finalized
     ) {
-        return false;
+        return CompactionMessageDisposition::RejectInvalid(
+            CompactionRejectReason::UnsupportedStatus,
+        );
     }
-    matches!(
+
+    if kind == MessageKind::CapabilityDisplayPreview {
+        return CompactionMessageDisposition::SkipEphemeral(
+            CompactionSkipReason::CapabilityDisplayPreview,
+        );
+    }
+    if matches!(
         kind,
         MessageKind::User
             | MessageKind::Assistant
@@ -358,34 +513,46 @@ fn is_compaction_model_visible(kind: MessageKind, status: MessageStatus) -> bool
             | MessageKind::Summary
             | MessageKind::CheckpointReference
             | MessageKind::ToolResultReference
-    )
+    ) {
+        return CompactionMessageDisposition::Include;
+    }
+    CompactionMessageDisposition::RejectInvalid(CompactionRejectReason::UnsupportedKind)
 }
 
-fn compaction_message_body(message: &ThreadMessageRecord) -> Result<&str, CompactionError> {
+fn defer_compaction(reason: CompactionDeferralReason) -> CompactionRangeDecision {
+    CompactionRangeDecision::Deferred {
+        safe_summary: match reason {
+            CompactionDeferralReason::UnstableTranscriptStatus => {
+                safe("compaction deferred until transcript stabilizes")
+            }
+        },
+    }
+}
+
+#[cfg(test)]
+fn compaction_message_body(
+    message: &ironclaw_threads::ThreadMessageRecord,
+) -> Result<&str, CompactionError> {
     message
         .content
         .as_deref()
         .ok_or(CompactionError::InvalidCutPoint)
 }
 
-fn append_escaped_message(output: &mut String, sequence: u64, kind: MessageKind, body: &str) {
-    output.push_str("<message sequence=\"");
-    output.push_str(&sequence.to_string());
-    output.push_str("\" kind=\"");
-    output.push_str(message_kind_name(kind));
-    output.push_str("\">");
-    output.push_str(&escape_xml(body));
-    output.push_str("</message>\n");
-}
-
-fn escaped_message_len(sequence: u64, kind: MessageKind, body: &str) -> usize {
-    "<message sequence=\"".len()
-        + sequence.to_string().len()
-        + "\" kind=\"".len()
-        + message_kind_name(kind).len()
-        + "\">".len()
-        + escaped_xml_len(body)
-        + "</message>\n".len()
+fn append_escaped_message_checked(
+    output: &mut String,
+    sequence: u64,
+    kind: MessageKind,
+    body: &str,
+    cap: usize,
+) -> Result<(), CompactionError> {
+    push_checked(output, "<message sequence=\"", cap)?;
+    push_checked(output, &sequence.to_string(), cap)?;
+    push_checked(output, "\" kind=\"", cap)?;
+    push_checked(output, message_kind_name(kind), cap)?;
+    push_checked(output, "\">", cap)?;
+    append_escaped_xml_checked(output, body, cap)?;
+    push_checked(output, "</message>\n", cap)
 }
 
 fn message_kind_name(kind: MessageKind) -> &'static str {
@@ -400,16 +567,49 @@ fn message_kind_name(kind: MessageKind) -> &'static str {
     }
 }
 
-fn escaped_xml_len(value: &str) -> usize {
-    value
-        .chars()
-        .map(|character| match character {
-            '&' => "&amp;".len(),
-            '<' => "&lt;".len(),
-            '>' => "&gt;".len(),
-            _ => character.len_utf8(),
-        })
-        .sum()
+fn append_escaped_xml_checked(
+    output: &mut String,
+    value: &str,
+    cap: usize,
+) -> Result<(), CompactionError> {
+    let mut run_start: Option<usize> = None;
+    for (idx, character) in value.char_indices() {
+        match character {
+            '&' | '<' | '>' => {
+                if let Some(start) = run_start.take() {
+                    push_checked(output, &value[start..idx], cap)?;
+                }
+                let segment = match character {
+                    '&' => "&amp;",
+                    '<' => "&lt;",
+                    '>' => "&gt;",
+                    _ => unreachable!(),
+                };
+                push_checked(output, segment, cap)?;
+            }
+            _ => {
+                if run_start.is_none() {
+                    run_start = Some(idx);
+                }
+            }
+        }
+    }
+    if let Some(start) = run_start {
+        push_checked(output, &value[start..], cap)?;
+    }
+    Ok(())
+}
+
+fn push_checked(output: &mut String, segment: &str, cap: usize) -> Result<(), CompactionError> {
+    let observed_bytes = output.len().saturating_add(segment.len());
+    if observed_bytes > cap {
+        return Err(CompactionError::InputTooLarge {
+            cap,
+            observed_bytes,
+        });
+    }
+    output.push_str(segment);
+    Ok(())
 }
 
 fn escape_xml(value: &str) -> String {
@@ -472,7 +672,7 @@ fn compaction_error_to_loop(error: CompactionError) -> LoopCompactionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_threads::ThreadMessageId;
+    use ironclaw_threads::{ThreadMessageId, ThreadMessageRecord};
 
     fn record_with_content(kind: MessageKind, content: Option<&str>) -> ThreadMessageRecord {
         ThreadMessageRecord {
@@ -528,5 +728,25 @@ mod tests {
         let message = record_with_content(MessageKind::ToolResultReference, Some("tool summary"));
 
         assert_eq!(compaction_message_body(&message), Ok("tool summary"));
+    }
+
+    #[test]
+    fn push_checked_accepts_exact_cap_and_rejects_one_over() {
+        let mut output = String::from("abcd");
+
+        assert_eq!(push_checked(&mut output, "ef", 6), Ok(()));
+        assert_eq!(output, "abcdef");
+        assert_eq!(
+            push_checked(&mut output, "g", 6),
+            Err(CompactionError::InputTooLarge {
+                cap: 6,
+                observed_bytes: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn compression_ratio_ppm_returns_zero_for_empty_input() {
+        assert_eq!(compression_ratio_ppm(0, 123), 0);
     }
 }

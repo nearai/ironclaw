@@ -15,12 +15,12 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
-    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver,
-    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle, loop_driver_execution_extension_id,
+    CapabilityResultWrite, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostInputBatch, HostInputEnvelope, HostInputQueue,
+    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
+    RunCancellationFactory, RunCancellationHandle, loop_driver_execution_extension_id,
     verify_product_live_cancellation_probe,
 };
 use ironclaw_reborn::{
@@ -57,6 +57,25 @@ use ironclaw_turns::{
     },
 };
 
+async fn write_capability_result_for_test(
+    io: &ProductLiveCapabilityIo,
+    run_context: &LoopRunContext,
+    input_ref: &CapabilityInputRef,
+    capability: &str,
+    output: serde_json::Value,
+) -> Result<LoopResultRef, AgentLoopHostError> {
+    let capability_id = capability_id(capability);
+    io.write_capability_result(CapabilityResultWrite {
+        run_context,
+        input_ref,
+        invocation_id: InvocationId::new(),
+        capability_id: &capability_id,
+        output,
+        display_preview: None,
+    })
+    .await
+}
+
 #[tokio::test]
 async fn capability_io_resolves_staged_inputs_and_materializes_run_scoped_results() {
     let io = ProductLiveCapabilityIo::default();
@@ -71,16 +90,15 @@ async fn capability_io_resolves_staged_inputs_and_materializes_run_scoped_result
         .unwrap();
     assert_eq!(resolved, serde_json::json!({ "text": "hello" }));
 
-    let result_ref = io
-        .write_capability_result(
-            &run_context,
-            &input_ref,
-            InvocationId::new(),
-            &capability_id("demo.echo"),
-            serde_json::json!({ "reply": "hello" }),
-        )
-        .await
-        .unwrap();
+    let result_ref = write_capability_result_for_test(
+        &io,
+        &run_context,
+        &input_ref,
+        "demo.echo",
+        serde_json::json!({ "reply": "hello" }),
+    )
+    .await
+    .unwrap();
 
     assert!(
         result_ref
@@ -131,16 +149,15 @@ async fn capability_io_rejects_cross_run_input_and_result_refs() {
         ironclaw_turns::run_profile::AgentLoopHostErrorKind::ScopeMismatch
     );
 
-    let result_ref = io
-        .write_capability_result(
-            &first_run,
-            &input_ref,
-            InvocationId::new(),
-            &capability_id("demo.echo"),
-            serde_json::json!({ "reply": "first" }),
-        )
-        .await
-        .unwrap();
+    let result_ref = write_capability_result_for_test(
+        &io,
+        &first_run,
+        &input_ref,
+        "demo.echo",
+        serde_json::json!({ "reply": "first" }),
+    )
+    .await
+    .unwrap();
     let result_error = io
         .result_for_ref(&second_run, &result_ref)
         .expect_err("cross-run result refs must fail closed");
@@ -161,26 +178,24 @@ async fn capability_io_prunes_refs_for_terminal_runs_without_cross_run_loss() {
     let second_input = io
         .stage_input(&second_run, serde_json::json!({ "text": "second" }))
         .unwrap();
-    let first_result = io
-        .write_capability_result(
-            &first_run,
-            &first_input,
-            InvocationId::new(),
-            &capability_id("demo.echo"),
-            serde_json::json!({ "reply": "first" }),
-        )
-        .await
-        .unwrap();
-    let second_result = io
-        .write_capability_result(
-            &second_run,
-            &second_input,
-            InvocationId::new(),
-            &capability_id("demo.echo"),
-            serde_json::json!({ "reply": "second" }),
-        )
-        .await
-        .unwrap();
+    let first_result = write_capability_result_for_test(
+        &io,
+        &first_run,
+        &first_input,
+        "demo.echo",
+        serde_json::json!({ "reply": "first" }),
+    )
+    .await
+    .unwrap();
+    let second_result = write_capability_result_for_test(
+        &io,
+        &second_run,
+        &second_input,
+        "demo.echo",
+        serde_json::json!({ "reply": "second" }),
+    )
+    .await
+    .unwrap();
 
     io.prune_run(&first_run).unwrap();
 
@@ -245,16 +260,15 @@ async fn capability_io_enforces_staging_entry_and_byte_caps() {
     );
 
     let oversized_result = serde_json::json!("x".repeat(4 * 1024 * 1024));
-    let byte_error = ProductLiveCapabilityIo::default()
-        .write_capability_result(
-            &run_context,
-            &CapabilityInputRef::new("input:oversized-result").unwrap(),
-            InvocationId::new(),
-            &capability_id("demo.echo"),
-            oversized_result,
-        )
-        .await
-        .expect_err("staging must enforce a serialized-byte cap");
+    let byte_error = write_capability_result_for_test(
+        &ProductLiveCapabilityIo::default(),
+        &run_context,
+        &CapabilityInputRef::new("input:oversized-result").unwrap(),
+        "demo.echo",
+        oversized_result,
+    )
+    .await
+    .expect_err("staging must enforce a serialized-byte cap");
     assert_eq!(
         byte_error.kind,
         ironclaw_turns::run_profile::AgentLoopHostErrorKind::BudgetExceeded
@@ -1245,6 +1259,8 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         model_policy_guard: Some(adapters.model_policy_guard),
         model_budget_accountant: Some(adapters.model_budget_accountant),
         safety_context: Some(adapters.safety_context),
+        hook_dispatcher_builder_factory: None,
+        hook_security_audit_sink: None,
         turn_event_sink: None,
     })
     .expect("adapter bundle should satisfy the product-live readiness gate");
@@ -1639,11 +1655,7 @@ impl LoopCapabilityInputResolver for UnusedCapabilityIo {
 impl LoopCapabilityResultWriter for UnusedCapabilityIo {
     async fn write_capability_result(
         &self,
-        _run_context: &LoopRunContext,
-        _input_ref: &CapabilityInputRef,
-        _invocation_id: InvocationId,
-        _capability_id: &CapabilityId,
-        _output: serde_json::Value,
+        _write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
         Ok(LoopResultRef::new("result:adapter-test").unwrap())
     }

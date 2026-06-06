@@ -233,6 +233,7 @@ impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTranspor
         self.requests.lock().unwrap().push(request);
         Ok(ironclaw_host_runtime::CommandExecutionOutput {
             output: format!("sandbox port: {command}"),
+            saved_output: None,
             exit_code: 0,
             // The injected transport acts as the sandbox, so the output is
             // sandboxed from the host process's perspective.

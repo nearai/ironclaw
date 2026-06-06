@@ -14,10 +14,10 @@ use ironclaw_event_streams::{
     InMemoryProjectionUpdateSource, NoExposureProjectionRedactionValidator,
     ProjectionStreamError as EventProjectionStreamError, ProjectionStreamItem,
     ProjectionSubscribeRequest, ProjectionSubscription as EventProjectionSubscription,
-    ProjectionTarget, ProjectionViewClass, SubscriberCapabilities, ThreadLiveProjectionItem,
-    ThreadLiveProjectionUpdate,
+    ProjectionTarget, ProjectionViewClass, SubscriberCapabilities, ThreadLiveProjectionUpdate,
 };
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
+use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::UserId;
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_product_adapters::{
@@ -29,20 +29,26 @@ use ironclaw_product_adapters::{
     RedactedString,
 };
 use ironclaw_turns::{
-    ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
+    ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
     TurnEventProjectionSource, TurnRunId, TurnScope, run_profile::LoopHostMilestoneSink,
 };
 
 mod display_preview;
-mod live_reasoning;
+mod live_progress;
 mod runtime_replay;
 mod turn_events;
+use crate::AuthChallengeProvider;
 use display_preview::{CapabilityDisplayPreviewSource, NoopCapabilityDisplayPreviewSource};
-use live_reasoning::LiveReasoningMilestoneSink;
+use live_progress::{
+    LiveProgressMilestoneSink, LiveProjectionPublisher, LiveSkillActivationObserver,
+    product_items_for_live_update,
+};
 use runtime_replay::{
     RuntimePayloadCandidate, replay_payload_candidates, snapshot_payload_candidates,
 };
-use turn_events::{TurnEventBridge, TurnEventPayload};
+use turn_events::{
+    FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventPayload,
+};
 
 pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 #[cfg(test)]
@@ -60,6 +66,7 @@ pub(crate) struct RebornProjectionServices {
     turn_events: TurnEventBridge,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     webui_reply_target_binding_ref: ReplyTargetBindingRef,
+    auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
 }
 
 impl RebornProjectionServices {
@@ -69,6 +76,34 @@ impl RebornProjectionServices {
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Self {
         self.turn_events = TurnEventBridge::enabled(turn_event_source, turn_coordinator);
+        self
+    }
+
+    pub(crate) fn with_failure_explainer(
+        mut self,
+        explainer: Arc<dyn FailureExplanationProvider>,
+    ) -> Self {
+        self.turn_events = self.turn_events.with_failure_explainer(explainer);
+        self
+    }
+
+    pub(crate) fn with_model_failure_explainer_factory(
+        self,
+        system_inference: Arc<
+            dyn Fn() -> Arc<dyn ironclaw_turns::run_profile::SystemInferencePort> + Send + Sync,
+        >,
+    ) -> Self {
+        self.with_failure_explainer(Arc::new(ModelFailureExplanationProvider::from_factory(
+            system_inference,
+        )))
+    }
+
+    /// Wire in an auth challenge provider so `auth_required` SSE events carry
+    /// `challenge_kind`, `provider`, `account_label`, and `authorization_url`.
+    /// Optional: when absent the `AuthPromptView` omits those fields (backward
+    /// compatible — legacy consumers deserialise them as `None`).
+    pub(crate) fn with_auth_challenges(mut self, provider: Arc<dyn AuthChallengeProvider>) -> Self {
+        self.auth_challenges = Some(provider);
         self
     }
 
@@ -84,21 +119,35 @@ impl RebornProjectionServices {
         Arc::new(WebuiRuntimeProjectionStream {
             manager: Arc::clone(&self.event_stream_manager),
             turn_events: self.turn_events.clone(),
+            auth_challenges: self.auth_challenges.clone(),
             display_previews: Arc::clone(&self.display_previews),
             reply_target_binding_ref: self.webui_reply_target_binding_ref.clone(),
         })
     }
 
-    pub(crate) fn with_live_reasoning_milestone_sink(
+    pub(crate) fn with_live_progress_milestone_sink_for_publisher(
         &self,
         inner: Arc<dyn LoopHostMilestoneSink>,
-        actor_user_id: UserId,
+        publisher: Arc<LiveProjectionPublisher>,
     ) -> Arc<dyn LoopHostMilestoneSink> {
-        Arc::new(LiveReasoningMilestoneSink::new(
-            inner,
+        Arc::new(LiveProgressMilestoneSink::new(inner, publisher))
+    }
+
+    pub(crate) fn live_projection_publisher(
+        &self,
+        actor_user_id: UserId,
+    ) -> Arc<LiveProjectionPublisher> {
+        Arc::new(LiveProjectionPublisher::new(
             Arc::clone(&self.live_updates),
             actor_user_id,
         ))
+    }
+
+    pub(crate) fn skill_activation_observer(
+        &self,
+        publisher: Arc<LiveProjectionPublisher>,
+    ) -> Arc<dyn SkillActivationObserver> {
+        Arc::new(LiveSkillActivationObserver::new(publisher))
     }
 }
 
@@ -123,6 +172,7 @@ pub(crate) fn build_reborn_projection_services(
         turn_events: TurnEventBridge::default(),
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
         webui_reply_target_binding_ref,
+        auth_challenges: None,
     }
 }
 
@@ -135,6 +185,7 @@ pub(crate) fn build_reborn_projection_services(
 struct WebuiRuntimeProjectionStream {
     manager: Arc<EventStreamManager>,
     turn_events: TurnEventBridge,
+    auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     reply_target_binding_ref: ReplyTargetBindingRef,
 }
@@ -198,7 +249,12 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
         let turn_after = batch.cursor().turn.clone();
         let turn_drain = self
             .turn_events
-            .drain(&request.actor.user_id, &request.scope, turn_after)
+            .drain(
+                &request.actor.user_id,
+                &request.scope,
+                turn_after,
+                self.auth_challenges.as_deref(),
+            )
             .await?;
         for TurnEventPayload {
             cursor: turn_cursor,
@@ -269,7 +325,7 @@ impl WebuiProjectionBatch {
         &self.cursor
     }
 
-    fn push_runtime_payloads(
+    fn push_durable_runtime_payloads(
         &mut self,
         final_cursor: EventProjectionCursor,
         item_cursor: EventProjectionCursor,
@@ -313,6 +369,20 @@ impl WebuiProjectionBatch {
         Ok(self.cursor.runtime_payloads_delivered == 0)
     }
 
+    fn push_live_payload(
+        &mut self,
+        cursor: EventProjectionCursor,
+        payload: ProductOutboundPayload,
+    ) -> bool {
+        if !self.has_runtime_payload_capacity() {
+            return false;
+        }
+        self.runtime_payloads_pushed += 1;
+        self.cursor.live = Some(cursor);
+        self.push(payload);
+        true
+    }
+
     async fn push_runtime_item(
         &mut self,
         item: ProjectionStreamItem,
@@ -327,18 +397,26 @@ impl WebuiProjectionBatch {
             scope,
             display_previews,
             self.cursor.runtime_item,
+            self.cursor.live.as_ref().map(|cursor| cursor.runtime),
             already_delivered,
             remaining_capacity,
         )
         .await?
         {
-            return self.push_runtime_payloads(
-                runtime_item.final_cursor,
-                runtime_item.item_cursor,
-                runtime_item.payloads,
-                runtime_item.total,
-                runtime_item.already_delivered,
-            );
+            match runtime_item {
+                RuntimePayloadItem::Durable(durable) => {
+                    return self.push_durable_runtime_payloads(
+                        durable.final_cursor,
+                        durable.item_cursor,
+                        durable.payloads,
+                        durable.total,
+                        durable.already_delivered,
+                    );
+                }
+                RuntimePayloadItem::Live { cursor, payload } => {
+                    return Ok(self.push_live_payload(cursor, payload));
+                }
+            }
         }
         Ok(true)
     }
@@ -383,6 +461,8 @@ fn runtime_projection_scope(actor: &TurnActor, scope: &TurnScope) -> EventProjec
 struct WebuiProjectionCursor {
     runtime: Option<EventProjectionCursor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    live: Option<EventProjectionCursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime_item: Option<EventCursor>,
     turn: Option<TurnEventProjectionCursor>,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -398,6 +478,7 @@ fn parse_webui_projection_cursor(
 ) -> Result<WebuiProjectionCursor, ProductAdapterError> {
     if let Ok(parsed) = serde_json::from_str::<WebuiProjectionCursor>(cursor)
         && (parsed.runtime.is_some()
+            || parsed.live.is_some()
             || parsed.turn.is_some()
             || parsed.runtime_payloads_delivered > 0)
     {
@@ -417,6 +498,7 @@ fn parse_webui_projection_cursor(
     })?;
     Ok(WebuiProjectionCursor {
         runtime: Some(runtime),
+        live: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 0,
@@ -434,6 +516,14 @@ fn validate_webui_projection_cursor_scope(
         return Err(ProductAdapterError::InvalidIdentifier {
             kind: "projection_cursor",
             reason: "runtime cursor scope does not match subscription scope".to_string(),
+        });
+    }
+    if let Some(live) = cursor.live.as_ref()
+        && &live.scope != projection_scope
+    {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            reason: "live cursor scope does not match subscription scope".to_string(),
         });
     }
     if let Some(turn) = cursor.turn.as_ref()
@@ -460,6 +550,7 @@ async fn item_to_payloads(
     scope: &TurnScope,
     display_previews: &dyn CapabilityDisplayPreviewSource,
     expected_item: Option<EventCursor>,
+    last_live_cursor: Option<EventCursor>,
     already_delivered: usize,
     capacity: usize,
 ) -> RuntimePayloadItemResult {
@@ -493,7 +584,7 @@ async fn item_to_payloads(
                     .await
                 }
                 ironclaw_event_streams::ProductProjectionEnvelope::ThreadLiveUpdate(update) => {
-                    live_update_payloads(scope, update, cursor, expected_item, already_delivered)
+                    live_update_payloads(scope, update, cursor, last_live_cursor)
                 }
                 _ => Err(internal_projection_error(
                     "unexpected projection update envelope",
@@ -527,38 +618,56 @@ fn live_update_payloads(
     scope: &TurnScope,
     update: &ThreadLiveProjectionUpdate,
     cursor: EventProjectionCursor,
-    expected_item: Option<EventCursor>,
-    already_delivered: usize,
+    last_live_cursor: Option<EventCursor>,
 ) -> RuntimePayloadItemResult {
-    let already_delivered =
-        effective_runtime_payload_offset(already_delivered, expected_item, cursor.runtime);
-    if already_delivered > 0 {
-        return Err(ProductAdapterError::InvalidIdentifier {
-            kind: "projection_cursor",
-            reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
-        });
+    if last_live_cursor.is_some_and(|last| cursor.runtime <= last) {
+        return Ok(None);
     }
-    let items = update
-        .items
-        .iter()
-        .map(|item| match item {
-            ThreadLiveProjectionItem::Thinking { id, body } => ProductProjectionItem::Thinking {
-                id: id.clone(),
-                body: body.clone(),
-            },
-        })
-        .collect::<Vec<_>>();
+    let items = product_items_for_live_update(update);
     if items.is_empty() {
         return Ok(None);
     }
     let state = ProductProjectionState::new(scope.thread_id.to_string(), items)?;
-    Ok(Some(RuntimePayloadItem {
-        final_cursor: cursor.clone(),
-        item_cursor: cursor,
-        payloads: vec![ProductOutboundPayload::ProjectionUpdate { state }],
-        total: 1,
-        already_delivered: 0,
+    Ok(Some(RuntimePayloadItem::Live {
+        cursor,
+        payload: ProductOutboundPayload::ProjectionUpdate { state },
     }))
+}
+
+#[derive(Debug)]
+struct DurableRuntimePayloadItem {
+    final_cursor: EventProjectionCursor,
+    item_cursor: EventProjectionCursor,
+    payloads: Vec<ProductOutboundPayload>,
+    total: usize,
+    already_delivered: usize,
+}
+
+#[derive(Debug)]
+enum RuntimePayloadItem {
+    Durable(DurableRuntimePayloadItem),
+    Live {
+        cursor: EventProjectionCursor,
+        payload: ProductOutboundPayload,
+    },
+}
+
+type RuntimePayloadItemResult = Result<Option<RuntimePayloadItem>, ProductAdapterError>;
+
+fn durable_runtime_payload_item(
+    final_cursor: EventProjectionCursor,
+    item_cursor: EventProjectionCursor,
+    payloads: Vec<ProductOutboundPayload>,
+    total: usize,
+    already_delivered: usize,
+) -> RuntimePayloadItem {
+    RuntimePayloadItem::Durable(DurableRuntimePayloadItem {
+        final_cursor,
+        item_cursor,
+        payloads,
+        total,
+        already_delivered,
+    })
 }
 
 async fn snapshot_payloads(
@@ -596,13 +705,13 @@ async fn snapshot_payloads(
         .skip(already_delivered)
         .take(capacity)
         .collect();
-    Ok(Some(RuntimePayloadItem {
-        final_cursor: cursor,
+    Ok(Some(durable_runtime_payload_item(
+        cursor,
         item_cursor,
         payloads,
         total,
         already_delivered,
-    }))
+    )))
 }
 
 async fn replay_payloads(
@@ -640,25 +749,14 @@ async fn replay_payloads(
         .skip(already_delivered)
         .take(capacity)
         .collect();
-    Ok(Some(RuntimePayloadItem {
-        final_cursor: cursor,
+    Ok(Some(durable_runtime_payload_item(
+        cursor,
         item_cursor,
         payloads,
         total,
         already_delivered,
-    }))
+    )))
 }
-
-#[derive(Debug)]
-struct RuntimePayloadItem {
-    final_cursor: EventProjectionCursor,
-    item_cursor: EventProjectionCursor,
-    payloads: Vec<ProductOutboundPayload>,
-    total: usize,
-    already_delivered: usize,
-}
-
-type RuntimePayloadItemResult = Result<Option<RuntimePayloadItem>, ProductAdapterError>;
 
 #[cfg(test)]
 struct RuntimePayloadItemInput {
@@ -682,7 +780,7 @@ async fn runtime_payloads_for_item(
     expected_item: Option<EventCursor>,
     already_delivered: usize,
     capacity: usize,
-) -> RuntimePayloadItemResult {
+) -> Result<Option<DurableRuntimePayloadItem>, ProductAdapterError> {
     let RuntimePayloadItemInput {
         runs,
         capability_activities,
@@ -719,7 +817,7 @@ async fn runtime_payloads_for_item(
         .skip(already_delivered)
         .take(capacity)
         .collect();
-    Ok(Some(RuntimePayloadItem {
+    Ok(Some(DurableRuntimePayloadItem {
         final_cursor: cursor,
         item_cursor,
         payloads,
@@ -765,6 +863,9 @@ async fn runtime_payload_from_candidate(
         RuntimePayloadCandidate::CapabilityActivity(activity) => {
             CapabilityActivityView::new(CapabilityActivityViewInput {
                 invocation_id: activity.invocation_id,
+                turn_run_id: activity
+                    .run_id
+                    .map(|run_id| TurnRunId::from_uuid(run_id.as_uuid())),
                 thread_id: activity.thread_id,
                 capability_id: activity.capability_id,
                 status: capability_activity_status_wire(activity.status),
@@ -872,12 +973,49 @@ fn run_status_projection_state(
         .map(|run| ProductProjectionItem::RunStatus {
             run_id: TurnRunId::from_uuid(run.invocation_id.as_uuid()),
             status: run_status_wire(run.status).to_string(),
+            failure_category: run_failure_category(&run),
+            failure_summary: run_failure_summary(&run),
         })
         .collect::<Vec<_>>();
     if items.is_empty() {
         return Ok(None);
     }
     ProductProjectionState::new(scope.thread_id.to_string(), items).map(Some)
+}
+
+fn run_failure_category(run: &RunStatusProjection) -> Option<SanitizedFailure> {
+    // Runtime replay categories intentionally use the event-projection namespace
+    // (model_failed, dispatch_failed, process_killed, ...), while turn lifecycle
+    // events use runner/driver failure reasons (lease_expired, driver_failed, ...).
+    // Both are sanitized product categories; clients must treat the field as an
+    // opaque category and prefer failure_summary for user-facing copy.
+    matches!(
+        run.status,
+        RunProjectionStatus::Failed | RunProjectionStatus::Killed
+    )
+    .then(|| run.error_kind.clone())
+    .flatten()
+    .and_then(|category| SanitizedFailure::new(category).ok())
+}
+
+fn run_failure_summary(run: &RunStatusProjection) -> Option<String> {
+    run_failure_category(run)
+        .as_ref()
+        .map(SanitizedFailure::category)
+        .map(runtime_failure_summary_for_category)
+        .map(str::to_string)
+}
+
+fn runtime_failure_summary_for_category(category: &str) -> &'static str {
+    match category {
+        "model_failed" => "The run failed while waiting for the model.",
+        "dispatch_failed" => "The run failed while executing a capability.",
+        "process_failed" => "The run failed while executing a runtime process.",
+        "process_killed" => "The run stopped because its runtime process was killed.",
+        "hook_failed" => "The run failed while evaluating a runtime hook.",
+        "unknown" | "unclassified" => "The run failed for an unknown reason.",
+        _ => "The run failed before producing a reply.",
+    }
 }
 
 fn capability_activity_status_wire(

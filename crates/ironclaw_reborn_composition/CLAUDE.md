@@ -3,6 +3,7 @@
 - Own only top-level Reborn composition for production/app startup.
 - Expose facade-shaped handles only: `HostRuntime`, `TurnCoordinator`, product-auth `RebornProductAuthServices`, WebUI `RebornServicesApi`, readiness.
 - Keep lower substrate handles private to factories and owning crates.
+- Substrate handles MAY be exposed via `#[cfg(any(test, feature = "test-support"))]` pub accessors on `RebornRuntime` when downstream integration tests need to drive production-shape state the facade doesn't yet surface (e.g. seeding `TriggerRecord` rows, `pair_external_actor` calls). These seams ship zero bytes in production binaries. New test-support accessors must carry a doc-comment naming the production call site they mirror and an explicit note that the handle is for tests only.
 - Do not depend on the root `ironclaw` crate or `src/` modules.
 - Do not add legacy bridge modes here until an accepted migration contract exists.
 - Do not route live v1/product traffic here; callers must opt in through explicit Reborn adapters.
@@ -34,6 +35,14 @@
   pre-authorizing the existing scoped account. Do not route raw token values
   through chat commands, model-visible messages, serializable DTOs,
   projections, or route-local pending maps.
+- `RebornProductAuthServices::flow_record_source` is an optional WebUI/local-dev
+  read-projection port, not a required product-auth capability. Filesystem-backed
+  local-dev composition wires the durable product-auth service itself as this
+  source so pending auth gates can be rendered from blocked turn state plus
+  auth-flow records. If a supplied product-auth bundle
+  omits it, runtime composition must expose the WebUI auth interaction surface
+  as explicitly unavailable; do not fabricate a route-local or unscoped pending
+  auth read model.
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.
@@ -75,10 +84,11 @@ Inbound order (outer → inner → handler):
    `BodyLimitPolicy` from `ironclaw_webui_v2::webui_v2_routes()` and,
    when present, product-auth route descriptors at composition time and
    enforces it before auth runs (so an oversized payload never spends a
-   bearer-validation step). Today: `create_thread` and product-auth
-   OAuth start 16 KiB, `send_message` 1 MiB, `cancel_run` and
-   `resolve_gate` 4 KiB, `get_timeline`, `stream_events`, and
-   product-auth OAuth callback `NoBody`.
+   bearer-validation step). Today: `create_thread`, product-auth OAuth
+   start, manual-token setup/secret-submit, accounts list/select/recovery/
+   refresh, and lifecycle cleanup — all 16 KiB; `send_message` 1 MiB;
+   `cancel_run` and `resolve_gate` 4 KiB; `get_timeline`,
+   `stream_events`, and product-auth OAuth callback `NoBody`.
    `BodyLimitPolicy` is an exhaustive `match`, so a new variant added
    upstream fails the build rather than silently disabling
    enforcement.
@@ -108,15 +118,15 @@ Inbound order (outer → inner → handler):
    `ConnectInfo<SocketAddr>`, never `X-Forwarded-For` / `X-Real-IP`.
    Composition fails closed if a future descriptor declares an unsupported
    scope.
-9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the nine v2
+9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
    handlers from `ironclaw_webui_v2` (create-thread, list-threads,
    send-message, get-timeline, stream-events SSE, stream-events WS,
-   cancel-run, resolve-gate, setup-extension).
+   cancel-run, resolve-gate, setup-extension, list-automations).
 
-### Product-auth OAuth routes
+### Product-auth routes
 
 When `bundle.product_auth` is present, `webui_v2_app` also mounts the
-Reborn-native product-auth OAuth surface:
+Reborn-native product-auth surface:
 
 - `POST /api/reborn/product-auth/oauth/start` is inside the existing
   bearer-auth layer. It derives `AuthProductScope` from the
@@ -137,6 +147,17 @@ Reborn-native product-auth OAuth surface:
   exchanges provider tokens, activates extensions, resumes turns, or
   writes secrets directly. Its descriptor declares `NoBody` and a
   transport-peer-IP public callback rate limit.
+- `POST /api/reborn/product-auth/manual-token/submit` is inside the
+  same bearer-auth layer as OAuth start. It derives `AuthProductScope`
+  from `WebUiAuthenticatedCaller`, validates the provider/account/token
+  fields, creates a short-lived manual-token interaction with a
+  `TurnGateResume` continuation, submits the raw token only to
+  `RebornProductAuthServices`, and returns the resulting
+  `credential_ref`. The browser must then call v2 `resolve_gate` with
+  that `credential_ref`; raw token values never go through gate resolution.
+  Setup, submit, and cleanup calls are timeout-bounded. If submit fails after
+  the interaction is created, the route abandons that scoped interaction before
+  returning a sanitized error.
 - Raw `state`, OAuth authorization codes, PKCE verifiers, provider
   token handles, provider bodies, and host paths must not be logged or
   serialized by the route. Responses use the sanitized product-auth
@@ -145,6 +166,77 @@ Reborn-native product-auth OAuth surface:
 `webui_route_match` is the shared matcher both the body-limit and
 rate-limit middlewares consume so the two enforcers cannot drift on
 which request belongs to which descriptor.
+
+### Extension pairing routes
+
+When Slack host-beta personal binding is configured, `webui_v2_app`
+mounts `POST /api/webchat/v2/extensions/pairing/redeem` inside the same
+bearer-auth layer as the native WebUI v2 extension routes. The request
+body carries `{ channel, code }`; the route validates the channel server-side
+and currently resolves the supported Slack channel aliases to the Slack
+personal-binding pairing service. The browser must not call provider-specific
+pairing paths directly.
+
+### Host-supplied public route mount (#4116 — SSO login surface)
+
+`WebuiServeConfig::with_public_route_mount(PublicRouteMount)`
+attaches a host-supplied `{ router, descriptors }` pair that is
+merged into the composed app OUTSIDE the bearer-auth layer but
+INSIDE the outer security-header / CORS / global-body-limit
+stack. The seam exists for the WebChat v2 SSO login surface
+shipped by
+`ironclaw_reborn_webui_ingress::webui_v2_auth_router`, which
+mounts `/auth/providers`, `/auth/login/{provider}`,
+`/auth/callback/{provider}`, and `/auth/logout`. The browser must
+reach those routes without a session (the whole point of login),
+so they cannot live behind the bearer middleware; they still
+inherit the same defense-in-depth headers and CORS allow-list as
+every other response.
+
+The mount's `descriptors` are folded into the SAME descriptor
+list the v2 facade and the product-auth callback already use, so
+the descriptor-driven per-route rate-limit and body-limit
+middlewares apply to the host-supplied surface exactly like they
+do to every other route — no side door. Today the SSO mount
+declares its five routes as `LocalGateway`/`OAuthCallback` +
+`IngressAuthPolicy::Public` + `RateLimitScope::PerIp` (60–120
+req/min/IP, 60s window) + tight body limits, so a sustained
+`/auth/login/*` flood is bounded by the same per-IP counter the
+public OAuth callback uses.
+
+This seam must NOT be used to re-introduce v1 `/auth/*` handlers
+into the v2 listener; the only intended consumer is the
+Reborn-native auth router. v1 gateway code remains untouched —
+`src/channels/web/` keeps its own bearer/OAuth stack.
+
+### Session transport decision (#4116)
+
+The OAuth callback returns a short-lived, one-time login ticket to
+the SPA via the URL query (`/v2?login_ticket=<ticket>`), not the
+session bearer itself and not an `HttpOnly` cookie. The SPA
+immediately POSTs that ticket to `/auth/session/exchange` and stores
+the returned bearer in `sessionStorage`.
+Rationale:
+
+- **Matches the existing v2 SPA auth model.** `app/auth.js`
+  already stores the bearer in `sessionStorage` and sends it as
+  `Authorization: Bearer` on every API call; SSE / WS use the
+  `?token=` query-string shim that the composition layer's bearer
+  middleware accepts only on `GET /api/webchat/v2/threads/{id}/events`.
+  Cookies would require a new auth path through the same middleware.
+- **The bearer never appears in a redirect `Location` header.** A
+  logged callback redirect can expose only the one-time ticket, not
+  the long-lived bearer. Tickets are short-lived and consumed
+  atomically by the exchange route. Composition also emits
+  `Referrer-Policy: no-referrer` as defense in depth.
+- **Logout actually revokes.** `POST /auth/logout` calls
+  `SessionStore::revoke`; the regression in
+  `crates/ironclaw_reborn_webui_ingress/tests/session_round_trip.rs`
+  locks that a post-revoke bearer fails on `/api/webchat/v2/threads`.
+
+This is a deliberate divergence from the v1 gateway, which sets a
+`Set-Cookie: ironclaw_session=...; HttpOnly` on its OAuth
+callback. v1 cookie code is NOT shared with the v2 listener.
 
 ### Entrypoint inventory (#3580)
 
@@ -165,7 +257,9 @@ rows are inventoried here, not implemented in the current PR.
 | Resolve gate | `POST /api/chat/gate/resolve` | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/gates/{gate_ref}/resolve` | Mapped |
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
-| Extensions onboarding | `GET\|POST /api/extensions/{name}/setup` | `POST /api/webchat/v2/extensions/{name}/setup` | Mapped to lifecycle projection; no production setup side effects yet |
+| Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup projects credential requirements and product-auth OAuth start is mounted under the extension setup surface |
+| LLM provider config | v1 settings/provider config surface | `GET /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers/{provider_id}/delete`, `POST /api/webchat/v2/llm/active`, `POST /api/webchat/v2/llm/{test-connection,list-models}` | Mapped for trusted operator-token deployments; left unmounted for multi-user authenticators until an admin role boundary exists |
+| SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row
 
@@ -173,6 +267,11 @@ rows are inventoried here, not implemented in the current PR.
   `auth_middleware`. The Reborn binary owns its own
   `WebuiAuthenticator` impl (env tokens, DB-backed sessions, OIDC,
   whatever the host wires) and supplies it via `WebuiServeConfig`.
+- **Operator LLM config** — the `/api/webchat/v2/llm/*` routes mutate
+  operator-wide provider settings and secrets. `webui_v2_app` only
+  mounts them when the host authenticator opts into operator LLM config;
+  multi-user authenticators must leave them unmounted until a real admin
+  authorization boundary exists.
 - **`?token=` exception** — only `GET /api/webchat/v2/threads/{id}/events`;
   any other v2 route receiving a `?token=` query parameter ignores it
   and falls through to bearer-header check (so a stale referer link

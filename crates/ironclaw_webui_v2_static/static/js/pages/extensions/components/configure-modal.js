@@ -1,15 +1,22 @@
 import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
 import { React, html } from "../../../lib/html.js";
-import { useExtensionSetup, useSetupSubmit } from "../hooks/useExtensions.js";
+import {
+  useExtensionSetup,
+  useOauthSetup,
+  useSetupSubmit,
+} from "../hooks/useExtensions.js";
+import { setupReadyForActivation } from "../lib/extension-actions.js";
 
-export function ConfigureModal({ extensionName, onClose, onSaved }) {
-  const { secrets, fields, onboarding, isLoading, error } =
-    useExtensionSetup(extensionName);
+export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
+  const extensionName = extension?.displayName || extension?.packageRef?.id || "Extension";
+  const { secrets = [], fields = [], onboarding, isLoading, error } =
+    useExtensionSetup(extension?.packageRef);
   const [values, setValues] = React.useState({});
   const [fieldValues, setFieldValues] = React.useState({});
+  const oauthMutation = useOauthSetup(extension?.packageRef);
 
-  const submitMutation = useSetupSubmit(extensionName, (res) => {
+  const submitMutation = useSetupSubmit(extension?.packageRef, (res) => {
     if (res.success !== false) {
       if (onSaved) onSaved(res);
       onClose();
@@ -24,6 +31,19 @@ export function ConfigureModal({ extensionName, onClose, onSaved }) {
     }
     submitMutation.mutate({ secrets: secretPayload, fields: fieldValues });
   }, [values, fieldValues, submitMutation]);
+  const handleOauth = React.useCallback(
+    (secret) => {
+      const popup = window.open("about:blank", "_blank", "width=600,height=600");
+      if (popup) popup.opener = null;
+      oauthMutation.mutate({ secret, popup });
+    },
+    [oauthMutation]
+  );
+  const manualSecrets = secrets.filter(
+    (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
+  );
+  const canSave = manualSecrets.length > 0 || fields.length > 0;
+  const canActivate = setupReadyForActivation({ secrets, fields });
 
   if (isLoading) {
     return html`
@@ -103,6 +123,28 @@ export function ConfigureModal({ extensionName, onClose, onSaved }) {
                   >
                 `}
               </label>
+              ${(secret.setup?.kind || "manual_token") === "oauth"
+                ? html`
+                    <div className="flex items-center justify-between gap-3 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2">
+                      <span className="text-xs text-iron-300">
+                        ${secret.provided
+                          ? "Authorization is configured."
+                          : "Authorize this provider in a browser popup."}
+                      </span>
+                      <${Button}
+                        variant=${secret.provided ? "secondary" : "primary"}
+                        onClick=${() => handleOauth(secret)}
+                        disabled=${oauthMutation.isPending}
+                      >
+                        ${oauthMutation.isPending
+                          ? "Opening..."
+                          : secret.provided
+                            ? "Reconnect"
+                            : "Authorize"}
+                      <//>
+                    </div>
+                  `
+                : html`
               <input
                 type="password"
                 placeholder=${secret.provided
@@ -124,6 +166,7 @@ export function ConfigureModal({ extensionName, onClose, onSaved }) {
                   Auto-generated if left blank
                 </p>
               `}
+                  `}
             </div>
           `
         )}
@@ -172,16 +215,36 @@ export function ConfigureModal({ extensionName, onClose, onSaved }) {
           ${submitMutation.error.message}
         </div>
       `}
+      ${oauthMutation.error &&
+      html`
+        <div
+          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+        >
+          ${oauthMutation.error.message}
+        </div>
+      `}
 
       <div className="mt-6 flex items-center justify-end gap-3">
         <${Button} variant="ghost" onClick=${onClose}>Cancel<//>
+        ${canActivate &&
+        html`
         <${Button}
           variant="primary"
+          onClick=${() => onActivate?.(extension)}
+        >
+          Activate
+        <//>
+        `}
+        ${canSave &&
+        html`
+        <${Button}
+          variant=${canActivate ? "secondary" : "primary"}
           onClick=${handleSubmit}
           disabled=${submitMutation.isPending}
         >
           ${submitMutation.isPending ? "Saving…" : "Save"}
         <//>
+        `}
       </div>
     <//>
   `;

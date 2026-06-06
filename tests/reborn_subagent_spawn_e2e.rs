@@ -155,6 +155,10 @@ async fn background_spawn_is_rejected_before_child_run_or_auth_invocation() {
             )],
             expected_tool_results: Vec::new(),
         },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply("background spawn rejected"),
+            expected_tool_results: Vec::new(),
+        },
     ]);
     let mut harness = spawn_harness("room-subagent-background-disabled", model_gateway).await;
     harness.start();
@@ -166,15 +170,14 @@ async fn background_spawn_is_rejected_before_child_run_or_auth_invocation() {
         )
         .await
         .expect("submit root turn");
-    let state = harness
-        .wait_for_status(submitted.run_id, TurnStatus::RecoveryRequired)
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
         .await
-        .expect("background spawn rejects the parent turn");
-
-    assert_eq!(
-        state.failure.expect("failure category").category(),
-        "driver_unavailable"
-    );
+        .expect("background spawn rejection completes parent turn");
+    harness
+        .assert_final_reply("background spawn rejected")
+        .await
+        .expect("parent final reply");
     assert!(
         harness
             .children_of(&submitted.scope, submitted.run_id)
@@ -222,7 +225,7 @@ async fn blocking_spawn_waits_while_child_is_blocked_on_approval_then_resumes() 
         RebornBinaryE2EHarness::with_harness_blocked_evidence_unscoped_worker(
             "room-subagent-child-approval",
             model_gateway,
-            RecordingTestCapabilityPort::spawn_auth_then_approval_then_allowed_tool_with_spawn_subagent(),
+            RecordingTestCapabilityPort::approval_then_allowed_tool_with_spawn_subagent(),
         ),
     )
     .await
@@ -293,8 +296,8 @@ async fn blocking_spawn_waits_while_child_is_blocked_on_approval_then_resumes() 
     );
     assert_eq!(
         harness.capability_invocations().len(),
-        2,
-        "spawn auth plus the child approval gate should reach the inner capability port"
+        1,
+        "the child approval gate should reach the inner capability port"
     );
     harness.assert_model_exhausted();
     harness.shutdown().await;

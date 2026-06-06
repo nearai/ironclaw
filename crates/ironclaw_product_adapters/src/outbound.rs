@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, InvocationId, ProcessId, RuntimeKind, ThreadId,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
-use serde::{Deserialize, Deserializer, Serialize};
+use ironclaw_turns::{ReplyTargetBindingRef, SanitizedFailure, TurnRunId};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::error::ProductAdapterError;
@@ -16,6 +16,13 @@ const PROJECTION_CURSOR_MAX_BYTES: usize = 1024;
 const PROJECTION_THREAD_ID_MAX_BYTES: usize = 512;
 const PROJECTION_ITEM_ID_MAX_BYTES: usize = 512;
 const PROJECTION_TEXT_MAX_BYTES: usize = 128 * 1024;
+const PROJECTION_WORK_SUMMARY_MAX_BYTES: usize = 1024;
+/// Maximum byte length for a projected skill activation name.
+pub const PROJECTION_SKILL_NAME_MAX_BYTES: usize = 128;
+/// Maximum byte length for a projected skill activation feedback note.
+pub const PROJECTION_SKILL_FEEDBACK_MAX_BYTES: usize = 1024;
+/// Maximum number of skill activation names or feedback notes per projection item.
+pub const PROJECTION_SKILL_ACTIVATION_MAX_ITEMS: usize = 16;
 const CAPABILITY_ACTIVITY_ERROR_KIND_MAX_BYTES: usize = 64;
 const CAPABILITY_ACTIVITY_ERROR_KIND_SEGMENT_MAX_BYTES: usize = 24;
 const CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
@@ -23,6 +30,19 @@ pub const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 pub const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
 pub const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
 pub const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
+
+fn serialize_failure_category<S>(
+    value: &Option<SanitizedFailure>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(failure) => serializer.serialize_some(failure.category()),
+        None => serializer.serialize_none(),
+    }
+}
 
 fn invalid(kind: &'static str, reason: impl Into<String>) -> ProductAdapterError {
     ProductAdapterError::InvalidIdentifier {
@@ -184,9 +204,19 @@ pub enum ProgressKind {
     Reflecting,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductWorkSummaryPhase {
+    Planning,
+    Waiting,
+    Retrying,
+    Context,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityActivityView {
     pub invocation_id: InvocationId,
+    pub turn_run_id: Option<TurnRunId>,
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
     pub status: CapabilityActivityStatusView,
@@ -208,6 +238,8 @@ impl Serialize for CapabilityActivityView {
         #[derive(Serialize)]
         struct Wire<'a> {
             invocation_id: &'a InvocationId,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            turn_run_id: &'a Option<TurnRunId>,
             thread_id: &'a Option<ThreadId>,
             capability_id: &'a CapabilityId,
             status: CapabilityActivityStatusView,
@@ -221,6 +253,7 @@ impl Serialize for CapabilityActivityView {
 
         Wire {
             invocation_id: &self.invocation_id,
+            turn_run_id: &self.turn_run_id,
             thread_id: &self.thread_id,
             capability_id: &self.capability_id,
             status: self.status,
@@ -239,6 +272,7 @@ impl CapabilityActivityView {
     pub fn new(input: CapabilityActivityViewInput) -> Result<Self, ProductAdapterError> {
         let value = Self {
             invocation_id: input.invocation_id,
+            turn_run_id: input.turn_run_id,
             thread_id: input.thread_id,
             capability_id: input.capability_id,
             status: input.status,
@@ -264,6 +298,7 @@ impl CapabilityActivityView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityActivityViewInput {
     pub invocation_id: InvocationId,
+    pub turn_run_id: Option<TurnRunId>,
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
     pub status: CapabilityActivityStatusView,
@@ -283,6 +318,8 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
         #[derive(Deserialize)]
         struct Wire {
             invocation_id: InvocationId,
+            #[serde(default)]
+            turn_run_id: Option<TurnRunId>,
             thread_id: Option<ThreadId>,
             capability_id: CapabilityId,
             status: CapabilityActivityStatusView,
@@ -296,6 +333,7 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
         let wire = Wire::deserialize(deserializer)?;
         Self::new(CapabilityActivityViewInput {
             invocation_id: wire.invocation_id,
+            turn_run_id: wire.turn_run_id,
             thread_id: wire.thread_id,
             capability_id: wire.capability_id,
             status: wire.status,
@@ -324,6 +362,7 @@ pub enum CapabilityActivityStatusView {
 pub struct CapabilityDisplayPreviewView {
     pub timeline_message_id: Option<String>,
     pub invocation_id: InvocationId,
+    pub turn_run_id: Option<TurnRunId>,
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
     pub status: CapabilityActivityStatusView,
@@ -344,6 +383,7 @@ impl CapabilityDisplayPreviewView {
         let value = Self {
             timeline_message_id: input.timeline_message_id,
             invocation_id: input.invocation_id,
+            turn_run_id: input.turn_run_id,
             thread_id: input.thread_id,
             capability_id: input.capability_id,
             status: input.status,
@@ -410,6 +450,8 @@ impl Serialize for CapabilityDisplayPreviewView {
         struct Wire<'a> {
             timeline_message_id: &'a Option<String>,
             invocation_id: &'a InvocationId,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            turn_run_id: &'a Option<TurnRunId>,
             thread_id: &'a Option<ThreadId>,
             capability_id: &'a CapabilityId,
             status: CapabilityActivityStatusView,
@@ -428,6 +470,7 @@ impl Serialize for CapabilityDisplayPreviewView {
         Wire {
             timeline_message_id: &self.timeline_message_id,
             invocation_id: &self.invocation_id,
+            turn_run_id: &self.turn_run_id,
             thread_id: &self.thread_id,
             capability_id: &self.capability_id,
             status: self.status,
@@ -450,6 +493,7 @@ impl Serialize for CapabilityDisplayPreviewView {
 pub struct CapabilityDisplayPreviewViewInput {
     pub timeline_message_id: Option<String>,
     pub invocation_id: InvocationId,
+    pub turn_run_id: Option<TurnRunId>,
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
     pub status: CapabilityActivityStatusView,
@@ -475,6 +519,8 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
             #[serde(default)]
             timeline_message_id: Option<String>,
             invocation_id: InvocationId,
+            #[serde(default)]
+            turn_run_id: Option<TurnRunId>,
             thread_id: Option<ThreadId>,
             capability_id: CapabilityId,
             status: CapabilityActivityStatusView,
@@ -493,6 +539,7 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
         Self::new(CapabilityDisplayPreviewViewInput {
             timeline_message_id: wire.timeline_message_id,
             invocation_id: wire.invocation_id,
+            turn_run_id: wire.turn_run_id,
             thread_id: wire.thread_id,
             capability_id: wire.capability_id,
             status: wire.status,
@@ -519,35 +566,138 @@ pub struct GatePromptView {
     pub body: String,
 }
 
+/// Discriminator for the kind of auth challenge surfaced in an `AuthPromptView`.
+///
+/// Added in issue #4112 as additive optional context. Legacy consumers that
+/// serialized `AuthPromptView` before this field existed will deserialize it
+/// as `None` (via `serde(default)`) without error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthPromptChallengeKind {
+    /// Browser must open `authorization_url` in a new tab and wait for the
+    /// OAuth callback to resume the run server-side.
+    #[serde(rename = "oauth_url")]
+    OAuthUrl,
+    /// User must type a manual token (PAT, API key) into the chat form.
+    ManualToken,
+    /// Other challenge kind (account selection, setup required, reauthorize).
+    /// The UI should fall back to a generic "authentication required" card.
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthPromptView {
     pub turn_run_id: TurnRunId,
     pub auth_request_ref: String,
     pub headline: String,
     pub body: String,
+    /// Challenge kind — present when the projection layer has auth-flow
+    /// metadata available for this gate. Absent on rows written before #4112.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge_kind: Option<AuthPromptChallengeKind>,
+    /// Short provider id (e.g. `"google"`, `"github"`, `"notion"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Human-readable account label (e.g. `"work@example.com"`, `"GitHub PAT"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
+    /// Opaque IDP authorization URL. Only present for `OAuthUrl` challenges.
+    /// This is the same URL already surfaced in the legacy
+    /// `AppEvent::OnboardingState.auth_url` field — safe to render in the
+    /// browser. Never contains a PKCE verifier, client secret, or token.
+    ///
+    /// Upstream projection converts this from validated `OAuthAuthorizationUrl`;
+    /// the DTO stores a `String` only to preserve the stable JSON wire shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_url: Option<String>,
+    /// Challenge expiry. Present when the auth flow has a bounded TTL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductProjectionItem {
-    Text { id: String, body: String },
-    Thinking { id: String, body: String },
-    RunStatus { run_id: TurnRunId, status: String },
-    Gate { gate_ref: String, headline: String },
+    Text {
+        id: String,
+        body: String,
+    },
+    Thinking {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<TurnRunId>,
+        body: String,
+    },
+    CapabilityActivity(CapabilityActivityView),
+    WorkSummary {
+        id: String,
+        run_id: TurnRunId,
+        phase: ProductWorkSummaryPhase,
+        body: String,
+    },
+    RunStatus {
+        run_id: TurnRunId,
+        status: String,
+        /// Sanitized, opaque product category. Projection sources may use
+        /// different internal namespaces; clients should not parse this for
+        /// user-facing copy and should prefer `failure_summary` when present.
+        #[serde(
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "serialize_failure_category"
+        )]
+        failure_category: Option<SanitizedFailure>,
+        /// User-facing sanitized explanation for terminal failure states.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure_summary: Option<String>,
+    },
+    Gate {
+        gate_ref: String,
+        headline: String,
+    },
+    SkillActivation {
+        id: String,
+        run_id: TurnRunId,
+        skill_names: Vec<String>,
+        feedback: Vec<String>,
+    },
 }
 
 impl ProductProjectionItem {
     fn validate(&self) -> Result<(), ProductAdapterError> {
         match self {
-            Self::Text { id, body } | Self::Thinking { id, body } => {
+            Self::Text { id, body } | Self::Thinking { id, body, .. } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
             }
-            Self::RunStatus { status, .. } => validate_bounded_text(
-                "projection_run_status",
+            Self::CapabilityActivity(activity) => activity.validate(),
+            Self::WorkSummary { id, body, .. } => {
+                validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
+                validate_bounded_text(
+                    "projection_work_summary",
+                    body,
+                    PROJECTION_WORK_SUMMARY_MAX_BYTES,
+                )
+            }
+            Self::RunStatus {
                 status,
-                PROJECTION_ITEM_ID_MAX_BYTES,
-            ),
+                failure_category: _,
+                failure_summary,
+                ..
+            } => {
+                validate_bounded_text(
+                    "projection_run_status",
+                    status,
+                    PROJECTION_ITEM_ID_MAX_BYTES,
+                )?;
+                if let Some(summary) = failure_summary {
+                    validate_bounded_text(
+                        "projection_failure_summary",
+                        summary,
+                        PROJECTION_TEXT_MAX_BYTES,
+                    )?;
+                }
+                Ok(())
+            }
             Self::Gate { gate_ref, headline } => {
                 validate_bounded_text(
                     "projection_gate_ref",
@@ -559,6 +709,41 @@ impl ProductProjectionItem {
                     headline,
                     PROJECTION_TEXT_MAX_BYTES,
                 )
+            }
+            Self::SkillActivation {
+                id,
+                skill_names,
+                feedback,
+                ..
+            } => {
+                validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
+                if skill_names.len() > PROJECTION_SKILL_ACTIVATION_MAX_ITEMS {
+                    return Err(invalid(
+                        "projection_skill_names",
+                        "too many activated skills",
+                    ));
+                }
+                if feedback.len() > PROJECTION_SKILL_ACTIVATION_MAX_ITEMS {
+                    return Err(invalid(
+                        "projection_skill_feedback",
+                        "too many skill activation feedback entries",
+                    ));
+                }
+                for skill_name in skill_names {
+                    validate_bounded_text(
+                        "projection_skill_name",
+                        skill_name,
+                        PROJECTION_SKILL_NAME_MAX_BYTES,
+                    )?;
+                }
+                for note in feedback {
+                    validate_bounded_text(
+                        "projection_skill_feedback",
+                        note,
+                        PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
+                    )?;
+                }
+                Ok(())
             }
         }
     }
@@ -572,18 +757,87 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
         #[derive(Deserialize)]
         #[serde(rename_all = "snake_case")]
         enum Wire {
-            Text { id: String, body: String },
-            Thinking { id: String, body: String },
-            RunStatus { run_id: TurnRunId, status: String },
-            Gate { gate_ref: String, headline: String },
+            Text {
+                id: String,
+                body: String,
+            },
+            Thinking {
+                id: String,
+                #[serde(default)]
+                run_id: Option<TurnRunId>,
+                body: String,
+            },
+            CapabilityActivity(CapabilityActivityView),
+            WorkSummary {
+                id: String,
+                run_id: TurnRunId,
+                phase: ProductWorkSummaryPhase,
+                body: String,
+            },
+            RunStatus {
+                run_id: TurnRunId,
+                status: String,
+                #[serde(default)]
+                failure_category: Option<String>,
+                #[serde(default)]
+                failure_summary: Option<String>,
+            },
+            Gate {
+                gate_ref: String,
+                headline: String,
+            },
+            SkillActivation {
+                id: String,
+                run_id: TurnRunId,
+                skill_names: Vec<String>,
+                feedback: Vec<String>,
+            },
         }
         let value = match Wire::deserialize(deserializer)? {
             Wire::Text { id, body } => ProductProjectionItem::Text { id, body },
-            Wire::Thinking { id, body } => ProductProjectionItem::Thinking { id, body },
-            Wire::RunStatus { run_id, status } => {
-                ProductProjectionItem::RunStatus { run_id, status }
+            Wire::Thinking { id, run_id, body } => {
+                ProductProjectionItem::Thinking { id, run_id, body }
             }
+            Wire::CapabilityActivity(activity) => {
+                ProductProjectionItem::CapabilityActivity(activity)
+            }
+            Wire::WorkSummary {
+                id,
+                run_id,
+                phase,
+                body,
+            } => ProductProjectionItem::WorkSummary {
+                id,
+                run_id,
+                phase,
+                body,
+            },
+            Wire::RunStatus {
+                run_id,
+                status,
+                failure_category,
+                failure_summary,
+            } => ProductProjectionItem::RunStatus {
+                run_id,
+                status,
+                failure_category: failure_category
+                    .map(SanitizedFailure::new)
+                    .transpose()
+                    .map_err(serde::de::Error::custom)?,
+                failure_summary,
+            },
             Wire::Gate { gate_ref, headline } => ProductProjectionItem::Gate { gate_ref, headline },
+            Wire::SkillActivation {
+                id,
+                run_id,
+                skill_names,
+                feedback,
+            } => ProductProjectionItem::SkillActivation {
+                id,
+                run_id,
+                skill_names,
+                feedback,
+            },
         };
         value.validate().map_err(serde::de::Error::custom)?;
         Ok(value)
@@ -723,6 +977,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn auth_prompt_challenge_kind_all_variants_roundtrip() {
+        for (variant, expected) in [
+            (AuthPromptChallengeKind::OAuthUrl, "\"oauth_url\""),
+            (AuthPromptChallengeKind::ManualToken, "\"manual_token\""),
+            (AuthPromptChallengeKind::Other, "\"other\""),
+        ] {
+            let serialized = serde_json::to_string(&variant).expect("serialize challenge kind");
+            assert_eq!(serialized, expected);
+            let decoded: AuthPromptChallengeKind =
+                serde_json::from_str(&serialized).expect("deserialize challenge kind");
+            assert_eq!(decoded, variant);
+        }
+    }
+
+    #[test]
     fn cursor_round_trips() {
         let cursor = ProjectionCursor::new("thread:42#cursor:7").expect("valid");
         let json = serde_json::to_string(&cursor).expect("serialize");
@@ -742,19 +1011,207 @@ mod tests {
 
     #[test]
     fn projection_state_round_trips_thinking_item() {
+        let run_id = TurnRunId::new();
         let state = ProductProjectionState::new(
             "thread-1",
             vec![ProductProjectionItem::Thinking {
                 id: "thinking:run:1".to_string(),
+                run_id: Some(run_id),
                 body: "checking context".to_string(),
             }],
         )
         .expect("valid thinking projection");
         let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(value["items"][0]["thinking"]["run_id"], run_id.to_string());
         assert_eq!(value["items"][0]["thinking"]["body"], "checking context");
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize thinking projection");
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_round_trips_capability_activity_item() {
+        let invocation_id = InvocationId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::CapabilityActivity(
+                CapabilityActivityView::new(CapabilityActivityViewInput {
+                    invocation_id,
+                    turn_run_id: None,
+                    thread_id: Some(ThreadId::new("thread-1").unwrap()),
+                    capability_id: CapabilityId::new("builtin.http").unwrap(),
+                    status: CapabilityActivityStatusView::Started,
+                    provider: None,
+                    runtime: None,
+                    process_id: None,
+                    output_bytes: None,
+                    error_kind: None,
+                    updated_at: Utc::now(),
+                })
+                .expect("valid capability activity"),
+            )],
+        )
+        .expect("valid capability activity projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(
+            value["items"][0]["capability_activity"]["capability_id"],
+            "builtin.http"
+        );
+        assert_eq!(
+            value["items"][0]["capability_activity"]["status"],
+            "started"
+        );
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize capability activity projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_round_trips_work_summary_item() {
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::WorkSummary {
+                id: "work-summary:run:1".to_string(),
+                run_id,
+                phase: ProductWorkSummaryPhase::Planning,
+                body: "checking branch state".to_string(),
+            }],
+        )
+        .expect("valid work summary projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(
+            value["items"][0]["work_summary"]["body"],
+            "checking branch state"
+        );
+        assert_eq!(value["items"][0]["work_summary"]["phase"], "planning");
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize work summary projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_round_trips_run_status_failure_details() {
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::RunStatus {
+                run_id,
+                status: "failed".to_string(),
+                failure_category: Some(SanitizedFailure::new("lease_expired").unwrap()),
+                failure_summary: Some(
+                    "The run failed because its runner lease expired.".to_string(),
+                ),
+            }],
+        )
+        .expect("valid run status projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(
+            value["items"][0]["run_status"]["failure_category"],
+            "lease_expired"
+        );
+        assert_eq!(
+            value["items"][0]["run_status"]["failure_summary"],
+            "The run failed because its runner lease expired."
+        );
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize run status projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_accepts_legacy_run_status_without_failure_details() {
+        let run_id = TurnRunId::new();
+        let json = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "run_status": {
+                    "run_id": run_id,
+                    "status": "failed"
+                }
+            }]
+        });
+
+        let decoded: ProductProjectionState =
+            serde_json::from_value(json).expect("deserialize legacy run status projection");
+        assert_eq!(
+            decoded.items,
+            vec![ProductProjectionItem::RunStatus {
+                run_id,
+                status: "failed".to_string(),
+                failure_category: None,
+                failure_summary: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn projection_state_round_trips_skill_activation_item() {
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::SkillActivation {
+                id: "skill-activation:run:1".to_string(),
+                run_id,
+                skill_names: vec!["code-review".to_string()],
+                feedback: vec!["code-review: force-activated via explicit mention".to_string()],
+            }],
+        )
+        .expect("valid skill activation projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(
+            value["items"][0]["skill_activation"]["skill_names"][0],
+            "code-review"
+        );
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize skill activation projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_rejects_oversized_work_summary_body() {
+        let json = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "work_summary": {
+                    "id": "work-summary:run:1",
+                    "run_id": TurnRunId::new(),
+                    "phase": "planning",
+                    "body": "x".repeat(PROJECTION_WORK_SUMMARY_MAX_BYTES + 1),
+                }
+            }]
+        });
+
+        assert!(serde_json::from_value::<ProductProjectionState>(json).is_err());
+    }
+
+    #[test]
+    fn projection_state_rejects_oversized_run_status_failure_details() {
+        let oversized_category = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "run_status": {
+                    "run_id": TurnRunId::new(),
+                    "status": "failed",
+                    "failure_category": "x".repeat(PROJECTION_ITEM_ID_MAX_BYTES + 1),
+                    "failure_summary": "The run failed."
+                }
+            }]
+        });
+        assert!(serde_json::from_value::<ProductProjectionState>(oversized_category).is_err());
+
+        let oversized_summary = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "run_status": {
+                    "run_id": TurnRunId::new(),
+                    "status": "failed",
+                    "failure_category": "driver_failed",
+                    "failure_summary": "x".repeat(PROJECTION_TEXT_MAX_BYTES + 1)
+                }
+            }]
+        });
+        assert!(serde_json::from_value::<ProductProjectionState>(oversized_summary).is_err());
     }
 
     #[test]
@@ -770,8 +1227,10 @@ mod tests {
 
     #[test]
     fn capability_activity_view_is_metadata_only() {
+        let run_id = TurnRunId::new();
         let view = CapabilityActivityView::new(CapabilityActivityViewInput {
             invocation_id: InvocationId::new(),
+            turn_run_id: Some(run_id),
             thread_id: Some(ThreadId::new("thread-tool-activity").expect("thread id")),
             capability_id: CapabilityId::new("script.echo").expect("capability id"),
             status: CapabilityActivityStatusView::Completed,
@@ -787,6 +1246,7 @@ mod tests {
         let rendered = serde_json::to_string(&json).expect("render");
 
         assert_eq!(json["status"], "completed");
+        assert_eq!(json["turn_run_id"], run_id.to_string());
         assert_eq!(json["output_bytes"], 12);
         for forbidden in [
             "arguments",
@@ -805,9 +1265,11 @@ mod tests {
 
     #[test]
     fn capability_display_preview_view_allows_bounded_display_material() {
+        let run_id = TurnRunId::new();
         let view = CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
             timeline_message_id: Some("timeline-message-1".to_string()),
             invocation_id: InvocationId::new(),
+            turn_run_id: Some(run_id),
             thread_id: Some(ThreadId::new("thread-tool-preview").expect("thread id")),
             capability_id: CapabilityId::new("builtin.read_file").expect("capability id"),
             status: CapabilityActivityStatusView::Completed,
@@ -826,6 +1288,7 @@ mod tests {
 
         let json = serde_json::to_value(&view).expect("serialize");
         assert_eq!(json["title"], "read_file");
+        assert_eq!(json["turn_run_id"], run_id.to_string());
         assert_eq!(json["subtitle"], "src/main.rs");
         assert_eq!(json["output_kind"], "text");
     }
@@ -995,6 +1458,7 @@ mod tests {
     fn capability_activity_view_rejects_unsafe_error_kind_on_serialize() {
         let view = CapabilityActivityView {
             invocation_id: InvocationId::new(),
+            turn_run_id: Some(TurnRunId::new()),
             thread_id: Some(ThreadId::new("thread-tool-activity").expect("thread id")),
             capability_id: CapabilityId::new("script.echo").expect("capability id"),
             status: CapabilityActivityStatusView::Failed,

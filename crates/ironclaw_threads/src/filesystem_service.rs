@@ -40,7 +40,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::future::join_all;
+use futures::{StreamExt, future::join_all};
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation,
     RecordVersion, RootFilesystem, ScopedFilesystem,
@@ -51,6 +51,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::summary_artifacts::find_overlapping_summary;
+use crate::title::derive_title_from_message;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -74,6 +76,8 @@ const FILESYSTEM_CAS_RETRIES: usize = 8;
 
 /// Conservative fan-out for indexed range materialization.
 const INDEXED_RANGE_MESSAGE_READ_CONCURRENCY: usize = 8;
+/// Conservative fan-out for per-thread title derivation during sidebar listing.
+const TITLE_DERIVATION_READ_CONCURRENCY: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
 enum MessageRangeFallbackPolicy {
@@ -331,6 +335,38 @@ where
         }
         messages.sort_by_key(|message| message.sequence);
         Ok(Some(messages))
+    }
+
+    async fn first_user_message_for_title(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        next_sequence: u64,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let index_store = MessageSequenceIndexStore::new(self.filesystem.as_ref());
+        for sequence in 1..next_sequence {
+            let Some(index) = index_store.read(scope, thread_id, sequence).await? else {
+                return Ok(self
+                    .list_thread_messages(scope, thread_id)
+                    .await?
+                    .into_iter()
+                    .find(|message| message.kind == MessageKind::User));
+            };
+            let Some((message, _)) = self
+                .read_message_versioned(scope, thread_id, index.message_id)
+                .await?
+            else {
+                return Ok(self
+                    .list_thread_messages(scope, thread_id)
+                    .await?
+                    .into_iter()
+                    .find(|message| message.kind == MessageKind::User));
+            };
+            if message.kind == MessageKind::User {
+                return Ok(Some(message));
+            }
+        }
+        Ok(None)
     }
 
     async fn materialize_message_range(
@@ -1268,6 +1304,31 @@ where
         Ok(thread.record)
     }
 
+    async fn delete_thread(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        // read_thread/read_thread_versioned enforce exact-scope ownership and
+        // preserve the same UnknownThread shape for absent or cross-scope rows.
+        self.read_thread(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await?;
+        match self
+            .filesystem
+            .delete(&scope.to_resource_scope(), &thread_root(scope, thread_id)?)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) if is_not_found(&error) => Err(SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn create_summary_artifact(
         &self,
         request: CreateSummaryArtifactRequest,
@@ -1304,22 +1365,11 @@ where
         let existing_summaries = self
             .list_thread_summaries(&request.scope, &request.thread_id)
             .await?;
-        if request.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-            && existing_summaries.iter().any(|summary| {
-                summary.model_context_policy
-                    == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-                    && ranges_overlap(
-                        request.start_sequence,
-                        request.end_sequence,
-                        summary.start_sequence,
-                        summary.end_sequence,
-                    )
-            })
+        let content = request.content.as_text().to_string();
+        if let Some(overlapping) =
+            find_overlapping_summary(&existing_summaries, &request, &content)?
         {
-            return Err(SessionThreadError::OverlappingSummaryRange {
-                start_sequence: request.start_sequence,
-                end_sequence: request.end_sequence,
-            });
+            return Ok(overlapping.clone());
         }
         let artifact = SummaryArtifact {
             summary_id: SummaryArtifactId::new(),
@@ -1327,7 +1377,7 @@ where
             start_sequence: request.start_sequence,
             end_sequence: request.end_sequence,
             summary_kind: request.summary_kind,
-            content: request.content.into_text(),
+            content,
             model_context_policy: request.model_context_policy,
         };
         let path = summary_record_path(&request.scope, &request.thread_id, artifact.summary_id)?;
@@ -1410,10 +1460,22 @@ where
         let results: Vec<Result<Option<(StoredThreadRecord, RecordVersion)>, SessionThreadError>> =
             futures::future::join_all(reads).await;
         let mut page: Vec<SessionThreadRecord> = Vec::with_capacity(thread_ids_page.len());
+        // Records whose `title` is `None` need a sidebar-friendly
+        // label derived from their first user message. We collect
+        // their page indices here and fan-out the indexed first-user
+        // reads below so we don't serialize N transcript probes
+        // behind the thread-record fan-out.
+        let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
         for (thread_id, result) in thread_ids_page.iter().zip(results) {
             match result {
                 Ok(Some((stored, _))) if stored.record.scope == request.scope => {
+                    let needs_derive = stored.record.title.is_none();
+                    let next_sequence = stored.next_sequence;
+                    let idx = page.len();
                     page.push(stored.record);
+                    if needs_derive {
+                        needs_title.push((idx, thread_id.clone(), next_sequence));
+                    }
                 }
                 Ok(_) => {
                     // Absent record or scope-mismatched payload (e.g.
@@ -1432,6 +1494,53 @@ where
                         ?error,
                         "skipping unreadable thread record during list_threads_for_scope",
                     );
+                }
+            }
+        }
+        // Derive titles in parallel from each thread's first user
+        // message. v1's libSQL list path did the same thing in SQL
+        // (`SELECT substr(content, 1, 100) FROM conversation_messages
+        // WHERE role='user' ORDER BY created_at LIMIT 1`); Reborn's
+        // filesystem layout reads via `RootFilesystem` instead. Errors
+        // are silent-ok — the sidebar entry simply falls back to its
+        // thread-id label, matching the WebUI fallback path.
+        if !needs_title.is_empty() {
+            let title_results: Vec<(
+                usize,
+                ThreadId,
+                Result<Option<ThreadMessageRecord>, SessionThreadError>,
+            )> = futures::stream::iter(needs_title)
+                .map(|(idx, thread_id, next_sequence)| {
+                    let scope = request.scope.clone();
+                    async move {
+                        let result = self
+                            .first_user_message_for_title(&scope, &thread_id, next_sequence)
+                            .await;
+                        (idx, thread_id, result)
+                    }
+                })
+                .buffer_unordered(TITLE_DERIVATION_READ_CONCURRENCY)
+                .collect()
+                .await;
+            for (idx, thread_id, msg_result) in title_results {
+                match msg_result {
+                    Ok(first_user) => {
+                        if let Some(title) = first_user
+                            .as_ref()
+                            .and_then(|message| message.content.as_deref())
+                            .and_then(derive_title_from_message)
+                        {
+                            page[idx].title = Some(title);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            thread_id = %thread_id.as_str(),
+                            scope = ?request.scope,
+                            ?error,
+                            "skipping thread-title derivation during list_threads_for_scope",
+                        );
+                    }
                 }
             }
         }
@@ -1515,6 +1624,13 @@ fn thread_record_path(
         "{}/thread.json",
         thread_root_string(scope, thread_id)
     ))
+}
+
+fn thread_root(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&thread_root_string(scope, thread_id))
 }
 
 fn messages_root(
@@ -1675,10 +1791,6 @@ fn ensure_user_accepted(
         from: message.status,
         attempted,
     })
-}
-
-fn ranges_overlap(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> bool {
-    left_start <= right_end && right_start <= left_end
 }
 
 fn is_model_visible(status: MessageStatus) -> bool {

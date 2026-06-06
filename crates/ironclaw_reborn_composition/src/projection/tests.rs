@@ -1,31 +1,49 @@
-use super::turn_events::WEBUI_TURN_EVENT_PAGE_LIMIT;
+use super::turn_events::{
+    FailureExplanationInput, FailureExplanationProvider, ModelFailureExplanationProvider,
+    WEBUI_TURN_EVENT_PAGE_LIMIT, bounded_failure_explanation,
+};
 use super::*;
 
 use async_trait::async_trait;
+use ironclaw_auth::{AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_event_projections::{
     CapabilityActivityProjection, ProjectionSnapshot, ThreadTimeline,
 };
 use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, ResourceScope,
-    RuntimeKind, TenantId, ThreadId, UserId,
+    AgentId, ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, NetworkMethod,
+    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
+    RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TenantId,
+    ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
-    CapabilityActivityStatusView, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductProjectionItem,
+    AuthPromptChallengeKind, CapabilityActivityStatusView, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductProjectionItem,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
     GateRef, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
     RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
     TurnBlockedGateKind, TurnBlockedGateMetadata, TurnError, TurnEventKind, TurnEventPage,
-    TurnLifecycleEvent, TurnRunState, TurnStatus,
+    TurnLifecycleEvent, TurnRunId, TurnRunState, TurnStatus,
+    run_profile::{
+        LoopSafeSummary, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
+        SystemInferenceResponse, SystemInferenceTaskId, SystemTaskKind,
+    },
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+use tokio::sync::Mutex;
+
+use crate::AuthChallengeView;
 
 mod cursor_validation;
 mod display_preview;
+mod failure_explanation;
+mod live_progress_stream;
 mod runtime_stream;
 mod turn_stream;
+mod turn_stream_auth;
 
 fn long_test_id(prefix: &str, character: char) -> String {
     format!("{prefix}-{}", character.to_string().repeat(96))
@@ -60,7 +78,7 @@ fn contains_run_status(
         | ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter().any(|item| {
             matches!(
                 item,
-                ProductProjectionItem::RunStatus { run_id, status }
+                ProductProjectionItem::RunStatus { run_id, status, .. }
                     if *run_id == expected_run_id && status == expected_status
             )
         }),
@@ -129,6 +147,71 @@ impl TurnEventProjectionSource for RebaseTurnEventSource {
     }
 }
 
+struct FakeFailureExplainer {
+    explanation: String,
+}
+
+#[async_trait]
+impl FailureExplanationProvider for FakeFailureExplainer {
+    async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String> {
+        assert!(
+            !input.failure_category.is_empty(),
+            "failure category should be available to the explainer"
+        );
+        assert!(
+            !input.fallback_summary.is_empty(),
+            "fallback summary should be available to the explainer"
+        );
+        Some(self.explanation.clone())
+    }
+}
+
+struct CountingFailureExplainer {
+    explanation: String,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl FailureExplanationProvider for CountingFailureExplainer {
+    async fn explain_failure(&self, _input: FailureExplanationInput) -> Option<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Some(self.explanation.clone())
+    }
+}
+
+struct RecordingFailureGateway {
+    response: Mutex<Result<SystemInferenceResponse, SystemInferenceError>>,
+    requests: Mutex<Vec<SystemInferenceRequest>>,
+}
+
+#[async_trait]
+impl SystemInferencePort for RecordingFailureGateway {
+    async fn call_system_inference(
+        &self,
+        request: SystemInferenceRequest,
+    ) -> Result<SystemInferenceResponse, SystemInferenceError> {
+        self.requests.lock().await.push(request);
+        self.response.lock().await.clone()
+    }
+}
+
+struct SlowSystemInference;
+
+#[async_trait]
+impl SystemInferencePort for SlowSystemInference {
+    async fn call_system_inference(
+        &self,
+        request: SystemInferenceRequest,
+    ) -> Result<SystemInferenceResponse, SystemInferenceError> {
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        Ok(SystemInferenceResponse {
+            task_id: request.task_id,
+            output_text: "too late".to_string(),
+            elapsed_ms: 2000,
+        })
+    }
+}
+
 struct FakeTurnCoordinator {
     state: TurnRunState,
 }
@@ -166,6 +249,57 @@ impl TurnCoordinator for FakeTurnCoordinator {
     }
 }
 
+struct FakeAuthChallengeProvider {
+    expected_owner_user_id: UserId,
+    expected_run_id: TurnRunId,
+    expected_gate_ref: String,
+}
+
+struct FailingAuthChallengeProvider;
+
+#[async_trait]
+impl AuthChallengeProvider for FakeAuthChallengeProvider {
+    async fn challenge_for_gate(
+        &self,
+        _scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
+        gate_ref: &str,
+        _credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+    ) -> Result<Option<AuthChallengeView>, ironclaw_auth::AuthProductError> {
+        if owner_user_id != &self.expected_owner_user_id
+            || run_id != self.expected_run_id
+            || gate_ref != self.expected_gate_ref
+        {
+            return Ok(None);
+        }
+        Ok(Some(AuthChallengeView {
+            kind: AuthPromptChallengeKind::OAuthUrl,
+            provider: AuthProviderId::new("github".to_string()).unwrap(),
+            account_label: None,
+            authorization_url: Some(
+                OAuthAuthorizationUrl::new("https://github.com/login/oauth/authorize".to_string())
+                    .unwrap(),
+            ),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+        }))
+    }
+}
+
+#[async_trait]
+impl AuthChallengeProvider for FailingAuthChallengeProvider {
+    async fn challenge_for_gate(
+        &self,
+        _scope: &TurnScope,
+        _owner_user_id: &UserId,
+        _run_id: TurnRunId,
+        _gate_ref: &str,
+        _credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+    ) -> Result<Option<AuthChallengeView>, ironclaw_auth::AuthProductError> {
+        Err(ironclaw_auth::AuthProductError::BackendUnavailable)
+    }
+}
+
 fn turn_run_state(
     scope: &TurnScope,
     user_id: &UserId,
@@ -187,6 +321,7 @@ fn turn_run_state(
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: Some(GateRef::new("gate:auth-required").unwrap()),
+        credential_requirements: Vec::new(),
         failure: None,
         event_cursor: cursor,
     }

@@ -1,13 +1,25 @@
+// arch-exempt: large_file, needs Reborn composition helper extraction, plan #4469
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
+use ironclaw_authorization::GrantAuthorizer;
 #[cfg(not(feature = "libsql"))]
 use ironclaw_authorization::InMemoryCapabilityLeaseStore;
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+use ironclaw_conversations::InMemoryConversationServices;
+use ironclaw_conversations::{
+    AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
+};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_conversations::{InboundTurnError, RebornFilesystemConversationServices};
 #[cfg(feature = "libsql")]
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
 #[cfg(not(feature = "libsql"))]
@@ -17,37 +29,42 @@ use ironclaw_events::{
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
 };
-use ironclaw_filesystem::RootFilesystem;
+#[cfg(not(feature = "libsql"))]
+use ironclaw_filesystem::InMemoryBackend;
 #[cfg(feature = "libsql")]
+use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{
-    BackendCapabilities, BackendId, BackendKind, Capability, CompositeRootFilesystem, ContentKind,
-    IndexPolicy, LibSqlRootFilesystem, MountDescriptor, StorageClass,
+    BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind, IndexPolicy,
+    MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, ProcessBackendKind, SecretMode};
 use ironclaw_host_api::{
-    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
+    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, RuntimeHttpEgress,
+    UserId, VirtualPath,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
-    LocalHostProcessPort, ProductAuthProviderRuntimePorts, builtin_first_party_handlers,
-    builtin_first_party_package,
+    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
+    HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
+    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_resources::InMemoryResourceGovernor;
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGovernor};
 #[cfg(feature = "libsql")]
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
 #[cfg(not(feature = "libsql"))]
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_secrets::FilesystemCredentialBroker;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_secrets::SecretStore;
@@ -56,6 +73,10 @@ use ironclaw_threads::FilesystemSessionThreadService;
 #[cfg(not(feature = "libsql"))]
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_threads::SessionThreadService;
+use ironclaw_triggers::{
+    TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerRecord, TriggerRepository,
+};
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(feature = "libsql")]
 use ironclaw_turns::FilesystemTurnStateStore;
@@ -69,23 +90,27 @@ use ironclaw_turns::{
 
 use crate::RebornProductAuthServicePorts;
 use crate::default_system_prompt::seed_default_system_prompt;
-use crate::google_oauth::google_provider_client;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use crate::input::OAuthClientConfig;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_authorization::local_dev_authorizer;
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
-    ambient_workspace_mount_view, skill_context_mount_view, workspace_mount_view,
+    ambient_workspace_mount_view, memory_mount_view, skill_context_mount_view,
+    skill_management_mount_view, workspace_mount_view,
 };
+use crate::mcp::hosted_http_mcp_runtime;
+use crate::product_auth_providers::{OAuthProviderComposition, compose_provider_client};
+use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessState,
+    RebornWorkerReadiness,
 };
 use crate::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
+        google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
+        google_slides_manifest_digest, notion_mcp_manifest_digest, web_access_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
@@ -95,13 +120,19 @@ use crate::{
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
-    gsuite::register_bundled_gsuite_first_party_handlers,
+    gsuite::{
+        ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
+    },
+    web_access::register_bundled_web_access_first_party_handlers,
 };
 
-#[cfg(feature = "libsql")]
 pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
-#[cfg(not(feature = "libsql"))]
-pub(crate) type LocalDevRootFilesystem = LocalFilesystem;
+
+struct LocalDevRootFilesystemBundle {
+    filesystem: Arc<LocalDevRootFilesystem>,
+    #[cfg(feature = "libsql")]
+    database: Arc<libsql::Database>,
+}
 
 type LocalDevWorkspaceFilesystems = (
     Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -110,6 +141,8 @@ type LocalDevWorkspaceFilesystems = (
 );
 
 const LOCAL_DEV_DEFAULT_SYSTEM_PROMPT_PATH: &str = "system/prompts/default-system.md";
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
 
 #[cfg(feature = "libsql")]
 pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFilesystem>;
@@ -212,7 +245,51 @@ where
     services
         .product_auth_provider_runtime_ports()
         .ok_or_else(|| RebornBuildError::InvalidConfig {
-            reason: "Google OAuth provider backend requires host runtime HTTP egress".to_string(),
+            reason: "product auth runtime ports unavailable; host runtime must be configured with HTTP egress and a secret store".to_string(),
+        })
+}
+
+fn attach_hosted_mcp_runtime<F, G, S, R>(
+    services: HostRuntimeServices<F, G, S, R>,
+) -> Result<HostRuntimeServices<F, G, S, R>, RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    // Soft-disable when host runtime HTTP egress is absent. Builds without
+    // egress — in-memory test services, minimal compositions — must still
+    // succeed; only hosted MCP capabilities go dark.
+    let Some(runtime_ports) = services.product_auth_provider_runtime_ports() else {
+        tracing::debug!(
+            "skipping hosted MCP runtime: host runtime HTTP egress absent \
+             (only affects hosted MCP extensions, e.g. Notion, NEAR AI)"
+        );
+        return Ok(services);
+    };
+    let runtime_http_egress = runtime_ports.runtime_http_egress();
+    let registry = services.shared_extension_registry();
+
+    Ok(services.with_mcp_runtime(Arc::new(hosted_http_mcp_runtime(
+        registry,
+        runtime_http_egress,
+    ))))
+}
+
+fn attach_wasm_runtime<F, G, S, R>(
+    services: HostRuntimeServices<F, G, S, R>,
+) -> Result<HostRuntimeServices<F, G, S, R>, RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    services
+        .try_with_default_wasm_runtime()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("WASM runtime could not be initialized: {error}"),
         })
 }
 
@@ -241,6 +318,19 @@ pub struct RebornServices {
     pub product_auth: Option<Arc<RebornProductAuthServices>>,
     pub readiness: RebornReadiness,
     pub(crate) local_runtime: Option<Arc<RebornLocalRuntimeServices>>,
+    /// Shared scoped secret store. Exposed so runtime-level features (e.g.
+    /// operator LLM-key storage) can reuse the same instance product-auth uses
+    /// rather than standing up a second authority.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) secret_store: Arc<dyn SecretStore>,
+}
+
+impl RebornServices {
+    /// The shared scoped secret store backing this composition.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
+        Arc::clone(&self.secret_store)
+    }
 }
 
 pub(crate) struct RebornLocalRuntimeServices {
@@ -251,24 +341,92 @@ pub(crate) struct RebornLocalRuntimeServices {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) capability_policy: Arc<LocalDevCapabilityPolicy>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
+    pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    pub(crate) trigger_conversation_services: InMemoryConversationServices,
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) trigger_conversation_services:
+        tokio::sync::OnceCell<RebornFilesystemConversationServices>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
+    /// Resource governor handle used by the budget accountant. Kept here
+    /// separately from the type-erased `dyn HostRuntime` so the runtime
+    /// composer can construct a `GovernorBackedAccountant` without losing
+    /// the concrete governor type. Wired through #3841 follow-up "A1: wire
+    /// GovernorBackedAccountant into production composition".
+    pub(crate) resource_governor: Arc<dyn ironclaw_resources::ResourceGovernor>,
+    /// Sink that receives `BudgetEvent`s from the governor. Composition
+    /// hands this to downstream consumers (audit log, SSE projection)
+    /// without forcing the governor to know about them. Wired through
+    /// #3841 follow-up "A2: project BudgetEvent into the gateway event
+    /// stream".
+    #[allow(dead_code)]
+    pub(crate) budget_event_sink: Arc<dyn ironclaw_resources::BudgetEventSink>,
+    /// Same sink as `budget_event_sink` but typed as the concrete
+    /// `InMemoryBudgetEventSink` so the runtime can expose `drain()` /
+    /// `snapshot()` to tests without leaking the concrete type into the
+    /// production `BudgetEventSink` boundary.
+    #[allow(dead_code)]
+    pub(crate) in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,
+    /// Broadcast sink production callers can subscribe against once a
+    /// real projection caller lands (review feedback Thermo-Nuclear
+    /// #3: the speculative `src/bridge/budget_events.rs` helper plus
+    /// `AppEvent::Budget` variant were removed pending an owner that
+    /// actually spawns a projection task with shutdown cancellation).
+    /// Composition fans every BudgetEvent through this alongside the
+    /// in-memory sink so tests can still inspect history.
+    pub(crate) broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
+    /// Approval-gate store used to surface `BudgetApprovalRequired` to a
+    /// user. Stays in-memory in local-dev; production composition will
+    /// swap in the filesystem-backed `FilesystemBudgetGateStore`.
+    #[allow(dead_code)]
+    pub(crate) budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
     pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
     // LocalSingleUser-only for now. Production and multi-tenant lifecycle
     // wiring need scoped storage/registry ownership before this is reused
     // outside local-dev composition. Tracked in #4091.
     pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
+    pub(crate) memory_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    #[cfg(all(
+        any(feature = "libsql", feature = "postgres"),
+        feature = "slack-v2-host-beta"
+    ))]
+    pub(crate) host_state_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    /// Tenant-scoped root filesystem used for third-party extension hook
+    /// discovery (`/system/extensions/<tenant>`). The runtime derives the
+    /// discovery root from the authenticated tenant id; this is the same
+    /// backend the rest of local-dev composition uses.
+    pub(crate) extension_filesystem: Arc<LocalDevRootFilesystem>,
     pub(crate) workspace_mounts: MountView,
     pub(crate) local_dev_storage_root: PathBuf,
     pub(crate) default_system_prompt_path: PathBuf,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
+    /// Canonical registry shared by capability dispatch and hook activation.
+    pub(crate) extension_registry: Arc<ExtensionRegistry>,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+impl RebornLocalRuntimeServices {
+    pub(crate) async fn durable_trigger_conversation_services(
+        &self,
+    ) -> Result<RebornFilesystemConversationServices, InboundTurnError> {
+        let filesystem = Arc::clone(&self.subagent_goal_filesystem);
+        self.trigger_conversation_services
+            .get_or_try_init(|| async move {
+                RebornFilesystemConversationServices::new(filesystem).await
+            })
+            .await
+            .cloned()
+    }
 }
 
 struct RebornLocalDevStoreGraph {
@@ -279,6 +437,18 @@ struct RebornLocalDevStoreGraph {
     local_runtime: Arc<RebornLocalRuntimeServices>,
     resource_governor: Arc<LocalDevResourceGovernor>,
     process_services: LocalDevProcessServices,
+    trigger_repository: Arc<dyn TriggerRepository>,
+}
+
+struct RebornLocalDevStoreGraphInput {
+    filesystem: Arc<LocalDevRootFilesystem>,
+    owner_user_id: UserId,
+    skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    workspace_mounts: MountView,
+    local_dev_storage_root: PathBuf,
+    default_system_prompt_path: PathBuf,
+    trigger_repository: Arc<dyn TriggerRepository>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -302,6 +472,8 @@ impl RebornServices {
             product_auth: None,
             readiness: RebornReadiness::disabled(),
             local_runtime: None,
+            #[cfg(feature = "root-llm-provider")]
+            secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
         }
     }
 }
@@ -334,13 +506,20 @@ fn auth_continuation_dispatcher(
 fn compose_product_auth_services(
     ports: RebornProductAuthServicePorts,
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    provider_client: Option<Arc<dyn AuthProviderClient>>,
+    provider_composition: OAuthProviderComposition,
 ) -> Arc<RebornProductAuthServices> {
-    let ports = match provider_client {
+    let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
         None => ports,
     };
-    Arc::new(ports.into_services(auth_continuation_dispatcher(turn_coordinator)))
+    let mut services = ports.into_services(auth_continuation_dispatcher(turn_coordinator));
+    if let Some(registry) = provider_composition.dcr_registry {
+        services = services.with_dcr_oauth_registry(registry);
+    }
+    if let Some(registry) = provider_composition.gate_registry {
+        services = services.with_oauth_gate_registry(registry);
+    }
+    Arc::new(services)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -356,17 +535,20 @@ fn production_config(
     if require_wasm_credentials {
         config = config.require_wasm_credentials();
     }
-    config
+    config.require_credential_broker()
 }
 
 async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
+    #[cfg(all(test, feature = "slack-v2-host-beta"))]
+    let host_runtime_http_egress_for_test = input.host_runtime_http_egress_for_test.clone();
     let RebornBuildInput {
         profile,
         storage,
         runtime_policy,
         runtime_process_binding,
         product_auth_ports,
-        google_oauth_config,
+        oauth_provider_configs,
+        oauth_dcr_provider_configs,
         owner_id,
         ..
     } = input;
@@ -418,7 +600,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         (false, None) => None,
     };
     validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
-    validate_local_dev_workspace_host_home_isolation(&workspace_root, host_home_root.as_ref())?;
     let default_system_prompt_path = local_dev_default_system_prompt_path(&root);
     seed_default_system_prompt(&root, &default_system_prompt_path).map_err(|error| {
         RebornBuildError::InvalidConfig {
@@ -426,8 +607,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         }
     })?;
     crate::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
-    let filesystem =
+    let filesystem_bundle =
         build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
+    let filesystem = filesystem_bundle.filesystem;
+    #[cfg(feature = "libsql")]
+    let trigger_repository =
+        local_dev_trigger_repository(Arc::clone(&filesystem_bundle.database)).await?;
+    #[cfg(not(feature = "libsql"))]
+    let trigger_repository = local_dev_trigger_repository();
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
         build_workspace_filesystems(
             Arc::clone(&filesystem),
@@ -441,32 +628,38 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
-    let mut store_graph = build_local_dev_store_graph(
-        Arc::clone(&filesystem),
+    let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
+        filesystem: Arc::clone(&filesystem),
         owner_user_id,
         skill_filesystem,
         workspace_filesystem,
-        runtime_workspace_mounts,
-        root.clone(),
+        workspace_mounts: runtime_workspace_mounts,
+        local_dev_storage_root: root.clone(),
         default_system_prompt_path,
-    )?;
+        trigger_repository,
+    })?;
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
     );
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let local_dev_product_auth_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let local_dev_secret_store =
+        build_local_dev_secret_store(&root, Arc::clone(&local_dev_product_auth_filesystem))?;
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let secret_store: Arc<dyn SecretStore> = local_dev_secret_store.clone();
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
-    let mut first_party_registry = builtin_first_party_registry()?;
-    let local_dev_capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
-        RebornBuildError::InvalidConfig {
-            reason: format!("local-dev capability policy is invalid: {error}"),
-        }
-    })?);
-
     let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
-    let authorizer = local_dev_authorizer(runtime_policy.as_ref(), local_dev_capability_policy);
+    let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
+    let authorizer = local_dev_authorizer(
+        runtime_policy.as_ref(),
+        Arc::clone(&store_graph.local_runtime.capability_policy),
+    );
     let mut services = HostRuntimeServices::new(
-        Arc::new(local_dev_builtin_extension_registry()?),
+        Arc::clone(&extension_registry),
         Arc::clone(&filesystem),
         Arc::clone(&store_graph.resource_governor),
         authorizer,
@@ -497,33 +690,71 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         services = services.with_runtime_process_port(Arc::new(process_port));
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
-    let google_provider_client = google_oauth_config
-        .map(|config| {
-            let runtime_ports = require_product_auth_runtime_ports(&services)?;
-            google_provider_client(config, Arc::clone(&secret_store), runtime_ports)
-        })
-        .transpose()?;
+    services = attach_hosted_mcp_runtime(services)?;
+    services = attach_wasm_runtime(services)?;
+    let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
+    let provider_composition = compose_provider_client(
+        oauth_provider_configs,
+        oauth_dcr_provider_configs,
+        Arc::clone(&secret_store),
+        product_auth_runtime_ports.clone(),
+    )?;
     let product_auth = match product_auth_ports {
         Some(ports) => {
-            compose_product_auth_services(ports, turn_coordinator.clone(), google_provider_client)
+            compose_product_auth_services(ports, turn_coordinator.clone(), provider_composition)
         }
         None => {
-            let services = RebornProductAuthServices::local_dev_in_memory(
-                auth_continuation_dispatcher(turn_coordinator.clone()),
-            );
-            Arc::new(match google_provider_client {
-                Some(provider_client) => services.with_provider_client(provider_client),
-                None => services,
-            })
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            {
+                let durable_services = Arc::new(FilesystemAuthProductServices::new(
+                    local_dev_product_auth_filesystem,
+                    Arc::clone(&secret_store),
+                ));
+                let provider_client: Arc<dyn AuthProviderClient> = provider_composition
+                    .client
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient));
+                let services = RebornProductAuthServicePorts::from_shared_with_provider(
+                    Arc::clone(&durable_services),
+                    provider_client,
+                )
+                .into_services(auth_continuation_dispatcher(turn_coordinator.clone()))
+                .with_flow_record_source(durable_services);
+                let services = match provider_composition.dcr_registry.clone() {
+                    Some(registry) => services.with_dcr_oauth_registry(registry),
+                    None => services,
+                };
+                let services = match provider_composition.gate_registry.clone() {
+                    Some(registry) => services.with_oauth_gate_registry(registry),
+                    None => services,
+                };
+                Arc::new(services)
+            }
+            #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+            {
+                let services = RebornProductAuthServices::local_dev_in_memory(
+                    auth_continuation_dispatcher(turn_coordinator.clone()),
+                );
+                let services = match provider_composition.client.clone() {
+                    Some(provider_client) => services.with_provider_client(provider_client),
+                    None => services,
+                };
+                let services = match provider_composition.dcr_registry.clone() {
+                    Some(registry) => services.with_dcr_oauth_registry(registry),
+                    None => services,
+                };
+                Arc::new(match provider_composition.gate_registry.clone() {
+                    Some(registry) => services.with_oauth_gate_registry(registry),
+                    None => services,
+                })
+            }
         }
     };
-    register_bundled_gsuite_first_party_handlers(
-        &mut first_party_registry,
-        product_auth.credential_account_service(),
-    )
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("GSuite first-party handlers are invalid: {error}"),
-    })?;
+    services = services.with_runtime_credential_account_resolver(Arc::new(
+        ProductAuthRuntimeCredentialResolver::new(
+            product_auth.runtime_credential_account_selection_service(),
+        ),
+    ));
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
         filesystem.as_ref(),
         &VirtualPath::new("/system/extensions")?,
@@ -558,6 +789,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     );
     restore_extension_lifecycle_state(
         &available_extensions,
+        &extension_filesystem,
         &extension_installation_store,
         &extension_lifecycle_service,
         &active_extensions,
@@ -573,21 +805,47 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         extension_lifecycle_service,
         active_extensions,
     ));
-    insert_extension_lifecycle_handlers(
-        &mut first_party_registry,
-        Arc::clone(&extension_management),
-    )
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
-    })?;
-    services = services.with_first_party_capabilities(Arc::new(first_party_registry));
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
-        local_runtime.extension_management = Some(extension_management);
+        local_runtime.extension_management = Some(Arc::clone(&extension_management));
+        local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
+        local_runtime.extension_registry = Arc::clone(&extension_registry);
+        let host_runtime_http_egress = services.host_runtime_http_egress_port();
+        #[cfg(all(test, feature = "slack-v2-host-beta"))]
+        let host_runtime_http_egress =
+            host_runtime_http_egress_for_test.unwrap_or(host_runtime_http_egress);
+        local_runtime.host_runtime_http_egress = host_runtime_http_egress;
     } else {
         return Err(RebornBuildError::InvalidConfig {
             reason: "local-dev extension lifecycle facade could not be attached".to_string(),
         });
     }
+    let trigger_create_hook = local_dev_trigger_create_hook(&store_graph.local_runtime);
+    let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
+        Arc::clone(&store_graph.trigger_repository),
+        trigger_create_hook,
+    )?;
+    register_bundled_gsuite_first_party_handlers(
+        &mut first_party_registry,
+        product_auth.credential_account_service(),
+        product_auth.credential_account_record_source(),
+        Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
+            product_auth_runtime_ports.clone(),
+        )),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("GSuite first-party handlers are invalid: {error}"),
+    })?;
+    register_bundled_web_access_first_party_handlers(&mut first_party_registry).map_err(
+        |error| RebornBuildError::InvalidConfig {
+            reason: format!("web access first-party handlers are invalid: {error}"),
+        },
+    )?;
+    insert_extension_lifecycle_handlers(&mut first_party_registry, extension_management).map_err(
+        |error| RebornBuildError::InvalidConfig {
+            reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
+        },
+    )?;
+    services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
@@ -600,19 +858,25 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         product_auth: Some(product_auth),
         readiness: readiness_for(profile, true, true, true),
         local_runtime: Some(store_graph.local_runtime),
+        #[cfg(feature = "root-llm-provider")]
+        secret_store,
     })
 }
 
 #[cfg(feature = "libsql")]
 fn build_local_dev_store_graph(
-    filesystem: Arc<LocalDevRootFilesystem>,
-    owner_user_id: UserId,
-    skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    workspace_mounts: MountView,
-    local_dev_storage_root: PathBuf,
-    default_system_prompt_path: PathBuf,
+    input: RebornLocalDevStoreGraphInput,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
+    let RebornLocalDevStoreGraphInput {
+        filesystem,
+        owner_user_id,
+        skill_filesystem,
+        workspace_filesystem,
+        workspace_mounts,
+        local_dev_storage_root,
+        default_system_prompt_path,
+        trigger_repository,
+    } = input;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
     let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
@@ -633,40 +897,73 @@ fn build_local_dev_store_graph(
     let thread_service: Arc<dyn SessionThreadService> = Arc::new(
         FilesystemSessionThreadService::new(Arc::clone(&scoped_filesystem)),
     );
+    let BudgetSinks {
+        budget_event_sink,
+        in_memory_budget_event_sink,
+        broadcast_budget_event_sink,
+        budget_gate_store,
+    } = build_budget_sinks();
+    let resource_governor: Arc<LocalDevResourceGovernor> = Arc::new(
+        PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
+            &scoped_filesystem,
+        )))
+        .with_event_sink(Arc::clone(&budget_event_sink)),
+    );
     let skill_mounts =
-        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+        skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
-    let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
     let capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("local-dev capability policy is invalid: {error}"),
         }
     })?);
+    let memory_mounts =
+        memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?;
+    let skill_management =
+        build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         capability_policy: Arc::clone(&capability_policy),
         turn_state: Arc::clone(&turn_state),
+        trigger_repository: Arc::clone(&trigger_repository),
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        trigger_conversation_services,
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        trigger_conversation_services: tokio::sync::OnceCell::new(),
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
+        resource_governor: Arc::clone(&resource_governor)
+            as Arc<dyn ironclaw_resources::ResourceGovernor>,
+        budget_event_sink,
+        in_memory_budget_event_sink,
+        broadcast_budget_event_sink,
+        budget_gate_store,
         skill_management,
         extension_management: None,
+        runtime_http_egress: None,
+        host_runtime_http_egress: None,
         skill_mounts,
+        memory_mounts,
         skill_filesystem,
         workspace_filesystem,
+        #[cfg(feature = "slack-v2-host-beta")]
+        host_state_filesystem: Arc::clone(&scoped_filesystem),
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
+        extension_filesystem: Arc::clone(&filesystem),
         workspace_mounts,
         local_dev_storage_root,
         default_system_prompt_path,
         event_log,
         audit_log,
+        extension_registry: Arc::new(ExtensionRegistry::new()),
     });
-    let resource_governor: Arc<LocalDevResourceGovernor> =
-        Arc::new(PersistentResourceGovernor::new(
-            FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem)),
-        ));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
 
     Ok(RebornLocalDevStoreGraph {
@@ -677,19 +974,24 @@ fn build_local_dev_store_graph(
         local_runtime,
         resource_governor,
         process_services,
+        trigger_repository,
     })
 }
 
 #[cfg(not(feature = "libsql"))]
 fn build_local_dev_store_graph(
-    filesystem: Arc<LocalDevRootFilesystem>,
-    owner_user_id: UserId,
-    skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    workspace_mounts: MountView,
-    local_dev_storage_root: PathBuf,
-    default_system_prompt_path: PathBuf,
+    input: RebornLocalDevStoreGraphInput,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
+    let RebornLocalDevStoreGraphInput {
+        filesystem,
+        owner_user_id,
+        skill_filesystem,
+        workspace_filesystem,
+        workspace_mounts,
+        local_dev_storage_root,
+        default_system_prompt_path,
+        trigger_repository,
+    } = input;
     #[cfg(feature = "postgres")]
     let subagent_goal_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
@@ -704,39 +1006,72 @@ fn build_local_dev_store_graph(
         Arc::new(InMemoryLoopCheckpointStore::default());
     let thread_service: Arc<dyn SessionThreadService> =
         Arc::new(InMemorySessionThreadService::default());
+    let BudgetSinks {
+        budget_event_sink,
+        in_memory_budget_event_sink,
+        broadcast_budget_event_sink,
+        budget_gate_store,
+    } = build_budget_sinks();
+    let resource_governor: Arc<LocalDevResourceGovernor> =
+        Arc::new(InMemoryResourceGovernor::new().with_event_sink(Arc::clone(&budget_event_sink)));
     let skill_mounts =
-        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+        skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
-    let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
     let capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("local-dev capability policy is invalid: {error}"),
         }
     })?);
+    let memory_mounts =
+        memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?;
+    let skill_management =
+        build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let trigger_conversation_services = local_dev_trigger_conversation_services();
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         capability_policy: Arc::clone(&capability_policy),
         turn_state: Arc::clone(&turn_state),
+        trigger_repository: Arc::clone(&trigger_repository),
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        trigger_conversation_services,
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        trigger_conversation_services: tokio::sync::OnceCell::new(),
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
+        resource_governor: Arc::clone(&resource_governor)
+            as Arc<dyn ironclaw_resources::ResourceGovernor>,
+        budget_event_sink,
+        in_memory_budget_event_sink,
+        broadcast_budget_event_sink,
+        budget_gate_store,
         skill_management,
         extension_management: None,
+        runtime_http_egress: None,
+        host_runtime_http_egress: None,
         skill_mounts,
+        memory_mounts,
         skill_filesystem,
         workspace_filesystem,
+        #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
+        host_state_filesystem: Arc::clone(&subagent_goal_filesystem),
         #[cfg(feature = "postgres")]
         subagent_goal_filesystem,
+        extension_filesystem: Arc::clone(&filesystem),
         workspace_mounts,
         local_dev_storage_root,
         default_system_prompt_path,
         event_log,
         audit_log,
+        extension_registry: Arc::new(ExtensionRegistry::new()),
     });
-    let resource_governor: Arc<LocalDevResourceGovernor> =
-        Arc::new(InMemoryResourceGovernor::new());
     let process_services = ProcessServices::in_memory();
 
     Ok(RebornLocalDevStoreGraph {
@@ -747,7 +1082,215 @@ fn build_local_dev_store_graph(
         local_runtime,
         resource_governor,
         process_services,
+        trigger_repository,
     })
+}
+
+#[cfg(feature = "libsql")]
+async fn local_dev_trigger_repository(
+    database: Arc<libsql::Database>,
+) -> Result<Arc<dyn TriggerRepository>, RebornBuildError> {
+    let repository = ironclaw_triggers::LibSqlTriggerRepository::new(database);
+    repository
+        .run_migrations()
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("local-dev trigger repository migrations failed: {error}"),
+        })?;
+    Ok(Arc::new(repository))
+}
+
+#[cfg(not(feature = "libsql"))]
+fn local_dev_trigger_repository() -> Arc<dyn TriggerRepository> {
+    Arc::new(ironclaw_triggers::InMemoryTriggerRepository::default())
+}
+
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+fn local_dev_trigger_conversation_services() -> InMemoryConversationServices {
+    InMemoryConversationServices::default()
+}
+
+fn local_dev_trigger_create_hook(
+    local_runtime: &Arc<RebornLocalRuntimeServices>,
+) -> Arc<dyn TriggerCreateHook> {
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    {
+        Arc::new(LocalRuntimeTriggerCreatorPairingHook {
+            runtime: Arc::clone(local_runtime),
+        })
+    }
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    {
+        Arc::new(InMemoryTriggerCreatorPairingHook {
+            conversations: local_runtime.trigger_conversation_services.clone(),
+        })
+    }
+}
+
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+struct InMemoryTriggerCreatorPairingHook {
+    conversations: InMemoryConversationServices,
+}
+
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+#[async_trait::async_trait]
+impl TriggerCreateHook for InMemoryTriggerCreatorPairingHook {
+    async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+        pair_trigger_creator(&self.conversations, record).await
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+struct LocalRuntimeTriggerCreatorPairingHook {
+    runtime: Arc<RebornLocalRuntimeServices>,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[async_trait::async_trait]
+impl TriggerCreateHook for LocalRuntimeTriggerCreatorPairingHook {
+    async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+        let conversations = self
+            .runtime
+            .durable_trigger_conversation_services()
+            .await
+            .map_err(|error| {
+                trigger_pairing_error(TriggerPairingFailureSource::ConversationInit, error)
+            })?;
+        pair_trigger_creator(&conversations, record).await
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+struct ScopedFilesystemTriggerCreatorPairingHook<F>
+where
+    F: RootFilesystem + 'static,
+{
+    filesystem: Arc<ScopedFilesystem<F>>,
+    conversations: tokio::sync::OnceCell<RebornFilesystemConversationServices>,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+impl<F> ScopedFilesystemTriggerCreatorPairingHook<F>
+where
+    F: RootFilesystem + 'static,
+{
+    fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self {
+            filesystem,
+            conversations: tokio::sync::OnceCell::new(),
+        }
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[async_trait::async_trait]
+impl<F> TriggerCreateHook for ScopedFilesystemTriggerCreatorPairingHook<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+        let filesystem = Arc::clone(&self.filesystem);
+        let conversations = self
+            .conversations
+            .get_or_try_init(|| async move {
+                RebornFilesystemConversationServices::new(filesystem)
+                    .await
+                    .map_err(|error| {
+                        trigger_pairing_error(TriggerPairingFailureSource::ConversationInit, error)
+                    })
+            })
+            .await
+            .cloned()?;
+        pair_trigger_creator(&conversations, record).await
+    }
+}
+
+async fn pair_trigger_creator(
+    pairing: &dyn ConversationActorPairingService,
+    record: &TriggerRecord,
+) -> Result<(), TriggerError> {
+    let adapter_kind = AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).map_err(|error| {
+        trigger_pairing_error(TriggerPairingFailureSource::TypedIdentity, error)
+    })?;
+    let adapter_installation_id =
+        AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID).map_err(|error| {
+            trigger_pairing_error(TriggerPairingFailureSource::TypedIdentity, error)
+        })?;
+    let external_actor_ref = ExternalActorRef::new(
+        TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+        record.creator_user_id.as_str(),
+    )
+    .map_err(|error| trigger_pairing_error(TriggerPairingFailureSource::TypedIdentity, error))?;
+    pairing
+        .pair_external_actor(
+            record.tenant_id.clone(),
+            adapter_kind,
+            adapter_installation_id,
+            external_actor_ref,
+            record.creator_user_id.clone(),
+        )
+        .await
+        .map_err(|error| trigger_pairing_error(TriggerPairingFailureSource::ActorPairing, error))
+}
+
+enum TriggerPairingFailureSource {
+    TypedIdentity,
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    ConversationInit,
+    ActorPairing,
+}
+
+impl TriggerPairingFailureSource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::TypedIdentity => "typed_identity",
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            Self::ConversationInit => "conversation_init",
+            Self::ActorPairing => "actor_pairing",
+        }
+    }
+}
+
+fn trigger_pairing_error(
+    source: TriggerPairingFailureSource,
+    _error: impl std::fmt::Display,
+) -> TriggerError {
+    tracing::debug!(
+        error_kind = "pairing_failure",
+        error_source = source.as_str(),
+        "trigger creator actor pairing failed"
+    );
+    TriggerError::Backend {
+        reason: "trigger creator actor pairing failed".to_string(),
+    }
+}
+
+struct BudgetSinks {
+    budget_event_sink: Arc<dyn ironclaw_resources::BudgetEventSink>,
+    in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,
+    broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
+    budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
+}
+
+fn build_budget_sinks() -> BudgetSinks {
+    let in_memory_budget_event_sink = Arc::new(ironclaw_resources::InMemoryBudgetEventSink::new());
+    let broadcast_budget_event_sink =
+        Arc::new(ironclaw_resources::BroadcastBudgetEventSink::default());
+    let budget_event_sink: Arc<dyn ironclaw_resources::BudgetEventSink> =
+        Arc::new(ironclaw_resources::CompositeBudgetEventSink::new(vec![
+            Arc::clone(&in_memory_budget_event_sink)
+                as Arc<dyn ironclaw_resources::BudgetEventSink>,
+            Arc::clone(&broadcast_budget_event_sink)
+                as Arc<dyn ironclaw_resources::BudgetEventSink>,
+        ]));
+    let budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore> =
+        Arc::new(ironclaw_resources::InMemoryBudgetGateStore::new());
+    BudgetSinks {
+        budget_event_sink,
+        in_memory_budget_event_sink,
+        broadcast_budget_event_sink,
+        budget_gate_store,
+    }
 }
 
 #[cfg(feature = "libsql")]
@@ -755,7 +1298,7 @@ async fn build_local_dev_root_filesystem(
     root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Result<Arc<LocalDevRootFilesystem>, RebornBuildError> {
+) -> Result<LocalDevRootFilesystemBundle, RebornBuildError> {
     let db_path = root.join("reborn-local-dev.db");
     let db = Arc::new(
         libsql::Builder::new_local(&db_path)
@@ -765,7 +1308,7 @@ async fn build_local_dev_root_filesystem(
                 reason: format!("local-dev libSQL database could not be opened: {error}"),
             })?,
     );
-    let database = Arc::new(LibSqlRootFilesystem::new(db));
+    let database = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     database.run_migrations().await?;
 
     let local = Arc::new(local_dev_project_filesystem(
@@ -786,6 +1329,7 @@ async fn build_local_dev_root_filesystem(
         )?,
         Arc::clone(&database),
     )?;
+    mount_local_dev_memory_root(&mut root, Arc::clone(&database))?;
     root.mount(
         local_dev_mount_descriptor(
             "/events",
@@ -798,31 +1342,11 @@ async fn build_local_dev_root_filesystem(
         )?,
         database,
     )?;
-    root.mount(
-        local_dev_mount_descriptor(
-            "/projects",
-            "local-dev-project-files",
-            BackendKind::LocalFilesystem,
-            StorageClass::FileContent,
-            ContentKind::ProjectFile,
-            IndexPolicy::NotIndexed,
-            local_dev_bytes_capabilities(),
-        )?,
-        Arc::clone(&local),
-    )?;
-    root.mount(
-        local_dev_mount_descriptor(
-            "/system/extensions",
-            "local-dev-system-extensions",
-            BackendKind::LocalFilesystem,
-            StorageClass::FileContent,
-            ContentKind::ExtensionPackage,
-            IndexPolicy::NotIndexed,
-            local_dev_bytes_capabilities(),
-        )?,
-        Arc::clone(&local),
-    )?;
-    Ok(Arc::new(root))
+    mount_local_dev_project_roots(&mut root, local)?;
+    Ok(LocalDevRootFilesystemBundle {
+        filesystem: Arc::new(root),
+        database: db,
+    })
 }
 
 #[cfg(not(feature = "libsql"))]
@@ -830,12 +1354,21 @@ async fn build_local_dev_root_filesystem(
     root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Result<Arc<LocalDevRootFilesystem>, RebornBuildError> {
-    Ok(Arc::new(local_dev_project_filesystem(
+) -> Result<LocalDevRootFilesystemBundle, RebornBuildError> {
+    let local = Arc::new(local_dev_project_filesystem(
         root,
         workspace_root,
         host_home_root,
-    )?))
+    )?);
+    tracing::warn!(
+        "local-dev: /memory is backed by InMemoryBackend; memory documents are ephemeral and will be lost on restart"
+    );
+    let mut composite = CompositeRootFilesystem::new();
+    mount_local_dev_memory_root(&mut composite, Arc::new(InMemoryBackend::new()))?;
+    mount_local_dev_project_roots(&mut composite, local)?;
+    Ok(LocalDevRootFilesystemBundle {
+        filesystem: Arc::new(composite),
+    })
 }
 
 fn local_dev_project_filesystem(
@@ -865,7 +1398,187 @@ fn local_dev_project_filesystem(
     Ok(filesystem)
 }
 
-#[cfg(feature = "libsql")]
+fn mount_local_dev_memory_root<F>(
+    root: &mut CompositeRootFilesystem,
+    backend: Arc<F>,
+) -> Result<(), RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    root.mount(
+        local_dev_mount_descriptor(
+            "/memory",
+            "local-dev-memory",
+            BackendKind::MemoryDocuments,
+            StorageClass::StructuredRecords,
+            ContentKind::MemoryDocument,
+            IndexPolicy::FullTextAndVector,
+            backend.capabilities(),
+        )?,
+        backend,
+    )?;
+    Ok(())
+}
+
+fn mount_local_dev_project_roots(
+    root: &mut CompositeRootFilesystem,
+    local: Arc<LocalFilesystem>,
+) -> Result<(), RebornBuildError> {
+    root.mount(
+        local_dev_mount_descriptor(
+            "/projects",
+            "local-dev-project-files",
+            BackendKind::LocalFilesystem,
+            StorageClass::FileContent,
+            ContentKind::ProjectFile,
+            IndexPolicy::NotIndexed,
+            BackendCapabilities::bytes_only(),
+        )?,
+        Arc::clone(&local),
+    )?;
+    root.mount(
+        local_dev_mount_descriptor(
+            "/system/extensions",
+            "local-dev-system-extensions",
+            BackendKind::LocalFilesystem,
+            StorageClass::FileContent,
+            ContentKind::ExtensionPackage,
+            IndexPolicy::NotIndexed,
+            BackendCapabilities::bytes_only(),
+        )?,
+        local,
+    )?;
+    Ok(())
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn build_local_dev_secret_store<F>(
+    root: &Path,
+    scoped_filesystem: Arc<ScopedFilesystem<F>>,
+) -> Result<Arc<FilesystemSecretStore<F>>, RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    let master_key = resolve_local_dev_secret_master_key(root)?;
+    let crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(master_key)?);
+    Ok(Arc::new(FilesystemSecretStore::new(
+        scoped_filesystem,
+        crypto,
+    )))
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn resolve_local_dev_secret_master_key(
+    root: &Path,
+) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
+    let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+    match std::fs::read_to_string(&key_path) {
+        Ok(existing) => {
+            return Ok(ironclaw_secrets::SecretMaterial::from(
+                existing.trim().to_string(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("local-dev secrets master key could not be read: {error}"),
+            });
+        }
+    }
+
+    let key = std::env::var(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(ironclaw_secrets::keychain::generate_master_key_hex);
+    write_local_dev_secret_master_key(&key_path, &key)?;
+    Ok(ironclaw_secrets::SecretMaterial::from(key))
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn write_local_dev_secret_master_key(path: &Path, key: &str) -> Result<(), RebornBuildError> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("local-dev secrets master key could not be created: {error}"),
+            })?;
+        file.write_all(key.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("local-dev secrets master key could not be written: {error}"),
+            })
+    }
+    #[cfg(windows)]
+    {
+        use std::io::Write as _;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("local-dev secrets master key could not be created: {error}"),
+            })?;
+        let account = std::env::var("USERDOMAIN")
+            .ok()
+            .filter(|domain| !domain.trim().is_empty())
+            .zip(
+                std::env::var("USERNAME")
+                    .ok()
+                    .filter(|user| !user.trim().is_empty()),
+            )
+            .map(|(domain, user)| format!("{domain}\\{user}"))
+            .or_else(|| std::env::var("USERNAME").ok())
+            .ok_or_else(|| RebornBuildError::InvalidConfig {
+                reason: "local-dev secrets master key could not be restricted: USERNAME is unset"
+                    .to_string(),
+            })?;
+        let status = std::process::Command::new("icacls")
+            .arg(path)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(format!("{account}:F"))
+            .status()
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "local-dev secrets master key permissions could not be set: {error}"
+                ),
+            })?;
+        if !status.success() {
+            let _ = std::fs::remove_file(path);
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "local-dev secrets master key permissions could not be set: icacls exited with {status}"
+                ),
+            });
+        }
+        file.write_all(key.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("local-dev secrets master key could not be written: {error}"),
+            })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        let _ = key;
+        Err(RebornBuildError::InvalidConfig {
+            reason:
+                "local-dev filesystem secret persistence requires Unix permissions or Windows ACLs"
+                    .to_string(),
+        })
+    }
+}
+
+// Intentionally uncfg'd: called from both libsql and no-libsql local-dev root
+// filesystem paths.
 fn local_dev_mount_descriptor(
     virtual_root: &str,
     backend_id: &str,
@@ -886,18 +1599,7 @@ fn local_dev_mount_descriptor(
     })
 }
 
-#[cfg(feature = "libsql")]
-fn local_dev_bytes_capabilities() -> BackendCapabilities {
-    BackendCapabilities::empty()
-        .with(Capability::Read)
-        .with(Capability::Write)
-        .with(Capability::Append)
-        .with(Capability::List)
-        .with(Capability::Stat)
-        .with(Capability::Delete)
-}
-
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_scoped_filesystem(
     filesystem: Arc<LocalDevRootFilesystem>,
 ) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
@@ -1069,34 +1771,6 @@ fn validate_local_dev_workspace_skill_isolation(
     Ok(())
 }
 
-fn validate_local_dev_workspace_host_home_isolation(
-    workspace_root: &Path,
-    host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Result<(), RebornBuildError> {
-    let Some(host_home_root) = host_home_root else {
-        return Ok(());
-    };
-
-    for (label, host_path) in [
-        (
-            "confirmed host home root",
-            host_home_root.canonical_root.as_path(),
-        ),
-        (
-            "confirmed host home raw alias",
-            host_home_root.raw_alias.as_path(),
-        ),
-    ] {
-        if paths_overlap(workspace_root, host_path) {
-            return Err(RebornBuildError::InvalidConfig {
-                reason: format!("local-dev workspace root must not overlap {label}"),
-            });
-        }
-    }
-
-    Ok(())
-}
-
 fn local_dev_default_system_prompt_path(storage_root: &Path) -> PathBuf {
     storage_root.join(LOCAL_DEV_DEFAULT_SYSTEM_PROMPT_PATH)
 }
@@ -1105,7 +1779,7 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
-fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
+pub(crate) fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
     // Shared by local-dev and production composition so host-owned first-party
     // capabilities expose the same built-in package contract in both profiles.
     let mut registry = ExtensionRegistry::new();
@@ -1121,10 +1795,14 @@ fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
     Ok(registry)
 }
 
-fn builtin_first_party_registry() -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers().map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("built-in first-party handlers are invalid: {error}"),
-    })
+fn builtin_first_party_registry_with_trigger_create_hook(
+    trigger_repository: Arc<dyn TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
+    builtin_first_party_handlers_with_trigger_create_hook(trigger_repository, trigger_create_hook)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party handlers are invalid: {error}"),
+        })
 }
 
 fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
@@ -1166,11 +1844,61 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
             None,
         ),
         AdminEntry::for_local_manifest(
+            PackageId::new("web-access").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Web Access first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/web-access/manifest.toml".to_string(),
+            Some(web_access_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            web_access_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
             PackageId::new("google-calendar").map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("Google Calendar first-party package id is invalid: {error}"),
             })?,
             "/system/extensions/google-calendar/manifest.toml".to_string(),
             Some(google_calendar_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            gsuite_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("google-docs").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Google Docs first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/google-docs/manifest.toml".to_string(),
+            Some(google_docs_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            gsuite_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("google-drive").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Google Drive first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/google-drive/manifest.toml".to_string(),
+            Some(google_drive_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            gsuite_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("google-sheets").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Google Sheets first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/google-sheets/manifest.toml".to_string(),
+            Some(google_sheets_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            gsuite_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("google-slides").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Google Slides first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/google-slides/manifest.toml".to_string(),
+            Some(google_slides_manifest_digest()),
             HostTrustAssignment::first_party(),
             gsuite_allowed_effects(),
             None,
@@ -1183,6 +1911,16 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
             Some(gmail_manifest_digest()),
             HostTrustAssignment::first_party(),
             gsuite_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("notion").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Notion MCP first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/notion/manifest.toml".to_string(),
+            Some(notion_mcp_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            notion_mcp_allowed_effects(),
             None,
         ),
     ]))])
@@ -1200,6 +1938,28 @@ fn gsuite_allowed_effects() -> Vec<EffectKind> {
     ]
 }
 
+fn web_access_allowed_effects() -> Vec<EffectKind> {
+    vec![EffectKind::DispatchCapability, EffectKind::Network]
+}
+
+fn notion_mcp_allowed_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+        EffectKind::ExternalWrite,
+    ]
+}
+
+#[cfg(test)]
+fn nearai_allowed_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+    ]
+}
+
 async fn build_production_shaped(
     input: RebornBuildInput,
 ) -> Result<RebornServices, RebornBuildError> {
@@ -1214,8 +1974,11 @@ async fn build_production_shaped(
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
+        #[cfg(all(test, feature = "slack-v2-host-beta"))]
+            host_runtime_http_egress_for_test: _,
         product_auth_ports,
-        google_oauth_config,
+        oauth_provider_configs,
+        oauth_dcr_provider_configs,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -1223,11 +1986,6 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
     );
-    if google_oauth_config.is_some() && product_auth_ports.is_none() {
-        return Err(RebornBuildError::InvalidConfig {
-            reason: "Google OAuth backend config requires product-auth ports".to_string(),
-        });
-    }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let _ = (
         production_trust_policy,
@@ -1238,7 +1996,8 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
         product_auth_ports,
-        google_oauth_config,
+        oauth_provider_configs,
+        oauth_dcr_provider_configs,
     );
 
     match storage {
@@ -1269,7 +2028,8 @@ async fn build_production_shaped(
                 wiring_config,
                 production_wiring,
                 product_auth_ports,
-                google_oauth_config,
+                oauth_provider_configs,
+                oauth_dcr_provider_configs,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
@@ -1291,7 +2051,8 @@ async fn build_production_shaped(
                 wiring_config,
                 production_wiring,
                 product_auth_ports,
-                google_oauth_config,
+                oauth_provider_configs,
+                oauth_dcr_provider_configs,
             };
             build_postgres_production(context, pool, url, secret_master_key).await
         }
@@ -1302,15 +2063,9 @@ async fn build_production_shaped(
 async fn resolve_secret_master_key(
     explicit: Option<ironclaw_secrets::SecretMaterial>,
 ) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
-    if let Some(master_key) = explicit {
-        Ok(master_key)
-    } else if let Some(master_key) =
-        ironclaw_secrets::keychain::resolve_master_key_material().await?
-    {
-        Ok(master_key)
-    } else {
-        Err(RebornBuildError::MissingSecretMasterKey)
-    }
+    resolve_explicit_or_keychain_master_key(explicit)
+        .await?
+        .ok_or(RebornBuildError::MissingSecretMasterKey)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1327,7 +2082,8 @@ struct RebornProductionBuildContext {
     wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
     production_wiring: RebornProductionWiring,
     product_auth_ports: Option<RebornProductAuthServicePorts>,
-    google_oauth_config: Option<OAuthClientConfig>,
+    oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
+    oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1377,6 +2133,203 @@ fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, Reb
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+type FilesystemProductionHostRuntimeServices<F> = HostRuntimeServices<
+    F,
+    PersistentResourceGovernor<FilesystemResourceGovernorStore<F>>,
+    ironclaw_processes::FilesystemProcessStore<F>,
+    ironclaw_processes::FilesystemProcessResultStore<F>,
+>;
+
+#[cfg(feature = "libsql")]
+pub(crate) async fn build_libsql_production_host_runtime_services<TPolicy, TWake>(
+    config: crate::LibSqlProductionSubstrateConfig<TPolicy, TWake>,
+) -> Result<crate::LibSqlProductionHostRuntimeServices, crate::RebornCompositionError>
+where
+    TPolicy: ironclaw_trust::TrustPolicy + 'static,
+    TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
+{
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
+    filesystem.run_migrations().await?;
+    build_filesystem_production_host_runtime_services(
+        filesystem,
+        config.event_store,
+        config.secret_master_key,
+        config.trust_policy,
+        config.runtime_policy,
+        config.turn_run_wake_notifier,
+        config.surface_version,
+    )
+    .await
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) async fn build_postgres_production_host_runtime_services<TPolicy, TWake>(
+    config: crate::PostgresProductionSubstrateConfig<TPolicy, TWake>,
+) -> Result<crate::PostgresProductionHostRuntimeServices, crate::RebornCompositionError>
+where
+    TPolicy: ironclaw_trust::TrustPolicy + 'static,
+    TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
+{
+    let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+        config.pool,
+    ));
+    filesystem.run_migrations().await?;
+    build_filesystem_production_host_runtime_services(
+        filesystem,
+        config.event_store,
+        config.secret_master_key,
+        config.trust_policy,
+        config.runtime_policy,
+        config.turn_run_wake_notifier,
+        config.surface_version,
+    )
+    .await
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
+    filesystem: Arc<F>,
+    event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
+    secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
+    trust_policy: Arc<TPolicy>,
+    runtime_policy: crate::RebornProductionRuntimePolicy,
+    turn_run_wake_notifier: Arc<TWake>,
+    surface_version: CapabilitySurfaceVersion,
+) -> Result<FilesystemProductionHostRuntimeServices<F>, crate::RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+    TPolicy: ironclaw_trust::TrustPolicy + 'static,
+    TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
+{
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
+    let secret_credentials = build_filesystem_secret_credential_stores(
+        Arc::clone(&scoped_filesystem),
+        secret_master_key,
+    )
+    .await?;
+    let resource_store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem));
+    let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
+    let (runtime_policy, process_binding) = runtime_policy.into_parts();
+
+    let services = HostRuntimeServices::new(
+        Arc::new(ExtensionRegistry::new()),
+        filesystem,
+        governor,
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        surface_version,
+    )
+    .with_trust_policy(trust_policy)
+    .with_runtime_policy(runtime_policy)
+    .with_capability_leases(capability_leases)
+    .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
+    .with_secret_store(Arc::clone(&secret_credentials.secret_store))
+    .with_credential_broker(secret_credentials.credential_broker)
+    .with_turn_run_wake_notifier(turn_run_wake_notifier)
+    .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
+    .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
+    .with_run_profile_resolver(Arc::new(
+        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
+    ))
+    .with_reborn_event_store_config(
+        ironclaw_reborn_event_store::RebornProfile::Production,
+        event_store,
+    )
+    .await?;
+    let services = apply_production_runtime_process_binding(services, process_binding);
+
+    let services = services
+        .try_with_host_http_egress_with_body_store(
+            ironclaw_network::PolicyNetworkHttpEgress::new(
+                ironclaw_network::ReqwestNetworkTransport::default(),
+            ),
+            Arc::clone(&scoped_filesystem),
+        )
+        .map_err(crate::RebornCompositionError::from)?;
+
+    Ok(services)
+}
+
+/// Central production secret/credential stores over the shared
+/// [`ScopedFilesystem`].
+///
+/// Backend selection is now a property of the underlying
+/// [`RootFilesystem`] (libSQL/Postgres/in-memory), not of each store itself.
+/// The secret store and credential broker are deliberately built together from
+/// one scoped filesystem and one crypto handle so production composition does
+/// not grow parallel ad hoc secret/credential stores.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+struct FilesystemSecretCredentialStores<F>
+where
+    F: RootFilesystem + 'static,
+{
+    secret_store: Arc<FilesystemSecretStore<F>>,
+    credential_broker: Arc<FilesystemCredentialBroker<F>>,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+impl<F> FilesystemSecretCredentialStores<F>
+where
+    F: RootFilesystem + 'static,
+{
+    fn new(
+        scoped_filesystem: Arc<ScopedFilesystem<F>>,
+        crypto: Arc<ironclaw_secrets::SecretsCrypto>,
+    ) -> Self {
+        Self {
+            secret_store: Arc::new(FilesystemSecretStore::new(
+                Arc::clone(&scoped_filesystem),
+                Arc::clone(&crypto),
+            )),
+            credential_broker: Arc::new(FilesystemCredentialBroker::new(scoped_filesystem, crypto)),
+        }
+    }
+
+    fn from_master_key(
+        scoped_filesystem: Arc<ScopedFilesystem<F>>,
+        master_key: ironclaw_secrets::SecretMaterial,
+    ) -> Result<Self, crate::RebornCompositionError> {
+        Ok(Self::new(
+            scoped_filesystem,
+            Arc::new(ironclaw_secrets::SecretsCrypto::new(master_key)?),
+        ))
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn build_filesystem_secret_credential_stores<F>(
+    scoped_filesystem: Arc<ScopedFilesystem<F>>,
+    master_key: Option<ironclaw_secrets::SecretMaterial>,
+) -> Result<FilesystemSecretCredentialStores<F>, crate::RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+{
+    let master_key = resolve_explicit_or_keychain_master_key(master_key)
+        .await?
+        .ok_or(crate::RebornCompositionError::MissingSecretMasterKey)?;
+    FilesystemSecretCredentialStores::from_master_key(scoped_filesystem, master_key)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn resolve_explicit_or_keychain_master_key(
+    explicit: Option<ironclaw_secrets::SecretMaterial>,
+) -> Result<Option<ironclaw_secrets::SecretMaterial>, ironclaw_secrets::SecretError> {
+    if let Some(master_key) = explicit {
+        Ok(Some(master_key))
+    } else if let Some(master_key) =
+        ironclaw_secrets::keychain::resolve_master_key_material().await?
+    {
+        Ok(Some(master_key))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 struct ProductionStoreBundle<F>
 where
     F: RootFilesystem + 'static,
@@ -1384,7 +2337,7 @@ where
     filesystem: Arc<F>,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     leases: Arc<FilesystemCapabilityLeaseStore<F>>,
-    secret_store: Arc<FilesystemSecretStore<F>>,
+    secret_credentials: FilesystemSecretCredentialStores<F>,
     event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
 }
 
@@ -1402,17 +2355,16 @@ where
         let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
             &scoped_filesystem,
         )));
-        let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
-        let secret_store = Arc::new(FilesystemSecretStore::new(
+        let secret_credentials = FilesystemSecretCredentialStores::from_master_key(
             Arc::clone(&scoped_filesystem),
-            secret_crypto,
-        ));
+            secret_master_key,
+        )?;
 
         Ok(Self {
             filesystem,
             scoped_filesystem,
             leases,
-            secret_store,
+            secret_credentials,
             event_store,
         })
     }
@@ -1422,6 +2374,7 @@ where
 async fn build_backend_production<F>(
     context: RebornProductionBuildContext,
     stores: ProductionStoreBundle<F>,
+    trigger_repository: Arc<dyn TriggerRepository>,
 ) -> Result<RebornServices, RebornBuildError>
 where
     F: RootFilesystem + 'static,
@@ -1431,9 +2384,18 @@ where
         wiring_config,
         production_wiring,
         product_auth_ports,
-        google_oauth_config,
+        oauth_provider_configs,
+        oauth_dcr_provider_configs,
     } = context;
-    let secret_store: Arc<dyn SecretStore> = stores.secret_store.clone();
+    let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
+    let trigger_create_hook = Arc::new(ScopedFilesystemTriggerCreatorPairingHook::new(Arc::clone(
+        &stores.scoped_filesystem,
+    )));
+    let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
+        trigger_repository,
+        trigger_create_hook,
+    )?;
+    let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
@@ -1444,9 +2406,10 @@ where
     )
     .with_trust_policy(production_wiring.trust_policy)
     .with_runtime_policy(production_wiring.runtime_policy)
-    .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_capability_leases(stores.leases)
-    .with_secret_store(stores.secret_store)
+    .with_secret_store(Arc::clone(&stores.secret_credentials.secret_store))
+    .with_credential_broker(stores.secret_credentials.credential_broker)
+    .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
     .try_with_host_http_egress_with_body_store(
         ironclaw_network::PolicyNetworkHttpEgress::new(
             ironclaw_network::ReqwestNetworkTransport::default(),
@@ -1457,35 +2420,78 @@ where
     .with_reborn_event_store_config(profile.to_event_store_profile(), stores.event_store)
     .await?
     .with_filesystem_run_state(Arc::clone(&stores.scoped_filesystem))
-    .with_filesystem_turn_state_store(stores.scoped_filesystem)
+    .with_filesystem_turn_state_store(Arc::clone(&stores.scoped_filesystem))
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
-    let google_provider_client = google_oauth_config
-        .map(|config| {
-            let runtime_ports = require_product_auth_runtime_ports(&services)?;
-            google_provider_client(config, secret_store, runtime_ports)
-        })
-        .transpose()?;
+    let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
+    let services = attach_hosted_mcp_runtime(services)?;
+    let provider_composition = compose_provider_client(
+        oauth_provider_configs,
+        oauth_dcr_provider_configs,
+        Arc::clone(&secret_store),
+        product_auth_runtime_ports.clone(),
+    )?;
     let services = apply_production_runtime_process_binding(
         services,
         production_wiring.runtime_process_binding,
     );
+    let services = attach_wasm_runtime(services)?;
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
+    let product_auth_ports = product_auth_ports.unwrap_or_else(|| {
+        let durable = Arc::new(FilesystemAuthProductServices::new(
+            product_auth_filesystem,
+            Arc::clone(&secret_store),
+        ));
+        RebornProductAuthServicePorts::from_shared_with_provider(
+            durable,
+            provider_composition
+                .client
+                .clone()
+                .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient)),
+        )
+    });
+    let product_auth_services = compose_product_auth_services(
+        product_auth_ports,
+        turn_coordinator.clone(),
+        provider_composition,
+    );
+    let product_auth_ready = true;
+    // Wire ProductAuthAccount runtime credential resolver before
+    // host_runtime_for_production so WASM extensions whose manifest declares a
+    // ProductAuthAccount runtime credential source resolve through
+    // CredentialAccountService. Unconditional in production: product_auth_services
+    // always exists (durable filesystem fallback from #4234).
+    let services = services.with_runtime_credential_account_resolver(Arc::new(
+        ProductAuthRuntimeCredentialResolver::new(
+            product_auth_services.runtime_credential_account_selection_service(),
+        ),
+    ));
+    register_bundled_gsuite_first_party_handlers(
+        &mut first_party_registry,
+        product_auth_services.credential_account_service(),
+        product_auth_services.credential_account_record_source(),
+        Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
+            product_auth_runtime_ports.clone(),
+        )),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("GSuite first-party handlers are invalid: {error}"),
+    })?;
+    let services = services.with_first_party_capabilities(Arc::new(first_party_registry));
+
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
-    let product_auth = product_auth_ports.map(|ports| {
-        compose_product_auth_services(ports, turn_coordinator.clone(), google_provider_client)
-    });
-    let product_auth_ready = product_auth.is_some();
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
         readiness: readiness_for(profile, true, true, product_auth_ready),
-        product_auth,
+        product_auth: Some(product_auth_services),
         local_runtime: None,
+        #[cfg(feature = "root-llm-provider")]
+        secret_store,
     })
 }
 
@@ -1501,6 +2507,13 @@ async fn build_libsql_production(
 
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     filesystem.run_migrations().await?;
+    let trigger_repository = Arc::new(ironclaw_triggers::LibSqlTriggerRepository::new(db));
+    trigger_repository
+        .run_migrations()
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("libSQL trigger repository migrations failed: {error}"),
+        })?;
     let stores = ProductionStoreBundle::new(
         filesystem,
         secret_master_key,
@@ -1510,7 +2523,7 @@ async fn build_libsql_production(
         },
     )?;
 
-    build_backend_production(context, stores).await
+    build_backend_production(context, stores, trigger_repository).await
 }
 
 #[cfg(feature = "postgres")]
@@ -1524,13 +2537,20 @@ async fn build_postgres_production(
 
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await?;
+    let trigger_repository = Arc::new(ironclaw_triggers::PostgresTriggerRepository::new(pool));
+    trigger_repository
+        .run_migrations()
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("PostgreSQL trigger repository migrations failed: {error}"),
+        })?;
     let stores = ProductionStoreBundle::new(
         filesystem,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url },
     )?;
 
-    build_backend_production(context, stores).await
+    build_backend_production(context, stores, trigger_repository).await
 }
 
 fn readiness_for(
@@ -1555,6 +2575,10 @@ fn readiness_for(
             turn_coordinator,
             product_auth,
         },
+        workers: RebornWorkerReadiness {
+            turn_runner: false,
+            trigger_poller: false,
+        },
     }
 }
 
@@ -1566,19 +2590,226 @@ mod tests {
         CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
         NewCredentialAccount, ProviderScope,
     };
+    use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_filesystem::FilesystemError;
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    use ironclaw_filesystem::{
+        DirEntry, FileStat, FilesystemOperation, RootFilesystem, VersionedEntry,
+    };
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
-        NetworkPolicy, NetworkTargetPattern, Principal, ResourceScope, RuntimeKind, ScopedPath,
-        SecretHandle, TrustClass, UserId, VirtualPath,
+        MountPermissions, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
+        ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
+        RuntimeCredentialRequirementSource, RuntimeKind, ScopedPath, SecretHandle, TenantId,
+        TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
-        RuntimeFailureKind, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-        SKILL_REMOVE_CAPABILITY_ID,
+        MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+        RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
+        SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+        TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
     };
     use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+    #[cfg(feature = "libsql")]
+    use secrecy::ExposeSecret;
+
+    use crate::{
+        extension_lifecycle::ExtensionActivationMode, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
+    };
+
+    struct FailingConversationActorPairingService;
+
+    #[async_trait::async_trait]
+    impl ConversationActorPairingService for FailingConversationActorPairingService {
+        async fn pair_external_actor(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: AdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+            _user_id: UserId,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "raw durable store error".to_string(),
+            })
+        }
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    struct FailingConversationStateFilesystem;
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[async_trait::async_trait]
+    impl RootFilesystem for FailingConversationStateFilesystem {
+        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "conversation state load failed".to_string(),
+            })
+        }
+
+        async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Ok(Vec::new())
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Err(FilesystemError::NotFound {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+            })
+        }
+    }
+
+    fn trigger_record_for_pairing_test() -> TriggerRecord {
+        TriggerRecord {
+            trigger_id: ironclaw_triggers::TriggerId::new(),
+            tenant_id: TenantId::new("pairing-test-tenant").expect("tenant id"),
+            creator_user_id: UserId::new("pairing-test-user").expect("user id"),
+            agent_id: None,
+            project_id: None,
+            name: "pairing test".to_string(),
+            source: ironclaw_triggers::TriggerSourceKind::Schedule,
+            schedule: ironclaw_triggers::TriggerSchedule::cron("* * * * *")
+                .expect("valid cron expression"),
+            completion_policy: ironclaw_triggers::TriggerCompletionPolicy::Recurring,
+            prompt: "pairing test prompt".to_string(),
+            state: ironclaw_triggers::TriggerState::Scheduled,
+            next_run_at: chrono::Utc::now(),
+            last_run_at: None,
+            last_fired_slot: None,
+            last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn pair_trigger_creator_maps_pairing_failure_to_sanitized_backend_error() {
+        let record = trigger_record_for_pairing_test();
+
+        let error = pair_trigger_creator(&FailingConversationActorPairingService, &record)
+            .await
+            .expect_err("pairing failure should surface");
+
+        let TriggerError::Backend { reason } = error else {
+            panic!("expected backend trigger error");
+        };
+        assert_eq!(reason, "trigger creator actor pairing failed");
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornLocalRuntimeServices> {
+        let local_dev_root = tempfile::tempdir().expect("tempdir");
+        let owner_user_id = "pairing-owner";
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            owner_user_id,
+            local_dev_root.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        let base_runtime = services.local_runtime.expect("local runtime");
+        let mut failing_root = CompositeRootFilesystem::new();
+        failing_root
+            .mount(
+                local_dev_mount_descriptor(
+                    "/conversations",
+                    "failing-conversation-state",
+                    BackendKind::Custom("test".to_string()),
+                    StorageClass::StructuredRecords,
+                    ContentKind::StructuredRecord,
+                    IndexPolicy::NotIndexed,
+                    BackendCapabilities::default(),
+                )
+                .expect("mount descriptor"),
+                Arc::new(FailingConversationStateFilesystem),
+            )
+            .expect("mount failing backend");
+        Arc::new(RebornLocalRuntimeServices {
+            approval_requests: Arc::clone(&base_runtime.approval_requests),
+            capability_leases: Arc::clone(&base_runtime.capability_leases),
+            capability_policy: Arc::clone(&base_runtime.capability_policy),
+            turn_state: Arc::clone(&base_runtime.turn_state),
+            trigger_repository: Arc::clone(&base_runtime.trigger_repository),
+            #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+            trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            trigger_conversation_services: tokio::sync::OnceCell::new(),
+            checkpoint_state_store: Arc::clone(&base_runtime.checkpoint_state_store),
+            loop_checkpoint_store: Arc::clone(&base_runtime.loop_checkpoint_store),
+            thread_service: Arc::clone(&base_runtime.thread_service),
+            resource_governor: Arc::clone(&base_runtime.resource_governor),
+            budget_event_sink: Arc::clone(&base_runtime.budget_event_sink),
+            in_memory_budget_event_sink: Arc::clone(&base_runtime.in_memory_budget_event_sink),
+            broadcast_budget_event_sink: Arc::clone(&base_runtime.broadcast_budget_event_sink),
+            budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
+            skill_management: Arc::clone(&base_runtime.skill_management),
+            extension_management: base_runtime.extension_management.clone(),
+            runtime_http_egress: base_runtime.runtime_http_egress.clone(),
+            host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
+            skill_mounts: base_runtime.skill_mounts.clone(),
+            memory_mounts: base_runtime.memory_mounts.clone(),
+            skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),
+            workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
+            #[cfg(feature = "slack-v2-host-beta")]
+            host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
+            subagent_goal_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
+                Arc::new(failing_root),
+                MountView::new(vec![MountGrant::new(
+                    MountAlias::new("/conversations").expect("mount alias"),
+                    VirtualPath::new("/conversations").expect("virtual path"),
+                    MountPermissions::read_write_list_delete(),
+                )])
+                .expect("mount view"),
+            )),
+            extension_filesystem: Arc::clone(&base_runtime.extension_filesystem),
+            workspace_mounts: base_runtime.workspace_mounts.clone(),
+            local_dev_storage_root: base_runtime.local_dev_storage_root.clone(),
+            default_system_prompt_path: base_runtime.default_system_prompt_path.clone(),
+            event_log: Arc::clone(&base_runtime.event_log),
+            audit_log: Arc::clone(&base_runtime.audit_log),
+            extension_registry: Arc::clone(&base_runtime.extension_registry),
+        })
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[tokio::test]
+    async fn durable_trigger_conversation_services_propagates_init_error() {
+        let runtime = local_runtime_with_failing_trigger_conversations().await;
+
+        let error = match runtime.durable_trigger_conversation_services().await {
+            Ok(_) => panic!("conversation service init should fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ironclaw_conversations::InboundTurnError::DurableState { .. }
+        ));
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[tokio::test]
+    async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backend() {
+        let hook = LocalRuntimeTriggerCreatorPairingHook {
+            runtime: local_runtime_with_failing_trigger_conversations().await,
+        };
+        let record = trigger_record_for_pairing_test();
+
+        let error = hook
+            .after_trigger_persisted(&record)
+            .await
+            .expect_err("conversation init failure should surface as trigger backend error");
+
+        let TriggerError::Backend { reason } = error else {
+            panic!("expected backend trigger error");
+        };
+        assert_eq!(reason, "trigger creator actor pairing failed");
+    }
 
     #[tokio::test]
     async fn local_dev_services_include_repl_runtime_substrate() {
@@ -1606,6 +2837,250 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_memory_first_party_tools_use_mounted_memory_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-memory-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        invoke_json(
+            &services,
+            MEMORY_WRITE_CAPABILITY_ID,
+            memory_context(MEMORY_WRITE_CAPABILITY_ID),
+            serde_json::json!({
+                "target": "projects/alpha/notes.md",
+                "content": "local dev mounted memory root search marker",
+                "append": false
+            }),
+        )
+        .await
+        .expect("memory_write should use the mounted /memory root");
+
+        let tree = invoke_json(
+            &services,
+            MEMORY_TREE_CAPABILITY_ID,
+            memory_context(MEMORY_TREE_CAPABILITY_ID),
+            serde_json::json!({"path": "", "depth": 3}),
+        )
+        .await
+        .expect("memory_tree should list the mounted /memory root");
+        assert!(
+            tree.to_string().contains("alpha/"),
+            "memory_tree should include the written memory document: {tree}"
+        );
+
+        let search = invoke_json(
+            &services,
+            MEMORY_SEARCH_CAPABILITY_ID,
+            memory_context(MEMORY_SEARCH_CAPABILITY_ID),
+            serde_json::json!({"query": "mounted memory root search marker", "limit": 5}),
+        )
+        .await
+        .expect("memory_search should query the mounted /memory root");
+        assert_eq!(search["result_count"], serde_json::json!(1));
+        assert_eq!(
+            search["results"][0]["path"],
+            serde_json::json!("projects/alpha/notes.md")
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn local_dev_memory_documents_persist_across_rebuilds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = dir.path().join("local-dev");
+        let owner = "local-dev-durable-memory-owner";
+
+        let services =
+            build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
+                .await
+                .expect("first local-dev services build");
+        invoke_json(
+            &services,
+            MEMORY_WRITE_CAPABILITY_ID,
+            memory_context(MEMORY_WRITE_CAPABILITY_ID),
+            serde_json::json!({
+                "target": "projects/durable/notes.md",
+                "content": "local dev durable mounted memory root search marker",
+                "append": false
+            }),
+        )
+        .await
+        .expect("memory_write should persist through the libsql /memory root");
+        drop(services);
+
+        let rebuilt =
+            build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
+                .await
+                .expect("rebuilt local-dev services");
+
+        let tree = invoke_json(
+            &rebuilt,
+            MEMORY_TREE_CAPABILITY_ID,
+            memory_context(MEMORY_TREE_CAPABILITY_ID),
+            serde_json::json!({"path": "", "depth": 3}),
+        )
+        .await
+        .expect("memory_tree should list rebuilt libsql memory documents");
+        assert!(
+            tree.to_string().contains("durable/"),
+            "memory_tree should include the persisted memory document: {tree}"
+        );
+
+        let search = invoke_json(
+            &rebuilt,
+            MEMORY_SEARCH_CAPABILITY_ID,
+            memory_context(MEMORY_SEARCH_CAPABILITY_ID),
+            serde_json::json!({"query": "durable mounted memory root search marker", "limit": 5}),
+        )
+        .await
+        .expect("memory_search should query rebuilt libsql memory documents");
+        assert_eq!(search["result_count"], serde_json::json!(1));
+        assert_eq!(
+            search["results"][0]["path"],
+            serde_json::json!("projects/durable/notes.md")
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = dir.path().join("local-dev");
+        let owner = "local-dev-durable-auth-owner";
+        let services =
+            build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
+                .await
+                .expect("local-dev services build");
+        let product_auth = services.product_auth.as_ref().expect("product auth");
+        let scope = AuthProductScope::new(
+            ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
+            AuthSurface::Callback,
+        );
+        let mut scope = scope;
+        scope.resource.thread_id = Some(ironclaw_host_api::ThreadId::new("auth-thread").unwrap());
+
+        let challenge = product_auth
+            .request_manual_token_setup(crate::RebornManualTokenSetupRequest::new(
+                scope.clone(),
+                ironclaw_auth::AuthProviderId::new("github").unwrap(),
+                CredentialAccountLabel::new("work github").unwrap(),
+                ironclaw_auth::AuthContinuationRef::SetupOnly,
+                chrono::Utc::now() + chrono::Duration::minutes(5),
+            ))
+            .await
+            .unwrap();
+        let submitted = product_auth
+            .submit_manual_token(crate::RebornManualTokenSubmitRequest::new(
+                scope.clone(),
+                challenge.interaction_id,
+                secrecy::SecretString::from("ghp_local_dev_pat"),
+            ))
+            .await
+            .unwrap();
+
+        let account = product_auth
+            .credential_account_service()
+            .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
+                scope.clone(),
+                submitted.account_id,
+            ))
+            .await
+            .unwrap()
+            .expect("manual-token submit should create account");
+        let access_secret = account.access_secret.expect("manual token access secret");
+        assert!(
+            access_secret.as_str().starts_with("product-auth-manual-"),
+            "local-dev default product-auth must create durable SecretStore-backed handles"
+        );
+
+        let rebuilt =
+            build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
+                .await
+                .expect("local-dev services rebuild");
+        let rebuilt_product_auth = rebuilt.product_auth.as_ref().expect("product auth");
+        let rebuilt_account = rebuilt_product_auth
+            .credential_account_service()
+            .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
+                scope.clone(),
+                submitted.account_id,
+            ))
+            .await
+            .unwrap()
+            .expect("manual-token account should survive local-dev rebuild");
+        assert_eq!(rebuilt_account.access_secret.as_ref(), Some(&access_secret));
+
+        let rebuilt_filesystem = build_local_dev_root_filesystem(
+            &local_dev_root,
+            &local_dev_root.join("workspace"),
+            None,
+        )
+        .await
+        .expect("local-dev filesystem rebuild");
+        let rebuilt_secret_store = build_local_dev_secret_store(
+            &local_dev_root,
+            local_dev_scoped_filesystem(rebuilt_filesystem.filesystem),
+        )
+        .expect("local-dev secret store rebuild");
+        let lease = rebuilt_secret_store
+            .lease_once(&scope.resource, &access_secret)
+            .await
+            .expect("manual token secret should survive local-dev rebuild");
+        let raw_secret = rebuilt_secret_store
+            .consume(&scope.resource, lease.id)
+            .await
+            .expect("manual token secret should decrypt after local-dev rebuild");
+        assert_eq!(raw_secret.expose_secret(), "ghp_local_dev_pat");
+
+        let flows = product_auth
+            .flow_record_source()
+            .expect("local-dev product-auth flow source")
+            .flows_for_owner(ironclaw_auth::AuthFlowOwnerScope {
+                tenant_id: scope.resource.tenant_id.clone(),
+                user_id: scope.resource.user_id.clone(),
+                agent_id: scope.resource.agent_id.clone(),
+                project_id: scope.resource.project_id.clone(),
+                thread_id: scope.resource.thread_id.clone().unwrap(),
+            })
+            .await
+            .unwrap();
+        let completed_flow = flows
+            .iter()
+            .find(|flow| flow.credential_account_id == Some(submitted.account_id))
+            .expect("manual-token completion should remain visible to auth gates");
+        assert_eq!(
+            completed_flow.status,
+            ironclaw_auth::AuthFlowStatus::Completed
+        );
+    }
+
+    /// Verify that `attach_hosted_mcp_runtime` is soft-disabled when the host
+    /// runtime has no HTTP egress (e.g. in-memory-only test services). The
+    /// function must not panic or return an error; it simply skips the MCP
+    /// runtime attachment so the rest of the composition continues.
+    #[test]
+    fn attach_hosted_mcp_runtime_skips_services_without_http_egress() {
+        let services = HostRuntimeServices::new(
+            Arc::new(ExtensionRegistry::new()),
+            Arc::new(LocalFilesystem::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+            Arc::new(GrantAuthorizer::new()),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        );
+        // product_auth_provider_runtime_ports() is None without HTTP egress.
+        assert!(services.product_auth_provider_runtime_ports().is_none());
+
+        // attach_hosted_mcp_runtime must succeed (soft-skip) rather than error.
+        let services = attach_hosted_mcp_runtime(services).expect("soft-disable must not error");
+
+        // Runtime ports still absent — no egress was added by the attachment.
+        assert!(services.product_auth_provider_runtime_ports().is_none());
+    }
+
+    #[tokio::test]
     async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_reborn_services(RebornBuildInput::local_dev(
@@ -1630,7 +3105,7 @@ mod tests {
             .await
             .expect("install Gmail");
         extension_management
-            .activate(gmail_ref)
+            .activate(gmail_ref, ExtensionActivationMode::Static)
             .await
             .expect("activate Gmail");
         extension_management
@@ -1638,7 +3113,7 @@ mod tests {
             .await
             .expect("install Google Calendar");
         extension_management
-            .activate(calendar_ref)
+            .activate(calendar_ref, ExtensionActivationMode::Static)
             .await
             .expect("activate Google Calendar");
 
@@ -1694,6 +3169,203 @@ mod tests {
         .expect_err("missing token should fail after approval resume");
         assert_ne!(failure, RuntimeFailureKind::Authorization);
         assert_ne!(failure, RuntimeFailureKind::MissingRuntime);
+    }
+
+    #[tokio::test]
+    async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev_with_profile(
+                RebornCompositionProfile::LocalDevYolo,
+                "local-dev-notion-mcp-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_minimal_approval_policy()),
+        )
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let notion_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+        let catalog = AvailableExtensionCatalog::from_first_party_assets()
+            .expect("first-party extensions load");
+        let notion_package = catalog.resolve(&notion_ref).expect("Notion MCP is bundled");
+        let capability_ids = notion_package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .map(|capability| capability.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(capability_ids.len(), 18);
+        assert!(capability_ids.contains(&"notion.notion-create-pages"));
+        assert!(capability_ids.contains(&"notion.notion-query-data-sources"));
+        assert!(capability_ids.contains(&"notion.notion-create-comment"));
+        assert!(capability_ids.contains(&"notion.notion-get-self"));
+
+        extension_management
+            .install(notion_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        extension_management
+            .activate(notion_ref, ExtensionActivationMode::Static)
+            .await
+            .expect("activate Notion MCP");
+
+        let outcome = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime")
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                notion_mcp_context("notion.notion-search"),
+                CapabilityId::new("notion.notion-search").unwrap(),
+                ResourceEstimate::default(),
+                serde_json::json!({ "query": "project notes" }),
+                notion_mcp_trust_decision(),
+            ))
+            .await
+            .expect("runtime invocation completes");
+
+        let RuntimeCapabilityOutcome::AuthRequired(gate) = outcome else {
+            panic!("expected missing Notion token to open auth gate, got {outcome:?}");
+        };
+        assert_eq!(gate.capability_id.as_str(), "notion.notion-search");
+    }
+
+    #[tokio::test]
+    async fn local_dev_web_access_installs_activates_and_dispatches_through_host_runtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev_with_profile(
+                RebornCompositionProfile::LocalDevYolo,
+                "local-dev-web-access-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_minimal_approval_policy()),
+        )
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let web_access_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access")
+                .expect("valid ref");
+
+        extension_management
+            .install(web_access_ref.clone())
+            .await
+            .expect("install Web Access");
+        extension_management
+            .activate(web_access_ref, ExtensionActivationMode::Static)
+            .await
+            .expect("activate Web Access");
+
+        let outcome = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime")
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                web_access_context("web-access.search"),
+                CapabilityId::new("web-access.search").unwrap(),
+                ResourceEstimate::default(),
+                serde_json::json!({
+                    "provider": "brave",
+                    "query": "ironclaw reborn"
+                }),
+                trust_decision(),
+            ))
+            .await
+            .expect("runtime invocation completes");
+
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected fail-closed handler outcome, got {outcome:?}");
+        };
+        assert_eq!(failure.capability_id.as_str(), "web-access.search");
+        assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+    }
+
+    #[tokio::test]
+    async fn local_dev_nearai_mcp_installs_and_activates_model_visible_capability() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-nearai-mcp-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let nearai_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+
+        extension_management
+            .install(nearai_ref.clone())
+            .await
+            .expect("install NEAR AI MCP");
+        extension_management
+            .activate(nearai_ref, ExtensionActivationMode::Static)
+            .await
+            .expect("activate NEAR AI MCP");
+
+        let capabilities = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        let search = capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "nearai.search")
+            .expect("nearai.search active");
+
+        assert_eq!(search.provider.as_str(), "nearai");
+        assert_eq!(search.effects, nearai_allowed_effects());
+        assert_eq!(search.runtime_credentials.len(), 1);
+        assert_eq!(
+            search.runtime_credentials[0].handle,
+            SecretHandle::new("llm_nearai_api_key").unwrap()
+        );
+        // NEAR AI MCP credential is sourced from a product-auth account so that the
+        // user-facing setup flow is the manual-token product-auth surface (shared
+        // with GitHub WASM), not an out-of-band SecretStore handle drop.
+        // The 'handle' field remains the staging slot name the MCP egress planner
+        // reads from RuntimeSecretInjectionStore after the obligation handler resolves
+        // the access secret via RuntimeCredentialAccountResolver.
+        assert_eq!(
+            search.runtime_credentials[0].source,
+            RuntimeCredentialRequirementSource::ProductAuthAccount {
+                provider: RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+                setup: Default::default(),
+            }
+        );
+        assert_eq!(
+            search.runtime_credentials[0].audience.host_pattern,
+            "private.near.ai"
+        );
+    }
+
+    #[test]
+    fn attach_hosted_mcp_runtime_skips_services_without_runtime_http_egress() {
+        let services = HostRuntimeServices::new(
+            Arc::new(ExtensionRegistry::new()),
+            Arc::new(LocalFilesystem::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+            Arc::new(GrantAuthorizer::new()),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        );
+
+        let services = attach_hosted_mcp_runtime(services).expect("attach is optional");
+
+        assert!(services.product_auth_provider_runtime_ports().is_none());
     }
 
     #[cfg(feature = "libsql")]
@@ -1917,44 +3589,6 @@ mod tests {
     }
 
     #[test]
-    fn local_dev_workspace_root_overlapping_host_home_root_is_rejected() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let host_home = dir.path().join("home");
-        let workspace = host_home.join("workspace");
-        let host_home_root = LocalDevHostHomeRoot {
-            canonical_root: host_home.clone(),
-            raw_alias: dir.path().join("home-link"),
-        };
-
-        let error =
-            validate_local_dev_workspace_host_home_isolation(&workspace, Some(&host_home_root))
-                .expect_err("workspace nested under host home should be rejected");
-        assert!(
-            matches!(error, RebornBuildError::InvalidConfig { .. }),
-            "unexpected error: {error:?}"
-        );
-    }
-
-    #[test]
-    fn local_dev_workspace_root_overlapping_host_home_raw_alias_is_rejected() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let raw_alias = dir.path().join("home-link");
-        let workspace = raw_alias.join("workspace");
-        let host_home_root = LocalDevHostHomeRoot {
-            canonical_root: dir.path().join("home"),
-            raw_alias,
-        };
-
-        let error =
-            validate_local_dev_workspace_host_home_isolation(&workspace, Some(&host_home_root))
-                .expect_err("workspace nested under raw host-home alias should be rejected");
-        assert!(
-            matches!(error, RebornBuildError::InvalidConfig { .. }),
-            "unexpected error: {error:?}"
-        );
-    }
-
-    #[test]
     fn builtin_first_party_package_declares_skill_management_tools() {
         let package = builtin_first_party_package().expect("built-in package builds");
         let ids = package
@@ -1963,17 +3597,30 @@ mod tests {
             .map(|capability| capability.id.as_str())
             .collect::<Vec<_>>();
         assert!(ids.contains(&SKILL_LIST_CAPABILITY_ID));
+        assert!(!ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
         assert!(ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
         assert!(ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
+        assert!(ids.contains(&TRIGGER_CREATE_CAPABILITY_ID));
+        assert!(ids.contains(&TRIGGER_LIST_CAPABILITY_ID));
+        assert!(ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID));
 
-        let registry = builtin_first_party_registry().expect("built-in handlers build");
+        let registry = ironclaw_host_runtime::builtin_first_party_handlers(Arc::new(
+            ironclaw_triggers::InMemoryTriggerRepository::default(),
+        ))
+        .expect("built-in handlers build");
         for id in [
             SKILL_LIST_CAPABILITY_ID,
             SKILL_INSTALL_CAPABILITY_ID,
             SKILL_REMOVE_CAPABILITY_ID,
+            TRIGGER_CREATE_CAPABILITY_ID,
+            TRIGGER_LIST_CAPABILITY_ID,
+            TRIGGER_REMOVE_CAPABILITY_ID,
         ] {
             assert!(registry.contains_handler(&ironclaw_host_api::CapabilityId::new(id).unwrap()));
         }
+        assert!(!registry.contains_handler(
+            &ironclaw_host_api::CapabilityId::new(SKILL_ACTIVATE_CAPABILITY_ID).unwrap()
+        ));
     }
 
     #[test]
@@ -2025,6 +3672,14 @@ mod tests {
         execution_context(capability_id, workspace_mounts())
     }
 
+    fn memory_context(capability_id: &str) -> ExecutionContext {
+        execution_context(
+            capability_id,
+            memory_mount_view(MountPermissions::read_write_list_delete())
+                .expect("valid memory mounts"),
+        )
+    }
+
     fn gsuite_context(capability_id: &str) -> ExecutionContext {
         let extension_id = ExtensionId::new("caller").expect("valid extension id");
         ExecutionContext::local_default(
@@ -2052,6 +3707,76 @@ mod tests {
             MountView::new(Vec::new()).expect("valid empty mount view"),
         )
         .expect("valid execution context")
+    }
+
+    fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
+        let extension_id = ExtensionId::new("caller").expect("valid extension id");
+        ExecutionContext::local_default(
+            UserId::new("local-dev-test-user").expect("valid user id"),
+            extension_id.clone(),
+            RuntimeKind::Mcp,
+            TrustClass::Sandbox,
+            CapabilitySet {
+                grants: vec![CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: CapabilityId::new(capability_id).expect("valid capability id"),
+                    grantee: Principal::Extension(extension_id),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: notion_mcp_allowed_effects(),
+                        mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
+                        network: notion_mcp_network_policy(),
+                        secrets: vec![SecretHandle::new("mcp_notion_access_token").unwrap()],
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                }],
+            },
+            MountView::new(Vec::new()).expect("valid empty mount view"),
+        )
+        .expect("valid execution context")
+    }
+
+    fn web_access_context(capability_id: &str) -> ExecutionContext {
+        let extension_id = ExtensionId::new("caller").expect("valid extension id");
+        ExecutionContext::local_default(
+            UserId::new("local-dev-test-user").expect("valid user id"),
+            extension_id.clone(),
+            RuntimeKind::FirstParty,
+            TrustClass::FirstParty,
+            CapabilitySet {
+                grants: vec![CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: CapabilityId::new(capability_id).expect("valid capability id"),
+                    grantee: Principal::Extension(extension_id),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: web_access_allowed_effects(),
+                        mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
+                        network: web_access_network_policy(),
+                        secrets: Vec::new(),
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                }],
+            },
+            MountView::new(Vec::new()).expect("valid empty mount view"),
+        )
+        .expect("valid execution context")
+    }
+
+    fn web_access_network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+                host_pattern: "mcp.exa.ai".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        }
     }
 
     fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext {
@@ -2142,11 +3867,52 @@ mod tests {
         }
     }
 
+    fn notion_mcp_network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "mcp.notion.com".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        }
+    }
+
+    fn notion_mcp_allowed_effects() -> Vec<EffectKind> {
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::UseSecret,
+        ]
+    }
+
     fn trust_decision() -> TrustDecision {
         TrustDecision {
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
                 allowed_effects: allowed_effects(),
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::Default,
+            evaluated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn local_dev_minimal_approval_policy()
+    -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+        let mut policy = crate::local_dev_runtime_policy().expect("local-dev policy resolves");
+        policy.requested_profile = ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo;
+        policy.resolved_profile = ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo;
+        policy.approval_policy = ironclaw_host_api::runtime_policy::ApprovalPolicy::Minimal;
+        policy
+    }
+
+    fn notion_mcp_trust_decision() -> TrustDecision {
+        TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: notion_mcp_allowed_effects(),
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::Default,

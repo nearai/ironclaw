@@ -237,6 +237,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `src/tools/` | `src/tools/README.md` |
 | `src/workspace/` | `src/workspace/README.md` |
 | `crates/ironclaw_engine/` | `crates/ironclaw_engine/CLAUDE.md` |
+| `crates/ironclaw_reborn_webui_ingress/` | `crates/ironclaw_reborn_webui_ingress/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |
 
 ## Job State Machine

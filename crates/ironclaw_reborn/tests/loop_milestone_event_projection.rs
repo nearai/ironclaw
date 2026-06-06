@@ -46,10 +46,10 @@ use ironclaw_turns::{
     TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind, FinalizeAssistantMessage,
-        HookDecisionSummary, LoopCheckpointKind, LoopDriverId, LoopGateKind, LoopHostMilestone,
-        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopModelPort,
-        LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopTranscriptPort, ParentLoopOutput, PromptMode,
+        HookDecisionSummary, InstructionSafetyContext, LoopCheckpointKind, LoopDriverId,
+        LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind,
+        LoopHostMilestoneSink, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest,
+        LoopPromptPort, LoopRunContext, LoopTranscriptPort, ParentLoopOutput, PromptMode,
     },
     runner::ClaimedTurnRun,
 };
@@ -268,6 +268,7 @@ async fn durable_milestone_sink_does_not_project_lossy_loop_progress_milestones(
     ] {
         sink.publish_loop_milestone(LoopHostMilestone {
             scope: scope.clone(),
+            actor: None,
             turn_id: TurnId::new(),
             run_id,
             loop_driver_id: LoopDriverId::new("test-driver").unwrap(),
@@ -639,6 +640,7 @@ fn projection_scope_for_thread(thread_id: ThreadId) -> ProjectionScope {
 fn loop_milestone_for_scope(scope: TurnScope) -> LoopHostMilestone {
     LoopHostMilestone {
         scope,
+        actor: None,
         turn_id: TurnId::new(),
         run_id: TurnRunId::new(),
         loop_driver_id: LoopDriverId::new("test-driver").unwrap(),
@@ -786,6 +788,7 @@ impl HostFixture {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
         };
@@ -842,6 +845,7 @@ impl HostFixture {
                 max_messages: 8,
                 ..TextOnlyLoopHostConfig::default()
             },
+            InstructionSafetyContext::local_development_noop(),
         )
         .build_text_only_host(RebornLoopDriverHostRequest {
             claimed_run: self.claimed.clone(),
@@ -934,6 +938,7 @@ fn milestone_for(
 ) -> LoopHostMilestone {
     LoopHostMilestone {
         scope,
+        actor: None,
         turn_id: TurnId::new(),
         run_id,
         loop_driver_id: LoopDriverId::new("milestone-projection-driver").unwrap(),

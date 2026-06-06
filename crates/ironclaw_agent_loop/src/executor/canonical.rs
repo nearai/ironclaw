@@ -10,8 +10,9 @@ use super::{
     AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, CancelCheck,
     CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage, DefaultExecutorPipeline,
     DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput, ModelStep, PendingInputAck,
-    PromptInput, PromptStep, StageContext, StopInput, StopObservationInput, StopObservationStep,
-    StopStep, TurnCompletedStep, UserFacingInputDrainMode,
+    PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep, StageContext, StopInput,
+    StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode,
 };
 
 impl DefaultExecutorPipeline {
@@ -130,14 +131,45 @@ impl DefaultExecutorPipeline {
                     state = *next;
                     response
                 }
+                ModelStep::RetryIteration(next) => {
+                    state = *next;
+                    continue;
+                }
                 ModelStep::Exit(exit) => return Ok(exit),
             };
 
+            // Capture provider-reported usage before the `match` consumes
+            // `model_response`. Only assistant-reply turns feed the
+            // diminishing-returns window (#3841 follow-up F1): a
+            // capability-batch turn produces tool calls, not output
+            // tokens, and would otherwise look like four "no progress"
+            // turns in a row. `None` is "unknown" and must NOT count as
+            // a zero-output turn against the detector.
+            let response_usage = model_response.usage;
             let completed = match model_response.output {
                 ParentLoopOutput::AssistantReply(reply) => {
-                    self.assistant_reply
-                        .process(ctx, AssistantReplyInput { state, reply })
+                    match self
+                        .reply_admission
+                        .process(ctx, ReplyAdmissionInput { state, reply })
                         .await?
+                    {
+                        ReplyAdmissionStep::Accept { state, reply } => {
+                            self.assistant_reply
+                                .process(
+                                    ctx,
+                                    AssistantReplyInput {
+                                        state: *state,
+                                        reply,
+                                        usage: response_usage,
+                                    },
+                                )
+                                .await?
+                        }
+                        ReplyAdmissionStep::Reject { state } => TurnCompletedStep::Continue {
+                            state,
+                            summary: crate::strategies::TurnSummary::reply_rejected(),
+                        },
+                    }
                 }
                 ParentLoopOutput::CapabilityCalls(calls) => {
                     self.capabilities

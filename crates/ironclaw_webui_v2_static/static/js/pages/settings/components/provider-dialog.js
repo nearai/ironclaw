@@ -65,7 +65,7 @@ export function ProviderDialog({
           </div>
           <label className="block space-y-2 text-sm text-[var(--v2-text-strong)]">
             ${t("llm.adapter")}
-            <${Select} value=${form.adapter} onChange=${(e) => update("adapter", e.target.value)}>
+            <${Select} value=${form.adapter} onChange=${(e) => formState.update("adapter", e.target.value)}>
               ${ADAPTER_OPTIONS.map((item) => html`<option key=${item.value} value=${item.value}>${item.label}</option>`)}
             <//>
           </label>

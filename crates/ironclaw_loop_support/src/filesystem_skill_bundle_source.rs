@@ -405,26 +405,21 @@ fn ensure_unique_source_kinds(
 
 fn map_file_read_error(error: FilesystemError) -> SkillBundleSourceError {
     if is_not_found(&error) {
-        tracing::warn!(
-            component = "filesystem_skill_bundle_source",
-            operation = "read_file",
-            error = %error,
-            error_debug = ?error,
-            "filesystem skill bundle read error mapped to not found"
-        );
         return SkillBundleSourceError::FileNotFound;
     }
     map_filesystem_error(error)
 }
 
 fn map_filesystem_error(error: FilesystemError) -> SkillBundleSourceError {
-    tracing::warn!(
-        component = "filesystem_skill_bundle_source",
-        operation = "map_filesystem_error",
-        error = %error,
-        error_debug = ?error,
-        "filesystem skill bundle error mapped to safe source error"
-    );
+    if !is_not_found(&error) {
+        tracing::warn!(
+            component = "filesystem_skill_bundle_source",
+            operation = "map_filesystem_error",
+            error = %error,
+            error_debug = ?error,
+            "filesystem skill bundle error mapped to safe source error"
+        );
+    }
     match error {
         FilesystemError::PermissionDenied { .. } => SkillBundleSourceError::PermissionDenied,
         // Kept for API completeness: some callers route filesystem errors through

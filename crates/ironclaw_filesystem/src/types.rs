@@ -13,8 +13,8 @@ use crate::record::RecordVersion;
 /// *intent* of an operation against the underlying [`MountPermissions`]
 /// surface and are reused by the unified `put`/`get` ops as their permission
 /// witness — `put` is a write, `get` is a read. The newer variants
-/// (`Query`, `EnsureIndex`, `BeginTxn`, `Append`, `Tail`) describe operations
-/// that have no analogue in the legacy enum.
+/// (`Query`, `EnsureIndex`, `BeginTxn`, `Append`, `Tail`, `HeadSeq`) describe
+/// operations that have no analogue in the legacy enum.
 ///
 /// `AppendFile` is the legacy byte-plane append onto a regular file; `Append`
 /// is the event-plane append that assigns a [`SeqNo`](crate::SeqNo). They are
@@ -34,6 +34,10 @@ pub enum FilesystemOperation {
     BeginTxn,
     Append,
     Tail,
+    /// Event-plane O(1) head read: the `MAX(seq)` lookup that resolves the
+    /// replay/live boundary. Distinct from `Tail` (which streams records) so a
+    /// head_seq failure surfaces under its own operation in logs/errors.
+    HeadSeq,
 }
 
 impl std::fmt::Display for FilesystemOperation {
@@ -52,6 +56,7 @@ impl std::fmt::Display for FilesystemOperation {
             Self::BeginTxn => "begin_txn",
             Self::Append => "append",
             Self::Tail => "tail",
+            Self::HeadSeq => "head_seq",
         })
     }
 }
@@ -461,9 +466,10 @@ impl BackendCapabilities {
     }
 
     /// Convenience: every capability the in-memory reference backend
-    /// implements. Includes Events on top of `sql_typical`.
+    /// implements. Includes Events, FTS, and Vector on top of
+    /// `sql_typical`.
     pub const fn in_memory_full() -> Self {
-        Self::sql_typical().with(Capability::Events)
+        Self::sql_typical_full()
     }
 
     /// Convenience: read + write + append + list + stat + delete only.
@@ -514,5 +520,19 @@ impl<'de> Deserialize<'de> for BackendCapabilities {
             out = out.with(cap);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_memory_full_includes_fts_vector_events() {
+        let capabilities = BackendCapabilities::in_memory_full();
+
+        assert!(capabilities.has(Capability::IndexFts));
+        assert!(capabilities.has(Capability::IndexVector));
+        assert!(capabilities.has(Capability::Events));
     }
 }

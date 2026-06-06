@@ -694,6 +694,7 @@ mod tests {
         CapabilityOutcome::Completed(CapabilityResultMessage {
             result_ref: LoopResultRef::new(result_ref).expect("test result ref is valid"),
             safe_summary: "done".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
         })
     }
@@ -1183,8 +1184,10 @@ mod tests {
         let filter =
             CapabilitySurfaceVisibleFilter::new(inner.clone(), [capability_id("demo.allowed")]);
 
+        let mut call = capability_info_call("demo.denied");
+        call.arguments["detail"] = serde_json::json!("schema");
         let error = filter
-            .register_provider_tool_call(capability_info_call("demo.denied"))
+            .register_provider_tool_call(call)
             .await
             .expect_err("denied capability_info target should fail before staging");
 

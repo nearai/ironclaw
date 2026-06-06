@@ -26,7 +26,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `ApprovalInteractionService` / `DefaultApprovalInteractionService` | Approval-only product/WebUI boundary for listing redacted pending approval gates and resolving click approve/deny through canonical approval resolver + turn coordinator ports |
 | `RunStateApprovalInteractionReadModel` | Canonical read model that returns status-bearing approval gates from scoped approval-request records plus the parked turn-run locator; `ApprovalInteractionService::list_pending` filters those records to pending UI DTOs |
 | `AuthInteractionService` / `DefaultAuthInteractionService` | Auth-required product/WebUI boundary for listing redacted pending auth gates and resolving credential/callback/cancel decisions through typed auth-flow manager + turn coordinator ports |
-| `RebornServicesApi` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; refuses persistent (`always: true`) approvals until an approval-policy port lands |
+| `RebornServicesApi` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; exposes connectable channel metadata for deterministic UI actions; rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; refuses persistent (`always: true`) approvals until an approval-policy port lands |
 
 ## Dependencies
 
@@ -77,6 +77,16 @@ DTOs. Resume/cancel decisions must go through `AuthFlowManager` and
 auth-flow records directly, or resume blocked auth gates without the
 `BlockedAuthGate` precondition.
 
+WebUI gate resolution routing should use current run-state first: a
+`BlockedApproval` run enters `ApprovalInteractionService`, a `BlockedAuth` run
+enters `AuthInteractionService`, and generic fallback is only for non-typed
+blocked gates or legacy/replay shapes. Do not let generic WebUI gate handling
+resume/cancel auth-blocked runs.
+Typed auth/approval interaction services intentionally re-read run-state through
+`blocked_gate_state` immediately before resume/cancel side effects. Treat that
+second read as a freshness/TOCTOU guard unless a future coordinator returns a
+sealed gate grant that can safely replace it.
+
 WebUI-facing facade methods must bind browser thread ids through
 `SessionThreadService` using a `ThreadScope` derived from the authenticated
 caller before accepting messages, streaming events, canceling runs, or resolving
@@ -100,6 +110,15 @@ resolve. Thread hints in subscription requests may narrow to the already
 resolved binding only; they are not authority to switch threads or tenants.
 Projection/subscription resolution is lookup-only and must not create bindings,
 threads, or external-event route reservations.
+
+Outbound delivery orchestration starts only after `ironclaw_outbound` resolves
+and validates a communication delivery candidate. `OutboundPolicyService`
+remains the authority for reply-target validation and delivery-attempt metadata.
+Product workflow may attach trusted product target metadata from conversation
+binding and call `ProductAdapter::render_outbound`, but it must not choose a
+different reply target, read outbound preferences itself, or render anything
+before policy approval. Target metadata resolvers must be lookup-only and keyed
+by the sealed validated reply-target binding.
 
 ## Test support
 

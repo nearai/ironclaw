@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Drive delete_file",
+  "description": "Permanently delete a file or folder.",
+  "type": "object",
+  "required": [
+    "file_id"
+  ],
+  "properties": {
+    "file_id": {
+      "type": "string",
+      "description": "The file ID to delete."
+    }
+  },
+  "additionalProperties": false
+}

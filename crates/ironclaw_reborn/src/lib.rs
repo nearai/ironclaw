@@ -18,7 +18,10 @@
 
 pub mod app_loop_family;
 pub mod driver_registry;
+pub mod failure_categories;
 pub mod hook_gate_refs;
+#[cfg(feature = "webui-user-store")]
+pub mod local_trigger_access;
 pub mod loop_driver_host;
 pub mod loop_exit_applier;
 pub mod milestone_events;
@@ -29,9 +32,12 @@ pub mod production_readiness;
 pub mod runtime;
 pub mod subagent;
 pub mod text_loop_driver;
+pub mod thread_scope;
 pub mod turn_runner;
 
 #[cfg(feature = "root-llm-provider")]
 pub mod model_gateway;
 #[cfg(feature = "libsql-secrets")]
 pub mod secrets;
+#[cfg(feature = "webui-user-store")]
+pub mod webui_users;

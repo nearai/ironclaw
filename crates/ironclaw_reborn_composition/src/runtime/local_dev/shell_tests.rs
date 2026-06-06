@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
-use ironclaw_loop_support::{LoopCapabilityInputResolver, LoopCapabilityResultWriter};
+use ironclaw_loop_support::{
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+};
 use ironclaw_turns::{
     RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
@@ -14,7 +16,6 @@ use ironclaw_turns::{
 use super::{
     LocalDevCapabilityIo, LocalDevExtensionSurfaceSource, LocalDevLoopCapabilityPortFactory,
 };
-use ironclaw_reborn::loop_driver_host::LoopCapabilityPortFactory;
 
 async fn run_context(label: &str) -> LoopRunContext {
     let resolved = InMemoryRunProfileResolver::default()
@@ -85,6 +86,12 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         .expect("local runtime substrate")
         .skill_mounts
         .clone();
+    let memory_mounts = services
+        .local_runtime
+        .as_ref()
+        .expect("local runtime substrate")
+        .memory_mounts
+        .clone();
     let policy = Arc::new(
         crate::local_dev_capability_policy::local_dev_capability_policy().expect("policy parses"),
     );
@@ -93,14 +100,16 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let factory = LocalDevLoopCapabilityPortFactory {
         runtime,
-        user_id: UserId::new("local-dev-shell-user").expect("user id"),
+        fallback_user_id: UserId::new("local-dev-shell-user").expect("user id"),
         policy,
         workspace_mounts,
         skill_mounts,
+        memory_mounts,
         extension_surface_source: LocalDevExtensionSurfaceSource::default(),
         input_resolver,
         result_writer,
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        skill_activation_source: None,
     };
     let run_context = run_context("shell-workdir").await;
     let port = factory

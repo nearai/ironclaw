@@ -64,8 +64,8 @@ pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
     FinalCheckpointEvidenceRequest, LoopBlocked, LoopBlockedKind, LoopCancelled,
     LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitApplier,
-    LoopExitEvidencePort, LoopExitInvalidHandling, LoopExitMapping, LoopExitValidationDecision,
-    LoopExitViolation, LoopExitViolationKind, LoopFailed, LoopFailureKind,
+    LoopExitEvidencePort, LoopExitMapping, LoopExitValidationDecision, LoopExitViolation,
+    LoopExitViolationKind, LoopFailed, LoopFailureKind,
 };
 pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
 pub use request::{
@@ -89,12 +89,13 @@ pub use run_profile::{
 pub use scope::{TurnActor, TurnScope};
 pub use status::{
     AdmissionRejection, AdmissionRejectionReason, BlockedReason, SanitizedCancelReason,
-    SanitizedFailure, TurnCapacityResource, TurnError, TurnErrorCategory, TurnRunProfile,
-    TurnRunState, TurnStatus,
+    SanitizedFailure, TurnActiveRunRefState, TurnCapacityResource, TurnError, TurnErrorCategory,
+    TurnRunProfile, TurnRunState, TurnStatus,
 };
 pub use store::{
     SpawnTreeReservation, SpawnTreeReservationKey, TurnActiveLockKey, TurnActiveLockRecord,
     TurnCheckpointRecord, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
     TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLockVersion,
     TurnPersistenceSnapshot, TurnRecord, TurnRunRecord, TurnSpawnTreeStateStore, TurnStateStore,
+    active_run_ref_state,
 };

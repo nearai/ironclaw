@@ -101,6 +101,7 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: GateRef::new("gate:auth-required").unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
+                    credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
             }],
@@ -182,6 +183,7 @@ async fn webui_event_stream_projects_approval_gate_prompt() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: gate_ref.clone(),
                     gate_kind: TurnBlockedGateKind::Approval,
+                    credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("capability requires approval".to_string()),
             }],
@@ -249,6 +251,7 @@ async fn webui_event_stream_projects_blocked_dependent_run_status() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: GateRef::new("gate:await-dependent-run").unwrap(),
                     gate_kind: TurnBlockedGateKind::AwaitDependentRun,
+                    credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("Waiting for dependent run".to_string()),
             }],
@@ -276,7 +279,7 @@ async fn webui_event_stream_projects_blocked_dependent_run_status() {
         ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter().any(|item| {
             matches!(
                 item,
-                ProductProjectionItem::RunStatus { run_id, status }
+                ProductProjectionItem::RunStatus { run_id, status, .. }
                     if *run_id == turn_run && status == "blocked_dependent_run"
             )
         }),
@@ -362,6 +365,7 @@ async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
     let scope_b = TurnScope::new(tenant_id, Some(agent_id), None, thread_b);
     let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
         runtime: None,
+        live: None,
         runtime_item: None,
         turn: Some(TurnEventProjectionCursor::for_scope(
             scope_a,
@@ -414,6 +418,7 @@ async fn webui_event_stream_rejects_foreign_composite_runtime_cursor() {
         runtime: Some(EventProjectionCursor::origin_for_scope(
             runtime_projection_scope(&actor, &scope_a),
         )),
+        live: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 1,
@@ -542,6 +547,7 @@ async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
         blocked_gate: Some(TurnBlockedGateMetadata {
             gate_ref: GateRef::new("gate:auth-required").unwrap(),
             gate_kind: TurnBlockedGateKind::Auth,
+            credential_requirements: Vec::new(),
         }),
         sanitized_reason: Some("GitHub authentication required".to_string()),
     });
@@ -614,6 +620,7 @@ async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: GateRef::new("gate:auth-required").unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
+                    credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("stale auth gate".to_string()),
             }],

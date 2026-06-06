@@ -134,6 +134,7 @@ mod tests {
                     content: "hi".to_string(),
                 }),
                 effective_model_profile_id: ModelProfileId::new("model_test").expect("ok"),
+                usage: None,
             })
         }
     }

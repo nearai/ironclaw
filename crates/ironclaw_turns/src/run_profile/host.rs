@@ -5,7 +5,9 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind, ThreadId};
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
@@ -648,11 +650,27 @@ impl AgentLoopHostErrorKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLoopHostErrorReasonKind {
+    ModelCreditsExhausted,
+}
+
+impl AgentLoopHostErrorReasonKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelCreditsExhausted => "model_credits_exhausted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 #[error("agent loop host {kind:?}: {safe_summary}")]
 pub struct AgentLoopHostError {
     pub kind: AgentLoopHostErrorKind,
     pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -661,8 +679,14 @@ impl AgentLoopHostError {
         Self {
             kind,
             safe_summary: safe_summary.into(),
+            reason_kind: None,
             diagnostic_ref: None,
         }
+    }
+
+    pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
+        self.reason_kind = Some(reason_kind);
+        self
     }
 
     pub fn with_diagnostic_ref(mut self, diagnostic_ref: LoopDiagnosticRef) -> Self {
@@ -1103,6 +1127,21 @@ pub struct LoopModelResponse {
     pub safe_reasoning_deltas: Vec<String>,
     pub output: ParentLoopOutput,
     pub effective_model_profile_id: ModelProfileId,
+    /// Provider-reported token usage for this call. `None` when the gateway
+    /// could not surface real numbers (replay test stubs, providers without
+    /// a usage object); downstream budget accounting falls back to the
+    /// reservation estimate in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LoopModelUsage>,
+}
+
+/// Token usage reported by a provider for a single model call. The accountant
+/// uses this to record actual USD spend instead of the conservative
+/// reservation estimate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopModelUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1363,6 +1402,8 @@ pub enum CapabilityOutcome {
     },
     AuthRequired {
         gate_ref: LoopGateRef,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
         safe_summary: String,
     },
     ResourceBlocked {
@@ -1401,11 +1442,33 @@ impl CapabilityOutcome {
 pub struct CapabilityResultMessage {
     pub result_ref: LoopResultRef,
     pub safe_summary: String,
+    /// Typed host signal describing whether this result advanced the loop's
+    /// evidence/state. This lets the loop distinguish deterministic
+    /// no-change outcomes from productive calls without inferring progress
+    /// from prose summaries or token counts.
+    #[serde(default)]
+    pub progress: CapabilityProgress,
     /// Host hint that this completed capability result should end the loop
     /// naturally after the current batch. Defaults to false for compatibility
     /// with older hosts.
     #[serde(default)]
     pub terminate_hint: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityProgress {
+    /// Older hosts, or hosts that cannot classify progress yet.
+    #[default]
+    Unknown,
+    /// The capability produced new evidence or changed host/runtime state.
+    #[serde(alias = "complete")]
+    MadeProgress,
+    /// The capability ran successfully but observed the same state/evidence as
+    /// before.
+    NoChange,
+    /// The capability reached a deterministic non-suspending blocker.
+    Blocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1708,6 +1771,11 @@ pub trait LoopTranscriptPort: Send + Sync {
 pub struct LoopCheckpointRequest {
     pub kind: LoopCheckpointKind,
     pub state_ref: LoopCheckpointStateRef,
+    /// Gate identity for `BeforeBlock` checkpoints; `None` for other kinds.
+    /// Defaults to `None` for backward-compatible deserialization of older
+    /// records that predate this field.
+    #[serde(default)]
+    pub gate_ref: Option<crate::ids::LoopGateRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -21,6 +21,19 @@ use crate::error::ProductWorkflowError;
 use crate::inbound_turn::{InboundTurnOutcome, InboundTurnService, check_before_inbound_policy};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest};
+use crate::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
+
+#[allow(dead_code)]
+pub fn rejecting_reborn_services_error() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Internal,
+        kind: RebornServicesErrorKind::Internal,
+        status_code: 500,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // FakeConversationBindingService
@@ -117,11 +130,17 @@ impl FakeConversationBindingService {
                 .map_err(|e| ProductWorkflowError::BindingResolutionFailed {
                     reason: e.to_string(),
                 })?,
-            user_id: UserId::new(format!("user:{}", request.external_actor_ref.id())).map_err(
-                |e| ProductWorkflowError::BindingResolutionFailed {
+            actor_user_id: UserId::new(format!("user:{}", request.external_actor_ref.id()))
+                .map_err(|e| ProductWorkflowError::BindingResolutionFailed {
                     reason: e.to_string(),
-                },
-            )?,
+                })?,
+            subject_user_id: Some(
+                UserId::new(format!("user:{}", request.external_actor_ref.id())).map_err(|e| {
+                    ProductWorkflowError::BindingResolutionFailed {
+                        reason: e.to_string(),
+                    }
+                })?,
+            ),
             thread_id: ThreadId::new(format!(
                 "thread:{}:{}",
                 request.installation_id.as_str(),
@@ -567,11 +586,16 @@ impl FakeInboundTurnService {
                     reason: e.to_string(),
                 }
             })?,
-            user_id: UserId::new("user:fake").map_err(|e| {
+            actor_user_id: UserId::new("user:fake").map_err(|e| {
                 ProductWorkflowError::BindingResolutionFailed {
                     reason: e.to_string(),
                 }
             })?,
+            subject_user_id: Some(UserId::new("user:fake").map_err(|e| {
+                ProductWorkflowError::BindingResolutionFailed {
+                    reason: e.to_string(),
+                }
+            })?),
             thread_id: ThreadId::new("thread:fake").map_err(|e| {
                 ProductWorkflowError::BindingResolutionFailed {
                     reason: e.to_string(),

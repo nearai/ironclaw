@@ -1136,10 +1136,10 @@ fn markdown_to_mrkdwn(input: &str) -> String {
         let url_expanded = expand_protected_spans(url, &protected);
         let text_expanded = expand_protected_spans(text, &protected);
 
-        // If the URL contains characters that would break Slack's
-        // `<url|text>` parser, fall back to leaving the original markdown
-        // form intact. RFC 3986 disallows these in URLs anyway.
-        if url_expanded.contains(['<', '>', '|']) {
+        // If the URL or expanded label contains characters that would break
+        // Slack's `<url|text>` parser, fall back to leaving the original
+        // markdown form intact. RFC 3986 disallows these in URLs anyway.
+        if url_expanded.contains(['<', '>', '|']) || text_expanded.contains('|') {
             link_out.push('[');
             link_out.push_str(text);
             link_out.push_str("](");
@@ -1862,6 +1862,16 @@ mod tests {
         assert_eq!(
             markdown_to_mrkdwn("[x](https://e.com/a|b)"),
             "[x](https://e.com/a|b)",
+        );
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_falls_back_when_expanded_label_has_pipe() {
+        // A `|` inside the expanded label would corrupt Slack's
+        // `<url|text>` parser, so leave the original markdown link intact.
+        assert_eq!(
+            markdown_to_mrkdwn("[a|b](https://e.com)"),
+            "[a|b](https://e.com)",
         );
     }
 

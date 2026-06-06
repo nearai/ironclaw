@@ -61,6 +61,7 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
                 policy_action,
                 &local_runtime.workspace_mounts,
                 &local_runtime.skill_mounts,
+                &local_runtime.memory_mounts,
             ) {
                 Ok(approval) => approval,
                 Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {
