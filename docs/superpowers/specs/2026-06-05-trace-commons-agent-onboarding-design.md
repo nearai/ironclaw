@@ -193,6 +193,9 @@ operator's invite link transitively vouches for it) but must be HTTPS.
   the machine and is never echoed in tool output, logs, or the policy file.
 - Keying by tenant means joining a second tenant creates a second keypair:
   no cross-tenant key reuse and no key-based linkage between tenants.
+- Pending files for permanently failed onboards (e.g. `InviteNotValid`) are
+  deleted on that terminal failure; the staged key was never registered, so
+  this is hygiene, not security.
 
 ### 2.3 `onboard()` and policy changes
 
@@ -283,7 +286,7 @@ Both tools route through `ToolDispatcher::dispatch()` like every other tool
 | Network failure after registration, before policy write | Keypair persisted locally + idempotent endpoint → retry with same invite succeeds |
 | Rate limited | Typed error, agent suggests retrying later |
 | `confirmed: false` | Tool refuses; agent must gather consent |
-| Tenant mismatch at claim time | Issuer rejects; cannot occur via this client (tenant comes from response) |
+| Tenant mismatch at claim time | Issuer rejects; tenant is server-anchored (registry row), cannot occur via this client |
 
 ## 5. Testing
 
