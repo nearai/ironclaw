@@ -42,21 +42,21 @@ mod tests {
     use crate::runtime::local_dev_filesystem_skill_context_source;
 
     async fn run_context(label: &str) -> LoopRunContext {
+        run_context_with_scope(TurnScope::new(
+            TenantId::new(format!("tenant-{label}")).expect("tenant id"),
+            Some(AgentId::new(format!("agent-{label}")).expect("agent id")),
+            Some(ProjectId::new(format!("project-{label}")).expect("project id")),
+            ThreadId::new(format!("thread-{label}")).expect("thread id"),
+        ))
+        .await
+    }
+
+    async fn run_context_with_scope(scope: TurnScope) -> LoopRunContext {
         let resolved = InMemoryRunProfileResolver::default()
             .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
             .await
             .expect("profile resolves");
-        LoopRunContext::new(
-            TurnScope::new(
-                TenantId::new(format!("tenant-{label}")).expect("tenant id"),
-                Some(AgentId::new(format!("agent-{label}")).expect("agent id")),
-                Some(ProjectId::new(format!("project-{label}")).expect("project id")),
-                ThreadId::new(format!("thread-{label}")).expect("thread id"),
-            ),
-            TurnId::new(),
-            TurnRunId::new(),
-            resolved,
-        )
+        LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved)
     }
 
     #[tokio::test]
@@ -71,6 +71,30 @@ mod tests {
 
         assert_eq!(request.context.user_id.as_str(), "sso-user");
         assert_eq!(request.context.resource_scope.user_id.as_str(), "sso-user");
+    }
+
+    #[tokio::test]
+    async fn local_dev_visible_capability_request_uses_explicit_subject_for_runtime_scope() {
+        let subject_user_id = UserId::new("team-agent-user").expect("subject user id");
+        let run_context = run_context_with_scope(TurnScope::new_with_owner(
+            TenantId::new("tenant-subject").expect("tenant id"),
+            Some(AgentId::new("agent-subject").expect("agent id")),
+            Some(ProjectId::new("project-subject").expect("project id")),
+            ThreadId::new("thread-subject").expect("thread id"),
+            Some(subject_user_id),
+        ))
+        .await
+        .with_actor(TurnActor::new(
+            UserId::new("slack-sender").expect("actor user id"),
+        ));
+        let fallback_user_id = UserId::new("env-operator").expect("fallback user id");
+        let request = visible_request_for_runtime_scope(&run_context, &fallback_user_id);
+
+        assert_eq!(request.context.user_id.as_str(), "team-agent-user");
+        assert_eq!(
+            request.context.resource_scope.user_id.as_str(),
+            "team-agent-user"
+        );
     }
 
     #[tokio::test]

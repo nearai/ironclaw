@@ -7,6 +7,8 @@ use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
+#[cfg(all(test, feature = "slack-v2-host-beta"))]
+use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TenantSandboxProcessPort};
 use ironclaw_trust::HostTrustPolicy;
 use secrecy::SecretString;
@@ -152,6 +154,8 @@ pub struct RebornBuildInput {
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
+    #[cfg(all(test, feature = "slack-v2-host-beta"))]
+    pub(crate) host_runtime_http_egress_for_test: Option<Option<HostRuntimeHttpEgressPort>>,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
@@ -394,6 +398,15 @@ impl RebornBuildInput {
         self
     }
 
+    #[cfg(all(test, feature = "slack-v2-host-beta"))]
+    pub(crate) fn with_host_runtime_http_egress_for_test(
+        mut self,
+        egress: Option<HostRuntimeHttpEgressPort>,
+    ) -> Self {
+        self.host_runtime_http_egress_for_test = Some(egress);
+        self
+    }
+
     /// Inject Reborn-native product-auth service ports.
     ///
     /// Production callers should provide durable implementations here. The
@@ -491,6 +504,8 @@ impl RebornBuildInput {
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
+            #[cfg(all(test, feature = "slack-v2-host-beta"))]
+            host_runtime_http_egress_for_test: None,
             product_auth_ports: None,
             oauth_provider_configs: Vec::new(),
             oauth_dcr_provider_configs: Vec::new(),

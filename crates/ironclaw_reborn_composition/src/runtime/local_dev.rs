@@ -745,8 +745,10 @@ fn local_dev_visible_capability_request(
         .grants
         .extend(extension_surface.grants(&extension_id));
     let user_id = run_context
-        .actor()
-        .map(|actor| actor.user_id.clone())
+        .scope
+        .explicit_owner_user_id()
+        .cloned()
+        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
         .unwrap_or_else(|| fallback_user_id.clone());
     let mut context = ExecutionContext::local_default(
         user_id,

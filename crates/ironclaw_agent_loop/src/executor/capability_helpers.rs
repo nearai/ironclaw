@@ -85,7 +85,11 @@ pub(super) fn push_call_signature_once(
     signatures: &mut HashSet<CapabilityCallSignature>,
     call: &CapabilityCallCandidate,
 ) -> Result<(), AgentLoopExecutorError> {
-    let args = serde_json::json!({ "input_ref": call.input_ref.as_str() });
+    let args = call
+        .provider_replay
+        .as_ref()
+        .map(|replay| replay.arguments.clone())
+        .unwrap_or_else(|| serde_json::json!({ "input_ref": call.input_ref.as_str() }));
     let signature =
         CapabilityCallSignature::from_call(call.capability_id.clone(), &args).map_err(|_| {
             AgentLoopExecutorError::PlannerContract {
@@ -217,10 +221,4 @@ pub(super) fn push_completed_result(
 ) {
     state.recovery_state = state.recovery_state.cleared_attempts();
     state.result_refs.push(result.result_ref);
-    if result.terminate_hint {
-        state.stop_state.terminate_hints_in_last_batch = state
-            .stop_state
-            .terminate_hints_in_last_batch
-            .saturating_add(1);
-    }
 }

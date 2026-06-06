@@ -176,9 +176,12 @@ fn credential_requirements(
             let provider = provider.as_str().to_string();
             let setup = credential_setup(setup);
             if let Some(seen) = groups.iter_mut().find(|seen| {
-                seen.handle == handle && seen.provider == provider && seen.setup == setup
+                seen.handle == handle
+                    && seen.provider == provider
+                    && can_merge_credential_setup(&seen.setup, &setup)
             }) {
                 seen.required |= requirement.required;
+                merge_credential_setup(&mut seen.setup, setup);
                 continue;
             }
             groups.push(CredentialRequirementGroup {
@@ -209,6 +212,39 @@ fn credential_requirements(
             }
         })
         .collect()
+}
+
+fn can_merge_credential_setup(
+    existing: &LifecycleExtensionCredentialSetup,
+    candidate: &LifecycleExtensionCredentialSetup,
+) -> bool {
+    matches!(
+        (existing, candidate),
+        (
+            LifecycleExtensionCredentialSetup::ManualToken,
+            LifecycleExtensionCredentialSetup::ManualToken
+        ) | (
+            LifecycleExtensionCredentialSetup::OAuth { .. },
+            LifecycleExtensionCredentialSetup::OAuth { .. }
+        )
+    )
+}
+
+fn merge_credential_setup(
+    existing: &mut LifecycleExtensionCredentialSetup,
+    candidate: LifecycleExtensionCredentialSetup,
+) {
+    if let (
+        LifecycleExtensionCredentialSetup::OAuth { scopes: existing },
+        LifecycleExtensionCredentialSetup::OAuth { scopes: candidate },
+    ) = (existing, candidate)
+    {
+        for scope in candidate {
+            if !existing.contains(&scope) {
+                existing.push(scope);
+            }
+        }
+    }
 }
 
 struct CredentialRequirementGroup {
@@ -1572,14 +1608,16 @@ mod tests {
     }
 
     #[test]
-    fn bundled_gsuite_wasm_credentials_declare_oauth_setup() {
+    fn bundled_google_credentials_project_single_oauth_setup_per_account() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
         for extension_id in [
+            "google-calendar",
             "google-docs",
             "google-drive",
             "google-sheets",
             "google-slides",
+            "gmail",
         ] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
@@ -1592,7 +1630,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             let mut credential_count = 0;
-            let mut capability_scope_sets: Vec<Vec<String>> = Vec::new();
+            let mut expected_setup_scopes: Vec<String> = Vec::new();
             for capability in &package.package.manifest.capabilities {
                 for credential in &capability.runtime_credentials {
                     let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
@@ -1616,8 +1654,10 @@ mod tests {
                         "{extension_id} capability {} OAuth setup scopes should match requested provider scopes",
                         capability.id
                     );
-                    if !capability_scope_sets.iter().any(|seen| seen == scopes) {
-                        capability_scope_sets.push(scopes.clone());
+                    for scope in scopes {
+                        if !expected_setup_scopes.contains(scope) {
+                            expected_setup_scopes.push(scope.clone());
+                        }
                     }
                     credential_count += 1;
                 }
@@ -1625,27 +1665,17 @@ mod tests {
 
             assert_eq!(
                 google_requirements.len(),
-                capability_scope_sets.len(),
-                "{extension_id} lifecycle setup should keep distinct OAuth scope sets separate"
+                1,
+                "{extension_id} lifecycle setup should show one Google OAuth request per account"
             );
+            let requirement = google_requirements[0];
+            let LifecycleExtensionCredentialSetup::OAuth { scopes } = &requirement.setup else {
+                panic!("{extension_id} should expose Google OAuth setup");
+            };
             assert_eq!(
-                google_requirements
-                    .iter()
-                    .map(|requirement| requirement.name.as_str())
-                    .collect::<HashSet<_>>()
-                    .len(),
-                google_requirements.len(),
-                "{extension_id} lifecycle setup should give split OAuth requirements unique names"
+                scopes, &expected_setup_scopes,
+                "{extension_id} lifecycle setup should request the union of capability OAuth scopes once"
             );
-            for requirement in google_requirements {
-                let LifecycleExtensionCredentialSetup::OAuth { scopes } = &requirement.setup else {
-                    panic!("{extension_id} should expose Google OAuth setup");
-                };
-                assert!(
-                    capability_scope_sets.iter().any(|seen| seen == scopes),
-                    "{extension_id} lifecycle setup should request only operation-level OAuth scopes; got {scopes:?}",
-                );
-            }
             assert!(
                 credential_count > 0,
                 "{extension_id} should declare runtime credentials"

@@ -1,7 +1,10 @@
 use ironclaw_agent_loop::{
     executor::{AgentLoopExecutor, CanonicalAgentLoopExecutor},
     families,
-    state::{CapabilityCallSignature, CheckpointKind, CheckpointPayloadError, LoopExecutionState},
+    state::{
+        CapabilityCallSignature, CheckpointKind, CheckpointPayloadError,
+        DeferredCompactionWatermark, LoopExecutionState,
+    },
     test_support::{
         LoopExecutionStateBuilder, MockAgentLoopDriverHost, ScenarioScript, capability_id,
         test_run_context,
@@ -27,6 +30,29 @@ fn state_serializes_round_trips() {
         serde_json::from_slice(&encoded).expect("state should deserialize");
 
     assert_eq!(decoded, state);
+}
+
+#[test]
+fn state_serializes_round_trips_with_last_deferred_compaction_watermark() {
+    let context = test_run_context("compaction-watermark-round-trip");
+    let mut state = LoopExecutionState::initial_for_run(&context);
+    state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+        through_seq: 42,
+        prompt_fingerprint: 7_777,
+    });
+
+    let encoded = serde_json::to_vec(&state).expect("state should serialize");
+    let decoded: LoopExecutionState =
+        serde_json::from_slice(&encoded).expect("state should deserialize");
+
+    assert_eq!(decoded.compaction_state, state.compaction_state);
+    assert_eq!(
+        decoded.compaction_state.last_deferred,
+        Some(DeferredCompactionWatermark {
+            through_seq: 42,
+            prompt_fingerprint: 7_777,
+        })
+    );
 }
 
 #[test]

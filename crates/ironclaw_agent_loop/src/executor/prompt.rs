@@ -4,17 +4,18 @@ use ironclaw_turns::{
     LoopExit,
     run_profile::{
         CapabilitySurfaceVersion, CompactionInitiator, LoopCompactionError, LoopCompactionMode,
-        LoopCompactionRequest, LoopContextCompactionKind, LoopContextCompactionMetadata,
-        LoopModelCapabilityView, LoopModelMessage, LoopProgressEvent, LoopSafeSummary,
-        SystemInferenceTaskId, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopCompactionOutcome, LoopCompactionRequest, LoopContextCompactionKind,
+        LoopContextCompactionMetadata, LoopModelCapabilityView, LoopModelMessage,
+        LoopProgressEvent, LoopSafeSummary, SystemInferenceTaskId, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 use std::time::Duration;
 use tracing::debug;
 
 use crate::state::{
-    CheckpointKind, CompactionPromptSnapshot, IndexedMessageKind, LoopExecutionState,
-    MessageIndexEntry,
+    CheckpointKind, CompactionPromptSnapshot, DeferredCompactionWatermark, IndexedMessageKind,
+    LoopExecutionState, MessageIndexEntry,
 };
 use crate::strategies::CompactionDecision;
 
@@ -350,7 +351,36 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         )
         .await;
         let response = match compaction_result {
-            CompactionCallOutcome::Completed(Ok(response)) => response,
+            CompactionCallOutcome::Completed(Ok(LoopCompactionOutcome::Compacted(response))) => {
+                response
+            }
+            CompactionCallOutcome::Completed(Ok(LoopCompactionOutcome::Deferred {
+                safe_summary,
+            })) => {
+                tracing::debug!(
+                    %safe_summary,
+                    "agent loop compaction deferred; continuing with the existing prompt"
+                );
+                state.compaction_state.force_compact_on_next_iteration = false;
+                state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+                    through_seq: drop_through_seq,
+                    prompt_fingerprint: state.compaction_prompt.fingerprint(),
+                });
+                state = match CheckpointStage
+                    .cancel_if_requested_after_pending_input_ack(
+                        self.ctx,
+                        state,
+                        self.pending_input_ack,
+                    )
+                    .await?
+                {
+                    CancelCheck::Continue(state) => *state,
+                    CancelCheck::Exit(exit) => {
+                        return Ok(PromptCompactionOutcome::Exited(exit));
+                    }
+                };
+                return Ok(PromptCompactionOutcome::Skipped(state));
+            }
             CompactionCallOutcome::Completed(Err(LoopCompactionError::Cancelled))
             | CompactionCallOutcome::Cancelled => {
                 return compaction_cancelled_exit(self.ctx, state, self.pending_input_ack).await;
@@ -391,6 +421,7 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         };
 
         state.compaction_state.last_compacted_through_seq = Some(drop_through_seq);
+        state.compaction_state.last_deferred = None;
         state.compaction_state.force_compact_on_next_iteration = false;
         state
             .compaction_prompt
@@ -413,7 +444,7 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
 }
 
 enum CompactionCallOutcome {
-    Completed(Result<ironclaw_turns::run_profile::LoopCompactionResponse, LoopCompactionError>),
+    Completed(Result<LoopCompactionOutcome, ironclaw_turns::run_profile::LoopCompactionError>),
     TimedOut,
     Cancelled,
 }
@@ -424,12 +455,7 @@ async fn await_compaction_with_cancellation<F>(
     call: F,
 ) -> CompactionCallOutcome
 where
-    F: std::future::Future<
-            Output = Result<
-                ironclaw_turns::run_profile::LoopCompactionResponse,
-                LoopCompactionError,
-            >,
-        >,
+    F: std::future::Future<Output = Result<LoopCompactionOutcome, LoopCompactionError>>,
 {
     let call = call;
     tokio::pin!(call);

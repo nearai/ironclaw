@@ -2,9 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-use ironclaw_auth::{
-    AuthProductError, AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl,
-};
 #[cfg(test)]
 use ironclaw_event_projections::CapabilityActivityProjection;
 use ironclaw_event_projections::{
@@ -24,12 +21,12 @@ use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::UserId;
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_product_adapters::{
-    AdapterInstallationId, AuthPromptChallengeKind, CapabilityActivityStatusView,
-    CapabilityActivityView, CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef,
-    ProductAdapterError, ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
-    ProductWorkflowRejectionKind, ProjectionCursor as ProductProjectionCursor, ProjectionStream,
-    ProjectionSubscriptionRequest, RedactedString,
+    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
+    CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
+    ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind,
+    ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest,
+    RedactedString,
 };
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
@@ -40,6 +37,7 @@ mod display_preview;
 mod live_progress;
 mod runtime_replay;
 mod turn_events;
+use crate::AuthChallengeProvider;
 use display_preview::{
     CapabilityDisplayPreviewResolution, CapabilityDisplayPreviewSource,
     NoopCapabilityDisplayPreviewSource,
@@ -55,62 +53,6 @@ use runtime_replay::{
 use turn_events::{
     FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventPayload,
 };
-
-// ── Auth challenge projection ────────────────────────────────────────────────
-
-/// Redacted view of a pending auth challenge used exclusively for WebUI
-/// projection enrichment. Contains only data safe to surface over the wire.
-/// No raw secrets, PKCE verifiers, state hashes, or tokens.
-#[derive(Debug, Clone)]
-pub struct AuthChallengeView {
-    pub kind: AuthPromptChallengeKind,
-    pub provider: AuthProviderId,
-    pub account_label: Option<CredentialAccountLabel>,
-    pub authorization_url: Option<OAuthAuthorizationUrl>,
-    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-impl AuthChallengeView {
-    /// Apply the view's enrichment fields onto a partially-constructed
-    /// `AuthPromptView`, removing the 5-field manual mapping at call sites.
-    ///
-    /// Caller constructs the 4 mandatory fields; this method fills the 5
-    /// optional enrichment fields from `self`.
-    pub(crate) fn enrich(
-        self,
-        mut view: ironclaw_product_adapters::AuthPromptView,
-    ) -> ironclaw_product_adapters::AuthPromptView {
-        view.challenge_kind = Some(self.kind);
-        view.provider = Some(self.provider.as_str().to_string());
-        view.account_label = self.account_label.map(|label| label.as_str().to_string());
-        view.authorization_url = self.authorization_url.map(|url| url.as_str().to_string());
-        view.expires_at = self.expires_at;
-        view
-    }
-}
-
-/// Narrow read-only interface used by the turn-event projection layer to
-/// enrich `AuthPromptView` with challenge metadata. Implemented by
-/// `RebornProductAuthServices` when a `flow_record_source` is wired in.
-///
-/// Implementations MUST verify caller user, run id, gate ref, and
-/// tenant/agent/project/thread before returning a record.
-#[async_trait]
-pub trait AuthChallengeProvider: Send + Sync {
-    /// Return the projection-safe challenge view for the given gate ref and
-    /// caller scope, or `None` if the auth flow cannot be found (already
-    /// consumed, not yet created, wrong scope, or record source unavailable).
-    /// Fallible challenge creation, such as DCR discovery/registration, must
-    /// surface errors instead of silently degrading to a missing challenge.
-    async fn challenge_for_gate(
-        &self,
-        scope: &TurnScope,
-        owner_user_id: &UserId,
-        run_id: TurnRunId,
-        gate_ref: &str,
-        credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
-    ) -> Result<Option<AuthChallengeView>, AuthProductError>;
-}
 
 pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 #[cfg(test)]

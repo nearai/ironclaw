@@ -46,7 +46,7 @@ Subagents are LLM-callable delegated work with a goal, parent-scope inheritance,
 
 ### Prompt planning + task pattern
 
-Compaction is part of prompt planning for the main turn run, using the already-held lease. `PromptStage` builds the candidate prompt bundle, applies the prompt-owned compaction index, asks the compaction strategy, and when needed calls the host `LoopCompactionPort`. After successful durable compaction, prompt planning checkpoints, acks pending input, and rebuilds the final prompt bundle before model dispatch. No new run is claimed; no contract is changed.
+Compaction is part of prompt planning for the main turn run, using the already-held lease. `PromptStage` builds the candidate prompt bundle, applies the prompt-owned compaction index, asks the compaction strategy, and when needed calls the host `LoopCompactionPort`. The host returns a typed `LoopCompactionOutcome`: `Compacted` for a durable summary artifact, or `Deferred` when the selected transcript range is temporarily unstable. After successful durable compaction, prompt planning checkpoints, acks pending input, and rebuilds the final prompt bundle before model dispatch. Deferred compaction is non-fatal: prompt planning keeps the candidate prompt, records a strategy-owned backoff marker for the deferred cut point, and continues without advancing `last_compacted_through_seq`. No new run is claimed.
 
 `SystemInferencePort` is the host-owned inference boundary used by the compaction task. The Reborn implementation dispatches directly through the host-managed model gateway with already-sanitized system/input text, no assistant prompt-bundle authority, and no capability surface. The same port and pattern serve future system inference tasks (goal refresh, error classification, memory consolidation). Tasks with real branching, validation, or invariant logic live in `loop_support` task modules.
 
@@ -400,15 +400,27 @@ crates/ironclaw_agent_loop/src/executor/prompt.rs
        request. Executor stages import zero types from ironclaw_loop_support;
        compaction task wiring is constructed inside AgentLoopDriverHost
        implementations.
-    5. On Ok(summary_id): set
+    5. On Ok(LoopCompactionOutcome::Compacted(response)): set
          state.compaction_state.last_compacted_through_seq = drop_through_seq
+         state.compaction_state.last_deferred = None
          state.compaction_state.force_compact_on_next_iteration = false
          state.compaction_prompt.retain_after_sequence(drop_through_seq)
          (Phase 3 reads force_compact and clears it; Phase 1 just sets
          it false defensively.)
        Then write a BeforeModel checkpoint, ack pending input, and rebuild the
        final prompt bundle.
-    6. On Err(error):
+    6. On Ok(LoopCompactionOutcome::Deferred { safe_summary }): set
+         state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+           through_seq: drop_through_seq,
+           prompt_fingerprint: state.compaction_prompt.fingerprint(),
+         })
+         state.compaction_state.force_compact_on_next_iteration = false
+       Then return to the existing candidate prompt without advancing the
+       durable compaction high-water mark. The strategy suppresses that exact
+       boundary only while the prompt snapshot fingerprint is unchanged; if a
+       later prompt refresh changes the snapshot, the same boundary can be
+       retried without requiring a newer user message.
+    7. On Err(error):
        - InvalidCutPoint | InputTooLarge | InjectionDetected | LeakDetected:
          emit CompactionFailed event with sanitized reason;
          return LoopFailureKind::CompactionUnavailable.
@@ -1023,6 +1035,7 @@ A future phase can land calibration once `LoopModelResponse.usage` is wired thro
 
 - **On prompt build.** `PromptStage` copies `LoopPromptBundle.compaction_message_index` into `state.compaction_prompt` and caches the summed token estimate. The snapshot is not serialized into checkpoints; a resumed run rebuilds it from the next prompt bundle.
 - **On compaction completion.** Entries with `sequence <= drop_through_seq` are pruned from the snapshot (they're now represented by the summary artifact and no longer model-visible).
+- **On compaction deferral.** `PromptStage` stores both the deferred user boundary and the current prompt snapshot fingerprint in `CompactionStrategyState`. This is an executor-local backoff marker, not a host-owned transcript decision. It prevents retrying the same unstable range while the prompt snapshot is unchanged, but expires automatically when a prompt refresh changes the snapshot.
 
 `LoadContextWindowRequest.max_messages` is unchanged. The strategy uses the prompt snapshot for threshold evaluation; only when `CompactionDecision::Trigger` is returned does the task load the transcript head to serialize. The cost of the strategy decision is therefore O(N) over the prompt snapshot per tick (cheap; bounded by ctx-window size), with zero disk reads on hot ticks.
 

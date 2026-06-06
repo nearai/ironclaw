@@ -14,13 +14,13 @@ use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, EnsureThreadRequest,
-    InMemorySessionThreadService, MessageContent, SessionThreadService, SummaryKind,
-    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadScope,
+    InMemorySessionThreadService, MessageContent, RedactMessageRequest, SessionThreadService,
+    SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::run_profile::{
-    LoopCompactionError, LoopCompactionMode, LoopCompactionPort, LoopCompactionRequest,
-    LoopSafeSummary, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
-    SystemInferenceResponse, SystemInferenceTaskId,
+    LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome, LoopCompactionPort,
+    LoopCompactionRequest, LoopSafeSummary, SystemInferenceError, SystemInferencePort,
+    SystemInferenceRequest, SystemInferenceResponse, SystemInferenceTaskId,
 };
 
 #[tokio::test]
@@ -92,7 +92,7 @@ async fn compaction_port_rejects_leaked_inference_output() {
 }
 
 #[tokio::test]
-async fn compaction_port_rejects_ranges_covering_hidden_statuses() {
+async fn compaction_port_defers_ranges_covering_unstable_statuses() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("visible-one").await;
     fixture.append_draft("hidden-draft").await;
@@ -105,17 +105,39 @@ async fn compaction_port_rejects_ranges_covering_hidden_statuses() {
         fixture.scope.clone(),
     );
 
-    let error = port
+    let outcome = port
         .compact_loop_context(fixture.request(3))
         .await
-        .expect_err("hidden range should not create an ignored replacement summary");
+        .expect("unstable range should return a typed deferral");
 
-    assert!(matches!(error, LoopCompactionError::InvalidCutPoint));
+    assert!(matches!(outcome, LoopCompactionOutcome::Deferred { .. }));
     assert!(inference.last_input().is_empty());
 }
 
 #[tokio::test]
-async fn compaction_port_rejects_ranges_covering_capability_previews() {
+async fn compaction_port_defers_when_terminal_cut_point_has_unstable_status() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible-one").await;
+    fixture.append_draft("terminal-draft").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(2))
+        .await
+        .expect("unstable terminal cut point should return a typed deferral");
+
+    assert!(matches!(outcome, LoopCompactionOutcome::Deferred { .. }));
+    assert!(inference.last_input().is_empty());
+}
+
+#[tokio::test]
+async fn compaction_port_skips_capability_previews() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("visible-one").await;
     fixture.append_preview().await;
@@ -128,10 +150,63 @@ async fn compaction_port_rejects_ranges_covering_capability_previews() {
         fixture.scope.clone(),
     );
 
+    let outcome = port
+        .compact_loop_context(fixture.request(3))
+        .await
+        .expect("capability previews should be skipped during compaction");
+
+    assert!(matches!(outcome, LoopCompactionOutcome::Compacted(_)));
+    let input = inference.last_input();
+    assert!(input.contains("visible-one"));
+    assert!(input.contains("visible-two"));
+    assert!(!input.contains("preview input"));
+    assert!(!input.contains("preview output"));
+}
+
+#[tokio::test]
+async fn compaction_port_rejects_redacted_messages() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible-one").await;
+    let redacted_message_id = fixture.append_user("redacted").await;
+    fixture.redact(redacted_message_id).await;
+    fixture.append_user("visible-two").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
     let error = port
         .compact_loop_context(fixture.request(3))
         .await
-        .expect_err("capability previews should not produce ignored replacement summaries");
+        .expect_err("redacted messages should not be compacted");
+
+    assert!(matches!(error, LoopCompactionError::InvalidCutPoint));
+    assert!(inference.last_input().is_empty());
+}
+
+#[tokio::test]
+async fn compaction_port_rejects_redacted_messages_after_unstable_statuses() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible-one").await;
+    fixture.append_draft("hidden-draft").await;
+    let redacted_message_id = fixture.append_user("redacted").await;
+    fixture.redact(redacted_message_id).await;
+    fixture.append_user("visible-two").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(4))
+        .await
+        .expect_err("hard-invalid messages should outrank deferral");
 
     assert!(matches!(error, LoopCompactionError::InvalidCutPoint));
     assert!(inference.last_input().is_empty());
@@ -523,7 +598,7 @@ impl CompactionFixture {
         }
     }
 
-    async fn append_user(&self, content: &str) {
+    async fn append_user(&self, content: &str) -> ThreadMessageId {
         self.threads
             .accept_inbound_message(AcceptInboundMessageRequest {
                 scope: self.scope.clone(),
@@ -533,6 +608,19 @@ impl CompactionFixture {
                 reply_target_binding_id: None,
                 external_event_id: None,
                 content: MessageContent::text(content),
+            })
+            .await
+            .unwrap()
+            .message_id
+    }
+
+    async fn redact(&self, message_id: ThreadMessageId) {
+        self.threads
+            .redact_message(RedactMessageRequest {
+                scope: self.scope.clone(),
+                thread_id: self.thread_id.clone(),
+                message_id,
+                redaction_ref: "test-redaction".to_string(),
             })
             .await
             .unwrap();

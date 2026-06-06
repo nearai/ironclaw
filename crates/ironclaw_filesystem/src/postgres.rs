@@ -705,6 +705,42 @@ impl RootFilesystem for PostgresRootFilesystem {
             .collect()
     }
 
+    async fn head_seq(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Option<SeqNo>, FilesystemError> {
+        let client = self.client().await?;
+        let from_raw = i64::try_from(from.get()).map_err(|_| {
+            backend_error(
+                path.clone(),
+                FilesystemOperation::HeadSeq,
+                "head_seq cursor exceeds i64",
+            )
+        })?;
+        let row = client
+            .query_one(
+                r#"
+                SELECT MAX(id) AS head
+                FROM root_filesystem_events
+                WHERE path = $1 AND id > $2
+                "#,
+                &[&path.as_str(), &from_raw],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::HeadSeq, error))?;
+        // `MAX(...)` over an empty match set yields SQL NULL.
+        let head_raw: Option<i64> = row.get("head");
+        match head_raw {
+            Some(id) => Ok(Some(seq_no_from_i64(
+                path,
+                id,
+                FilesystemOperation::HeadSeq,
+            )?)),
+            None => Ok(None),
+        }
+    }
+
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let mut client = self.client().await?;
         let transaction = client

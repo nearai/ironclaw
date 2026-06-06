@@ -94,6 +94,7 @@ ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
+ironclaw_hooks = { path = "../ironclaw_hooks" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
@@ -131,11 +132,13 @@ axum = { version = "0.8", optional = true }
 tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", optional = true, features = ["cors", "set-header", "limit", "catch-panic"] }
 lru = { version = "0.16", optional = true }
+fs4 = "0.6"
 rand = "0.8"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }

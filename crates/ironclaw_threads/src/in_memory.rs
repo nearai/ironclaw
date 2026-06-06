@@ -572,6 +572,31 @@ impl SessionThreadService for InMemorySessionThreadService {
         Ok(thread.record.clone())
     }
 
+    async fn delete_thread(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let existing =
+            state
+                .threads
+                .get(thread_id)
+                .ok_or_else(|| SessionThreadError::UnknownThread {
+                    thread_id: thread_id.clone(),
+                })?;
+        if &existing.record.scope != scope {
+            return Err(SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            });
+        }
+        state.threads.remove(thread_id);
+        state
+            .inbound_idempotency
+            .retain(|_, record| &record.thread_id != thread_id);
+        Ok(())
+    }
+
     async fn create_summary_artifact(
         &self,
         request: CreateSummaryArtifactRequest,

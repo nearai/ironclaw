@@ -33,7 +33,7 @@ use crate::oauth_gate::{GoogleOAuthGateProviderRegistry, OAuthGateChallengeReque
 use crate::product_auth_runtime_credentials::{
     ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountSelectionService,
 };
-use crate::projection::{AuthChallengeProvider, AuthChallengeView};
+use crate::{AuthChallengeProvider, AuthChallengeView};
 
 /// Dispatches a typed continuation event once an OAuth callback flow has
 /// completed.
@@ -702,14 +702,14 @@ impl RebornProductAuthServices {
         self
     }
 
-    /// Expose this service as an `Arc<dyn AuthChallengeProvider>` so the
-    /// projection layer can enrich `AuthPromptView` SSE frames with
-    /// `challenge_kind`, `provider`, `account_label`, and `authorization_url`.
+    /// Expose this service as an `Arc<dyn AuthChallengeProvider>` so product
+    /// surfaces can enrich `AuthPromptView` payloads with `challenge_kind`,
+    /// `provider`, `account_label`, and `authorization_url`.
     ///
     /// Returns `None` when no `flow_record_source` is configured (meaning this
     /// bundle was built without the in-memory projection source, e.g. in
     /// production deployments that use durable DB backends not yet wired to
-    /// `AuthFlowRecordSource`). The WebUI prompt falls back to the plain
+    /// `AuthFlowRecordSource`). Product auth prompts fall back to the plain
     /// 4-field view in that case, which is backward-compatible.
     #[doc(hidden)]
     pub fn as_auth_challenge_provider(self: &Arc<Self>) -> Option<Arc<dyn AuthChallengeProvider>> {

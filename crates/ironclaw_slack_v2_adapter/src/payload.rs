@@ -153,10 +153,12 @@ fn parse_message_event(
 /// Fixed user-message routing strategies in this first slice.
 /// `AppMention`: public channel, strip leading `@mention`, thread fallback to `ts`.
 /// `Dm`: direct-message channel required, keep text verbatim, no thread fallback.
+/// `ThreadReply`: channel thread reply, keep text verbatim, require `thread_ts`.
 #[derive(Debug, Clone, Copy)]
 enum SlackMessageKind {
     AppMention,
     Dm,
+    ThreadReply,
 }
 
 fn try_parse_user_message(
@@ -179,6 +181,9 @@ fn try_parse_user_message(
     {
         return noop_parsed_inbound(event_id, team_id, Some(event));
     }
+    if matches!(kind, SlackMessageKind::ThreadReply) && event.thread_ts.is_none() {
+        return noop_parsed_inbound(event_id, team_id, Some(event));
+    }
     let Some(ts) = event.ts.as_deref() else {
         return noop_parsed_inbound(event_id, team_id, Some(event));
     };
@@ -194,6 +199,11 @@ fn try_parse_user_message(
             raw_text.to_string(),
             event.thread_ts.as_deref(),
             ProductTriggerReason::DirectChat,
+        ),
+        SlackMessageKind::ThreadReply => (
+            raw_text.to_string(),
+            event.thread_ts.as_deref(),
+            ProductTriggerReason::ReplyToBot,
         ),
     };
 
@@ -223,7 +233,7 @@ fn parse_thread_interaction(
         ProductTriggerReason::ReplyToBot,
     )?
     else {
-        return noop_parsed_inbound(event_id, team_id, Some(event));
+        return try_parse_user_message(event_id, team_id, event, SlackMessageKind::ThreadReply);
     };
     Ok(parsed)
 }
@@ -334,6 +344,9 @@ fn parse_interaction_resolution(
     text: &str,
     source_trigger: ProductTriggerReason,
 ) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
+    let text = strip_leading_slack_mentions(text);
+    let text = strip_wrapping_inline_code(text);
+    let text = strip_leading_slack_mentions(text);
     let mut parts = text.split_whitespace();
     let Some(first) = parts.next() else {
         return Ok(None);
@@ -372,6 +385,27 @@ fn parse_interaction_resolution(
             }
         }
         _ => Ok(None),
+    }
+}
+
+fn strip_wrapping_inline_code(text: &str) -> &str {
+    let mut rest = text.trim();
+    while rest.len() >= 2 && rest.starts_with('`') && rest.ends_with('`') {
+        rest = rest[1..rest.len() - 1].trim();
+    }
+    rest
+}
+
+fn strip_leading_slack_mentions(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    loop {
+        let Some(after_open) = rest.strip_prefix("<@") else {
+            return rest;
+        };
+        let Some((_mention, after_close)) = after_open.split_once('>') else {
+            return rest;
+        };
+        rest = after_close.trim_start();
     }
 }
 
@@ -805,6 +839,40 @@ mod tests {
     }
 
     #[test]
+    fn channel_thread_message_becomes_reply_to_bot_user_message() {
+        let inbound = parse(serde_json::json!({
+            "type": "event_callback",
+            "team_id": "T123",
+            "event_id": "EvThreadReply",
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "channel": "C123",
+                "text": "continue without mentioning the bot",
+                "ts": "1710000000.000011",
+                "thread_ts": "1710000000.000010"
+            }
+        }));
+
+        assert_eq!(inbound.external_conversation_ref.conversation_id(), "C123");
+        assert_eq!(
+            inbound.external_conversation_ref.topic_id(),
+            Some("1710000000.000010")
+        );
+        assert_eq!(
+            inbound.external_conversation_ref.reply_target_message_id(),
+            Some("1710000000.000011")
+        );
+        match inbound.payload {
+            ProductInboundPayload::UserMessage(payload) => {
+                assert_eq!(payload.text, "continue without mentioning the bot");
+                assert_eq!(payload.trigger, ProductTriggerReason::ReplyToBot);
+            }
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn channel_thread_interaction_reply_becomes_approval_resolution() {
         let inbound = parse(serde_json::json!({
             "type": "event_callback",
@@ -834,6 +902,90 @@ mod tests {
                 );
             }
             other => panic!("expected approval resolution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel_thread_auth_deny_reply_becomes_auth_resolution() {
+        let inbound = parse(serde_json::json!({
+            "type": "event_callback",
+            "team_id": "T123",
+            "event_id": "EvThreadAuthDeny",
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "channel": "C123",
+                "text": "auth deny gate:auth-slack",
+                "ts": "1710000000.000011",
+                "thread_ts": "1710000000.000010"
+            }
+        }));
+
+        match inbound.payload {
+            ProductInboundPayload::AuthResolution(payload) => {
+                assert_eq!(payload.auth_request_ref, "gate:auth-slack");
+                assert_eq!(
+                    payload.source_trigger,
+                    Some(ProductTriggerReason::ReplyToBot)
+                );
+            }
+            other => panic!("expected auth resolution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel_thread_mentioned_auth_deny_reply_becomes_auth_resolution() {
+        let inbound = parse(serde_json::json!({
+            "type": "event_callback",
+            "team_id": "T123",
+            "event_id": "EvThreadMentionAuthDeny",
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "channel": "C123",
+                "text": "<@UBOT> auth deny gate:auth-slack",
+                "ts": "1710000000.000011",
+                "thread_ts": "1710000000.000010"
+            }
+        }));
+
+        match inbound.payload {
+            ProductInboundPayload::AuthResolution(payload) => {
+                assert_eq!(payload.auth_request_ref, "gate:auth-slack");
+                assert_eq!(
+                    payload.source_trigger,
+                    Some(ProductTriggerReason::ReplyToBot)
+                );
+            }
+            other => panic!("expected auth resolution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel_thread_backticked_auth_deny_reply_becomes_auth_resolution() {
+        let inbound = parse(serde_json::json!({
+            "type": "event_callback",
+            "team_id": "T123",
+            "event_id": "EvThreadBacktickedAuthDeny",
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "channel": "C123",
+                "text": "`auth deny gate:auth-slack`",
+                "ts": "1710000000.000011",
+                "thread_ts": "1710000000.000010"
+            }
+        }));
+
+        match inbound.payload {
+            ProductInboundPayload::AuthResolution(payload) => {
+                assert_eq!(payload.auth_request_ref, "gate:auth-slack");
+                assert_eq!(
+                    payload.source_trigger,
+                    Some(ProductTriggerReason::ReplyToBot)
+                );
+            }
+            other => panic!("expected auth resolution, got {other:?}"),
         }
     }
 

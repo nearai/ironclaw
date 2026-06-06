@@ -682,10 +682,10 @@ fn dcr_callback_state_from_oauth_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AuthChallengeProvider;
     use crate::RebornAuthContinuationDispatcher;
     use crate::input::OAuthClientConfig;
     use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
-    use crate::projection::AuthChallengeProvider;
     use async_trait::async_trait;
     use ironclaw_auth::{GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices};
     use ironclaw_host_api::{RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement};

@@ -8,6 +8,17 @@ use chrono::Utc;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_hooks::{
+    HookId, HookLocalId, HookRegistrar, HookRegistry, HookVersion,
+    dispatch::HookDispatcherBuilder,
+    evaluator::PredicateEvaluator,
+    manifest::{HookManifestBody, HookManifestEntry, HookManifestKind},
+    ordering::HookPhase,
+    points::ObserverHookContext,
+    predicate::{CapabilityPredicate, HookPredicateSpec},
+    registry::HookPointSpec,
+    sink::{ObserverHook, ObserverSink},
+};
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
@@ -105,8 +116,8 @@ use ironclaw_turns::{
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
         LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionMode,
-        LoopCompactionPort, LoopCompactionRequest, LoopContextRequest, LoopDriverId,
-        LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
+        LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopContextRequest,
+        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
         LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAckToken, LoopInputCursor,
         LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
@@ -484,6 +495,9 @@ async fn compact_loop_context_dispatches_system_inference_and_persists_summary()
         .summary_artifacts
         .first()
         .expect("host compaction should persist a summary artifact");
+    let LoopCompactionOutcome::Compacted(response) = response else {
+        panic!("host compaction should produce a persisted summary artifact");
+    };
     assert_eq!(
         response.summary_artifact_id.as_str(),
         summary.summary_id.to_string()
@@ -2483,6 +2497,8 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
+        hook_dispatcher_builder_factory: None,
+        hook_security_audit_sink: None,
         turn_event_sink: Some(event_sink.clone()),
     })
     .unwrap();
@@ -2553,6 +2569,370 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     assert!(runtime.invocations().is_empty());
 }
 
+// ─── Hook framework activation (#3934) e2e through build_default_planned_runtime ──
+//
+// These tests drive the *production* composition function
+// `build_default_planned_runtime` with a per-run hook dispatcher builder
+// factory shaped exactly like the one `ironclaw_reborn_composition::hooks`
+// produces (first-party builtin no-op observer + extension-declared `Installed`
+// hooks via `HookRegistrar::install`). They then build a host through the
+// composed `host_factory` and invoke a capability, proving the hook gate fires
+// (or doesn't) through the real runtime composition rather than a test-only
+// factory wiring.
+
+/// Canonical identity path for the test-local no-op observer used by the
+/// host-plumbing doubles below.
+///
+/// This is a TEST-LOCAL host-plumbing double path, NOT aligned with any
+/// production type. `NoOpObserverHook` was removed from the production
+/// first-party catalog in `1e618d076`: `install_first_party_hooks` now ships
+/// an empty catalog, so there is no production type at
+/// `ironclaw_reborn_composition::hooks::NoOpObserverHook`. The only surviving
+/// `NoOpObserverHook` is the composition crate's test-only one at
+/// `ironclaw_reborn_composition::hooks::tests::NoOpObserverHook`. This constant
+/// just needs a stable, distinct builtin identity for the host-plumbing doubles
+/// (see the note at the `first_party_only_hook_factory` definition below); the
+/// path string is opaque and need not match any real type.
+const E2E_NOOP_OBSERVER_PATH: &str = "ironclaw_reborn::tests::loop_driver_host::E2eNoOpObserver";
+
+#[derive(Debug, Default)]
+struct E2eNoOpObserver;
+
+#[async_trait]
+impl ObserverHook for E2eNoOpObserver {
+    async fn observe(&self, _ctx: &ObserverHookContext, _sink: &mut dyn ObserverSink) {}
+}
+
+/// Build a host factory→runtime via `build_default_planned_runtime` with an
+/// optional hook dispatcher builder factory, then return the composed host
+/// (built from a freshly-claimed run) plus the recording runtime so the test
+/// can assert whether the inner port was reached.
+async fn build_runtime_host_with_optional_hooks(
+    thread_label: &str,
+    allowed_id: &CapabilityId,
+    hook_factory: Option<ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory>,
+) -> (
+    Box<dyn AgentLoopDriverHost + Send + Sync>,
+    Arc<RecordingHostRuntime>,
+    Arc<InMemoryCapabilityIo>,
+    CapabilitySurfaceVersion,
+) {
+    let fixture = HostFixture::new_unsubmitted(thread_label, "hello").await;
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(allowed_id.as_str()),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_factory = Arc::new(TestHostRuntimeCapabilityFactory {
+        runtime: runtime.clone(),
+        visible_request: host_runtime_visible_request(&fixture, ["demo"]),
+        io: io.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+    });
+    let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([allowed_id.clone()]),
+    ));
+    let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
+        fixture.thread_service.clone(),
+        turn_store.clone(),
+        turn_store.clone(),
+    ));
+    let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
+        turn_state: turn_store.clone(),
+        thread_service: fixture.thread_service.clone(),
+        thread_scope: fixture.thread_scope.clone(),
+        model_gateway: fixture.gateway.clone(),
+        checkpoint_state_store: fixture.checkpoint_state_store.clone(),
+        loop_checkpoint_store: turn_store.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+        capability_factory,
+        capability_surface_resolver: surface_resolver,
+        capability_result_writer: io.clone(),
+        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        loop_exit_evidence: evidence,
+        config: DefaultPlannedRuntimeConfig::default(),
+        model_route_resolver: None,
+        // A ready cancellation factory so `create_host` doesn't need the run
+        // present in the (otherwise unused) in-memory turn-state store. The
+        // hook wiring under test is independent of cancellation.
+        cancellation_factory: Some(Arc::new(ReadyRunCancellationFactory::default())),
+        skill_context_source: None,
+        input_queue: None,
+        identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
+        model_policy_guard: None,
+        model_budget_accountant: None,
+        safety_context: None,
+        turn_event_sink: None,
+        hook_dispatcher_builder_factory: hook_factory,
+    })
+    .unwrap();
+
+    // Align the claimed run with the planned profile that
+    // `build_default_planned_runtime` registers, so the planned driver's
+    // capability surface resolves (otherwise the host reports no capabilities).
+    let planned = default_planned_run_profile_resolver()
+        .expect("planned default profile resolver")
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let mut claimed = fixture.claimed.clone();
+    claimed.state.resolved_run_profile_id = planned.profile_id.clone();
+    claimed.state.resolved_run_profile_version = planned.loop_driver.version;
+    claimed.resolved_run_profile = planned;
+
+    let host = composition
+        .host_factory
+        .create_host(&claimed)
+        .await
+        .unwrap();
+    let surface = host
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+    (host, runtime, io, surface.version)
+}
+
+// NOTE (review item #6): the two builder factories below are HAND-BUILT test
+// doubles that exercise the `ironclaw_reborn` host-factory PLUMBING — i.e. that
+// a dispatcher minted by a builder factory is wired through
+// `HookedLoopCapabilityPort` and that a deny short-circuits the inner runtime
+// port. They are deliberately NOT a substitute for activation coverage: they do
+// not prove the production composition root wires the canonical registry/config.
+// That activation coverage now lives where it belongs — driving the REAL
+// `build_hook_dispatcher_builder_factory` and `build_reborn_runtime` — in
+// `ironclaw_reborn_composition::hooks` and
+// `ironclaw_reborn_composition::runtime` tests. Keep this split: host plumbing
+// is tested here; composition activation is tested in the composition crate.
+
+/// First-party-only builder factory: installs just the no-op observer, mirroring
+/// the composition's first-party-only state. Host-plumbing double only — see the
+/// note above.
+fn first_party_only_hook_factory() -> ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory
+{
+    Arc::new(|| {
+        let hook_id = HookId::for_builtin(E2E_NOOP_OBSERVER_PATH, HookVersion::ONE);
+        Ok(HookDispatcherBuilder::new(HookRegistry::new())
+            .install_builtin_observer(
+                hook_id,
+                HookPhase::Telemetry,
+                HookPointSpec::AfterCapability,
+                Box::new(E2eNoOpObserver),
+            )
+            .expect("install first-party no-op observer"))
+    })
+}
+
+/// Builder factory matching the composition loader: first-party no-op observer
+/// plus an extension-declared `Installed`-tier deny hook (projected from a
+/// manifest entry through `HookRegistrar::install`, exactly as the composition
+/// does). Denies `deny_target`.
+fn extension_deny_hook_factory(
+    extension: &str,
+    deny_target: &str,
+) -> ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory {
+    let extension = extension.to_string();
+    let deny_target = deny_target.to_string();
+    Arc::new(move || {
+        let evaluator = Arc::new(PredicateEvaluator::new());
+        let registrar = HookRegistrar::new(evaluator);
+        let mut builder = first_party_only_hook_factory()().expect("first-party builder");
+        let entry = HookManifestEntry::new(
+            HookLocalId::new("deny-cap").expect("valid hook local id"),
+            HookManifestKind::BeforeCapability,
+            HookManifestBody::Predicate {
+                spec: HookPredicateSpec::DenyCapability {
+                    when: CapabilityPredicate::NameEquals {
+                        name: deny_target.clone(),
+                    },
+                    reason: "e2e extension deny".to_string(),
+                },
+            },
+        );
+        let ext_id =
+            ironclaw_host_api::ExtensionId::new(extension.clone()).expect("valid extension id");
+        let entries = vec![entry];
+        let (next, _ids) = registrar
+            .install(ext_id, "0.1.0", &entries, builder)
+            .expect("install extension deny hook");
+        builder = next;
+        Ok(builder)
+    })
+}
+
+/// Flag OFF (no factory): a capability the surface allows reaches the inner
+/// host runtime port unaffected. This is the exact pre-hooks behavior — the
+/// hard rollout-safety contract.
+#[tokio::test]
+async fn hooks_flag_off_capability_invocation_is_unaffected() {
+    let allowed_id = CapabilityId::new("demo.allowed").unwrap();
+    let (host, runtime, io, surface_version) =
+        build_runtime_host_with_optional_hooks("thread-hooks-off", &allowed_id, None).await;
+
+    let input_ref = CapabilityInputRef::new("input:hooks-off").unwrap();
+    io.put_input(input_ref.clone(), json!({ "message": "off" }));
+    runtime.push_outcome(RuntimeCapabilityOutcome::Completed(Box::new(
+        RuntimeCapabilityCompleted {
+            capability_id: allowed_id.clone(),
+            output: json!({ "ok": true }),
+            usage: ResourceUsage::default(),
+            display_preview: None,
+        },
+    )));
+    let outcome = host
+        .invoke_capability(CapabilityInvocation {
+            surface_version,
+            capability_id: allowed_id.clone(),
+            input_ref,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, CapabilityOutcome::Completed(_)),
+        "flag OFF: allowed capability must complete unaffected, got {outcome:?}"
+    );
+    assert_eq!(
+        runtime.invocations().len(),
+        1,
+        "flag OFF: the inner host runtime port must be reached"
+    );
+}
+
+/// Flag ON, first-party-only (no-op observer): an allowed capability still
+/// completes and reaches the inner port — the no-op observer ships dark.
+#[tokio::test]
+async fn hooks_flag_on_first_party_only_does_not_change_outcome() {
+    let allowed_id = CapabilityId::new("demo.allowed").unwrap();
+    let (host, runtime, io, surface_version) = build_runtime_host_with_optional_hooks(
+        "thread-hooks-on-noop",
+        &allowed_id,
+        Some(first_party_only_hook_factory()),
+    )
+    .await;
+
+    let input_ref = CapabilityInputRef::new("input:hooks-noop").unwrap();
+    io.put_input(input_ref.clone(), json!({ "message": "noop" }));
+    runtime.push_outcome(RuntimeCapabilityOutcome::Completed(Box::new(
+        RuntimeCapabilityCompleted {
+            capability_id: allowed_id.clone(),
+            output: json!({ "ok": true }),
+            usage: ResourceUsage::default(),
+            display_preview: None,
+        },
+    )));
+    let outcome = host
+        .invoke_capability(CapabilityInvocation {
+            surface_version,
+            capability_id: allowed_id.clone(),
+            input_ref,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, CapabilityOutcome::Completed(_)),
+        "first-party no-op observer must not change the outcome, got {outcome:?}"
+    );
+    assert_eq!(runtime.invocations().len(), 1, "inner port must be reached");
+}
+
+/// Flag ON, extension-declared deny hook (Installed tier, projected from a
+/// manifest entry exactly as the composition loader does): the capability is
+/// denied through the composed runtime and the inner host runtime port is
+/// never reached.
+#[tokio::test]
+async fn hooks_flag_on_extension_deny_hook_denies_through_composed_runtime() {
+    let allowed_id = CapabilityId::new("demo.allowed").unwrap();
+    let (host, runtime, _io, surface_version) = build_runtime_host_with_optional_hooks(
+        "thread-hooks-on-deny",
+        &allowed_id,
+        // The hook's owning extension must match the capability provider
+        // ("demo") so the default OwnCapabilities scope keeps the hook in
+        // scope for `demo.allowed`.
+        Some(extension_deny_hook_factory("demo", "demo.allowed")),
+    )
+    .await;
+
+    // No input staged and no outcome pushed: the hook must deny before the
+    // capability port resolves input or reaches the inner runtime.
+    let outcome = host
+        .invoke_capability(CapabilityInvocation {
+            surface_version,
+            capability_id: allowed_id.clone(),
+            input_ref: CapabilityInputRef::new("input:hooks-deny").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, CapabilityOutcome::Denied(_)),
+        "extension deny hook must deny through the composed runtime, got {outcome:?}"
+    );
+    assert!(
+        runtime.invocations().is_empty(),
+        "hook deny must short-circuit before the inner host runtime port"
+    );
+}
+
+/// Per-tenant isolation: tenant A composes a runtime with a deny hook;
+/// tenant B composes a runtime with no hooks. The same capability is denied
+/// for A but completes for B — proving one tenant's hooks never apply to
+/// another. Each `build_default_planned_runtime` call is its own tenant scope
+/// (the composition builds one runtime per identity).
+#[tokio::test]
+async fn hooks_are_isolated_per_tenant_runtime() {
+    let allowed_id = CapabilityId::new("demo.allowed").unwrap();
+
+    // Tenant A: deny hook active.
+    let (host_a, runtime_a, _io_a, surface_a) = build_runtime_host_with_optional_hooks(
+        "thread-tenant-a",
+        &allowed_id,
+        Some(extension_deny_hook_factory("demo", "demo.allowed")),
+    )
+    .await;
+    let outcome_a = host_a
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface_a,
+            capability_id: allowed_id.clone(),
+            input_ref: CapabilityInputRef::new("input:tenant-a").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome_a, CapabilityOutcome::Denied(_)),
+        "tenant A's deny hook must fire"
+    );
+    assert!(runtime_a.invocations().is_empty());
+
+    // Tenant B: no hooks composed. Same capability completes.
+    let (host_b, runtime_b, io_b, surface_b) =
+        build_runtime_host_with_optional_hooks("thread-tenant-b", &allowed_id, None).await;
+    let input_ref_b = CapabilityInputRef::new("input:tenant-b").unwrap();
+    io_b.put_input(input_ref_b.clone(), json!({ "message": "b" }));
+    runtime_b.push_outcome(RuntimeCapabilityOutcome::Completed(Box::new(
+        RuntimeCapabilityCompleted {
+            capability_id: allowed_id.clone(),
+            output: json!({ "ok": true }),
+            usage: ResourceUsage::default(),
+            display_preview: None,
+        },
+    )));
+    let outcome_b = host_b
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface_b,
+            capability_id: allowed_id.clone(),
+            input_ref: input_ref_b,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome_b, CapabilityOutcome::Completed(_)),
+        "tenant B has no hooks; tenant A's deny must not leak across runtimes, got {outcome_b:?}"
+    );
+    assert_eq!(runtime_b.invocations().len(), 1);
+}
+
 // Identity source is now required by the `DefaultPlannedRuntimeParts` type
 // signature, so the previous fail-closed runtime gate is enforced at compile
 // time. The dynamic gate test has been retired alongside the dead
@@ -2615,6 +2995,8 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
+        hook_dispatcher_builder_factory: None,
+        hook_security_audit_sink: None,
         turn_event_sink: None,
     })
     .expect("all product-live adapters should satisfy readiness");
@@ -2725,6 +3107,8 @@ async fn product_live_parts_for_gate_test(
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
+        hook_dispatcher_builder_factory: None,
+        hook_security_audit_sink: None,
         turn_event_sink: None,
     }
 }

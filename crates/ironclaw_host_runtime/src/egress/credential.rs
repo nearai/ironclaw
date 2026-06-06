@@ -234,7 +234,7 @@ fn staged_secret_for_injection(
     let Some(secret_injections) = secret_injections else {
         return missing_runtime_credential(injection.required);
     };
-    match secret_injections.get(&request.scope, capability_id, &injection.handle) {
+    match secret_injections.take(&request.scope, capability_id, &injection.handle) {
         Ok(Some(material)) => Ok(Some(material)),
         Ok(None) => missing_runtime_credential(injection.required),
         Err(_) => Err(RuntimeHttpEgressError::Credential {

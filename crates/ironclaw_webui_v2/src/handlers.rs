@@ -22,16 +22,19 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError, ProjectionCursor,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    CodexLoginStart, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectionCursor,
+    RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -415,6 +418,15 @@ pub struct ListAutomationsQuery {
     pub limit: Option<u32>,
 }
 
+/// `GET /api/webchat/v2/channels/connectable`
+pub async fn list_connectable_channels(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornConnectableChannelListResponse>, WebUiV2HttpError> {
+    let response = state.services().list_connectable_channels(caller).await?;
+    Ok(Json(response))
+}
+
 /// `GET /api/webchat/v2/extensions`
 pub async fn list_extensions(
     State(state): State<WebUiV2State>,
@@ -522,6 +534,113 @@ pub async fn setup_extension(
         .services()
         .setup_extension(caller, package_ref, body)
         .await?;
+    Ok(Json(response))
+}
+
+/// Path param carrying the LLM provider id.
+#[derive(Debug, Deserialize)]
+pub struct LlmProviderPath {
+    pub provider_id: String,
+}
+
+/// `GET /api/webchat/v2/llm/providers`
+pub async fn get_llm_config(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    let response = state.services().get_llm_config(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/providers`
+pub async fn upsert_llm_provider(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<UpsertLlmProviderRequest>,
+) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    let response = state.services().upsert_llm_provider(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/providers/{provider_id}/delete`
+pub async fn delete_llm_provider(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(LlmProviderPath { provider_id }): Path<LlmProviderPath>,
+) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .delete_llm_provider(caller, provider_id)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/active`
+pub async fn set_active_llm(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<SetActiveLlmRequest>,
+) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    let response = state.services().set_active_llm(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/test-connection`
+pub async fn test_llm_connection(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<LlmProbeRequest>,
+) -> Result<Json<LlmProbeResult>, WebUiV2HttpError> {
+    let response = state.services().test_llm_connection(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/list-models`
+pub async fn list_llm_models(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<LlmProbeRequest>,
+) -> Result<Json<LlmModelsResult>, WebUiV2HttpError> {
+    let response = state.services().list_llm_models(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/nearai/login`
+pub async fn start_nearai_login(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<NearAiLoginRequest>,
+) -> Result<Json<NearAiLoginStart>, WebUiV2HttpError> {
+    let response = state.services().start_nearai_login(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/nearai/wallet`
+///
+/// Completes a NEAR AI wallet (NEP-413) login from a browser-signed message:
+/// relays the signature to NEAR AI, stores the session token, and makes NEAR AI
+/// active.
+pub async fn complete_nearai_wallet_login(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<NearAiWalletLoginRequest>,
+) -> Result<Json<NearAiWalletLoginResult>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .complete_nearai_wallet_login(caller, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/llm/codex/login`
+///
+/// Begins an OpenAI Codex device-code login. Takes no body — returns the user
+/// code + verification URL to display; a background task completes the flow.
+pub async fn start_codex_login(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<CodexLoginStart>, WebUiV2HttpError> {
+    let response = state.services().start_codex_login(caller).await?;
     Ok(Json(response))
 }
 

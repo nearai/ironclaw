@@ -13,6 +13,40 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornConnectableChannelListResponse {
+    pub channels: Vec<RebornConnectableChannelInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornConnectableChannelInfo {
+    pub channel: String,
+    pub display_name: String,
+    pub strategy: RebornChannelConnectStrategy,
+    pub action: RebornChannelConnectAction,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornChannelConnectStrategy {
+    InboundProofCode,
+    WebGeneratedCode,
+    QrCode,
+    OAuth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornChannelConnectAction {
+    pub title: String,
+    pub instructions: String,
+    pub code_placeholder: String,
+    pub submit_label: String,
+    pub success_message: String,
+    pub error_message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornCreateThreadResponse {
     pub thread: SessionThreadRecord,
 }

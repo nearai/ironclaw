@@ -25,11 +25,10 @@ use crate::slack_personal_binding_pairing::{
     SlackPersonalBindingPairingService,
 };
 
-pub const SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH: &str =
-    "/api/reborn/slack/personal-binding/pairing/redeem";
+pub const WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH: &str =
+    "/api/webchat/v2/extensions/pairing/redeem";
 
-const SLACK_PERSONAL_BINDING_PAIRING_REDEEM_ROUTE_ID: &str =
-    "slack.personal_binding.pairing.redeem";
+const SLACK_PERSONAL_BINDING_PAIRING_REDEEM_ROUTE_ID: &str = "webui.v2.extensions.pairing.redeem";
 const SLACK_PERSONAL_BINDING_PAIRING_BODY_LIMIT_BYTES: NonZeroU64 =
     NonZeroU64::new(16 * 1024).unwrap(); // safety: 16 KiB is non-zero.
 const SLACK_PERSONAL_BINDING_PAIRING_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(20).unwrap(); // safety: 20 is non-zero.
@@ -57,7 +56,7 @@ pub(crate) fn slack_personal_binding_pairing_route_mount(
     SlackPersonalBindingPairingRouteMount {
         protected: Router::new()
             .route(
-                SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH,
+                WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
                 post(slack_personal_binding_pairing_redeem_handler),
             )
             .with_state(config),
@@ -70,7 +69,7 @@ pub(crate) fn slack_personal_binding_pairing_route_descriptors() -> Vec<IngressR
         IngressRouteDescriptor::new(
             SLACK_PERSONAL_BINDING_PAIRING_REDEEM_ROUTE_ID,
             NetworkMethod::Post,
-            SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH,
+            WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
             redeem_policy(),
         )
         .expect("Slack personal binding pairing route descriptor must validate at startup"), // safety: route id, method, path, and policy are static typed literals.
@@ -103,6 +102,7 @@ fn redeem_policy() -> IngressPolicy {
 
 #[derive(Debug, Deserialize)]
 struct SlackPersonalBindingPairingRedeemRequest {
+    channel: String,
     code: String,
 }
 
@@ -118,6 +118,7 @@ async fn slack_personal_binding_pairing_redeem_handler(
     Json(request): Json<SlackPersonalBindingPairingRedeemRequest>,
 ) -> Result<Json<SlackPersonalBindingPairingRedeemResponse>, SlackPersonalBindingPairingRouteError>
 {
+    validate_pairing_channel(&request.channel)?;
     let code = SlackPersonalBindingPairingCode::new(request.code)?;
     let binding = config
         .pairing_service
@@ -133,6 +134,13 @@ async fn slack_personal_binding_pairing_redeem_handler(
         provider: binding.provider.to_string(),
         provider_user_id: binding.provider_user_id.to_string(),
     }))
+}
+
+fn validate_pairing_channel(channel: &str) -> Result<(), SlackPersonalBindingPairingRouteError> {
+    match channel.trim().to_ascii_lowercase().as_str() {
+        "slack" | "slack_v2" | "slack-v2" => Ok(()),
+        _ => Err(SlackPersonalBindingPairingRouteError::BadRequest),
+    }
 }
 
 #[derive(Debug)]
@@ -171,10 +179,7 @@ impl From<SlackPersonalBindingPairingError> for SlackPersonalBindingPairingRoute
 impl IntoResponse for SlackPersonalBindingPairingRouteError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::BadRequest => (
-                StatusCode::BAD_REQUEST,
-                "Invalid or expired Slack pairing code.",
-            ),
+            Self::BadRequest => (StatusCode::BAD_REQUEST, "Invalid or expired pairing code."),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Slack pairing service is unavailable.",
@@ -215,7 +220,10 @@ mod tests {
         );
         let response = mount
             .protected
-            .oneshot(redeem_request("tenant-a", r#"{"code":"abc12345"}"#))
+            .oneshot(redeem_request(
+                "tenant-a",
+                r#"{"channel":"slack","code":"abc12345"}"#,
+            ))
             .await
             .unwrap();
 
@@ -232,7 +240,10 @@ mod tests {
 
         let response = mount
             .protected
-            .oneshot(redeem_request("tenant-a", r#"{"code":"abc123"}"#))
+            .oneshot(redeem_request(
+                "tenant-a",
+                r#"{"channel":"slack","code":"abc123"}"#,
+            ))
             .await
             .unwrap();
 
@@ -248,7 +259,10 @@ mod tests {
 
         let response = mount
             .protected
-            .oneshot(redeem_request("tenant-a", r#"{"code":"abc12345"}"#))
+            .oneshot(redeem_request(
+                "tenant-a",
+                r#"{"channel":"slack","code":"abc12345"}"#,
+            ))
             .await
             .unwrap();
 
@@ -264,7 +278,10 @@ mod tests {
 
         let response = mount
             .protected
-            .oneshot(redeem_request("tenant-b", r#"{"code":"abc12345"}"#))
+            .oneshot(redeem_request(
+                "tenant-b",
+                r#"{"channel":"slack","code":"abc12345"}"#,
+            ))
             .await
             .unwrap();
 
@@ -280,11 +297,35 @@ mod tests {
 
         let response = mount
             .protected
-            .oneshot(redeem_request("tenant-a", r#"{"code":"abc12345"}"#))
+            .oneshot(redeem_request(
+                "tenant-a",
+                r#"{"channel":"slack","code":"abc12345"}"#,
+            ))
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn redeem_route_rejects_unsupported_channels_before_binding() {
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let mount = route_mount(
+            binding_store.clone(),
+            Arc::new(StaticChallengeStore::found()),
+        );
+
+        let response = mount
+            .protected
+            .oneshot(redeem_request(
+                "tenant-a",
+                r#"{"channel":"discord","code":"abc12345"}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(binding_store.bound_user_ids().is_empty());
     }
 
     fn route_mount(
@@ -311,7 +352,7 @@ mod tests {
     fn redeem_request(tenant_id: &str, body: &'static str) -> Request<Body> {
         Request::builder()
             .method("POST")
-            .uri(SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH)
+            .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
             .header("content-type", "application/json")
             .extension(WebUiAuthenticatedCaller {
                 tenant_id: TenantId::new(tenant_id).unwrap(),

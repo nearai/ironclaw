@@ -7,11 +7,15 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, RuntimeHttpSaveTarget, RuntimeKind, SandboxQuota, ScopedPath,
     VirtualPath, valid_http_field_name,
 };
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 
-use super::{first_party_capability_manifest, input_error};
+use super::{
+    first_party_capability_manifest,
+    http_output::{HttpDispatchOutput, shape_response},
+    input_error,
+};
 
 pub const HTTP_CAPABILITY_ID: &str = "builtin.http";
 pub const HTTP_SAVE_CAPABILITY_ID: &str = "builtin.http.save";
@@ -19,17 +23,15 @@ pub const HTTP_SAVE_CAPABILITY_ID: &str = "builtin.http.save";
 const DEFAULT_HTTP_TIMEOUT_MS: u32 = 10_000;
 const MAX_HTTP_TIMEOUT_MS: u32 = 30_000;
 pub(super) const MAX_HTTP_OUTPUT_BYTES: u64 = 15 * 1024 * 1024;
-const DEFAULT_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
-const MAX_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
+const DEFAULT_INLINE_RESPONSE_BODY_LIMIT: u64 = 48 * 1024;
+const MAX_INLINE_RESPONSE_BODY_LIMIT: u64 = 256 * 1024;
+const DEFAULT_SAVE_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
+const MAX_SAVE_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
 const DEFAULT_NETWORK_EGRESS_BYTES: u64 = 16 * 1024;
 const MAX_NETWORK_EGRESS_BYTES: u64 = 256 * 1024;
 const MAX_HTTP_HEADERS: usize = 64;
 const MAX_HTTP_HEADER_NAME_BYTES: usize = 512;
 const MAX_HTTP_HEADER_VALUE_BYTES: usize = 8 * 1024;
-pub(super) struct HttpDispatchOutput {
-    pub output: Value,
-    pub network_egress_bytes: u64,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HttpSaveMode {
@@ -85,7 +87,7 @@ fn http_resource_profile() -> ResourceProfile {
     ResourceProfile {
         default_estimate: ResourceEstimate {
             wall_clock_ms: Some(DEFAULT_HTTP_TIMEOUT_MS.into()),
-            output_bytes: Some(DEFAULT_RESPONSE_BODY_LIMIT),
+            output_bytes: Some(DEFAULT_INLINE_RESPONSE_BODY_LIMIT),
             network_egress_bytes: Some(DEFAULT_NETWORK_EGRESS_BYTES),
             ..ResourceEstimate::default()
         },
@@ -154,7 +156,8 @@ pub(super) async fn dispatch(
             error,
         )
     })?;
-    let response_body_limit = response_body_limit(&request.input).map_err(|error| {
+    let save_mode = HttpSaveMode::for_capability(request.capability_id.as_str());
+    let response_body_limit = response_body_limit(&request.input, save_mode).map_err(|error| {
         log_raw_http_input_error_for_local_diagnostics(
             unsafe_raw_diagnostics_allowed,
             &request.input,
@@ -170,19 +173,15 @@ pub(super) async fn dispatch(
             error,
         )
     })?;
-    let save_body_to = save_body_to(
-        &request.input,
-        request.mounts.as_ref(),
-        HttpSaveMode::for_capability(request.capability_id.as_str()),
-    )
-    .map_err(|error| {
-        log_raw_http_input_error_for_local_diagnostics(
-            unsafe_raw_diagnostics_allowed,
-            &request.input,
-            "save_to",
-            error,
-        )
-    })?;
+    let save_body_to =
+        save_body_to(&request.input, request.mounts.as_ref(), save_mode).map_err(|error| {
+            log_raw_http_input_error_for_local_diagnostics(
+                unsafe_raw_diagnostics_allowed,
+                &request.input,
+                "save_to",
+                error,
+            )
+        })?;
     let http_request = RuntimeHttpEgressRequest {
         runtime: RuntimeKind::FirstParty,
         scope: request.scope.clone(),
@@ -199,49 +198,31 @@ pub(super) async fn dispatch(
         save_body_to,
         timeout_ms: Some(timeout_ms),
     };
+    let tool_call_egress = request.services.tool_call_http_egress.clone();
+    let egress_future = async move {
+        match save_mode {
+            HttpSaveMode::Disabled => {
+                let tool_call_egress =
+                    tool_call_egress.ok_or_else(|| RuntimeHttpEgressError::Network {
+                        reason: "tool-call HTTP egress was not configured".to_string(),
+                        request_bytes: 0,
+                        response_bytes: 0,
+                    })?;
+                tool_call_egress
+                    .execute_for_model_visible_output(http_request)
+                    .await
+            }
+            HttpSaveMode::Required => egress.execute(http_request).await,
+        }
+    };
     let response = super::run_egress_catching_panic(
-        egress.execute(http_request),
+        egress_future,
         "first-party HTTP egress future panicked",
         || FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend),
     )
     .await?
     .map_err(http_error)?;
-    let mut output = Map::new();
-    output.insert("status".to_string(), json!(response.status));
-    output.insert("headers".to_string(), response_headers(response.headers));
-    if let Some(saved_body) = response.saved_body {
-        output.insert(
-            "saved_body".to_string(),
-            json!({
-                "path": saved_body.path.as_str(),
-                "bytes_written": saved_body.bytes_written,
-            }),
-        );
-    } else {
-        // Response bodies must be valid UTF-8 to appear as body_text. Any invalid
-        // byte returns the full response as body_base64 to avoid lossy surprises.
-        match String::from_utf8(response.body) {
-            Ok(body_text) => {
-                output.insert("body_text".to_string(), Value::String(body_text));
-            }
-            Err(error) => {
-                output.insert(
-                    "body_base64".to_string(),
-                    Value::String(BASE64_STANDARD.encode(error.into_bytes())),
-                );
-            }
-        }
-    }
-    output.insert("request_bytes".to_string(), json!(response.request_bytes));
-    output.insert("response_bytes".to_string(), json!(response.response_bytes));
-    output.insert(
-        "redaction_applied".to_string(),
-        json!(response.redaction_applied),
-    );
-    Ok(HttpDispatchOutput {
-        output: Value::Object(output),
-        network_egress_bytes: response.request_bytes,
-    })
+    Ok(shape_response(response, response_body_limit))
 }
 
 fn method(input: &Value) -> Result<NetworkMethod, FirstPartyCapabilityError> {
@@ -354,15 +335,20 @@ fn staged_policy_placeholder() -> NetworkPolicy {
     NetworkPolicy::default()
 }
 
-fn response_body_limit(input: &Value) -> Result<u64, FirstPartyCapabilityError> {
-    let limit = ranged_u64(
-        input,
-        "response_body_limit",
-        DEFAULT_RESPONSE_BODY_LIMIT,
-        1,
-        MAX_RESPONSE_BODY_LIMIT,
-    )?;
-    Ok(limit.max(DEFAULT_RESPONSE_BODY_LIMIT))
+fn response_body_limit(
+    input: &Value,
+    save_mode: HttpSaveMode,
+) -> Result<u64, FirstPartyCapabilityError> {
+    let default = match save_mode {
+        HttpSaveMode::Disabled => DEFAULT_INLINE_RESPONSE_BODY_LIMIT,
+        HttpSaveMode::Required => DEFAULT_SAVE_RESPONSE_BODY_LIMIT,
+    };
+    let max = match save_mode {
+        HttpSaveMode::Disabled => MAX_INLINE_RESPONSE_BODY_LIMIT,
+        HttpSaveMode::Required => MAX_SAVE_RESPONSE_BODY_LIMIT,
+    };
+    let limit = ranged_u64(input, "response_body_limit", default, 1, max)?;
+    Ok(limit)
 }
 
 fn timeout_ms(input: &Value) -> Result<u32, FirstPartyCapabilityError> {
@@ -443,15 +429,6 @@ fn ranged_u64(
         return Err(input_error());
     }
     Ok(value)
-}
-
-fn response_headers(headers: Vec<(String, String)>) -> Value {
-    Value::Array(
-        headers
-            .into_iter()
-            .map(|(name, value)| json!({ "name": name, "value": value }))
-            .collect(),
-    )
 }
 
 fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {

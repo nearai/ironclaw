@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
+use ironclaw_host_api::ThreadId;
 use ironclaw_product_adapters::{
-    ApprovalDecision, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductRejection, ProductRejectionKind, ProductWorkflow,
-    ProductWorkflowRejectionKind, ProjectionSubscriptionRequest, RedactedString,
+    ApprovalDecision, ExternalConversationRef, ProductAdapterError, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
+    ProductWorkflow, ProductWorkflowRejectionKind, ProjectionSubscriptionRequest, RedactedString,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, TurnActor, TurnError,
@@ -29,7 +30,10 @@ use crate::auth_interaction::{
     AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService,
     RejectingAuthInteractionService, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
 };
-use crate::binding::{ConversationBindingService, ResolveBindingRequest, ResolvedBinding};
+use crate::binding::{
+    ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
+    ResolvedBinding,
+};
 use crate::binding_ref::{
     DEFAULT_BINDING_REF_RAW_MAX_BYTES, binding_ref_segment, bounded_idempotency_key,
 };
@@ -122,6 +126,20 @@ impl ProductWorkflow for DefaultProductWorkflow {
         &self,
         envelope: ProductInboundEnvelope,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
+        if matches!(
+            envelope.payload(),
+            ProductInboundPayload::SubscriptionRequest(_)
+        ) {
+            return Err(ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                reason: RedactedString::new(
+                    "subscription_request must be resolved through resolve_projection_subscription",
+                ),
+            });
+        }
+
         let source_binding_key =
             SourceBindingKey::new(envelope.source_binding_key()).map_err(|reason| {
                 ProductAdapterError::from(ProductWorkflowError::BindingResolutionFailed { reason })
@@ -245,13 +263,8 @@ impl ProductWorkflow for DefaultProductWorkflow {
             projection_thread_id_from_binding(&binding, payload.thread_id_hint.as_deref())?;
 
         Ok(ProjectionSubscriptionRequest {
-            actor: TurnActor::new(binding.user_id.clone()),
-            scope: TurnScope::new(
-                binding.tenant_id.clone(),
-                binding.agent_id.clone(),
-                binding.project_id.clone(),
-                thread_id,
-            ),
+            actor: TurnActor::new(binding.actor_user_id.clone()),
+            scope: turn_scope_for_thread(&binding, thread_id),
             after_cursor: payload.after_cursor.clone(),
         })
     }
@@ -274,6 +287,44 @@ struct DispatchPorts<'a> {
 
 fn resolve_binding_request(envelope: &ProductInboundEnvelope) -> ResolveBindingRequest {
     ResolveBindingRequest::from_envelope(envelope)
+}
+
+async fn lookup_interaction_binding(
+    envelope: &ProductInboundEnvelope,
+    binding_service: &dyn ConversationBindingService,
+) -> Result<ResolvedBinding, ProductWorkflowError> {
+    let request = resolve_binding_request(envelope);
+    match binding_service.lookup_binding(request.clone()).await {
+        Ok(binding) => Ok(binding),
+        Err(ProductWorkflowError::BindingRequired { .. })
+            if can_fallback_to_direct_base_binding(&request) =>
+        {
+            binding_service
+                .lookup_binding(direct_base_binding_request(request)?)
+                .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn can_fallback_to_direct_base_binding(request: &ResolveBindingRequest) -> bool {
+    request.route_kind == ProductConversationRouteKind::Direct
+        && request.external_conversation_ref.topic_id().is_some()
+}
+
+fn direct_base_binding_request(
+    mut request: ResolveBindingRequest,
+) -> Result<ResolveBindingRequest, ProductWorkflowError> {
+    request.external_conversation_ref = ExternalConversationRef::new(
+        request.external_conversation_ref.space_id(),
+        request.external_conversation_ref.conversation_id(),
+        None,
+        request.external_conversation_ref.reply_target_message_id(),
+    )
+    .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+        reason: error.to_string(),
+    })?;
+    Ok(request)
 }
 
 fn projection_thread_id_from_binding(
@@ -412,11 +463,9 @@ async fn dispatch_approval_resolution(
     approval_interaction_service: &dyn ApprovalInteractionService,
 ) -> Result<DispatchedAction, ProductWorkflowError> {
     let decision = approval_interaction_decision(payload.decision)?;
-    let binding = binding_service
-        .lookup_binding(resolve_binding_request(envelope))
-        .await?;
+    let binding = lookup_interaction_binding(envelope, binding_service).await?;
     let scope = turn_scope_from_binding(&binding);
-    let actor = TurnActor::new(binding.user_id.clone());
+    let actor = TurnActor::new(binding.actor_user_id.clone());
     let gate_ref = GateRef::new(payload.gate_ref.clone()).map_err(|_| {
         ProductWorkflowError::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::InvalidGateRef,
@@ -451,11 +500,9 @@ async fn dispatch_scoped_approval_resolution(
     approval_interaction_service: &dyn ApprovalInteractionService,
 ) -> Result<DispatchedAction, ProductWorkflowError> {
     let decision = approval_interaction_decision(payload.decision)?;
-    let binding = binding_service
-        .lookup_binding(resolve_binding_request(envelope))
-        .await?;
+    let binding = lookup_interaction_binding(envelope, binding_service).await?;
     let scope = turn_scope_from_binding(&binding);
-    let actor = TurnActor::new(binding.user_id.clone());
+    let actor = TurnActor::new(binding.actor_user_id.clone());
     let pending = approval_interaction_service
         .list_pending(ListPendingApprovalsRequest {
             scope: scope.clone(),
@@ -529,11 +576,9 @@ async fn dispatch_auth_resolution(
         }
         ironclaw_product_adapters::AuthResolutionResult::Denied => AuthInteractionDecision::Deny,
     };
-    let binding = binding_service
-        .lookup_binding(resolve_binding_request(envelope))
-        .await?;
+    let binding = lookup_interaction_binding(envelope, binding_service).await?;
     let scope = turn_scope_from_binding(&binding);
-    let actor = TurnActor::new(binding.user_id.clone());
+    let actor = TurnActor::new(binding.actor_user_id.clone());
     let gate_ref = GateRef::new(payload.auth_request_ref.clone()).map_err(|_| {
         ProductWorkflowError::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::InvalidGateRef,
@@ -672,11 +717,16 @@ fn interaction_resolution_idempotency_key(
 }
 
 fn turn_scope_from_binding(binding: &ResolvedBinding) -> TurnScope {
-    TurnScope::new(
+    turn_scope_for_thread(binding, binding.thread_id.clone())
+}
+
+fn turn_scope_for_thread(binding: &ResolvedBinding, thread_id: ThreadId) -> TurnScope {
+    TurnScope::new_with_owner(
         binding.tenant_id.clone(),
         binding.agent_id.clone(),
         binding.project_id.clone(),
-        binding.thread_id.clone(),
+        thread_id,
+        binding.subject_user_id.clone(),
     )
 }
 
