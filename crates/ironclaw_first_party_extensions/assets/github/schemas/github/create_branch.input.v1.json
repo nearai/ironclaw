@@ -34,7 +34,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 255,
-      "description": "Source branch, tag, or ref."
+      "description": "Source branch, tag, ref, or 40-character commit SHA."
     }
   },
   "required": [

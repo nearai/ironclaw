@@ -613,20 +613,25 @@ pub(crate) fn create_branch(
 
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
-    let source_ref = normalize_ref_lookup(from_ref)?;
-    let source_path = format!(
-        "/repos/{}/{}/git/ref/{}",
-        encoded_owner,
-        encoded_repo,
-        encode_repo_path(&source_ref)
-    );
-    let source_ref_resp = github_request("GET", &source_path, None)?;
-    let source_ref_json: serde_json::Value = serde_json::from_str(&source_ref_resp)
-        .map_err(|e| format!("Invalid GitHub response for source ref: {e}"))?;
-    let sha = source_ref_json
-        .pointer("/object/sha")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "Source ref response missing object.sha".to_string())?;
+    let sha = if is_full_commit_sha(from_ref) {
+        from_ref.to_string()
+    } else {
+        let source_ref = normalize_ref_lookup(from_ref)?;
+        let source_path = format!(
+            "/repos/{}/{}/git/ref/{}",
+            encoded_owner,
+            encoded_repo,
+            encode_repo_path(&source_ref)
+        );
+        let source_ref_resp = github_request("GET", &source_path, None)?;
+        let source_ref_json: serde_json::Value = serde_json::from_str(&source_ref_resp)
+            .map_err(|e| format!("Invalid GitHub response for source ref: {e}"))?;
+        source_ref_json
+            .pointer("/object/sha")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Source ref response missing object.sha".to_string())?
+            .to_string()
+    };
 
     let req_body = serde_json::json!({
         "ref": normalize_branch_ref(branch)?,

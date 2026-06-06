@@ -1221,8 +1221,8 @@ impl RebornBinaryE2EHarness {
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(format!(
-                    "timed out waiting for {expected:?}; last status={:?} failure={:?}",
-                    state.status, state.failure
+                    "timed out waiting for {expected:?}; last status={:?} gate_ref={:?} credential_requirements={:?} failure={:?}",
+                    state.status, state.gate_ref, state.credential_requirements, state.failure
                 )
                 .into());
             }
@@ -1776,7 +1776,9 @@ impl HostRuntimeCapabilityHarness {
             runtime_kind: RuntimeKind::Wasm,
             effect_kinds: github_support::effect_kinds(),
             network_policy: github_support::api_policy(),
-            secrets: github_support::secret_handles()?,
+            // Runtime credentials are staged through InjectCredentialAccountOnce; exposing the
+            // manifest slot here preflights it as a direct secret and bypasses product auth.
+            secrets: Vec::new(),
             provider_id: github_support::provider_id()?,
             user_id: UserId::new("reborn-e2e-github-user")?,
             invocations: Arc::new(Mutex::new(Vec::new())),
