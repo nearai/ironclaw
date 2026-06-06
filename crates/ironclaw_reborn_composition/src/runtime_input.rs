@@ -33,6 +33,7 @@ use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_reborn_config::RebornBootConfig;
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
+use crate::hooks::HooksActivationConfig;
 use crate::input::RebornBuildInput;
 
 /// Caller-owned identity for an assembled Reborn runtime.
@@ -262,6 +263,9 @@ pub struct RebornRuntimeInput {
     pub default_project_id: Option<ProjectId>,
     pub regex_skill_activation_enabled: bool,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    /// Hook-framework activation knobs. Default OFF. Callers resolve
+    /// environment or config into this typed value once at the edge.
+    pub hooks: HooksActivationConfig,
     /// Pre-resolved budget defaults to seed the model-budget accountant.
     /// The caller owns the config-layer precedence (compiled -> section
     /// -> env) and must call [`BudgetDefaults::validate`] before
@@ -309,6 +313,7 @@ impl RebornRuntimeInput {
             default_project_id: None,
             regex_skill_activation_enabled: true,
             skill_context_source: None,
+            hooks: HooksActivationConfig::default(),
             budget_defaults: None,
             budget_event_observer: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -407,6 +412,11 @@ impl RebornRuntimeInput {
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    pub fn with_hooks_config(mut self, hooks: HooksActivationConfig) -> Self {
+        self.hooks = hooks;
         self
     }
 

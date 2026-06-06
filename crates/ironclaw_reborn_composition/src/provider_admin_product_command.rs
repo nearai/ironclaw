@@ -193,6 +193,9 @@ fn config_load_error_reason(error: &ironclaw_reborn_config::RebornConfigFileErro
         ironclaw_reborn_config::RebornConfigFileError::InlineSecret { source, .. } => {
             format!("field validation failed: {source}")
         }
+        ironclaw_reborn_config::RebornConfigFileError::InvalidField { field, reason, .. } => {
+            format!("field `{field}` validation failed: {reason}")
+        }
         ironclaw_reborn_config::RebornConfigFileError::InvalidApiVersion {
             found, reason, ..
         } => {

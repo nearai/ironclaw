@@ -38,6 +38,7 @@ mod extension_lifecycle_command;
 mod factory;
 mod google_oauth;
 mod gsuite;
+mod hooks;
 mod input;
 mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
@@ -142,6 +143,13 @@ pub use extension_lifecycle_command::{
 };
 pub use factory::{RebornServices, build_reborn_services};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
+pub use hooks::{
+    HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
+    HookProjectionRegistry, HooksActivationConfig, MAX_INSTALLED_EXTENSIONS_CONSIDERED,
+    MAX_TOTAL_HOOKS_PER_TENANT, ThirdPartyDiscoveryInput, build_hook_dispatcher_builder_factory,
+    build_hook_dispatcher_builder_factory_for_tenant, build_hook_projection_registry,
+    tenant_extension_root,
+};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
@@ -222,9 +230,9 @@ pub use slack_egress::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_host_beta::{
-    SlackHostBetaBuildError, SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts,
-    build_slack_events_route_mount, build_slack_events_route_mount_with_actor_user_resolver,
-    build_slack_host_beta_mounts,
+    SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
+    SlackHostBetaConfigInput, SlackHostBetaMounts, build_slack_events_route_mount,
+    build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{
@@ -257,7 +265,8 @@ pub use slack_personal_binding_serve::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_serve::{
     SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
-    SlackInstallationSelector, slack_events_route_descriptors, slack_events_route_mount,
+    SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
+    slack_events_route_mount,
 };
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]

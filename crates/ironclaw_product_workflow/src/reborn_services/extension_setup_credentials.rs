@@ -79,6 +79,7 @@ pub(super) async fn project(
             credential_ref: account.map(|account| account.id.to_string()),
         });
     }
+    secrets.sort_by_key(|secret| !secret.provided);
     Ok(secrets)
 }
 

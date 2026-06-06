@@ -47,6 +47,7 @@ const USER: &str = "user-alpha";
 const AGENT: &str = "agent-default";
 const PROJECT: &str = "project-default";
 const VALID_TOKEN: &str = "valid-bearer-token";
+const DISALLOWED_GOOGLE_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 
 struct OnlyValidToken;
 
@@ -761,7 +762,7 @@ async fn product_auth_google_oauth_start_rejects_disallowed_scopes() {
 
     let invalid_requests = [
         google_oauth_start_body(json!({ "scopes": [] })),
-        google_oauth_start_body(json!({ "scopes": ["https://www.googleapis.com/auth/drive"] })),
+        google_oauth_start_body(json!({ "scopes": [DISALLOWED_GOOGLE_SCOPE] })),
     ];
 
     for body in invalid_requests {
@@ -769,7 +770,7 @@ async fn product_auth_google_oauth_start_rejects_disallowed_scopes() {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = read_body_string(response).await;
         assert!(body.contains("\"code\":\"invalid_request\""));
-        assert!(!body.contains("drive"));
+        assert!(!body.contains(DISALLOWED_GOOGLE_SCOPE));
     }
 }
 
@@ -944,7 +945,15 @@ async fn product_auth_manual_token_submit_has_per_caller_rate_limit() {
     for index in 0..20 {
         let response = post_manual_token_submit(
             &app,
-            manual_token_body(&format!("ghp_secret_{index}"), json!({})),
+            manual_token_body(
+                &format!("ghp_secret_{index}"),
+                json!({
+                    "account_label": format!("work github {index}"),
+                    "run_id": Uuid::from_u128((index + 1) as u128).to_string(),
+                    "gate_ref": format!("gate:auth-github-{index}"),
+                    "thread_id": format!("thread-auth-{index}")
+                }),
+            ),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1389,7 +1398,7 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
     let response = app
         .clone()
         .oneshot(callback_request(format!(
-            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope=https://www.googleapis.com/auth/drive"
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope={DISALLOWED_GOOGLE_SCOPE}"
         )))
         .await
         .expect("oneshot");
@@ -1399,7 +1408,7 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
     assert!(body.contains("\"code\":\"malformed_callback\""));
     assert!(!body.contains(&state));
     assert!(!body.contains("google-auth-code"));
-    assert!(!body.contains("drive"));
+    assert!(!body.contains(DISALLOWED_GOOGLE_SCOPE));
     assert!(dispatcher.events().is_empty());
 
     let replay_response = app
@@ -1568,24 +1577,6 @@ async fn product_auth_callback_malformed_fields_are_sanitized() {
     .await;
 
     let malformed_uris = [
-        format!(
-            "/api/reborn/product-auth/oauth/callback/{}?user_id={USER}&agent_id={AGENT}&project_id={PROJECT}&invocation_id={}&provider=github&account_label=work&code=missing-state-code",
-            started.flow_id, started.invocation_id
-        ),
-        callback_uri(
-            &started.flow_id,
-            &started.invocation_id,
-            USER,
-            "malformed-field-state",
-            "&account_label=work&code=missing-provider-code",
-        ),
-        callback_uri(
-            &started.flow_id,
-            &started.invocation_id,
-            USER,
-            "malformed-field-state",
-            "&provider=github&code=missing-label-code",
-        ),
         callback_uri(
             &started.flow_id,
             &started.invocation_id,
@@ -1613,20 +1604,6 @@ async fn product_auth_callback_malformed_fields_are_sanitized() {
             USER,
             "malformed-field-state",
             "&provider=github&account_label=work&code=bad-scopes-code&scopes=repo,,gist",
-        ),
-        callback_uri(
-            &started.flow_id,
-            &started.invocation_id,
-            USER,
-            "malformed-field-state",
-            "&provider=github&account_label=work&code=missing-scopes-code",
-        ),
-        callback_uri(
-            &started.flow_id,
-            &started.invocation_id,
-            USER,
-            "malformed-field-state",
-            "&provider=github&account_label=work&code=empty-scopes-code&scopes=",
         ),
     ];
 

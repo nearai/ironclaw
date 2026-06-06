@@ -83,13 +83,9 @@ async fn polymarket_daily_cap_denies_after_ten_invocations() {
     let extension = ExtensionId::new("polymarket-trader").expect("valid ext id");
     let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
     let builder = HookDispatcherBuilder::new(HookRegistry::new());
+    let entries = vec![polymarket_daily_cap_manifest()];
     let (builder, ids) = registrar
-        .install(
-            extension.clone(),
-            "0.4.2".to_string(),
-            vec![polymarket_daily_cap_manifest()],
-            builder,
-        )
+        .install(extension.clone(), "0.4.2", &entries, builder)
         .expect("manifest installs cleanly");
     assert_eq!(ids.len(), 1);
     let dispatcher = builder.build_arc();
@@ -142,13 +138,9 @@ async fn polymarket_daily_cap_does_not_fire_for_other_capabilities() {
     let extension = ExtensionId::new("polymarket-trader").expect("valid ext id");
     let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
     let builder = HookDispatcherBuilder::new(HookRegistry::new());
+    let entries = vec![polymarket_daily_cap_manifest()];
     let (builder, _ids) = registrar
-        .install(
-            extension.clone(),
-            "0.4.2".to_string(),
-            vec![polymarket_daily_cap_manifest()],
-            builder,
-        )
+        .install(extension.clone(), "0.4.2", &entries, builder)
         .expect("installs");
     let dispatcher = builder.build_arc();
 
@@ -211,8 +203,9 @@ async fn large_stake_approval_manifest_validates_and_installs() {
     let extension = ExtensionId::new("polymarket-trader").expect("valid ext id");
     let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
     let builder = HookDispatcherBuilder::new(HookRegistry::new());
+    let entries = vec![entry];
     let (_builder, ids) = registrar
-        .install(extension, "0.4.2".to_string(), vec![entry], builder)
+        .install(extension, "0.4.2", &entries, builder)
         .expect("approval-gate manifest installs through the registrar");
     assert_eq!(ids.len(), 1);
 }
@@ -227,13 +220,9 @@ async fn large_stake_approval_with_unresolved_args_fails_closed() {
     let extension = ExtensionId::new("polymarket-trader").expect("valid ext id");
     let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
     let builder = HookDispatcherBuilder::new(HookRegistry::new());
+    let entries = vec![large_stake_approval_manifest()];
     let (builder, _ids) = registrar
-        .install(
-            extension.clone(),
-            "0.4.2".to_string(),
-            vec![large_stake_approval_manifest()],
-            builder,
-        )
+        .install(extension.clone(), "0.4.2", &entries, builder)
         .expect("installs");
     let dispatcher = builder.build_arc();
 

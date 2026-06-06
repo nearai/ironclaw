@@ -12,10 +12,72 @@ use ironclaw_agent_loop::{
 use ironclaw_turns::{LoopExit, LoopFailureKind, run_profile::LoopRunInfoPort};
 
 #[tokio::test]
-async fn repetition_escape_after_three_iterations() {
-    let (host, checkpoints) = MockAgentLoopDriverHost::builder()
-        .script(ScenarioScript::same_calls_repeated("demo.echo", 6))
-        .build();
+async fn repeated_signature_warns_before_allowing_final_reply() {
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Reply {
+                text: "done after warning".to_string(),
+            },
+        ]),
+        capability_outcomes: VecDeque::from([
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-1")],
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-2")],
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-3")],
+        ]),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, checkpoints) = MockAgentLoopDriverHost::builder().script(script).build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should succeed");
+
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
+        }
+        other => panic!("expected final reply completion, got {other:?}"),
+    }
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["done after warning"]
+    );
+    assert_eq!(host.model_call_count(), 4);
+    assert_eq!(repeated_call_warning_prompt_count(&host), 1);
+    assert_eq!(
+        checkpoints.kinds(),
+        vec![
+            CheckpointKind::BeforeModel,
+            CheckpointKind::BeforeSideEffect,
+            CheckpointKind::BeforeModel,
+            CheckpointKind::BeforeSideEffect,
+            CheckpointKind::BeforeModel,
+            CheckpointKind::BeforeSideEffect,
+            CheckpointKind::BeforeModel,
+            CheckpointKind::Final,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn repeated_signature_stops_after_rendered_warning_and_no_progress_result() {
+    let script =
+        ScenarioScript::same_calls_repeated("demo.echo", 4).with_capability_outcomes(vec![
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-1")],
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-2")],
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-3")],
+            vec![ScriptedCapabilityOutcome::completed_no_change(
+                "result:repeat-4",
+            )],
+        ]);
+    let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let exit = CanonicalAgentLoopExecutor
@@ -31,18 +93,59 @@ async fn repetition_escape_after_three_iterations() {
         other => panic!("expected no-progress fallback completion, got {other:?}"),
     }
     assert_no_progress_fallback(&host);
-    assert_eq!(host.model_call_count(), 3);
+    assert_eq!(host.model_call_count(), 4);
+    assert_eq!(repeated_call_warning_prompt_count(&host), 1);
+}
+
+#[tokio::test]
+async fn repeated_signature_made_progress_after_warning_clears_warning_and_continues() {
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Reply {
+                text: "done after progress".to_string(),
+            },
+        ]),
+        capability_outcomes: VecDeque::from([
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-1")],
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-2")],
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-3")],
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-4")],
+        ]),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should succeed");
+
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
+        }
+        other => panic!("expected final reply completion, got {other:?}"),
+    }
     assert_eq!(
-        checkpoints.kinds(),
-        vec![
-            CheckpointKind::BeforeModel,
-            CheckpointKind::BeforeSideEffect,
-            CheckpointKind::BeforeModel,
-            CheckpointKind::BeforeSideEffect,
-            CheckpointKind::BeforeModel,
-            CheckpointKind::BeforeSideEffect,
-            CheckpointKind::Final,
-        ]
+        host.finalized_assistant_messages(),
+        vec!["done after progress"]
+    );
+    assert_eq!(host.model_call_count(), 5);
+    assert_eq!(repeated_call_warning_prompt_count(&host), 1);
+    assert!(
+        host.prompt_requests()
+            .last()
+            .expect("final prompt request")
+            .inline_messages
+            .is_empty(),
+        "warning should be cleared before the final reply prompt"
     );
 }
 
@@ -231,4 +334,16 @@ fn assert_no_progress_fallback(host: &MockAgentLoopDriverHost) {
     assert_eq!(messages.len(), 1);
     assert!(messages[0].contains("repeating the same step without making progress"));
     assert!(messages[0].contains("repeated calls, results, and any failure summaries"));
+}
+
+fn repeated_call_warning_prompt_count(host: &MockAgentLoopDriverHost) -> usize {
+    host.prompt_requests()
+        .iter()
+        .filter(|request| {
+            request.inline_messages.iter().any(|message| {
+                message.safe_body.as_str()
+                    == "loop control repeated capability call detected change strategy explain new evidence or answer from current evidence"
+            })
+        })
+        .count()
 }
