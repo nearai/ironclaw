@@ -332,6 +332,26 @@ impl RebornServices {
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
     }
+
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_approval_test_parts(&self) -> Option<RebornLocalDevApprovalTestParts> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
+            local_runtime.approval_requests.clone();
+        let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
+            local_runtime.capability_leases.clone();
+        Some(RebornLocalDevApprovalTestParts {
+            approval_requests,
+            capability_leases,
+        })
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Clone)]
+pub struct RebornLocalDevApprovalTestParts {
+    pub approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+    pub capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore>,
 }
 
 pub(crate) struct RebornLocalRuntimeServices {

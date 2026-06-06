@@ -157,6 +157,15 @@ fn local_only_runtime_policy() -> EffectiveRuntimePolicy {
 }
 
 #[cfg(feature = "libsql")]
+fn local_only_minimal_approval_policy() -> EffectiveRuntimePolicy {
+    let mut policy = local_only_runtime_policy();
+    policy.requested_profile = RuntimeProfile::LocalYolo;
+    policy.resolved_profile = RuntimeProfile::LocalYolo;
+    policy.approval_policy = ApprovalPolicy::Minimal;
+    policy
+}
+
+#[cfg(feature = "libsql")]
 fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
@@ -1023,7 +1032,7 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
     let dir = tempfile::tempdir().unwrap();
     let services = build_reborn_services(
         RebornBuildInput::local_dev("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(local_only_runtime_policy()),
+            .with_runtime_policy(local_only_minimal_approval_policy()),
     )
     .await
     .expect("local-dev services should build with trigger management runtime");

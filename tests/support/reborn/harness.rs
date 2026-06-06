@@ -15,7 +15,7 @@
 #![allow(dead_code)] // Shared by staged Reborn binary-E2E validation ports.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -25,6 +25,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
@@ -33,25 +34,30 @@ use ironclaw_filesystem::{
     ScopedFilesystem, StorageClass,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
-    CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    HostPath, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy, NetworkScheme,
-    NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
-    ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
-    SecretHandle, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    Action, AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
+    CapabilityId, CapabilitySet, CredentialStageError, Decision, EffectKind, ExecutionContext,
+    ExtensionId, GrantConstraints, HostPath, MountAlias, MountGrant, MountPermissions, MountView,
+    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId,
+    Principal, ProjectId, ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfacePolicy,
+    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, CancelRuntimeWorkOutcome,
+    CancelRuntimeWorkRequest, CapabilitySurfacePolicy,
     CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, ECHO_CAPABILITY_ID,
     GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
-    HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
-    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
-    MEMORY_WRITE_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCredentialAccessSecret,
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, SHELL_CAPABILITY_ID,
+    HostRuntime, HostRuntimeError, HostRuntimeHealth, HostRuntimeServices, HostRuntimeStatus,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityResumeRequest, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
+    RuntimeCredentialAccountResolver, RuntimeStatusRequest, SHELL_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
-    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
+    VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_loop_support::{
@@ -91,7 +97,7 @@ use ironclaw_reborn::{
 };
 use ironclaw_reborn_composition::{
     ProductLiveCapabilityIo, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
-    build_reborn_services, visible_capability_request_for_run,
+    RebornLocalDevApprovalTestParts, build_reborn_services, visible_capability_request_for_run,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_secrets::{
@@ -257,6 +263,15 @@ impl HarnessCapabilityRecorder {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.network_http_requests(),
+        }
+    }
+
+    async fn approve_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+        match self {
+            Self::Recording(_) => {
+                Err("recording capability port has no local-dev approvals".into())
+            }
+            Self::HostRuntime(harness) => harness.approve_local_dev_gate(gate_ref).await,
         }
     }
 }
@@ -460,7 +475,22 @@ impl RebornBinaryE2EHarness {
             conversation_id,
             model_gateway,
             HarnessCapabilityMode::HostRuntime(host_runtime),
-            false,
+            true,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_file_capabilities_requiring_approval(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime =
+            Arc::new(HostRuntimeCapabilityHarness::file_tools_requiring_approval().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            true,
         )
         .await
     }
@@ -1071,6 +1101,22 @@ impl RebornBinaryE2EHarness {
         self.resume_with_gate(run_id, blocked).await
     }
 
+    pub async fn approve_and_resume_local_dev_gate(
+        &self,
+        run_id: TurnRunId,
+    ) -> HarnessResult<GateRef> {
+        let blocked = self
+            .run_state(run_id)
+            .await?
+            .gate_ref
+            .ok_or("blocked run missing gate ref")?;
+        self.capability_recorder
+            .approve_local_dev_gate(&blocked)
+            .await?;
+        self.resume_with_gate(run_id, blocked.clone()).await?;
+        Ok(blocked)
+    }
+
     pub async fn resume_blocked_turn_in_scope(
         &self,
         scope: TurnScope,
@@ -1465,6 +1511,8 @@ impl HarnessCapabilityMode {
 
 struct HostRuntimeCapabilityHarness {
     runtime: Arc<dyn HostRuntime>,
+    approval_parts: Option<RebornLocalDevApprovalTestParts>,
+    pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
     io: Arc<ProductLiveCapabilityIo>,
     root: Arc<tempfile::TempDir>,
     workspace_root: PathBuf,
@@ -1485,6 +1533,19 @@ struct HostRuntimeCapabilityHarness {
 
 impl HostRuntimeCapabilityHarness {
     async fn file_tools() -> HarnessResult<Self> {
+        Self::file_tools_with_runtime_policy(Some(
+            ironclaw_reborn_composition::local_dev_yolo_runtime_policy(true)?,
+        ))
+        .await
+    }
+
+    async fn file_tools_requiring_approval() -> HarnessResult<Self> {
+        Self::file_tools_with_runtime_policy(None).await
+    }
+
+    async fn file_tools_with_runtime_policy(
+        runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+    ) -> HarnessResult<Self> {
         Self::new(
             "reborn-e2e-builtin-tools",
             vec![
@@ -1495,6 +1556,7 @@ impl HostRuntimeCapabilityHarness {
             Vec::new(),
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-builtin-user")?,
+            runtime_policy,
         )
         .await
     }
@@ -1507,6 +1569,7 @@ impl HostRuntimeCapabilityHarness {
             Vec::new(),
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-write-only-user")?,
+            None,
         )
         .await
     }
@@ -1523,6 +1586,7 @@ impl HostRuntimeCapabilityHarness {
             Vec::new(),
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-coding-read-user")?,
+            None,
         )
         .await
     }
@@ -1547,6 +1611,7 @@ impl HostRuntimeCapabilityHarness {
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-process-user")?,
             MountView::default(),
+            None,
         )
         .await
     }
@@ -1570,6 +1635,7 @@ impl HostRuntimeCapabilityHarness {
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-skill-management-user")?,
             skill_mounts()?,
+            None,
         )
         .await?;
         harness.network_policy = http_test_policy();
@@ -1589,6 +1655,7 @@ impl HostRuntimeCapabilityHarness {
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-trigger-management-user")?,
             MountView::default(),
+            None,
         )
         .await
     }
@@ -1600,6 +1667,7 @@ impl HostRuntimeCapabilityHarness {
         secrets: Vec<SecretHandle>,
         provider_id: ExtensionId,
         user_id: UserId,
+        runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     ) -> HarnessResult<Self> {
         Self::new_with_mounts(
             service_label,
@@ -1609,6 +1677,7 @@ impl HostRuntimeCapabilityHarness {
             provider_id,
             user_id,
             workspace_mounts(MountPermissions::read_write_list_delete())?,
+            runtime_policy,
         )
         .await
     }
@@ -1621,18 +1690,46 @@ impl HostRuntimeCapabilityHarness {
         provider_id: ExtensionId,
         user_id: UserId,
         mounts: MountView,
+        runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     ) -> HarnessResult<Self> {
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
-        let services =
-            build_reborn_services(RebornBuildInput::local_dev(service_label, storage_root)).await?;
+        let mut input = if runtime_policy.as_ref().is_some_and(|policy| {
+            policy.resolved_profile == ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo
+        }) {
+            let host_home_root = root.path().join("host-home");
+            std::fs::create_dir_all(&host_home_root)?;
+            ironclaw_reborn_composition::local_runtime_build_input_with_options(
+                ironclaw_reborn_composition::RebornCompositionProfile::LocalDevYolo,
+                service_label,
+                storage_root,
+                ironclaw_reborn_composition::RebornLocalRuntimeProfileOptions {
+                    confirm_host_access: true,
+                },
+            )?
+            .with_local_dev_confirmed_host_home_root(host_home_root)
+        } else {
+            RebornBuildInput::local_dev(service_label, storage_root)
+        };
+        if let Some(runtime_policy) = runtime_policy {
+            input = input.with_runtime_policy(runtime_policy);
+        }
+        let services = build_reborn_services(input).await?;
+        let approval_parts = services.local_dev_approval_test_parts();
+        let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
         let runtime = services
             .host_runtime
             .ok_or("local-dev Reborn services missing host runtime")?;
+        let runtime = Arc::new(RecordingHostRuntime::new(
+            runtime,
+            Arc::clone(&pending_approval_scopes),
+        ));
         Ok(Self {
             runtime,
+            approval_parts,
+            pending_approval_scopes,
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
             workspace_root,
@@ -1706,6 +1803,8 @@ impl HostRuntimeCapabilityHarness {
         ];
         Ok(Self {
             runtime,
+            approval_parts: None,
+            pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
             workspace_root,
@@ -1767,6 +1866,8 @@ impl HostRuntimeCapabilityHarness {
         let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
         Ok(Self {
             runtime,
+            approval_parts: None,
+            pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
             workspace_root,
@@ -1827,6 +1928,166 @@ impl HostRuntimeCapabilityHarness {
 
     fn workspace_file_path(&self, relative: &str) -> PathBuf {
         self.workspace_root.join(relative.trim_start_matches('/'))
+    }
+
+    async fn approve_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+        let approval_parts = self
+            .approval_parts
+            .as_ref()
+            .ok_or("host runtime harness has no local-dev approval stores")?;
+        let request_id = approval_request_id_from_gate_ref(gate_ref)?;
+        let scope = self
+            .pending_approval_scopes
+            .lock()
+            .unwrap()
+            .get(&request_id)
+            .cloned()
+            .ok_or("approval gate was not recorded by the host runtime harness")?;
+        let record = approval_parts
+            .approval_requests
+            .get(&scope, request_id)
+            .await?
+            .ok_or("approval request was not persisted")?;
+        let capability = match record.request.action.as_ref() {
+            Action::Dispatch { capability, .. } | Action::SpawnCapability { capability, .. } => {
+                capability.clone()
+            }
+            other => return Err(format!("unsupported approval action: {other:?}").into()),
+        };
+        let approval = self.lease_approval_for(&capability);
+        let resolver = ApprovalResolver::new(
+            approval_parts.approval_requests.as_ref(),
+            approval_parts.capability_leases.as_ref(),
+        );
+        match record.request.action.as_ref() {
+            Action::Dispatch { .. } => {
+                resolver
+                    .approve_dispatch(&scope, request_id, approval)
+                    .await?;
+            }
+            Action::SpawnCapability { .. } => {
+                resolver.approve_spawn(&scope, request_id, approval).await?;
+            }
+            other => return Err(format!("unsupported approval action: {other:?}").into()),
+        }
+        Ok(())
+    }
+
+    fn lease_approval_for(&self, capability_id: &CapabilityId) -> LeaseApproval {
+        let mounts = self
+            .capability_mount_overrides
+            .iter()
+            .find(|(override_capability, _)| override_capability == capability_id)
+            .map(|(_, mounts)| mounts.clone())
+            .unwrap_or_else(|| self.mounts.clone());
+        LeaseApproval {
+            issued_by: Principal::HostRuntime,
+            allowed_effects: self.effect_kinds.clone(),
+            mounts,
+            network: self.network_policy.clone(),
+            secrets: self.secrets.clone(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: Some(1),
+        }
+    }
+}
+
+fn approval_request_id_from_gate_ref(gate_ref: &GateRef) -> HarnessResult<ApprovalRequestId> {
+    const APPROVAL_GATE_PREFIX: &str = "gate:approval-";
+    let value = gate_ref
+        .as_str()
+        .strip_prefix(APPROVAL_GATE_PREFIX)
+        .ok_or("gate ref is not a local-dev approval gate")?;
+    Ok(ApprovalRequestId::parse(value)?)
+}
+
+struct RecordingHostRuntime {
+    inner: Arc<dyn HostRuntime>,
+    pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
+}
+
+impl RecordingHostRuntime {
+    fn new(
+        inner: Arc<dyn HostRuntime>,
+        pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
+    ) -> Self {
+        Self {
+            inner,
+            pending_approval_scopes,
+        }
+    }
+}
+
+#[async_trait]
+impl HostRuntime for RecordingHostRuntime {
+    async fn invoke_capability(
+        &self,
+        request: RuntimeCapabilityRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let scope = request.context.resource_scope.clone();
+        let outcome = self.inner.invoke_capability(request).await?;
+        if let RuntimeCapabilityOutcome::ApprovalRequired(gate) = &outcome {
+            self.pending_approval_scopes
+                .lock()
+                .unwrap()
+                .insert(gate.approval_request_id, scope);
+        }
+        Ok(outcome)
+    }
+
+    async fn spawn_capability(
+        &self,
+        request: RuntimeCapabilityRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let scope = request.context.resource_scope.clone();
+        let outcome = self.inner.spawn_capability(request).await?;
+        if let RuntimeCapabilityOutcome::ApprovalRequired(gate) = &outcome {
+            self.pending_approval_scopes
+                .lock()
+                .unwrap()
+                .insert(gate.approval_request_id, scope);
+        }
+        Ok(outcome)
+    }
+
+    async fn resume_capability(
+        &self,
+        request: RuntimeCapabilityResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.inner.resume_capability(request).await
+    }
+
+    async fn resume_spawn_capability(
+        &self,
+        request: RuntimeCapabilityResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.inner.resume_spawn_capability(request).await
+    }
+
+    async fn visible_capabilities(
+        &self,
+        request: RuntimeVisibleCapabilityRequest,
+    ) -> Result<RuntimeVisibleCapabilitySurface, HostRuntimeError> {
+        self.inner.visible_capabilities(request).await
+    }
+
+    async fn cancel_work(
+        &self,
+        request: CancelRuntimeWorkRequest,
+    ) -> Result<CancelRuntimeWorkOutcome, HostRuntimeError> {
+        self.inner.cancel_work(request).await
+    }
+
+    async fn runtime_status(
+        &self,
+        request: RuntimeStatusRequest,
+    ) -> Result<HostRuntimeStatus, HostRuntimeError> {
+        self.inner.runtime_status(request).await
+    }
+
+    async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
+        self.inner.health().await
     }
 }
 
