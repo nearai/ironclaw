@@ -184,7 +184,7 @@ fn tool_call_http_egress_returns_network_error_when_partial_response_is_missing(
 }
 
 #[tokio::test]
-async fn host_http_egress_consumes_staged_obligation_secret_once() {
+async fn host_http_egress_reuses_staged_obligation_secret_within_dispatch() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -255,15 +255,22 @@ async fn host_http_egress_consumes_staged_obligation_secret_once() {
         );
     }
 
-    let error = service
+    service
         .execute(request)
         .await
-        .expect_err("staged secret must not be reusable");
-    assert!(matches!(
-        error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
-    ));
-    assert_eq!(network_recorder.lock().unwrap().len(), 1);
+        .expect("staged secret should stay available until dispatch cleanup");
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-staged-secret".to_string()
+        ))
+    );
 }
 
 #[test]

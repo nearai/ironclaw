@@ -1,6 +1,6 @@
 use ironclaw_host_api::{
     CapabilityId, RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, SecretHandle,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle,
 };
 use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
@@ -52,7 +52,7 @@ impl<'a> CredentialSourceStrategy<'a> {
     ) -> Result<(), RuntimeHttpEgressError> {
         match self {
             Self::SecretStoreLease => Err(RuntimeHttpEgressError::Credential {
-                // Production egress accepts one-shot staged obligations only;
+                // Production egress accepts staged obligations only;
                 // direct store leases are retained behind crate-local tests for
                 // legacy mapping coverage, not as a runtime path.
                 reason: "direct secret-store leases are unavailable for production runtime egress"
@@ -234,7 +234,16 @@ fn staged_secret_for_injection(
     let Some(secret_injections) = secret_injections else {
         return missing_runtime_credential(injection.required);
     };
-    match secret_injections.take(&request.scope, capability_id, &injection.handle) {
+    // MCP HTTP sessions may span multiple JSON-RPC requests, so staged
+    // credentials stay one-shot there. Inline runtimes reuse staged material
+    // until their capability dispatch completes and the obligation handler
+    // discards the handoff.
+    let staged_material = if request.runtime == RuntimeKind::Mcp {
+        secret_injections.take(&request.scope, capability_id, &injection.handle)
+    } else {
+        secret_injections.get(&request.scope, capability_id, &injection.handle)
+    };
+    match staged_material {
         Ok(Some(material)) => Ok(Some(material)),
         Ok(None) => missing_runtime_credential(injection.required),
         Err(_) => Err(RuntimeHttpEgressError::Credential {

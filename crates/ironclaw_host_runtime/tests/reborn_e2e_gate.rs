@@ -524,7 +524,7 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
 }
 
 #[tokio::test]
-async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
+async fn reborn_e2e_gate_host_http_reuses_staged_secret_until_dispatch_completion() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -556,6 +556,14 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
         .unwrap();
     let mut context = execution_context_without_grants();
     context.resource_scope = scope.clone();
+    let obligations = [
+        Obligation::ApplyNetworkPolicy {
+            policy: staged_policy.clone(),
+        },
+        Obligation::InjectSecretOnce {
+            handle: handle.clone(),
+        },
+    ];
     obligation_services
         .obligation_handler()
         .satisfy(ironclaw_capabilities::CapabilityObligationRequest {
@@ -563,14 +571,7 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
             context: &context,
             capability_id: &capability_id,
             estimate: &ResourceEstimate::default(),
-            obligations: &[
-                Obligation::ApplyNetworkPolicy {
-                    policy: staged_policy.clone(),
-                },
-                Obligation::InjectSecretOnce {
-                    handle: handle.clone(),
-                },
-            ],
+            obligations: &obligations,
         })
         .await
         .unwrap();
@@ -621,15 +622,53 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
             ))
         );
     }
-    let replay = service
-        .execute(request)
+    service
+        .execute(request.clone())
         .await
-        .expect_err("consumed staged secret must not be reusable");
-    assert!(matches!(replay, RuntimeHttpEgressError::Credential { .. }));
+        .expect("staged secret should remain available during the same dispatch");
     assert_eq!(
         network_recorder.lock().unwrap().len(),
-        1,
-        "replay must fail before a second outbound transport attempt"
+        2,
+        "second request should reach the transport before dispatch cleanup"
+    );
+
+    obligation_services
+        .obligation_handler()
+        .complete_dispatch(
+            ironclaw_capabilities::CapabilityObligationCompletionRequest {
+                phase: ironclaw_capabilities::CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &ResourceEstimate::default(),
+                obligations: &obligations,
+                dispatch: &CapabilityDispatchResult {
+                    capability_id: capability_id.clone(),
+                    provider: context.extension_id.clone(),
+                    runtime: RuntimeKind::Script,
+                    output: json!({"ok": true}),
+                    display_preview: None,
+                    usage: ResourceUsage::default(),
+                    receipt: ResourceReceipt {
+                        id: ResourceReservationId::new(),
+                        scope: scope.clone(),
+                        status: ReservationStatus::Reconciled,
+                        estimate: ResourceEstimate::default(),
+                        actual: Some(ResourceUsage::default()),
+                    },
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    let _replay = service
+        .execute(request)
+        .await
+        .expect_err("dispatch cleanup should remove staged handoffs");
+    assert_eq!(
+        network_recorder.lock().unwrap().len(),
+        2,
+        "cleanup replay must fail before a third outbound transport attempt"
     );
 }
 

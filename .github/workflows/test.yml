@@ -98,7 +98,7 @@ jobs:
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|build\.rs$|\.github/workflows/(test|nightly-deep-ci|e2e|replay-gate|code_style|docker|release|release-plz|rebuild-release-image|coverage|live-canary|pr-label-classify|pr-label-scope|claude-review)\.yml$|\.github/actions/install-cargo-component/|\.github/(dependabot|labeler)\.yml$)'; then
+          if has_match '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|build\.rs$|\.github/workflows/(test|nightly-deep-ci|e2e|replay-gate|code_style|docker|release|release-plz|rebuild-release-image|coverage|live-canary|pr-label-classify|pr-label-scope|claude-review)\.yml$|\.github/actions/install-cargo-component/)'; then
             echo "has_core_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_core_code=false" >> "$GITHUB_OUTPUT"
