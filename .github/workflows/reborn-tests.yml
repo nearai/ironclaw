@@ -198,35 +198,7 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Run Reborn root tests
-        run: |
-          mapfile -t test_names < <(
-            find tests -maxdepth 1 -type f -name 'reborn_*.rs' -print \
-              | sed -E 's#^tests/##; s#\.rs$##' \
-              | sort
-          )
-
-          if [ "${#test_names[@]}" -eq 0 ]; then
-            echo "No Reborn root tests discovered"
-            exit 1
-          fi
-
-          selected=false
-          for index in "${!test_names[@]}"; do
-            if (( index % REBORN_ROOT_TEST_PARTITIONS != REBORN_ROOT_TEST_PARTITION )); then
-              continue
-            fi
-
-            selected=true
-            test_name="${test_names[$index]}"
-            echo "::group::cargo test --test ${test_name}"
-            timeout --signal=INT --kill-after=30s 12m \
-              cargo test --test "${test_name}" -- --nocapture
-            echo "::endgroup::"
-          done
-
-          if [ "${selected}" != true ]; then
-            echo "No Reborn root tests assigned to partition ${REBORN_ROOT_TEST_PARTITION}"
-          fi
+        run: scripts/ci/run-reborn-root-partition.sh
 
   reborn-tests:
     name: Tests (Reborn)
