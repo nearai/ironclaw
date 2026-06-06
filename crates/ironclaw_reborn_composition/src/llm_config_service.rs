@@ -175,18 +175,23 @@ impl RebornLlmConfigService {
     }
 
     async fn build_snapshot(&self) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
-        let list = self.admin_list_async().await.map_err(map_admin_error)?;
+        let list = self.admin_list_async().await.map_err(|error| {
+            tracing::debug!(%error, "build_snapshot: admin_list_async failed");
+            map_admin_error(error)
+        })?;
         let builtin_registry = ironclaw_llm::ProviderRegistry::try_load_from_path(None)
-            .map_err(|_| LlmConfigServiceError::Unavailable)?;
+            .map_err(|error| {
+                tracing::debug!(%error, "build_snapshot: builtin registry load failed");
+                LlmConfigServiceError::Unavailable
+            })?;
 
         let mut providers = Vec::with_capacity(list.providers.len());
         let mut active = None;
         for info in list.providers {
-            let stored_key_set = self
-                .keys
-                .exists(&info.id)
-                .await
-                .map_err(|_| LlmConfigServiceError::Unavailable)?;
+            let stored_key_set = self.keys.exists(&info.id).await.map_err(|error| {
+                tracing::debug!(provider_id = %info.id, %error, "build_snapshot: keys.exists failed");
+                LlmConfigServiceError::Unavailable
+            })?;
             let builtin = builtin_registry.find(&info.id).is_some();
             let metadata = info.metadata;
             let env_key_set = metadata.as_ref().is_some_and(metadata_env_key_set);

@@ -147,6 +147,13 @@ macro_rules! string_id {
                 D: serde::Deserializer<'de>,
             {
                 let value = String::deserialize(deserializer)?;
+                // Sentinel records (e.g. `ResourceScope::system`) are written
+                // through `from_trusted` and intentionally contain bytes the
+                // validator rejects. Rehydrate them through the same escape
+                // hatch so writes round-trip.
+                if $crate::resource::is_system_reserved(&value) {
+                    return Ok(Self::from_trusted(value));
+                }
                 Self::new(value).map_err(serde::de::Error::custom)
             }
         }
@@ -278,3 +285,39 @@ uuid_id!(ResourceReservationId);
 uuid_id!(ApprovalRequestId);
 uuid_id!(AuditEventId);
 uuid_id!(CorrelationId);
+
+#[cfg(test)]
+mod string_id_serde_tests {
+    use super::*;
+    use crate::resource::SYSTEM_RESERVED_ID;
+
+    #[test]
+    fn tenant_id_round_trips_system_sentinel() {
+        let id = TenantId::from_trusted(SYSTEM_RESERVED_ID.to_string());
+        let json = serde_json::to_string(&id).expect("serialize sentinel tenant id");
+        let back: TenantId = serde_json::from_str(&json).expect("deserialize sentinel tenant id");
+        assert_eq!(back.as_str(), SYSTEM_RESERVED_ID);
+    }
+
+    #[test]
+    fn user_id_round_trips_system_sentinel() {
+        let id = UserId::from_trusted(SYSTEM_RESERVED_ID.to_string());
+        let json = serde_json::to_string(&id).expect("serialize sentinel user id");
+        let back: UserId = serde_json::from_str(&json).expect("deserialize sentinel user id");
+        assert_eq!(back.as_str(), SYSTEM_RESERVED_ID);
+    }
+
+    #[test]
+    fn tenant_id_rejects_other_control_chars_on_wire() {
+        let raw = serde_json::to_string("hello\u{0007}world").unwrap();
+        let result: Result<TenantId, _> = serde_json::from_str(&raw);
+        assert!(result.is_err(), "non-sentinel control chars must stay rejected");
+    }
+
+    #[test]
+    fn tenant_id_accepts_normal_identifier_on_wire() {
+        let raw = serde_json::to_string("acme-co").unwrap();
+        let id: TenantId = serde_json::from_str(&raw).expect("ordinary tenant id deserializes");
+        assert_eq!(id.as_str(), "acme-co");
+    }
+}

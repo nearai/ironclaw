@@ -27,6 +27,13 @@ pub const LOCAL_DEFAULT_PROJECT_ID: &str = "bootstrap";
 /// caller-supplied identifier can ever collide with it.
 pub const SYSTEM_RESERVED_ID: &str = "\x1fSYSTEM\x1f";
 
+/// True iff `value` is the system sentinel string. Used by id deserializers
+/// to route the sentinel through the `from_trusted` escape hatch, and by
+/// callers that need to special-case scope-derived paths or display values.
+pub fn is_system_reserved(value: &str) -> bool {
+    value == SYSTEM_RESERVED_ID
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceScope {
     pub tenant_id: TenantId,
@@ -78,7 +85,8 @@ impl ResourceScope {
 
     /// True iff this scope is the system sentinel (see [`Self::system`]).
     pub fn is_system(&self) -> bool {
-        self.tenant_id.as_str() == SYSTEM_RESERVED_ID && self.user_id.as_str() == SYSTEM_RESERVED_ID
+        is_system_reserved(self.tenant_id.as_str())
+            && is_system_reserved(self.user_id.as_str())
     }
 }
 
