@@ -1679,6 +1679,7 @@ pub async fn build_reborn_runtime(
         model_policy_guard: None,
         model_budget_accountant,
         safety_context: None,
+        hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
         turn_event_sink: None,
         hook_dispatcher_builder_factory,
     })?;

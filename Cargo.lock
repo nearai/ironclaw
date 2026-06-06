@@ -4449,6 +4449,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_hooks_libsql"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "ironclaw_hooks",
+ "ironclaw_host_api",
+ "libsql",
+ "rust_decimal",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ironclaw_hooks_parity"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "deadpool-postgres",
+ "ironclaw_hooks",
+ "ironclaw_hooks_libsql",
+ "ironclaw_hooks_postgres",
+ "ironclaw_host_api",
+ "libsql",
+ "rust_decimal",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "ironclaw_hooks_postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "deadpool-postgres",
+ "ironclaw_hooks",
+ "ironclaw_host_api",
+ "rust_decimal",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_host_api"
 version = "0.1.0"
 dependencies = [
