@@ -1354,8 +1354,17 @@ where
             .await
         {
             Ok(()) => {
-                self.delete_idempotency_records_for_thread(scope, thread_id)
+                if let Err(error) = self
+                    .delete_idempotency_records_for_thread(scope, thread_id)
                     .await
+                {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        error = %error,
+                        "thread delete completed but inbound idempotency cleanup failed"
+                    );
+                }
+                Ok(())
             }
             Err(error) if is_not_found(&error) => Err(SessionThreadError::UnknownThread {
                 thread_id: thread_id.clone(),

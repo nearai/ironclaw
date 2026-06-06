@@ -1314,6 +1314,7 @@ impl RebornServices {
             .thread_operation_locks
             .lock()
             .expect("thread operation lock map poisoned");
+        locks.retain(|_, lock| lock.strong_count() > 0);
         if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
             return lock;
         }
