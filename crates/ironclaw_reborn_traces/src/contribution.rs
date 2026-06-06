@@ -7559,7 +7559,11 @@ fn trace_credit_notice_outbox_path(scope: Option<&str>) -> PathBuf {
     trace_contribution_dir_for_scope(scope).join("credit_notice_outbox.json")
 }
 
-fn write_json_file<T: Serialize + ?Sized>(
+/// Atomic, durable, 0o600 JSON write (create_new + uuid temp name + sync_all +
+/// best-effort parent-dir sync). Reused by `onboarding::device_key` so the
+/// Ed25519 secret is never world-readable at any point and concurrent writers
+/// don't race on a fixed temp name.
+pub(crate) fn write_json_file<T: Serialize + ?Sized>(
     path: &Path,
     value: &T,
     label: &str,
