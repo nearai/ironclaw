@@ -114,26 +114,7 @@ jobs:
 
       - name: Run crate tests
         run: |
-          feature_flags=""
-          if [ "${{ matrix.package }}" = "ironclaw_reborn_cli" ]; then
-            feature_flags="--features webui-v2-beta,slack-v2-host-beta"
-          elif [ "${{ matrix.package }}" = "ironclaw_product_adapters" ]; then
-            feature_flags="--features test-support,host-auth-mint"
-          elif [ "${{ matrix.package }}" = "ironclaw_product_workflow" ]; then
-            feature_flags="--features test-support"
-          elif [ "${{ matrix.package }}" = "ironclaw_product_workflow_storage" ]; then
-            feature_flags="--features libsql"
-          elif [ "${{ matrix.package }}" = "ironclaw_reborn_composition" ]; then
-            feature_flags="--features test-support,webui-v2-beta,slack-v2-host-beta,libsql"
-          elif [ "${{ matrix.package }}" = "ironclaw_reborn" ]; then
-            feature_flags="--features root-llm-provider,libsql-secrets,libsql-restart-tests,webui-user-store"
-          elif [ "${{ matrix.package }}" = "ironclaw_reborn_event_store" ]; then
-            feature_flags="--features libsql"
-          elif [ "${{ matrix.package }}" = "ironclaw_reborn_webui_ingress" ]; then
-            feature_flags="--features dev-in-memory-session"
-          elif [ "${{ matrix.package }}" = "ironclaw_webui_v2" ] || [ "${{ matrix.package }}" = "ironclaw_webui_v2_static" ]; then
-            feature_flags="--features webui-v2-beta"
-          fi
+          feature_flags="$(scripts/ci/package-feature-flags.sh "${{ matrix.package }}")"
 
           # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
           timeout --signal=INT --kill-after=30s 28m \

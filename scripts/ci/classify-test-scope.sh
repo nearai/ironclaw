@@ -9,8 +9,14 @@ has_reborn_tests=false
 is_docs_only_path() {
   local path="$1"
   case "$path" in
-    docs/*|.github/ISSUE_TEMPLATE/*|.github/pull_request_template.md|*.md)
+    docs/*|.github/ISSUE_TEMPLATE/*|.github/pull_request_template.md)
       return 0
+      ;;
+    *.md)
+      case "$path" in
+        */*) return 1 ;;
+        *) return 0 ;;
+      esac
       ;;
     *)
       return 1
@@ -24,7 +30,7 @@ is_shared_test_path() {
     Cargo.toml|Cargo.lock|build.rs|providers.json|Dockerfile)
       return 0
       ;;
-    scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
+    scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh|scripts/ci/package-feature-flags.sh)
       return 0
       ;;
     .github/workflows/test.yml|.github/workflows/reborn-tests.yml|.github/workflows/reborn-integration.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
@@ -78,9 +84,6 @@ is_reborn_test_path() {
     crates/ironclaw_conversations/*|crates/ironclaw_outbound/*|crates/ironclaw_triggers/*)
       return 0
       ;;
-    .github/workflows/reborn-tests.yml|.github/workflows/reborn-integration.yml|.github/workflows/reborn-e2e.yml)
-      return 0
-      ;;
     *)
       return 1
       ;;
@@ -108,7 +111,7 @@ is_code_path() {
   esac
 }
 
-while IFS= read -r path; do
+while IFS= read -r path || [ -n "$path" ]; do
   [ -n "$path" ] || continue
 
   if ! is_docs_only_path "$path"; then

@@ -22,6 +22,40 @@ assert_scope() {
   printf 'PASS %s\n' "$name"
 }
 
+assert_scope_no_trailing_newline() {
+  local name="$1"
+  local files="$2"
+  local expected="$3"
+  local actual
+
+  actual="$(printf '%s' "$files" | "$classifier" | sort)"
+
+  if [ "$actual" != "$expected" ]; then
+    printf 'FAIL %s\n' "$name" >&2
+    printf 'Expected:\n%s\n' "$expected" >&2
+    printf 'Actual:\n%s\n' "$actual" >&2
+    exit 1
+  fi
+
+  printf 'PASS %s\n' "$name"
+}
+
+assert_empty_scope() {
+  local expected="$1"
+  local actual
+
+  actual="$(printf '' | "$classifier" | sort)"
+
+  if [ "$actual" != "$expected" ]; then
+    printf 'FAIL empty input\n' >&2
+    printf 'Expected:\n%s\n' "$expected" >&2
+    printf 'Actual:\n%s\n' "$actual" >&2
+    exit 1
+  fi
+
+  printf 'PASS empty input\n'
+}
+
 assert_scope \
   "reborn binary crate" \
   "crates/ironclaw_reborn_cli/src/main.rs" \
@@ -79,12 +113,58 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
+  "shared classifier script" \
+  "scripts/ci/classify-test-scope.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "shared package feature flags script" \
+  "scripts/ci/package-feature-flags.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "shared reborn tests workflow" \
+  ".github/workflows/reborn-tests.yml" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "legacy code style workflow" \
+  ".github/workflows/code_style.yml" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=false"
+
+assert_scope \
   "docs only" \
   "README.md" \
   "docs_only=true
 has_core_code=false
 has_legacy_tests=false
 has_reborn_tests=false"
+
+assert_empty_scope \
+  "docs_only=true
+has_core_code=false
+has_legacy_tests=false
+has_reborn_tests=false"
+
+assert_scope \
+  "nested markdown is not docs only" \
+  "crates/ironclaw_reborn/CLAUDE.md" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
 
 assert_scope \
   "reborn docs only" \
@@ -101,4 +181,12 @@ crates/ironclaw_reborn_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope_no_trailing_newline \
+  "final path without trailing newline" \
+  "crates/ironclaw_reborn_cli/src/main.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
 has_reborn_tests=true"
