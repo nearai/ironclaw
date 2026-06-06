@@ -30,7 +30,7 @@ is_shared_test_path() {
     Cargo.toml|Cargo.lock|build.rs|providers.json|Dockerfile)
       return 0
       ;;
-    scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh|scripts/ci/package-feature-flags.sh)
+    scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh|scripts/ci/package-feature-flags.sh|scripts/ci/reborn-package-matrix.sh)
       return 0
       ;;
     .github/workflows/test.yml | \

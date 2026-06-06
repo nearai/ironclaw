@@ -31,8 +31,9 @@ jobs:
     name: Detect code changes
     runs-on: ubuntu-latest
     outputs:
-      has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_code }}
+      has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_core_code }}
       has_boundary_check: ${{ steps.non_pr.outputs.has_boundary_check || steps.diff.outputs.has_boundary_check }}
+      has_gateway_js: ${{ steps.non_pr.outputs.has_gateway_js || steps.diff.outputs.has_gateway_js }}
       has_legacy_tests: ${{ steps.non_pr.outputs.has_legacy_tests || steps.diff.outputs.has_legacy_tests }}
       has_reborn_tests: ${{ steps.non_pr.outputs.has_reborn_tests || steps.diff.outputs.has_reborn_tests }}
       has_reborn_cli: ${{ steps.non_pr.outputs.has_reborn_cli || steps.diff.outputs.has_reborn_cli }}
@@ -42,6 +43,7 @@ jobs:
         run: |
           echo "has_code=true" >> "$GITHUB_OUTPUT"
           echo "has_boundary_check=true" >> "$GITHUB_OUTPUT"
+          echo "has_gateway_js=true" >> "$GITHUB_OUTPUT"
           echo "has_legacy_tests=true" >> "$GITHUB_OUTPUT"
           echo "has_reborn_tests=true" >> "$GITHUB_OUTPUT"
           echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
@@ -57,19 +59,18 @@ jobs:
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"...HEAD)"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile$|build\.rs$|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|scripts/ci/|\.github/workflows/code_style\.yml$)'; then
-            echo "has_code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_code=false" >> "$GITHUB_OUTPUT"
-            echo "No code changes — style checks will be skipped"
-          fi
-
           printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/channels/web/|scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
             echo "has_boundary_check=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_boundary_check=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_gateway/static/js/|\.github/workflows/code_style\.yml$)'; then
+            echo "has_gateway_js=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_gateway_js=false" >> "$GITHUB_OUTPUT"
           fi
 
           if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_reborn/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/code_style\.yml$)'; then
@@ -117,7 +118,7 @@ jobs:
   gateway-js-syntax:
     name: Gateway JS syntax
     needs: changes
-    if: needs.changes.outputs.has_code == 'true'
+    if: needs.changes.outputs.has_gateway_js == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -188,25 +189,7 @@ jobs:
       - id: packages
         name: Build package matrix from Reborn crate families
         run: |
-          packages="$(
-            cargo metadata --no-deps --format-version 1 \
-              | jq -c '
-                  [
-                    .packages[]
-                    | select(
-                        (.name | startswith("ironclaw_reborn"))
-                        or (.name | startswith("ironclaw_product"))
-                        or (.name == "ironclaw_architecture")
-                        or (.name == "ironclaw_slack_v2_adapter")
-                        or (.name == "ironclaw_telegram_v2_adapter")
-                        or (.name == "ironclaw_wasm_product_adapters")
-                        or (.name | startswith("ironclaw_webui_v2"))
-                      )
-                    | .name
-                  ]
-                  | unique
-                '
-          )"
+          packages="$(scripts/ci/reborn-package-matrix.sh)"
 
           if [ -z "${packages}" ] || [ "${packages}" = "[]" ]; then
             echo "No Reborn workspace crates discovered" >&2
@@ -323,7 +306,7 @@ jobs:
   gateway-boundaries:
     name: Gateway platform/feature boundaries
     needs: changes
-    if: needs.changes.outputs.has_code == 'true' || needs.changes.outputs.has_boundary_check == 'true'
+    if: needs.changes.outputs.has_boundary_check == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -364,9 +347,7 @@ jobs:
 
           for job_result in \
             "format=${{ needs.format.result }}" \
-            "gateway-js-syntax=${{ needs.gateway-js-syntax.result }}" \
-            "deny-check=${{ needs.deny-check.result }}" \
-            "gateway-boundaries=${{ needs.gateway-boundaries.result }}"; do
+            "deny-check=${{ needs.deny-check.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
             if [[ "$result" != "success" ]]; then
@@ -374,6 +355,20 @@ jobs:
               exit 1
             fi
           done
+
+          if [[ "${{ needs.changes.outputs.has_gateway_js }}" == "true" ]]; then
+            if [[ "${{ needs.gateway-js-syntax.result }}" != "success" ]]; then
+              echo "gateway-js-syntax failed: ${{ needs.gateway-js-syntax.result }}"
+              exit 1
+            fi
+          fi
+
+          if [[ "${{ needs.changes.outputs.has_boundary_check }}" == "true" ]]; then
+            if [[ "${{ needs.gateway-boundaries.result }}" != "success" ]]; then
+              echo "gateway-boundaries failed: ${{ needs.gateway-boundaries.result }}"
+              exit 1
+            fi
+          fi
 
           if [[ "${{ needs.changes.outputs.has_legacy_tests }}" == "true" ]]; then
             if [[ "${{ needs.clippy.result }}" != "success" ]]; then
