@@ -85,6 +85,7 @@ use ironclaw_turns::{
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
+use crate::hooks::build_hook_dispatcher_builder_factory;
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{
@@ -1355,6 +1356,7 @@ pub async fn build_reborn_runtime(
         default_project_id,
         regex_skill_activation_enabled,
         skill_context_source: configured_skill_context_source,
+        hooks: hooks_config,
         budget_defaults,
         budget_event_observer,
         #[cfg(any(test, feature = "test-support"))]
@@ -1622,6 +1624,13 @@ pub async fn build_reborn_runtime(
     let capability_input_resolver = local_dev_capabilities.capability_input_resolver;
     let capability_result_writer = local_dev_capabilities.capability_result_writer;
     let model_gateway = local_dev_capabilities.model_gateway;
+    let hook_dispatcher_builder_factory = build_hook_dispatcher_builder_factory(
+        hooks_config,
+        local_runtime.extension_registry.as_ref(),
+    )
+    .map_err(|error| RebornRuntimeError::InvalidArgument {
+        reason: format!("hook framework activation failed: {error}"),
+    })?;
 
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
@@ -1672,6 +1681,7 @@ pub async fn build_reborn_runtime(
         safety_context: None,
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
         turn_event_sink: None,
+        hook_dispatcher_builder_factory,
     })?;
     let default_resolved_run_profile = composition
         .run_profile_resolver

@@ -38,6 +38,7 @@ mod extension_lifecycle_command;
 mod factory;
 mod google_oauth;
 mod gsuite;
+mod hooks;
 mod input;
 mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
@@ -142,6 +143,10 @@ pub use extension_lifecycle_command::{
 };
 pub use factory::{RebornServices, build_reborn_services};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
+pub use hooks::{
+    HOOKS_ENABLED_ENV, HookDispatcherBuilderFactory, HooksActivationConfig,
+    build_hook_dispatcher_builder_factory,
+};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;

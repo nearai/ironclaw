@@ -400,6 +400,8 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) default_system_prompt_path: PathBuf,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
+    /// Canonical registry shared by capability dispatch and hook activation.
+    pub(crate) extension_registry: Arc<ExtensionRegistry>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -641,8 +643,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
     let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
+    let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
     let mut services = HostRuntimeServices::new(
-        Arc::new(local_dev_builtin_extension_registry()?),
+        Arc::clone(&extension_registry),
         Arc::clone(&filesystem),
         Arc::clone(&store_graph.resource_governor),
         Arc::new(GrantAuthorizer::new()),
@@ -791,6 +794,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
+        local_runtime.extension_registry = Arc::clone(&extension_registry);
         let host_runtime_http_egress = services.host_runtime_http_egress_port();
         #[cfg(all(test, feature = "slack-v2-host-beta"))]
         let host_runtime_http_egress =
@@ -936,6 +940,7 @@ fn build_local_dev_store_graph(
         default_system_prompt_path,
         event_log,
         audit_log,
+        extension_registry: Arc::new(ExtensionRegistry::new()),
     });
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
 
@@ -1035,6 +1040,7 @@ fn build_local_dev_store_graph(
         default_system_prompt_path,
         event_log,
         audit_log,
+        extension_registry: Arc::new(ExtensionRegistry::new()),
     });
     let process_services = ProcessServices::in_memory();
 
@@ -2733,6 +2739,7 @@ mod tests {
             default_system_prompt_path: base_runtime.default_system_prompt_path.clone(),
             event_log: Arc::clone(&base_runtime.event_log),
             audit_log: Arc::clone(&base_runtime.audit_log),
+            extension_registry: Arc::clone(&base_runtime.extension_registry),
         })
     }
 

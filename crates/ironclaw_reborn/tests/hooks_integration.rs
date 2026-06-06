@@ -762,11 +762,12 @@ fn wasm_dispatcher_from_wat_with_timeout(
     if let Some(timeout) = dispatcher_timeout {
         builder = builder.with_timeout(timeout);
     }
+    let entries = vec![entry];
     let (builder, ids) = registrar
         .install(
             ironclaw_host_api::ExtensionId::new("integration-tests").expect("valid ext id"),
-            "0.0.1".to_string(),
-            vec![entry],
+            "0.0.1",
+            &entries,
             builder,
         )
         .expect("wasm hook installs");
@@ -794,11 +795,12 @@ fn wasm_before_prompt_dispatcher_from_wat(
     )
     .with_scope(HookManifestScope::OwnCapabilities);
     let builder = HookDispatcherBuilder::new(HookRegistry::new());
+    let entries = vec![entry];
     let (builder, _ids) = registrar
         .install(
             ironclaw_host_api::ExtensionId::new("integration-tests").expect("valid ext id"),
-            "0.0.1".to_string(),
-            vec![entry],
+            "0.0.1",
+            &entries,
             builder,
         )
         .expect("wasm before_prompt hook installs");
@@ -2791,10 +2793,11 @@ async fn wasm_unsupported_host_import_is_rejected_at_install_time() {
     .with_scope(HookManifestScope::SameTenant)
     .with_requires_grant("integration-test-wasm-hooks");
     let builder = HookDispatcherBuilder::new(HookRegistry::new());
+    let entries = vec![entry];
     let result = registrar.install(
         ironclaw_host_api::ExtensionId::new("integration-tests").expect("valid ext id"),
-        "0.0.1".to_string(),
-        vec![entry],
+        "0.0.1",
+        &entries,
         builder,
     );
     match result {
@@ -2842,10 +2845,11 @@ async fn wasm_missing_export_is_rejected_at_install_time() {
     .with_scope(HookManifestScope::SameTenant)
     .with_requires_grant("integration-test-wasm-hooks");
     let builder = HookDispatcherBuilder::new(HookRegistry::new());
+    let entries = vec![entry];
     let result = registrar.install(
         ironclaw_host_api::ExtensionId::new("integration-tests").expect("valid ext id"),
-        "0.0.1".to_string(),
-        vec![entry],
+        "0.0.1",
+        &entries,
         builder,
     );
     match result {
