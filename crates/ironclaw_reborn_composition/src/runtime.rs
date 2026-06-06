@@ -3381,6 +3381,17 @@ mod tests {
             run_id: child_run_id,
             ..
         } = child;
+
+        runtime
+            .cancel_run(
+                &parent_scope,
+                parent_run_id,
+                SanitizedCancelReason::UserRequested,
+                "test-parent-cancel",
+            )
+            .await
+            .expect("parent cancellation succeeds");
+
         let result_ref = LoopResultRef::new("result:runtime-cancel-child").unwrap();
         runtime
             .thread_service
@@ -3425,16 +3436,6 @@ mod tests {
             })
             .await
             .expect("child thread metadata seeded");
-
-        runtime
-            .cancel_run(
-                &parent_scope,
-                parent_run_id,
-                SanitizedCancelReason::UserRequested,
-                "test-parent-cancel",
-            )
-            .await
-            .expect("parent cancellation succeeds");
 
         let child_state = runtime
             .turn_coordinator
