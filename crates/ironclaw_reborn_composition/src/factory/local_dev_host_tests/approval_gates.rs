@@ -353,13 +353,26 @@ fn tenant_sandbox_process_policy() -> ironclaw_host_api::runtime_policy::Effecti
 
 fn local_dev_minimal_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
     let mut policy = local_dev_policy();
-    // Override approval policy to Minimal (yolo-equivalent via ApprovalPolicy enum).
+    // Minimal is a profile-scoped bypass, so model the resolver's local-yolo
+    // output instead of only overriding the approval enum.
+    policy.requested_profile = ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo;
+    policy.resolved_profile = ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo;
+    policy.approval_policy = ironclaw_host_api::runtime_policy::ApprovalPolicy::Minimal;
+    policy
+}
+
+fn local_dev_minimal_enterprise_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy
+{
+    let mut policy = local_dev_policy();
+    policy.resolved_profile =
+        ironclaw_host_api::runtime_policy::RuntimeProfile::EnterpriseYoloDedicated;
     policy.approval_policy = ironclaw_host_api::runtime_policy::ApprovalPolicy::Minimal;
     policy
 }
 
 /// Minimal approval policy must complete effectful capabilities without any approval gate.
-/// Verifies `ApprovalPolicy::Minimal => GrantAuthorizer` path in `local_dev_authorizer`.
+/// Verifies the runtime-profile policy allows Minimal bypass only for a yolo
+/// profile.
 #[tokio::test]
 async fn local_dev_minimal_policy_shell_invocation_completes_without_approval_gate() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
@@ -389,6 +402,49 @@ async fn local_dev_minimal_policy_shell_invocation_completes_without_approval_ga
 
     // Minimal policy must not create an approval gate.
     assert!(matches!(outcome, RuntimeCapabilityOutcome::Completed(_))); // safety: test-only assertion in #[cfg(test)] module.
+}
+
+#[tokio::test]
+async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
+    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev("ent-minimal-owner", dir.path().join("local-dev"))
+            .with_runtime_policy(local_dev_minimal_enterprise_policy()),
+    )
+    .await
+    .expect("local-dev minimal enterprise services build"); // safety: test-only helper in #[cfg(test)] module.
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
+    let host_runtime = services
+        .host_runtime
+        .as_ref()
+        .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
+    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.
+    let context = shell_execution_context("ent-minimal-owner", "thread-ent-minimal");
+
+    let outcome = host_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            capability_id,
+            ResourceEstimate::default(),
+            serde_json::json!({"command": "echo ent"}),
+            trust_decision(shell_allowed_effects()),
+        ))
+        .await
+        .expect("enterprise minimal shell invocation resolves"); // safety: test-only helper in #[cfg(test)] module.
+
+    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = outcome else {
+        panic!("enterprise profile must keep gating even under Minimal, got {outcome:?}");
+    };
+    let approval = local_runtime
+        .approval_requests
+        .get(&context.resource_scope, gate.approval_request_id)
+        .await
+        .expect("approval store read") // safety: test-only helper in #[cfg(test)] module.
+        .expect("approval request persisted"); // safety: test-only helper in #[cfg(test)] module.
+    assert_eq!(approval.status, ApprovalStatus::Pending); // safety: test-only assertion in #[cfg(test)] module.
 }
 
 /// `authorize_spawn_with_trust` RequireApproval-then-resume end-to-end.
@@ -551,8 +607,8 @@ fn echo_spawn_allowed_effects() -> Vec<EffectKind> {
 }
 
 /// A capability invoked without a matching grant must be denied, not upgraded to
-/// RequireApproval. Verifies `other => other` pass-through in
-/// `require_approval_for_local_dev_policy`.
+/// RequireApproval. Verifies non-Allow pass-through in the profile approval
+/// authorizer.
 #[tokio::test]
 async fn local_dev_ungranted_capability_returns_denied_not_approval_gate() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
