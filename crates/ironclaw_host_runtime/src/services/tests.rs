@@ -6,18 +6,20 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_capabilities::{
-    CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationHandler,
+    CapabilityObligationCompletionRequest, CapabilityObligationError,
+    CapabilityObligationFailureKind, CapabilityObligationHandler, CapabilityObligationPhase,
     CapabilityObligationRequest,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, DispatchError, EffectKind, ExtensionId, HostPortCatalog,
-    InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    PermissionMode, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
-    RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeKind,
-    SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
+    AgentId, CapabilityDescriptor, CapabilityDispatchResult, CapabilityId, CapabilitySet,
+    CorrelationId, DispatchError, EffectKind, ExecutionContext, ExtensionId, HostPortCatalog,
+    InvocationId, MountView, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
+    Obligation, PermissionMode, ProjectId, ReservationStatus, ResourceEstimate, ResourceReceipt,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
+    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind, RuntimeHttpEgress,
+    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -540,6 +542,88 @@ async fn scrubbed_runtime_policy_resets_managed_local_process_port_after_inherit
 
     assert_eq!(output.exit_code, 0);
     assert_eq!(output.output, workdir.path().display().to_string());
+}
+
+#[tokio::test]
+async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
+    use ironclaw_events::{InMemorySecurityAuditSink, SecurityBoundary, SecurityDecision};
+
+    let security_sink = Arc::new(InMemorySecurityAuditSink::new());
+    let services = test_services().with_security_audit_sink(Arc::clone(&security_sink));
+    let handler = services.builtin_obligation_handler();
+
+    let invocation_id = InvocationId::new();
+    let resource_scope = ResourceScope {
+        tenant_id: TenantId::new("tenant1").unwrap(),
+        user_id: UserId::new("user1").unwrap(),
+        agent_id: Some(AgentId::new("agent-a").unwrap()),
+        project_id: Some(ProjectId::new("project1").unwrap()),
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
+    };
+    let context = ExecutionContext {
+        invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: resource_scope.tenant_id.clone(),
+        user_id: resource_scope.user_id.clone(),
+        agent_id: resource_scope.agent_id.clone(),
+        project_id: resource_scope.project_id.clone(),
+        mission_id: resource_scope.mission_id.clone(),
+        thread_id: resource_scope.thread_id.clone(),
+        extension_id: ExtensionId::new("caller").unwrap(),
+        runtime: RuntimeKind::Wasm,
+        trust: TrustClass::Sandbox,
+        grants: CapabilitySet::default(),
+        mounts: MountView::default(),
+        resource_scope: resource_scope.clone(),
+    };
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let dispatch = CapabilityDispatchResult {
+        capability_id: capability_id.clone(),
+        provider: context.extension_id.clone(),
+        runtime: RuntimeKind::Wasm,
+        output: Value::String("hello AKIAABCDEFGHIJKLMNOP goodbye".to_string()),
+        display_preview: None,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: resource_scope.clone(),
+            status: ReservationStatus::Released,
+            estimate: ResourceEstimate::default(),
+            actual: None,
+        },
+    };
+
+    let result = handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &ResourceEstimate::default(),
+            obligations: &[Obligation::RedactOutput],
+            dispatch: &dispatch,
+        })
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(CapabilityObligationError::Failed {
+                kind: CapabilityObligationFailureKind::Output
+            })
+        ),
+        "expected output-obligation failure, got {result:?}"
+    );
+    let events = security_sink.snapshot();
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(event.boundary, SecurityBoundary::LeakDetector);
+    assert_eq!(event.decision, SecurityDecision::Blocked);
+    assert_eq!(event.capability_id.as_ref(), Some(&capability_id));
+    assert_eq!(event.scope.as_ref(), Some(&resource_scope));
 }
 
 #[tokio::test]
