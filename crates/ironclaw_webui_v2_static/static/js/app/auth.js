@@ -11,9 +11,9 @@ import {
 // The Reborn host validates bearer tokens via OIDC; the SPA simply
 // carries whatever token the user supplies (via `?token=` URL param,
 // `#token=` URL fragment, OAuth `login_ticket` exchange, or
-// `sessionStorage`) and lets the server reject anything invalid. No
-// v2 endpoint exposes session probing or profile info, so this hook
-// holds no derived identity state.
+// `sessionStorage`) and lets the server reject anything invalid. The
+// session endpoint is the source of truth for derived identity and
+// UI capabilities.
 //
 // `?token=`  — manual-token paste pattern (the "Connect" form on
 //              the login page).

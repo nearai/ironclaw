@@ -102,7 +102,7 @@ function ExpandableNavItem({ route, label, subRoutes, onNavigate }) {
   `;
 }
 
-export function SidebarNav({ onNewChat, isCreating, isAdmin = true, onNavigate }) {
+export function SidebarNav({ onNewChat, isCreating, isAdmin = false, onNavigate }) {
   const t = useT();
   const visibleRoutes = React.useMemo(
     () => navRoutes.filter((route) => isAdmin || route.id !== "admin"),

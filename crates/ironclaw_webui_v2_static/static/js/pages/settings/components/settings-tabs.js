@@ -10,7 +10,7 @@ function useVisibleTabs(isAdmin) {
   );
 }
 
-export function SettingsTabs({ activeTab, onTabChange, isAdmin = true }) {
+export function SettingsTabs({ activeTab, onTabChange, isAdmin = false }) {
   const t = useT();
   const tabs = useVisibleTabs(isAdmin);
   return html`
@@ -45,7 +45,7 @@ export function SettingsTabs({ activeTab, onTabChange, isAdmin = true }) {
   `;
 }
 
-export function SettingsTabsMobile({ activeTab, onTabChange, isAdmin = true }) {
+export function SettingsTabsMobile({ activeTab, onTabChange, isAdmin = false }) {
   const t = useT();
   const tabs = useVisibleTabs(isAdmin);
   const active = tabs.find((tab) => tab.id === activeTab) || tabs[0];

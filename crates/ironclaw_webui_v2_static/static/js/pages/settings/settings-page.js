@@ -17,7 +17,7 @@ export function SettingsPage() {
   const t = useT();
   const { tab = "inference" } = useParams();
   const navigate = useNavigate();
-  const { gatewayStatus, gatewayStatusQuery, isAdmin = true } = useOutletContext();
+  const { gatewayStatus, gatewayStatusQuery, isAdmin = false } = useOutletContext();
   const {
     settings,
     query,

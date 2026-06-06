@@ -185,6 +185,16 @@ mod tests {
         assert!(auth.contains("operator_webui_config"));
         assert!(auth.contains("isAdmin: Boolean(session?.capabilities?.operator_webui_config)"));
         assert!(!auth.contains("isAdmin: false"));
+
+        let sidebar_nav = asset_text("js/components/sidebar-nav.js");
+        assert!(sidebar_nav.contains("isAdmin = false"));
+
+        let settings_page = asset_text("js/pages/settings/settings-page.js");
+        assert!(settings_page.contains("isAdmin = false"));
+
+        let settings_tabs = asset_text("js/pages/settings/components/settings-tabs.js");
+        assert!(settings_tabs.contains("isAdmin = false"));
+        assert!(!settings_tabs.contains("isAdmin = true"));
     }
 
     #[test]
