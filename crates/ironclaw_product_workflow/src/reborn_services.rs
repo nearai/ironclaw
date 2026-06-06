@@ -129,6 +129,12 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
 
 #[async_trait]
 pub trait OutboundPreferencesProductFacade: Send + Sync {
+    /// Return the authenticated caller's scoped outbound preferences.
+    ///
+    /// Real implementations must scope stored preferences by the caller's
+    /// tenant/user identity. The Phase 1 unsupported implementation returns an
+    /// empty projection so read callers can treat "not configured yet" as a
+    /// stable state while mutation and target inventory remain fail-closed.
     async fn get_outbound_preferences(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -159,9 +165,10 @@ impl UnsupportedOutboundPreferencesProductFacade {
 impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductFacade {
     async fn get_outbound_preferences(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Ok(RebornOutboundPreferencesResponse::default())
+        let _ = caller;
+        Ok(unsupported_outbound_preferences_projection())
     }
 
     async fn set_outbound_preferences(
@@ -169,14 +176,14 @@ impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductF
         _caller: WebUiAuthenticatedCaller,
         _request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Err(outbound_preferences_unavailable())
+        Err(unsupported_outbound_preferences_mutation_error())
     }
 
     async fn list_outbound_delivery_targets(
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        Err(outbound_preferences_unavailable())
+        Err(unsupported_outbound_preferences_mutation_error())
     }
 }
 
@@ -399,9 +406,10 @@ pub trait RebornServicesApi: Send + Sync {
 
     async fn get_outbound_preferences(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Ok(RebornOutboundPreferencesResponse::default())
+        let _ = caller;
+        Ok(unsupported_outbound_preferences_projection())
     }
 
     async fn set_outbound_preferences(
@@ -410,7 +418,7 @@ pub trait RebornServicesApi: Send + Sync {
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
         let _ = (caller, request);
-        Err(outbound_preferences_unavailable())
+        Err(unsupported_outbound_preferences_mutation_error())
     }
 
     async fn list_outbound_delivery_targets(
@@ -418,7 +426,7 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
         let _ = caller;
-        Err(outbound_preferences_unavailable())
+        Err(unsupported_outbound_preferences_mutation_error())
     }
 
     async fn list_extensions(
@@ -1500,6 +1508,14 @@ fn automation_unavailable() -> RebornServicesError {
 
 fn outbound_preferences_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(true)
+}
+
+fn unsupported_outbound_preferences_projection() -> RebornOutboundPreferencesResponse {
+    RebornOutboundPreferencesResponse::default()
+}
+
+fn unsupported_outbound_preferences_mutation_error() -> RebornServicesError {
+    outbound_preferences_unavailable()
 }
 
 struct AcceptedWebUiMessage {
