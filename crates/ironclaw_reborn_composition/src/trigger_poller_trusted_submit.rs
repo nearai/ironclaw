@@ -186,6 +186,7 @@ where
                 resolve_request,
                 fire.agent_id.clone(),
                 fire.project_id.clone(),
+                None,
             )
             .await
             .map_err(classify_materializer_inbound_error)?;
@@ -600,6 +601,7 @@ mod tests {
             _request: ResolveConversationRequest,
             _trusted_agent_id: Option<AgentId>,
             _trusted_project_id: Option<ProjectId>,
+            _trusted_owner_user_id: Option<UserId>,
         ) -> Result<ConversationBindingResolution, InboundTurnError> {
             panic!("foreign-tenant materialization must reject before trusted binding resolution")
         }

@@ -1082,6 +1082,26 @@ mod tests {
             .expect("unauthenticated route responds");
         assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 
+        let empty_list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .body(Body::empty())
+                    .expect("empty list request builds"),
+            )
+            .await
+            .expect("empty list route responds");
+        assert_eq!(empty_list.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(empty_list.into_body(), 64 * 1024)
+            .await
+            .expect("empty list body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("empty list json");
+        assert_eq!(body["routes"], serde_json::json!([]));
+        assert_eq!(body["next_cursor"], serde_json::Value::Null);
+
         let upsert = app
             .clone()
             .oneshot(

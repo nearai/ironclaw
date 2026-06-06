@@ -512,30 +512,68 @@ impl ConversationBindingService for ProductConversationBindingService {
         let installation_scope = self
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
+        let conversation_request =
+            conversation_request(&request, installation_scope.tenant_id.clone())?;
+        if request.route_kind == ProductConversationRouteKind::Shared {
+            match self
+                .conversations
+                .lookup_binding(conversation_request.clone())
+                .await
+            {
+                Ok(resolution) if resolution.turn_scope.explicit_owner_user_id().is_some() => {
+                    let owner_user_id = resolution.turn_scope.explicit_owner_user_id().cloned();
+                    let expected_user_id =
+                        resolve_actor_user(&installation_scope, &request).await?;
+                    if let Some(user_id) = expected_user_id.as_ref() {
+                        self.apply_resolved_actor_binding(&installation_scope, &request, user_id)
+                            .await?;
+                    }
+                    let resolution = self
+                        .conversations
+                        .resolve_or_create_binding_with_trusted_scope(
+                            conversation_request,
+                            None,
+                            None,
+                            owner_user_id,
+                        )
+                        .await
+                        .map_err(map_conversation_error)?;
+                    ensure_resolved_actor_matches_expected_user(
+                        expected_user_id.as_ref(),
+                        &resolution,
+                    )?;
+
+                    return resolved_binding_from_resolution(resolution, request.route_kind);
+                }
+                Ok(_) | Err(ironclaw_conversations::InboundTurnError::BindingRequired { .. }) => {}
+                Err(error) => return Err(map_conversation_error(error)),
+            }
+        }
         let configured_subject_user_id = installation_scope
             .configured_subject_user_id_for_route(&request)
             .await?;
-        ensure_shared_route_has_configured_subject(
-            request.route_kind,
-            configured_subject_user_id.as_ref(),
-        )?;
         let expected_user_id = resolve_actor_user(&installation_scope, &request).await?;
         if let Some(user_id) = expected_user_id.as_ref() {
             self.apply_resolved_actor_binding(&installation_scope, &request, user_id)
                 .await?;
         }
+        ensure_shared_route_has_configured_subject(
+            request.route_kind,
+            configured_subject_user_id.as_ref(),
+        )?;
         let resolution = self
             .conversations
             .resolve_or_create_binding_with_trusted_scope(
-                conversation_request(&request, installation_scope.tenant_id.clone())?,
+                conversation_request,
                 installation_scope.default_agent_id.clone(),
                 installation_scope.default_project_id.clone(),
+                configured_subject_user_id.clone(),
             )
             .await
             .map_err(map_conversation_error)?;
         ensure_resolved_actor_matches_expected_user(expected_user_id.as_ref(), &resolution)?;
 
-        resolved_binding_from_resolution(resolution, request.route_kind, configured_subject_user_id)
+        resolved_binding_from_resolution(resolution, request.route_kind)
     }
 
     async fn lookup_binding(
@@ -545,37 +583,32 @@ impl ConversationBindingService for ProductConversationBindingService {
         let installation_scope = self
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
-        let configured_subject_user_id = installation_scope
-            .configured_subject_user_id_for_route(&request)
-            .await?;
-        ensure_shared_route_has_configured_subject(
-            request.route_kind,
-            configured_subject_user_id.as_ref(),
-        )?;
+        let conversation_request =
+            conversation_request(&request, installation_scope.tenant_id.clone())?;
         let resolution = self
             .conversations
-            .lookup_binding(conversation_request(
-                &request,
-                installation_scope.tenant_id.clone(),
-            )?)
+            .lookup_binding(conversation_request)
             .await
             .map_err(map_conversation_error)?;
 
-        resolved_binding_from_resolution(resolution, request.route_kind, configured_subject_user_id)
+        resolved_binding_from_resolution(resolution, request.route_kind)
     }
 }
 
 fn resolved_binding_from_resolution(
     resolution: ironclaw_conversations::ConversationBindingResolution,
     route_kind: ProductConversationRouteKind,
-    configured_subject_user_id: Option<UserId>,
 ) -> Result<ResolvedBinding, ProductWorkflowError> {
     let actor_user_id = resolution.actor.user_id;
     let subject_user_id = match route_kind {
         ProductConversationRouteKind::Direct => Some(actor_user_id.clone()),
-        ProductConversationRouteKind::Shared => {
-            Some(configured_subject_user_id.ok_or_else(shared_route_requires_subject_error)?)
-        }
+        ProductConversationRouteKind::Shared => Some(
+            resolution
+                .turn_scope
+                .explicit_owner_user_id()
+                .cloned()
+                .ok_or_else(shared_route_missing_persisted_subject_error)?,
+        ),
     };
     Ok(ResolvedBinding {
         tenant_id: resolution.tenant_id,
@@ -601,6 +634,10 @@ fn shared_route_requires_subject_error() -> ProductWorkflowError {
     ProductWorkflowError::BindingRequired {
         reason: "shared product route requires a configured subject user".into(),
     }
+}
+
+fn shared_route_missing_persisted_subject_error() -> ProductWorkflowError {
+    ProductWorkflowError::BindingAccessDenied
 }
 
 fn conversation_request(

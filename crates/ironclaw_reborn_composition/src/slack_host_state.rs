@@ -253,7 +253,8 @@ where
         let Ok(channel_id) = String::from_utf8(decoded) else {
             return Ok(None);
         };
-        if path_segment(&channel_id) != stem {
+        let canonical_name = format!("{}.json", path_segment(&channel_id));
+        if canonical_name != entry_name {
             return Ok(None);
         }
         scoped_path(&format!(
@@ -261,7 +262,7 @@ where
             CHANNEL_ROUTE_ROOT,
             path_segment(installation_id.as_str()),
             path_segment(team_id),
-            entry_name
+            canonical_name
         ))
         .map(Some)
     }

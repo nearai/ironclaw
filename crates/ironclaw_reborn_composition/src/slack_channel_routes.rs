@@ -439,6 +439,8 @@ async fn upsert_slack_channel_route_handler(
     ensure_authorized_operator(&config, &caller)?;
     scan_route_admin_field(&config, "channel_id", &request.channel_id)?;
     scan_route_admin_field(&config, "subject_user_id", &request.subject_user_id)?;
+    // `UserId` is not tenant-qualified; tenant isolation comes from the
+    // server-stamped route key plus the caller/config tenant check above.
     let subject_user_id =
         UserId::new(request.subject_user_id).map_err(|_| SlackRouteError::BadRequest)?;
     let key = config.key_for_channel(request.channel_id)?;
@@ -760,6 +762,36 @@ mod tests {
                 ProductConversationSubjectRouteResolutionRequest {
                     adapter_id: ProductAdapterId::new("not_slack").expect("adapter"),
                     installation_id: AdapterInstallationId::new(INSTALLATION)
+                        .expect("installation"),
+                    route_key: ProductConversationRouteKey::new(
+                        Some(TEAM.to_string()),
+                        "C0ENG".to_string(),
+                    )
+                    .expect("route key"),
+                },
+            )
+            .await
+            .expect("resolver succeeds");
+
+        assert_eq!(resolved, None);
+        assert_eq!(store.resolve_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn slack_subject_route_resolver_returns_none_for_installation_mismatch_without_store_call()
+     {
+        let store = Arc::new(CountingRouteStore::default());
+        let resolver = SlackChannelRouteSubjectResolver::new(
+            TenantId::new(TENANT).expect("tenant"),
+            AdapterInstallationId::new(INSTALLATION).expect("installation"),
+            store.clone(),
+        );
+
+        let resolved = resolver
+            .resolve_product_conversation_subject_route(
+                ProductConversationSubjectRouteResolutionRequest {
+                    adapter_id: ProductAdapterId::new(SLACK_V2_ADAPTER_ID).expect("adapter"),
+                    installation_id: AdapterInstallationId::new("install_other")
                         .expect("installation"),
                     route_key: ProductConversationRouteKey::new(
                         Some(TEAM.to_string()),

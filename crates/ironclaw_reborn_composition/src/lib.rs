@@ -673,6 +673,23 @@ fn invocation_mount_view_for_segments(
     MountView::new(grants)
 }
 
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    feature = "slack-v2-host-beta"
+))]
+pub(crate) fn slack_host_state_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::HostApiError> {
+    let tenant_id = resource_scope_path_segment(scope.tenant_id.as_str());
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/tenant-shared/slack-personal-binding")?,
+        VirtualPath::new(format!(
+            "/tenants/{tenant_id}/shared/slack-personal-binding"
+        ))?,
+        MountPermissions::read_write_list_delete(),
+    )])
+}
+
 /// Wrap `root` in a tenant-aware [`ScopedFilesystem`] whose resolver is
 /// [`invocation_mount_view`]. The returned filesystem is the single
 /// production handle — every consumer-store call routes per-scope
@@ -858,6 +875,39 @@ mod mount_view_tests {
         assert_eq!(
             resolved.as_str(),
             &format!("/tenants/{}/shared/foo", scope.tenant_id.as_str())
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_state_mount_view_grants_delete_only_to_slack_state_root() {
+        let scope = sample_scope();
+        let view = slack_host_state_mount_view(&scope).unwrap();
+        let resolved = view
+            .resolve(
+                &ScopedPath::new("/tenant-shared/slack-personal-binding/channel-routes/route.json")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            &format!(
+                "/tenants/{}/shared/slack-personal-binding/channel-routes/route.json",
+                scope.tenant_id.as_str()
+            )
+        );
+        let grant = view
+            .mounts
+            .iter()
+            .find(|grant| grant.alias.as_str() == "/tenant-shared/slack-personal-binding")
+            .expect("slack host-state grant");
+        assert_eq!(
+            grant.permissions,
+            MountPermissions::read_write_list_delete()
+        );
+        assert!(
+            view.resolve(&ScopedPath::new("/tenant-shared/other.json").unwrap())
+                .is_err()
         );
     }
 

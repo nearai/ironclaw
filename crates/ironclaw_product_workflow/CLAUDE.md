@@ -111,6 +111,10 @@ resolve. Thread hints in subscription requests may narrow to the already
 resolved binding only; they are not authority to switch threads or tenants.
 Projection/subscription resolution is lookup-only and must not create bindings,
 threads, or external-event route reservations.
+Shared-route subject users are also first-bind scope, not a live overlay on
+existing external conversation bindings. Route admin updates apply to new
+bindings; existing Slack threads must continue resolving under the owner that
+created their thread scope.
 
 Outbound delivery orchestration starts only after `ironclaw_outbound` resolves
 and validates a communication delivery candidate. `OutboundPolicyService`

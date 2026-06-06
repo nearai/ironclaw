@@ -7,7 +7,9 @@ use std::time::Duration as StdDuration;
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
-use ironclaw_conversations::InMemoryConversationServices;
+use ironclaw_conversations::{
+    ConversationBindingService as ConversationBindingPort, InMemoryConversationServices,
+};
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
@@ -647,7 +649,7 @@ async fn approval_resolution_payload_routes_through_approval_interaction_service
 async fn concrete_approval_resolution_rejects_unknown_installation_via_product_binding_service() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
-        conversations;
+        conversations.clone();
     let binding = Arc::new(ProductConversationBindingService::new(
         conversation_port,
         StaticProductInstallationResolver::default(),
@@ -1844,7 +1846,7 @@ async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
         ),
         scope,
     )]);
-    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+    let binding = ProductConversationBindingService::new(conversation_port.clone(), resolver);
     let workflow = DefaultProductWorkflow::new(
         Arc::new(DefaultInboundTurnService::new(
             binding.clone(),
@@ -2405,7 +2407,7 @@ async fn shared_route_without_configured_subject_requires_binding() {
             Some(ProjectId::new("project:alpha").expect("project")),
         ),
     )]);
-    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+    let binding = ProductConversationBindingService::new(conversation_port.clone(), resolver);
     let envelope = sample_envelope_with_payload(
         "shared-no-subject",
         ProductInboundPayload::UserMessage(
@@ -2462,7 +2464,7 @@ async fn shared_route_uses_conversation_specific_subject_over_installation_defau
         ),
         scope,
     )]);
-    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+    let binding = ProductConversationBindingService::new(conversation_port.clone(), resolver);
     let envelope = sample_envelope_with_context(
         ProductAdapterId::new("test_adapter").expect("adapter"),
         AdapterInstallationId::new("install_alpha").expect("installation"),
@@ -2520,7 +2522,7 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
         ),
         scope,
     )]);
-    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+    let binding = ProductConversationBindingService::new(conversation_port.clone(), resolver);
     let envelope = sample_envelope_with_context(
         ProductAdapterId::new("test_adapter").expect("adapter"),
         AdapterInstallationId::new("install_alpha").expect("installation"),
@@ -2555,10 +2557,289 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
         resolved.subject_user_id.as_ref().map(UserId::as_str),
         Some("user:eng-team")
     );
+
+    let failing_subject_resolver = Arc::new(FailingSubjectRouteResolver::default());
+    let failing_scope = ProductInstallationScope::with_default_scope(
+        TenantId::new("tenant:alpha").expect("tenant"),
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_conversation_subject_route_resolver(failing_subject_resolver.clone());
+    let failing_installation_resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        failing_scope,
+    )]);
+    let failing_binding = ProductConversationBindingService::new(
+        conversation_port.clone(),
+        failing_installation_resolver,
+    );
+    let existing_route_envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-route-subject-existing").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(
+            Some("T-team"),
+            "C-eng",
+            Some("thread-1"),
+            Some("msg-existing"),
+        )
+        .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "hello existing shared thread",
+                vec![],
+                ProductTriggerReason::BotMention,
+            )
+            .expect("message"),
+        ),
+    );
+    let resolved_with_unavailable_route_store = failing_binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(
+            &existing_route_envelope,
+        ))
+        .await
+        .expect("existing shared binding should not need route resolver");
+
+    assert_eq!(
+        resolved_with_unavailable_route_store.thread_id,
+        resolved.thread_id
+    );
+    assert_eq!(
+        resolved_with_unavailable_route_store
+            .subject_user_id
+            .as_ref()
+            .map(UserId::as_str),
+        Some("user:eng-team")
+    );
+    let route_mismatch_replay = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-route-subject-existing").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(
+            Some("T-team"),
+            "C-ops",
+            Some("thread-1"),
+            Some("msg-existing"),
+        )
+        .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "reused event id on a different shared route",
+                vec![],
+                ProductTriggerReason::BotMention,
+            )
+            .expect("message"),
+        ),
+    );
+    let route_mismatch = failing_binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&route_mismatch_replay))
+        .await
+        .expect_err("existing shared binding must record the external event route");
+    assert!(matches!(
+        route_mismatch,
+        ProductWorkflowError::BindingAccessDenied
+    ));
+    assert_eq!(failing_subject_resolver.call_count(), 0);
     let calls = subject_resolver.calls();
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].route_key.space_id(), Some("T-team"));
     assert_eq!(calls[0].route_key.conversation_id(), "C-eng");
+
+    subject_resolver.set_subject(UserId::new("user:ops-team").expect("updated route subject"));
+    let reassigned_route_envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-route-subject-2").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-2"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "hello existing shared thread",
+                vec![],
+                ProductTriggerReason::BotMention,
+            )
+            .expect("message"),
+        ),
+    );
+    let resolved_after_route_update = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(
+            &reassigned_route_envelope,
+        ))
+        .await
+        .expect("existing shared binding should keep its original subject");
+
+    assert_eq!(resolved_after_route_update.thread_id, resolved.thread_id);
+    assert_eq!(
+        resolved_after_route_update
+            .subject_user_id
+            .as_ref()
+            .map(UserId::as_str),
+        Some("user:eng-team")
+    );
+
+    subject_resolver.clear_subject();
+    let deleted_route_envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-route-subject-3").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-3"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "hello deleted shared route",
+                vec![],
+                ProductTriggerReason::BotMention,
+            )
+            .expect("message"),
+        ),
+    );
+    let resolved_after_route_delete = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(
+            &deleted_route_envelope,
+        ))
+        .await
+        .expect("existing shared binding should survive route deletion");
+
+    assert_eq!(resolved_after_route_delete.thread_id, resolved.thread_id);
+    assert_eq!(
+        resolved_after_route_delete
+            .subject_user_id
+            .as_ref()
+            .map(UserId::as_str),
+        Some("user:eng-team")
+    );
+
+    let deleted_route_lookup_envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-route-subject-4").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-4"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "lookup deleted shared route",
+                vec![],
+                ProductTriggerReason::BotMention,
+            )
+            .expect("message"),
+        ),
+    );
+    let looked_up_after_route_delete = binding
+        .lookup_binding(ResolveBindingRequest::from_envelope(
+            &deleted_route_lookup_envelope,
+        ))
+        .await
+        .expect("existing shared binding lookup should survive route deletion");
+
+    assert_eq!(looked_up_after_route_delete.thread_id, resolved.thread_id);
+    assert_eq!(
+        looked_up_after_route_delete
+            .subject_user_id
+            .as_ref()
+            .map(UserId::as_str),
+        Some("user:eng-team")
+    );
+}
+
+#[tokio::test]
+async fn lookup_binding_does_not_backfill_legacy_ownerless_shared_route() {
+    let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
+    let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
+    let installation_id =
+        ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            tenant_id.clone(),
+            adapter_kind.clone(),
+            installation_id.clone(),
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    ConversationBindingPort::resolve_or_create_binding(
+        conversations.as_ref(),
+        ironclaw_conversations::ResolveConversationRequest {
+            tenant_id: tenant_id.clone(),
+            adapter_kind,
+            adapter_installation_id: installation_id,
+            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+                .expect("actor"),
+            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
+                Some("T-team"),
+                "C-eng",
+                Some("thread-legacy"),
+                Some("msg-legacy"),
+            )
+            .expect("conversation"),
+            external_event_id: ironclaw_conversations::ExternalEventId::new("evt:legacy-shared")
+                .expect("event"),
+            route_kind: ironclaw_conversations::ConversationRouteKind::Shared,
+            requested_agent_id: Some(AgentId::new("agent:legacy").expect("agent")),
+            requested_project_id: Some(ProjectId::new("project:legacy").expect("project")),
+        },
+    )
+    .await
+    .expect("seed legacy shared binding");
+
+    let subject_resolver = Arc::new(RecordingSubjectRouteResolver::default());
+    subject_resolver.set_subject(UserId::new("user:eng-team").expect("route subject"));
+    let scope = ProductInstallationScope::with_default_scope(
+        tenant_id,
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_conversation_subject_route_resolver(subject_resolver.clone());
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        scope,
+    )]);
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations.clone();
+    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+    let envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:legacy-shared-lookup").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(
+            Some("T-team"),
+            "C-eng",
+            Some("thread-legacy"),
+            Some("msg-lookup"),
+        )
+        .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "lookup existing legacy shared route",
+                vec![],
+                ProductTriggerReason::BotMention,
+            )
+            .expect("message"),
+        ),
+    );
+
+    let error = binding
+        .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect_err("lookup must not backfill legacy ownerless shared routes");
+
+    assert!(matches!(error, ProductWorkflowError::BindingAccessDenied));
+    assert!(
+        subject_resolver.calls().is_empty(),
+        "existing-only lookup must stay read-only and must not invoke route subject resolution"
+    );
 }
 
 #[tokio::test]
@@ -3531,6 +3812,13 @@ impl RecordingSubjectRouteResolver {
             .subject_user_id
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(subject_user_id);
+    }
+
+    fn clear_subject(&self) {
+        *self
+            .subject_user_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     fn calls(&self) -> Vec<ProductConversationSubjectRouteResolutionRequest> {

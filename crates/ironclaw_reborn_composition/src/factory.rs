@@ -910,6 +910,8 @@ fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
+    #[cfg(feature = "slack-v2-host-beta")]
+    let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
@@ -939,7 +941,7 @@ fn build_local_dev_store_graph(
         skill_filesystem,
         workspace_filesystem,
         #[cfg(feature = "slack-v2-host-beta")]
-        host_state_filesystem: Arc::clone(&scoped_filesystem),
+        host_state_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         extension_filesystem: Arc::clone(&filesystem),
         workspace_mounts,
@@ -1009,6 +1011,8 @@ fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
+    #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
+    let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -1040,7 +1044,7 @@ fn build_local_dev_store_graph(
         skill_filesystem,
         workspace_filesystem,
         #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
-        host_state_filesystem: Arc::clone(&subagent_goal_filesystem),
+        host_state_filesystem,
         #[cfg(feature = "postgres")]
         subagent_goal_filesystem,
         extension_filesystem: Arc::clone(&filesystem),
@@ -1583,6 +1587,19 @@ fn local_dev_scoped_filesystem(
     filesystem: Arc<LocalDevRootFilesystem>,
 ) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
     crate::wrap_scoped(filesystem)
+}
+
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    feature = "slack-v2-host-beta"
+))]
+fn local_dev_slack_host_state_filesystem(
+    filesystem: Arc<LocalDevRootFilesystem>,
+) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
+    Arc::new(ScopedFilesystem::new(
+        filesystem,
+        crate::slack_host_state_mount_view,
+    ))
 }
 
 #[cfg(feature = "libsql")]
