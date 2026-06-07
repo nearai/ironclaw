@@ -86,8 +86,10 @@ pub use commands::{
 };
 pub use conversation_binding::{
     ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
-    StaticProductActorUserResolver, StaticProductInstallationResolver,
+    ProductConversationBindingService, ProductConversationRouteKey,
+    ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
+    ProductInstallationKey, ProductInstallationScope, StaticProductActorUserResolver,
+    StaticProductInstallationResolver,
 };
 pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
 #[cfg(any(test, feature = "test-support"))]
@@ -142,15 +144,15 @@ pub use reborn_services::{
     RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
-    RebornExtensionSetupSecret, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse, RebornServices,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
     StaticConnectableChannelsProductFacade, UnsupportedAutomationProductFacade,
     UpsertLlmProviderRequest,
 };

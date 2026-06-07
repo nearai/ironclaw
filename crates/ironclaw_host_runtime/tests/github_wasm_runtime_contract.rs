@@ -171,6 +171,99 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
 }
 
 #[tokio::test]
+async fn host_runtime_services_restages_github_product_auth_for_multi_request_wasm_capability() {
+    let capability_id = CapabilityId::new("github.create_branch").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let source_sha = "abc123def4567890abc123def4567890abc123de";
+    let policy = github_policy();
+    let network = RecordingNetworkHttpEgress::with_body(
+        format!(r#"{{"ref":"refs/heads/main","object":{{"sha":"{source_sha}"}}}}"#).into_bytes(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_github_package()),
+        Arc::new(filesystem_with_github_package()),
+        Arc::new(governor_with_default_limit(sample_account())),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+            Obligation::InjectCredentialAccountOnce {
+                handle: slot_handle,
+                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: Vec::new(),
+                requester_extension: ExtensionId::new("github").unwrap(),
+            },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
+        result: Ok(account_access_secret.clone()),
+    }))
+    .with_trust_policy(Arc::new(github_first_party_trust_policy()))
+    .try_with_host_http_egress(network.clone())
+    .unwrap()
+    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    .unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "branch": "feature/matrix",
+                "from_ref": "main"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/nearai/ironclaw/git/ref/heads/main"
+    );
+    assert_eq!(requests[1].method, NetworkMethod::Post);
+    assert_eq!(
+        requests[1].url,
+        "https://api.github.com/repos/nearai/ironclaw/git/refs"
+    );
+    for request in &requests {
+        assert_eq!(request.policy, policy);
+        assert_google_bearer_header(request, "ghp_fake_fixture_token");
+    }
+    let create_body: serde_json::Value =
+        serde_json::from_slice(&requests[1].body).expect("create branch JSON body");
+    assert_eq!(
+        create_body,
+        json!({"ref": "refs/heads/feature/matrix", "sha": source_sha})
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_google_credential() {
     let capability_id = CapabilityId::new("google-drive.list_files").unwrap();
     let scope = sample_scope(InvocationId::new());

@@ -119,7 +119,7 @@ Inbound order (outer → inner → handler):
    Composition fails closed if a future descriptor declares an unsupported
    scope.
 9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
-   handlers from `ironclaw_webui_v2` (create-thread, list-threads,
+   handlers from `ironclaw_webui_v2` (create-thread, list-threads, delete-thread,
    send-message, get-timeline, stream-events SSE, stream-events WS,
    cancel-run, resolve-gate, setup-extension, list-automations).
 
@@ -176,6 +176,13 @@ body carries `{ channel, code }`; the route validates the channel server-side
 and currently resolves the supported Slack channel aliases to the Slack
 personal-binding pairing service. The browser must not call provider-specific
 pairing paths directly.
+
+When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
+`GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` inside the same bearer
+auth layer. The browser supplies only `channel_id` and `subject_user_id`;
+tenant, adapter installation, and Slack team come from host configuration. The
+route writes to Slack host state so runtime assignments are durable and are
+resolved before static TOML `channel_routes` fallback.
 
 ### Host-supplied public route mount (#4116 — SSO login surface)
 
@@ -250,6 +257,7 @@ rows are inventoried here, not implemented in the current PR.
 | Send message | `POST /api/chat/send` | `POST /api/webchat/v2/threads/{thread_id}/messages` | Mapped |
 | Create thread | `POST /api/chat/thread/new` | `POST /api/webchat/v2/threads` | Mapped |
 | List threads | `GET /api/chat/threads` | `GET /api/webchat/v2/threads` | Mapped |
+| Delete thread | (none) | `DELETE /api/webchat/v2/threads/{thread_id}` | Mapped |
 | Read history / timeline | `GET /api/chat/history` | `GET /api/webchat/v2/threads/{thread_id}/timeline` | Mapped |
 | SSE stream | `GET /api/chat/events` | `GET /api/webchat/v2/threads/{thread_id}/events` | Mapped (incl. `?token=` shim) |
 | WebSocket stream | `GET /api/chat/ws` | `GET /api/webchat/v2/threads/{tid}/ws` | Mapped |
@@ -267,9 +275,10 @@ rows are inventoried here, not implemented in the current PR.
   `auth_middleware`. The Reborn binary owns its own
   `WebuiAuthenticator` impl (env tokens, DB-backed sessions, OIDC,
   whatever the host wires) and supplies it via `WebuiServeConfig`.
-- **Operator LLM config** — the `/api/webchat/v2/llm/*` routes mutate
-  operator-wide provider settings and secrets. `webui_v2_app` only
-  mounts them when the host authenticator opts into operator LLM config;
+- **Operator WebUI config** — the `/api/webchat/v2/llm/*` routes and
+  Slack channel-route admin mutate operator-wide provider settings,
+  secrets, or channel ownership. `webui_v2_app` only mounts them when
+  the host authenticator opts into `allows_operator_webui_config`;
   multi-user authenticators must leave them unmounted until a real admin
   authorization boundary exists.
 - **`?token=` exception** — only `GET /api/webchat/v2/threads/{id}/events`;

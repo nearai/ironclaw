@@ -25,9 +25,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_workflow::{
     LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
     RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
@@ -258,6 +259,14 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn delete_thread(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 
