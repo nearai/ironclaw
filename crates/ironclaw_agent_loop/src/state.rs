@@ -11,8 +11,8 @@ pub use signature::{ArgsHash, CapabilityCallSignature, CapabilityCallSignatureEr
 pub use slots::{
     CapabilityStrategyState, CompactionPromptSnapshot, CompactionStrategyState,
     ContextStrategyState, DeferredCompactionWatermark, GateStrategyState, GoalRefreshStrategyState,
-    IndexedMessageKind, MessageIndexEntry, ModelStrategyState, RecoveryAttemptClass,
-    RecoveryStrategyState, RepeatedCallWarningPhase, RepeatedCallWarningState,
+    IndexedMessageKind, MessageIndexEntry, ModelStrategyState, PostCapabilityStageState,
+    RecoveryAttemptClass, RecoveryStrategyState, RepeatedCallWarningPhase, RepeatedCallWarningState,
     ReplyAdmissionRejection, ReplyAdmissionRejectionReason, ReplyAdmissionStrategyState,
     StopStrategyState,
 };
@@ -71,6 +71,8 @@ pub struct LoopExecutionState {
     #[serde(default)]
     pub compaction_prompt: CompactionPromptSnapshot,
     #[serde(default)]
+    pub post_capability_state: PostCapabilityStageState,
+    #[serde(default)]
     pub goal_refresh_state: GoalRefreshStrategyState,
     pub recovery_state: RecoveryStrategyState,
     #[serde(default)]
@@ -104,6 +106,7 @@ impl LoopExecutionState {
             model_state: ModelStrategyState::default(),
             compaction_state: CompactionStrategyState::default(),
             compaction_prompt: CompactionPromptSnapshot::default(),
+            post_capability_state: PostCapabilityStageState::default(),
             goal_refresh_state: GoalRefreshStrategyState::default(),
             recovery_state: RecoveryStrategyState::default(),
             reply_admission_state: ReplyAdmissionStrategyState::default(),

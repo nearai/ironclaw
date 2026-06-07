@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use ironclaw_host_api::CapabilityId;
+
 use super::CapabilityCallSignature;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -388,3 +390,27 @@ pub enum RepeatedCallWarningPhase {
 /// Persistent state owned by `GateHandlingStrategy`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GateStrategyState {}
+
+/// Persistent state owned by `PostCapabilityStage`.
+///
+/// ### `pending_capability_bytes`
+/// Per-capability byte accounting accumulator. Filled on each completed
+/// capability call within a turn by `push_completed_result` (later steps).
+/// Read and cleared by `PostCapabilityStage` when the per-capability byte
+/// policy trips, at which point the stage sets `skip_model_this_iteration`
+/// and drains this map to zero so the next turn starts fresh.
+///
+/// ### `skip_model_this_iteration`
+/// One-shot pipeline directive set by `PostCapabilityStage` when a
+/// byte-policy violation is detected. Read by `PromptStage` at the START
+/// of the NEXT iteration to compact-then-bypass the model (i.e. write a
+/// compacted summary without an additional model round-trip). Cleared
+/// immediately after `PromptStage` consumes it so it does not persist
+/// across subsequent iterations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PostCapabilityStageState {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_capability_bytes: BTreeMap<CapabilityId, u64>,
+    #[serde(default)]
+    pub skip_model_this_iteration: bool,
+}
