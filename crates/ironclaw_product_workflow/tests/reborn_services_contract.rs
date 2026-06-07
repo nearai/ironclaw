@@ -1,6 +1,12 @@
 //! Contract tests for WebUI-facing RebornServices facade.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -24,15 +30,16 @@ use ironclaw_product_workflow::{
     ListPendingAuthInteractionsResponse, ProductAgentBoundCaller, ProductWorkflowError,
     RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornExtensionOnboardingState, RebornGetRunStateRequest, RebornResolveGateResponse,
-    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    StaticConnectableChannelsProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornGetRunStateRequest,
+    RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, StaticConnectableChannelsProductFacade,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    approval_gate_ref,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -54,6 +61,7 @@ use ironclaw_turns::{
     TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use serde_json::json;
+use tokio::sync::{Notify, oneshot};
 
 fn caller() -> WebUiAuthenticatedCaller {
     caller_for_user("user-alpha")
@@ -384,6 +392,100 @@ impl TurnCoordinator for FakeTurnCoordinator {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(17),
+        })
+    }
+}
+
+struct BlockingSubmitCoordinator {
+    submit_entered: AtomicBool,
+    submit_released: AtomicBool,
+    entered_submit: Notify,
+    release_submit: Notify,
+    run_id: TurnRunId,
+}
+
+impl BlockingSubmitCoordinator {
+    fn new() -> Self {
+        Self {
+            submit_entered: AtomicBool::new(false),
+            submit_released: AtomicBool::new(false),
+            entered_submit: Notify::new(),
+            release_submit: Notify::new(),
+            run_id: TurnRunId::new(),
+        }
+    }
+
+    async fn wait_for_submit(&self) {
+        while !self.submit_entered.load(Ordering::Acquire) {
+            self.entered_submit.notified().await;
+        }
+    }
+
+    fn release_submit(&self) {
+        self.submit_released.store(true, Ordering::Release);
+        self.release_submit.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl TurnCoordinator for BlockingSubmitCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.submit_entered.store(true, Ordering::Release);
+        self.entered_submit.notify_waiters();
+        while !self.submit_released.load(Ordering::Acquire) {
+            self.release_submit.notified().await;
+        }
+        Ok(SubmitTurnResponse::Accepted {
+            turn_id: TurnId::new(),
+            run_id: self.run_id,
+            status: TurnStatus::Queued,
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            event_cursor: EventCursor(23),
+            accepted_message_ref: request.accepted_message_ref,
+            reply_target_binding_ref: request.reply_target_binding_ref,
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        panic!("resume_turn is not used by delete submit serialization tests")
+    }
+
+    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        panic!("cancel_run is not used by delete submit serialization tests")
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Ok(TurnRunState {
+            scope: request.scope,
+            actor: Some(turn_actor_for_user("user-alpha")),
+            turn_id: TurnId::new(),
+            run_id: request.run_id,
+            status: TurnStatus::Queued,
+            accepted_message_ref: AcceptedMessageRef::new("msg:blocked-submit").expect("valid ref"),
+            source_binding_ref: SourceBindingRef::new("webui-src:blocked-submit")
+                .expect("valid ref"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("webui-reply:blocked-submit")
+                .expect("valid ref"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor(29),
         })
     }
 }
@@ -2067,6 +2169,187 @@ async fn get_timeline_rejects_cross_user_access() {
 
     assert_eq!(err.code, RebornServicesErrorCode::NotFound);
     assert_eq!(err.status_code, 404);
+}
+
+#[tokio::test]
+async fn delete_thread_removes_owned_thread() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .delete_thread(
+            caller(),
+            RebornDeleteThreadRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect("delete owned thread");
+
+    assert_eq!(response.thread_id.as_str(), "thread-alpha");
+    assert!(response.deleted);
+
+    let err = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("deleted thread must no longer be readable");
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+}
+
+#[tokio::test]
+async fn delete_thread_rejects_cross_user_access_without_deleting_owner_thread() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let alice = caller();
+    create_thread_for(&services, alice.clone(), "thread-alpha").await;
+
+    let err = services
+        .delete_thread(
+            caller_for_user("user-beta"),
+            RebornDeleteThreadRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect_err("cross-user delete must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+
+    services
+        .get_timeline(
+            alice,
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("owner thread must remain after rejected cross-user delete");
+}
+
+#[tokio::test]
+async fn delete_thread_rejects_thread_with_active_run() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-before-delete",
+                "thread_id": "thread-alpha",
+                "content": "keep this run alive"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+
+    let err = services
+        .delete_thread(
+            caller(),
+            RebornDeleteThreadRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect_err("active thread delete must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Busy);
+    assert_eq!(err.status_code, 409);
+    assert_eq!(coordinator.run_state_request_count(), 1);
+    services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("rejected delete must leave thread readable");
+}
+
+#[tokio::test]
+async fn delete_thread_waits_for_in_flight_submit_before_active_run_check() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(BlockingSubmitCoordinator::new());
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let submit_services = services.clone();
+    let submit_handle = tokio::spawn(async move {
+        submit_services
+            .submit_turn(
+                caller(),
+                serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                    "client_action_id": "send-racing-delete",
+                    "thread_id": "thread-alpha",
+                    "content": "submit while delete races"
+                }))
+                .expect("request"),
+            )
+            .await
+    });
+    coordinator.wait_for_submit().await;
+
+    let delete_services = services.clone();
+    let (delete_done_tx, mut delete_done_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let result = delete_services
+            .delete_thread(
+                caller(),
+                RebornDeleteThreadRequest {
+                    thread_id: "thread-alpha".to_string(),
+                },
+            )
+            .await;
+        let _ = delete_done_tx.send(result);
+    });
+
+    let early_delete = tokio::time::timeout(Duration::from_millis(25), &mut delete_done_rx).await;
+    assert!(
+        early_delete.is_err(),
+        "delete must wait behind the in-flight submit operation"
+    );
+
+    coordinator.release_submit();
+    submit_handle
+        .await
+        .expect("submit task joins")
+        .expect("submit succeeds");
+
+    let err = delete_done_rx
+        .await
+        .expect("delete result")
+        .expect_err("delete sees submitted active run after waiting");
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Busy);
+    services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("rejected delete must leave thread readable");
 }
 
 #[tokio::test]

@@ -58,27 +58,28 @@ mod sse_capacity;
 pub use descriptors::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_CANCEL_RUN,
     WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_ROUTE_CREATE_THREAD,
-    WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER, WEBUI_V2_ROUTE_GET_EXTENSION_SETUP,
-    WEBUI_V2_ROUTE_GET_LLM_CONFIG, WEBUI_V2_ROUTE_GET_TIMELINE, WEBUI_V2_ROUTE_INSTALL_EXTENSION,
-    WEBUI_V2_ROUTE_LIST_AUTOMATIONS, WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS,
-    WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY, WEBUI_V2_ROUTE_LIST_EXTENSIONS,
-    WEBUI_V2_ROUTE_LIST_LLM_MODELS, WEBUI_V2_ROUTE_LIST_THREADS, WEBUI_V2_ROUTE_REMOVE_EXTENSION,
-    WEBUI_V2_ROUTE_RESOLVE_GATE, WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SET_ACTIVE_LLM,
-    WEBUI_V2_ROUTE_SETUP_EXTENSION, WEBUI_V2_ROUTE_START_CODEX_LOGIN,
-    WEBUI_V2_ROUTE_START_NEARAI_LOGIN, WEBUI_V2_ROUTE_STREAM_EVENTS,
-    WEBUI_V2_ROUTE_STREAM_EVENTS_WS, WEBUI_V2_ROUTE_TEST_LLM_CONNECTION,
-    WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, is_webui_v2_llm_config_route_id, webui_v2_routes,
+    WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER, WEBUI_V2_ROUTE_DELETE_THREAD,
+    WEBUI_V2_ROUTE_GET_EXTENSION_SETUP, WEBUI_V2_ROUTE_GET_LLM_CONFIG, WEBUI_V2_ROUTE_GET_TIMELINE,
+    WEBUI_V2_ROUTE_INSTALL_EXTENSION, WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
+    WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS, WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY,
+    WEBUI_V2_ROUTE_LIST_EXTENSIONS, WEBUI_V2_ROUTE_LIST_LLM_MODELS, WEBUI_V2_ROUTE_LIST_THREADS,
+    WEBUI_V2_ROUTE_REMOVE_EXTENSION, WEBUI_V2_ROUTE_RESOLVE_GATE, WEBUI_V2_ROUTE_SEND_MESSAGE,
+    WEBUI_V2_ROUTE_SET_ACTIVE_LLM, WEBUI_V2_ROUTE_SETUP_EXTENSION,
+    WEBUI_V2_ROUTE_START_CODEX_LOGIN, WEBUI_V2_ROUTE_START_NEARAI_LOGIN,
+    WEBUI_V2_ROUTE_STREAM_EVENTS, WEBUI_V2_ROUTE_STREAM_EVENTS_WS,
+    WEBUI_V2_ROUTE_TEST_LLM_CONNECTION, WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER,
+    is_webui_v2_llm_config_route_id, webui_v2_routes,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 #[cfg(feature = "webui-v2-beta")]
 pub use handlers::{
     activate_extension, cancel_run, complete_nearai_wallet_login, create_thread,
-    delete_llm_provider, get_extension_setup, get_llm_config, get_timeline, install_extension,
-    list_automations, list_connectable_channels, list_extension_registry, list_extensions,
-    list_llm_models, list_threads, remove_extension, resolve_gate, send_message, set_active_llm,
-    setup_extension, start_codex_login, start_nearai_login, stream_events, stream_events_ws,
-    test_llm_connection, upsert_llm_provider,
+    delete_llm_provider, delete_thread, get_extension_setup, get_llm_config, get_timeline,
+    install_extension, list_automations, list_connectable_channels, list_extension_registry,
+    list_extensions, list_llm_models, list_threads, remove_extension, resolve_gate, send_message,
+    set_active_llm, setup_extension, start_codex_login, start_nearai_login, stream_events,
+    stream_events_ws, test_llm_connection, upsert_llm_provider,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use router::{

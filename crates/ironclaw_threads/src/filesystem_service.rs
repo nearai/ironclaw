@@ -502,6 +502,38 @@ where
         Ok(None)
     }
 
+    async fn delete_idempotency_records_for_thread(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        let root = idempotency_root()?;
+        let resource_scope = scope.to_resource_scope();
+        let entries = match self.filesystem.list_dir(&resource_scope, &root).await {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            if !entry.name.ends_with(".json") {
+                continue;
+            }
+            let child = join_scoped(&root, &entry.name)?;
+            let Some(versioned) = self.filesystem.get(&resource_scope, &child).await? else {
+                continue;
+            };
+            let record = deserialize::<InboundIdempotencyRecord>(&versioned.entry.body)?;
+            if record.scope == *scope && record.thread_id == *thread_id {
+                match self.filesystem.delete(&resource_scope, &child).await {
+                    Ok(()) => {}
+                    Err(error) if is_not_found(&error) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Read-modify-write the `next_sequence` counter on the thread record
     /// with optimistic CAS and bounded retry. Returns the sequence
     /// assigned to the caller (i.e. `next_sequence` before the bump) plus
@@ -1344,6 +1376,8 @@ where
             thread_id: thread_id.clone(),
         })
         .await?;
+        self.delete_idempotency_records_for_thread(scope, thread_id)
+            .await?;
         match self
             .filesystem
             .delete(&scope.to_resource_scope(), &thread_root(scope, thread_id)?)
