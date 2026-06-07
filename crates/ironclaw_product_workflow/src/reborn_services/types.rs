@@ -615,6 +615,10 @@ fn has_line_or_paragraph_separator(value: &str) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornSetOutboundPreferencesRequest {
     /// `Some(id)` sets the final-reply target; `None` clears it.
+    ///
+    /// The field defaults to `None` when omitted, so clients that want to leave
+    /// an existing value unchanged must use the read endpoint instead of
+    /// submitting a partial update without this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_reply_target_id: Option<RebornOutboundDeliveryTargetId>,
 }
