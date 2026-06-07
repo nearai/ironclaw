@@ -49,8 +49,6 @@ registerPack("ar", {
 
   "chat.placeholder": "راسل IronClaw...",
   "chat.send": "إرسال",
-  "chat.removeImage": "إزالة الصورة",
-  "chat.removeAttachment": "إزالة المرفق",
 
   "chat.conversations": "المحادثات",
   "chat.threads": "{count} خيوط",
@@ -510,7 +508,6 @@ registerPack("ar", {
   "chat.suggestion3Desc": "تحقق من الإعداد والمصادقة والإقران والقدرات المتاحة.",
   "chat.heroPlaceholder": "اسأل IronClaw أي شيء.",
   "chat.followUpPlaceholder": "اطلب تغييرات متابعة",
-  "chat.attachFiles": "إرفاق ملفات",
   "chat.modeAutoReview": "مراجعة تلقائية",
   "chat.runtimeLocal": "العمل محليًا",
   "chat.statusWorking": "جارٍ العمل",
