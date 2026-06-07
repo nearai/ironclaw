@@ -927,7 +927,7 @@ impl HostRuntimeLoopCapabilityPort {
             }
             Err(error) => return Err(error),
         };
-        let (result_ref, _byte_len) = self
+        let (result_ref, byte_len) = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
                 run_context: &self.run_context,
@@ -943,6 +943,7 @@ impl HostRuntimeLoopCapabilityPort {
             safe_summary: "capability info returned".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len,
         }))
     }
 
@@ -1752,7 +1753,7 @@ async fn runtime_outcome_to_loop(
     ensure_runtime_outcome_matches(requested_capability_id, &outcome)?;
     Ok(match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
-            let (result_ref, _byte_len) = result_writer
+            let (result_ref, byte_len) = result_writer
                 .write_capability_result(CapabilityResultWrite {
                     run_context,
                     input_ref,
@@ -1767,6 +1768,7 @@ async fn runtime_outcome_to_loop(
                 safe_summary: "capability completed".to_string(),
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
+                byte_len,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => CapabilityOutcome::ApprovalRequired {

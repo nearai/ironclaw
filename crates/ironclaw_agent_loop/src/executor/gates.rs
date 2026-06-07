@@ -145,7 +145,7 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                 state.gate_state = gate;
                 state.last_gate = Some(gate_ref.clone());
                 append_capability_result_ref(ctx.host, &call, &input.resolved_result).await?;
-                push_completed_result(&mut state, input.resolved_result);
+                push_completed_result(&mut state, &call.capability_id, input.resolved_result);
                 match CheckpointStage.cancel_if_requested(ctx, state).await? {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -174,7 +174,7 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
             GateOutcome::SkipAndContinue { gate } => {
                 state.gate_state = gate;
                 append_capability_result_ref(ctx.host, &call, &input.resolved_result).await?;
-                push_completed_result(&mut state, input.resolved_result);
+                push_completed_result(&mut state, &call.capability_id, input.resolved_result);
                 match CheckpointStage.cancel_if_requested(ctx, state).await? {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),

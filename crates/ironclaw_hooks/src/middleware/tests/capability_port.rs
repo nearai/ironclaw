@@ -77,6 +77,7 @@ impl LoopCapabilityPort for AlwaysCompletedPort {
                 .expect("ok"),
             safe_summary: format!("ran {}", request.capability_id),
             terminate_hint: false,
+            byte_len: 0,
         }))
     }
 

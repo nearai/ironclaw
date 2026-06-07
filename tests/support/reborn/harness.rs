@@ -2695,6 +2695,7 @@ impl RecordingTestCapabilityPort {
             safe_summary: "echo: hi".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len: 0,
         })
     }
 }

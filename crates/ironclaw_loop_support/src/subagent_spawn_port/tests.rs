@@ -241,6 +241,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
             safe_summary: "authorized".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len: 0,
         }))
     }
 
@@ -361,6 +362,7 @@ impl LoopCapabilityPort for AuthPassPort {
             safe_summary: "authorized".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len: 0,
         }))
     }
 
@@ -1158,6 +1160,7 @@ fn completed_outcome(label: &str) -> CapabilityOutcome {
         safe_summary: "completed".to_string(),
         progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
         terminate_hint: false,
+        byte_len: 0,
     })
 }
 

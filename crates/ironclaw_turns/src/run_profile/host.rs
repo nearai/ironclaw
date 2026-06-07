@@ -1455,6 +1455,9 @@ pub struct CapabilityResultMessage {
     /// with older hosts.
     #[serde(default)]
     pub terminate_hint: bool,
+    /// Serialized output size in bytes — pure metadata, no PII.
+    #[serde(default)]
+    pub byte_len: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -1047,6 +1047,7 @@ fn scripted_capability_outcome(
             safe_summary: "completed".to_string(),
             progress,
             terminate_hint,
+            byte_len: 0,
         })),
         ScriptedCapabilityOutcome::ApprovalRequired { gate_ref } => {
             Ok(CapabilityOutcome::ApprovalRequired {
