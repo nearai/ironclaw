@@ -18,6 +18,7 @@ postgres = ["ironclaw_filesystem/postgres"]
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", version = "0.1.0" }

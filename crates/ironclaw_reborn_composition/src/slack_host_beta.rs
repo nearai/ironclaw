@@ -11,18 +11,19 @@ use std::time::Duration;
 
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
-use ironclaw_outbound::{InMemoryOutboundStateStore, OutboundStateStore};
+use ironclaw_outbound::{FilesystemOutboundStateStore, OutboundStateStore};
 use ironclaw_product_adapters::{
     AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus,
     EgressCredentialHandle, ExternalActorRef, OutboundDeliverySink, ProductAdapter,
     ProductAdapterId, ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::{
-    DefaultInboundTurnService, DefaultProductWorkflow, InMemoryIdempotencyLedger,
-    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
-    ProductConversationRouteKey, ProductConversationSubjectRouteResolver, ProductInstallationKey,
-    ProductInstallationScope, ProductWorkflowError, StaticProductInstallationResolver,
+    DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
+    ProductActorUserResolver, ProductConversationBindingService, ProductConversationRouteKey,
+    ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
+    ProductWorkflowError, StaticProductInstallationResolver,
 };
+use ironclaw_product_workflow_storage::RebornFilesystemIdempotencyLedger;
 use ironclaw_slack_v2_adapter::{
     SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackV2Adapter,
     SlackV2AdapterConfig, slack_request_signature_auth_requirement,
@@ -67,6 +68,7 @@ const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
 const SLACK_WEBHOOK_WORKFLOW_TIMEOUT: Duration = Duration::from_secs(2);
 const SLACK_MAX_IN_FLIGHT_WEBHOOKS: usize = 64;
 const SLACK_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
+const SLACK_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
 
 struct NoopSlackDeliverySink;
 
@@ -326,8 +328,13 @@ fn build_slack_events_route_mount_with_resolvers(
     // The resolver controls inbound Slack actor binding. `config.user_id`
     // scopes host-mediated Slack bot-token egress and legacy static actor
     // mapping. Shared Slack channel execution is configured separately.
+    let local_runtime = runtime
+        .services()
+        .local_runtime
+        .as_ref()
+        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
     tracing::warn!(
-        "Slack host-beta uses in-memory conversation bindings, idempotency ledger, and outbound state; Slack continuity, retry deduplication, and delivery state are lost on process restart"
+        "Slack host-beta uses in-memory conversation bindings; Slack conversation binding continuity is lost on process restart"
     );
     let adapter_id = ProductAdapterId::new(SLACK_V2_ADAPTER_ID)
         .map_err(|reason| invalid_config("adapter_id", reason.to_string()))?;
@@ -377,11 +384,22 @@ fn build_slack_events_route_mount_with_resolvers(
     let workflow = Arc::new(
         DefaultProductWorkflow::new(
             inbound,
-            Arc::new(InMemoryIdempotencyLedger::with_settled_entry_limit(
-                NonZeroUsize::new(SLACK_IDEMPOTENCY_LEDGER_SETTLED_LIMIT).ok_or_else(|| {
-                    invalid_config("idempotency_ledger_limit", "must be non-zero".to_string())
-                })?,
-            )),
+            Arc::new(
+                RebornFilesystemIdempotencyLedger::new(
+                    Arc::clone(&local_runtime.host_state_filesystem),
+                    slack_egress_scope_template(&config),
+                )
+                .with_settled_entry_limit(
+                    NonZeroUsize::new(SLACK_IDEMPOTENCY_LEDGER_SETTLED_LIMIT).ok_or_else(|| {
+                        invalid_config("settled_entry_limit", "must be non-zero".to_string())
+                    })?,
+                )
+                .with_settled_prune_interval(
+                    NonZeroUsize::new(SLACK_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL).ok_or_else(
+                        || invalid_config("settled_prune_interval", "must be non-zero".to_string()),
+                    )?,
+                ),
+            ),
             Arc::new(binding.clone()),
         )
         .with_approval_interaction_service(runtime.webui_approval_interaction_service())
@@ -405,7 +423,9 @@ fn build_slack_events_route_mount_with_resolvers(
     ));
 
     let egress = slack_protocol_egress(runtime, &config, token_handle)?;
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(FilesystemOutboundStateStore::new(Arc::clone(
+        &local_runtime.host_state_filesystem,
+    )));
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> = outbound;
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
@@ -755,6 +775,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_slack_events_route_mount_fails_when_durable_host_state_unavailable() {
+        let (mut runtime, _root) = runtime().await;
+        runtime.clear_local_runtime_for_test();
+
+        let error = match build_slack_events_route_mount(&runtime, config()) {
+            Ok(_) => panic!("Slack route requires durable host state"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            SlackHostBetaBuildError::DurableHostStateUnavailable
+        ));
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
     async fn build_slack_events_route_mount_dispatches_signed_event_callback() {
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
         let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
@@ -801,6 +838,54 @@ mod tests {
             Some(
                 "adapter:8:slack_v2;installation:17:install_host_beta;agent:16:agent:slack-host;project:18:project:slack-host;space:6:T0HOST;conversation:6:D0HOST;topic:0:;"
             )
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_events_route_mount_deduplicates_event_after_route_rebuild() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let body = dm_event_body_with(
+            "Ev-host-beta-durable-idempotency",
+            "dedupe me",
+            "1710000000.000011",
+        );
+
+        let first_mount =
+            build_slack_events_route_mount(&runtime, config()).expect("first route builds");
+        post_signed_slack_event(&first_mount, &body).await;
+        if let Some(drain) = first_mount.drain.as_ref() {
+            drain.drain().await;
+        }
+        wait_for_slack_message_count_with_text(
+            &runtime,
+            Some(UserId::new(USER).expect("user")),
+            "dedupe me",
+            1,
+        )
+        .await;
+
+        let rebuilt_mount =
+            build_slack_events_route_mount(&runtime, config()).expect("rebuilt route builds");
+        post_signed_slack_event(&rebuilt_mount, &body).await;
+        if let Some(drain) = rebuilt_mount.drain.as_ref() {
+            drain.drain().await;
+        }
+
+        assert_eq!(
+            slack_message_count_with_text(
+                &runtime,
+                Some(UserId::new(USER).expect("user")),
+                "dedupe me"
+            )
+            .await,
+            1,
+            "duplicate Slack event should replay from the durable idempotency ledger"
         );
 
         runtime.shutdown().await.expect("runtime shuts down");
@@ -1550,6 +1635,66 @@ mod tests {
             }
             if tokio::time::Instant::now() >= deadline {
                 panic!("signed Slack event did not create a thread");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn slack_message_count_with_text(
+        runtime: &RebornRuntime,
+        owner_user_id: Option<UserId>,
+        text: &str,
+    ) -> usize {
+        let thread_service = runtime.webui_thread_service();
+        let scope = ThreadScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            owner_user_id,
+            mission_id: None,
+        };
+        let threads = thread_service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: scope.clone(),
+                limit: Some(100),
+                cursor: None,
+            })
+            .await
+            .expect("list Slack-created threads");
+        let mut count = 0;
+        for thread in threads.threads {
+            let history = thread_service
+                .list_thread_history(ThreadHistoryRequest {
+                    scope: scope.clone(),
+                    thread_id: thread.thread_id,
+                })
+                .await
+                .expect("read Slack-created thread history");
+            count += history
+                .messages
+                .iter()
+                .filter(|message| message.content.as_deref() == Some(text))
+                .count();
+        }
+        count
+    }
+
+    async fn wait_for_slack_message_count_with_text(
+        runtime: &RebornRuntime,
+        owner_user_id: Option<UserId>,
+        text: &str,
+        expected: usize,
+    ) -> usize {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let count = slack_message_count_with_text(runtime, owner_user_id.clone(), text).await;
+            if count >= expected {
+                return count;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "Slack message {text:?} count stayed below {expected}; latest count: {count}"
+                );
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

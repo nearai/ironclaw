@@ -1,49 +1,23 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 #[cfg(feature = "postgres")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-use ironclaw_host_api::VirtualPath;
-use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalActorRef, ExternalEventId, ProductAdapterId, ProductInboundAck,
-};
-use ironclaw_product_workflow::{
-    ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductInboundAction,
-    ProductWorkflowError, SourceBindingKey,
-};
 #[cfg(feature = "libsql")]
 use ironclaw_product_workflow_storage::RebornLibSqlIdempotencyLedger;
 #[cfg(feature = "postgres")]
 use ironclaw_product_workflow_storage::RebornPostgresIdempotencyLedger;
 
-fn fingerprint(suffix: &str) -> ActionFingerprintKey {
-    fingerprint_for_actor(suffix, "user1")
-}
+mod support;
 
-fn fingerprint_for_actor(suffix: &str, actor_id: &str) -> ActionFingerprintKey {
-    ActionFingerprintKey::new(
-        ProductAdapterId::new("test_adapter").expect("valid adapter"),
-        AdapterInstallationId::new("install_alpha").expect("valid installation"),
-        ExternalActorRef::new("test", actor_id, Option::<String>::None).expect("valid actor"),
-        SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;")
-            .expect("valid source binding key"),
-        ExternalEventId::new(format!("evt:{suffix}")).expect("valid event"),
-    )
-}
-
-fn custom_root(suffix: &str) -> VirtualPath {
-    VirtualPath::new(format!(
-        "/engine/product_workflow/idempotency/test_roots/{suffix}"
-    ))
-    .expect("valid custom ledger root")
-}
+use support::*;
 
 #[cfg(feature = "postgres")]
 fn unique_suffix(name: &str) -> String {
@@ -68,211 +42,6 @@ async fn libsql_filesystem(path: &str) -> Arc<LibSqlRootFilesystem> {
         .await
         .expect("run libsql filesystem migrations");
     filesystem
-}
-
-async fn assert_settled_action_survives_reopen_and_replays(
-    ledger: &dyn IdempotencyLedger,
-    reopened: &dyn IdempotencyLedger,
-    suffix: &str,
-) {
-    let received_at = Utc::now();
-    let fingerprint = fingerprint(suffix);
-
-    let decision = ledger
-        .begin_or_replay(fingerprint.clone(), received_at)
-        .await
-        .expect("begin");
-    let IdempotencyDecision::New(mut action) = decision else {
-        panic!("expected new action");
-    };
-    action.settle(ProductInboundAck::NoOp);
-    ledger.settle(action).await.expect("settle");
-
-    let replay = reopened
-        .begin_or_replay(fingerprint, received_at + Duration::seconds(1))
-        .await
-        .expect("replay");
-
-    let IdempotencyDecision::Replay(action) = replay else {
-        panic!("expected replay");
-    };
-    assert_eq!(action.outcome, Some(ProductInboundAck::NoOp));
-}
-
-async fn assert_in_flight_action_blocks_until_lease_expires(
-    ledger: &dyn IdempotencyLedger,
-    suffix: &str,
-) {
-    let received_at = Utc::now();
-    let fingerprint = fingerprint(suffix);
-
-    assert!(matches!(
-        ledger
-            .begin_or_replay(fingerprint.clone(), received_at)
-            .await
-            .expect("begin"),
-        IdempotencyDecision::New(_)
-    ));
-    let blocked = ledger
-        .begin_or_replay(fingerprint.clone(), received_at + Duration::seconds(5))
-        .await
-        .expect_err("fresh reservation should block");
-    assert!(matches!(blocked, ProductWorkflowError::Transient { .. }));
-
-    let reclaimed = ledger
-        .begin_or_replay(fingerprint, received_at + Duration::seconds(11))
-        .await
-        .expect("expired reservation should be reclaimed");
-    assert!(matches!(reclaimed, IdempotencyDecision::New(_)));
-}
-
-async fn assert_release_allows_retry_without_waiting_for_lease(
-    ledger: &dyn IdempotencyLedger,
-    suffix: &str,
-) {
-    let received_at = Utc::now();
-    let fingerprint = fingerprint(suffix);
-
-    let decision = ledger
-        .begin_or_replay(fingerprint.clone(), received_at)
-        .await
-        .expect("begin");
-    let IdempotencyDecision::New(action) = decision else {
-        panic!("expected new action");
-    };
-    ledger.release(action).await.expect("release");
-
-    let retry = ledger
-        .begin_or_replay(fingerprint, received_at + Duration::seconds(1))
-        .await
-        .expect("retry after release");
-    assert!(matches!(retry, IdempotencyDecision::New(_)));
-}
-
-async fn assert_duplicate_reservation_contention_serializes(
-    first: &dyn IdempotencyLedger,
-    second: &dyn IdempotencyLedger,
-    suffix: &str,
-) {
-    let received_at = Utc::now();
-    let fingerprint = fingerprint(suffix);
-
-    let (left, right) = tokio::join!(
-        first.begin_or_replay(fingerprint.clone(), received_at),
-        second.begin_or_replay(fingerprint, received_at),
-    );
-    let results = [left, right];
-    let new_count = results
-        .iter()
-        .filter(|result| matches!(result, Ok(IdempotencyDecision::New(_))))
-        .count();
-    let blocked_count = results
-        .iter()
-        .filter(|result| matches!(result, Err(ProductWorkflowError::Transient { .. })))
-        .count();
-
-    assert_eq!(new_count, 1);
-    assert_eq!(blocked_count, 1);
-}
-
-async fn assert_superseded_reservation_cannot_settle(ledger: &dyn IdempotencyLedger, suffix: &str) {
-    let received_at = Utc::now();
-    let fingerprint = fingerprint(suffix);
-
-    let IdempotencyDecision::New(mut stale_action) = ledger
-        .begin_or_replay(fingerprint.clone(), received_at)
-        .await
-        .expect("begin")
-    else {
-        panic!("expected new action");
-    };
-
-    let IdempotencyDecision::New(mut replacement) = ledger
-        .begin_or_replay(fingerprint, received_at + Duration::seconds(11))
-        .await
-        .expect("expired reservation should be reclaimed")
-    else {
-        panic!("expected reclaimed action");
-    };
-
-    stale_action.settle(ProductInboundAck::NoOp);
-    let stale_error = ledger
-        .settle(stale_action)
-        .await
-        .expect_err("superseded action must not settle");
-    assert!(matches!(
-        stale_error,
-        ProductWorkflowError::Transient { .. }
-    ));
-
-    replacement.settle(ProductInboundAck::NoOp);
-    ledger
-        .settle(replacement)
-        .await
-        .expect("replacement settle");
-}
-
-async fn assert_settle_missing_reservation_returns_transient(
-    ledger: &dyn IdempotencyLedger,
-    suffix: &str,
-) {
-    let received_at = Utc::now();
-    let mut action = ProductInboundAction::begin(fingerprint(suffix), received_at);
-    action.settle(ProductInboundAck::NoOp);
-
-    let error = ledger
-        .settle(action)
-        .await
-        .expect_err("missing reservation must not settle");
-    assert!(matches!(error, ProductWorkflowError::Transient { .. }));
-}
-
-async fn assert_custom_root_isolated_from_default_root(
-    custom: &dyn IdempotencyLedger,
-    default: &dyn IdempotencyLedger,
-    suffix: &str,
-) {
-    let received_at = Utc::now();
-    let fingerprint = fingerprint(suffix);
-    let IdempotencyDecision::New(mut action) = custom
-        .begin_or_replay(fingerprint.clone(), received_at)
-        .await
-        .expect("begin in custom root")
-    else {
-        panic!("expected new custom-root action");
-    };
-    action.settle(ProductInboundAck::NoOp);
-    custom.settle(action).await.expect("settle custom root");
-
-    let default_decision = default
-        .begin_or_replay(fingerprint, received_at + Duration::seconds(1))
-        .await
-        .expect("begin in default root");
-    assert!(matches!(default_decision, IdempotencyDecision::New(_)));
-}
-
-async fn assert_actor_identity_is_part_of_fingerprint_path(
-    ledger: &dyn IdempotencyLedger,
-    suffix: &str,
-) {
-    let received_at = Utc::now();
-    let first_actor = fingerprint_for_actor(suffix, "user1");
-    let second_actor = fingerprint_for_actor(suffix, "user2");
-
-    assert!(matches!(
-        ledger
-            .begin_or_replay(first_actor, received_at)
-            .await
-            .expect("begin first actor"),
-        IdempotencyDecision::New(_)
-    ));
-    assert!(matches!(
-        ledger
-            .begin_or_replay(second_actor, received_at)
-            .await
-            .expect("begin second actor"),
-        IdempotencyDecision::New(_)
-    ));
 }
 
 #[cfg(feature = "libsql")]
@@ -328,6 +97,35 @@ async fn libsql_duplicate_reservation_contention_serializes() {
     );
 
     assert_duplicate_reservation_contention_serializes(&first, &second, "libsql-contention").await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_settled_entry_limit_prunes_oldest() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+        libsql_filesystem(&db_path.display().to_string()).await,
+        Duration::seconds(10),
+    )
+    .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"));
+
+    assert_settled_entry_limit_prunes_oldest(&ledger, "libsql-retention").await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_settled_prune_interval_defers_until_interval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+        libsql_filesystem(&db_path.display().to_string()).await,
+        Duration::seconds(10),
+    )
+    .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"))
+    .with_settled_prune_interval(NonZeroUsize::new(3).expect("non-zero interval"));
+
+    assert_settled_prune_interval_defers_until_interval(&ledger, "libsql-prune-interval").await;
 }
 
 #[cfg(feature = "libsql")]
@@ -444,6 +242,37 @@ async fn postgres_duplicate_reservation_contention_serializes_when_configured() 
         &first,
         &second,
         &unique_suffix("postgres-contention"),
+    )
+    .await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_settled_entry_limit_prunes_oldest_when_configured() {
+    let Some(filesystem) = postgres_filesystem().await else {
+        return;
+    };
+    let ledger =
+        RebornPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10))
+            .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"));
+
+    assert_settled_entry_limit_prunes_oldest(&ledger, &unique_suffix("postgres-retention")).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_settled_prune_interval_defers_until_interval_when_configured() {
+    let Some(filesystem) = postgres_filesystem().await else {
+        return;
+    };
+    let ledger =
+        RebornPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10))
+            .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"))
+            .with_settled_prune_interval(NonZeroUsize::new(3).expect("non-zero interval"));
+
+    assert_settled_prune_interval_defers_until_interval(
+        &ledger,
+        &unique_suffix("postgres-prune-interval"),
     )
     .await;
 }
