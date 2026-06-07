@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use super::CapabilityCallSignature;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContextStrategyState {}
 
@@ -330,6 +332,57 @@ pub struct StopStrategyState {
     /// progress reported no new evidence/state.
     #[serde(default)]
     pub trailing_no_progress_results: u32,
+    /// Pending or rendered repeated-call warning that must be shown to the
+    /// model before repeated calls can terminalize as no-progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeated_call_warning: Option<RepeatedCallWarningState>,
+}
+
+impl StopStrategyState {
+    pub fn mark_repeated_call_warning_rendered(&mut self) {
+        if let Some(warning) = self.repeated_call_warning.as_mut()
+            && warning.phase == RepeatedCallWarningPhase::PendingRender
+        {
+            warning.phase = RepeatedCallWarningPhase::Rendered;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RepeatedCallWarningState {
+    pub signature: CapabilityCallSignature,
+    pub phase: RepeatedCallWarningPhase,
+}
+
+impl RepeatedCallWarningState {
+    pub fn pending_render(signature: CapabilityCallSignature) -> Self {
+        Self {
+            signature,
+            phase: RepeatedCallWarningPhase::PendingRender,
+        }
+    }
+
+    pub fn rendered(signature: CapabilityCallSignature) -> Self {
+        Self {
+            signature,
+            phase: RepeatedCallWarningPhase::Rendered,
+        }
+    }
+
+    pub fn terminal_ready(signature: CapabilityCallSignature) -> Self {
+        Self {
+            signature,
+            phase: RepeatedCallWarningPhase::TerminalReady,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepeatedCallWarningPhase {
+    PendingRender,
+    Rendered,
+    TerminalReady,
 }
 
 /// Persistent state owned by `GateHandlingStrategy`.

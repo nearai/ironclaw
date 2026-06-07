@@ -347,6 +347,7 @@ impl ContextStrategy for NoInlineContextStrategy {
                 capability_view: None,
             },
             emitted_admission_control: false,
+            emitted_repeated_call_warning: false,
         }
     }
 }
