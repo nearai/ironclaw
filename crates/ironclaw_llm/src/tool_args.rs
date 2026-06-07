@@ -125,7 +125,10 @@ mod tests {
     fn parse_args_lossy_empty_string() {
         let (val, err) = parse_tool_call_args_lossy("");
         assert!(val.as_object().expect("should be object").is_empty());
-        assert!(err.is_some());
+        assert_eq!(
+            err.expect("error should be present"),
+            "empty arguments string"
+        );
     }
 
     #[test]

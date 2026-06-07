@@ -42,7 +42,7 @@ pub mod runtime;
 pub mod session;
 pub mod smart_routing;
 mod token_refreshing;
-// Phase A scaffolding — helpers awaiting per-provider migration (Phase B+).
+// arch-exempt: scaffolding, Phase A helpers awaiting first per-provider caller, plan #4522
 // Remove the allow once any production call site references these items.
 #[allow(dead_code)]
 pub(crate) mod tool_args;
