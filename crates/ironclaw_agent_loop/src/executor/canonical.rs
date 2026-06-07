@@ -1,6 +1,6 @@
 use ironclaw_turns::{
     LoopExit,
-    run_profile::{AgentLoopDriverHost, LoopProgressEvent, ParentLoopOutput},
+    run_profile::{AgentLoopDriverHost, LoopDriverNoteKind, LoopProgressEvent, ParentLoopOutput},
 };
 use tracing::debug;
 
@@ -112,6 +112,23 @@ impl DefaultExecutorPipeline {
                 )
                 .await?
                 .state;
+            if prompt.rendered_repeated_call_warning {
+                state.stop_state.mark_repeated_call_warning_rendered();
+                CheckpointStage
+                    .emit_progress(
+                        ctx,
+                        LoopProgressEvent::driver_note(
+                            LoopDriverNoteKind::Planning,
+                            "repeated capability call warning rendered",
+                        )
+                        .map_err(|_| {
+                            AgentLoopExecutorError::PlannerContract {
+                                detail: "repeated-call warning progress summary was invalid",
+                            }
+                        })?,
+                    )
+                    .await;
+            }
             pending_input_ack.ack(host).await?;
 
             let model_response = match self

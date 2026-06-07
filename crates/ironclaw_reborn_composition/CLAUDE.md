@@ -177,6 +177,13 @@ and currently resolves the supported Slack channel aliases to the Slack
 personal-binding pairing service. The browser must not call provider-specific
 pairing paths directly.
 
+When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
+`GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` inside the same bearer
+auth layer. The browser supplies only `channel_id` and `subject_user_id`;
+tenant, adapter installation, and Slack team come from host configuration. The
+route writes to Slack host state so runtime assignments are durable and are
+resolved before static TOML `channel_routes` fallback.
+
 ### Host-supplied public route mount (#4116 — SSO login surface)
 
 `WebuiServeConfig::with_public_route_mount(PublicRouteMount)`
@@ -267,9 +274,10 @@ rows are inventoried here, not implemented in the current PR.
   `auth_middleware`. The Reborn binary owns its own
   `WebuiAuthenticator` impl (env tokens, DB-backed sessions, OIDC,
   whatever the host wires) and supplies it via `WebuiServeConfig`.
-- **Operator LLM config** — the `/api/webchat/v2/llm/*` routes mutate
-  operator-wide provider settings and secrets. `webui_v2_app` only
-  mounts them when the host authenticator opts into operator LLM config;
+- **Operator WebUI config** — the `/api/webchat/v2/llm/*` routes and
+  Slack channel-route admin mutate operator-wide provider settings,
+  secrets, or channel ownership. `webui_v2_app` only mounts them when
+  the host authenticator opts into `allows_operator_webui_config`;
   multi-user authenticators must leave them unmounted until a real admin
   authorization boundary exists.
 - **`?token=` exception** — only `GET /api/webchat/v2/threads/{id}/events`;
