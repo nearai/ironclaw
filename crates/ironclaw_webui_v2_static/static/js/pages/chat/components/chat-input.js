@@ -2,10 +2,6 @@ import { Icon } from "../../../design-system/icons.js";
 import { Button } from "../../../design-system/button.js";
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
-import {
-  formatSize,
-  useComposerAttachments,
-} from "../hooks/useComposerAttachments.js";
 
 export function ChatInput({
   onSend,
@@ -23,15 +19,9 @@ export function ChatInput({
   const [text, setText] = React.useState("");
   const [isSending, setIsSending] = React.useState(false);
   const [isCancelling, setIsCancelling] = React.useState(false);
+  const [unsupportedPayloadError, setUnsupportedPayloadError] =
+    React.useState("");
   const textareaRef = React.useRef(null);
-  const {
-    images,
-    attachments,
-    addFiles,
-    removeImage,
-    removeAttachment,
-    clearAttachments,
-  } = useComposerAttachments();
 
   const autoResize = React.useCallback(() => {
     const el = textareaRef.current;
@@ -59,17 +49,13 @@ export function ChatInput({
   }, [initialText, resetKey]);
 
   const handleSend = React.useCallback(async () => {
-    if (
-      (!text.trim() && images.length === 0 && attachments.length === 0) ||
-      disabled ||
-      isSending
-    )
+    if (!text.trim() || disabled || isSending)
       return;
     setIsSending(true);
     try {
-      await onSend(text.trim(), { images, attachments });
+      await onSend(text.trim());
       setText("");
-      clearAttachments();
+      setUnsupportedPayloadError("");
       if (textareaRef.current) textareaRef.current.style.height = "auto";
     } catch {
       // The failed optimistic message renders retry details in the thread.
@@ -78,12 +64,9 @@ export function ChatInput({
     }
   }, [
     text,
-    images,
-    attachments,
     disabled,
     isSending,
     onSend,
-    clearAttachments,
   ]);
 
   const handleCancel = React.useCallback(async () => {
@@ -111,10 +94,10 @@ export function ChatInput({
       const files = Array.from(e.clipboardData.files);
       if (files.length > 0) {
         e.preventDefault();
-        addFiles(files);
+        setUnsupportedPayloadError(t("chat.attachmentsUnsupported"));
       }
     },
-    [addFiles]
+    [t]
   );
 
   const onDrop = React.useCallback(
@@ -122,9 +105,11 @@ export function ChatInput({
       e.preventDefault();
       setDragOver(false);
       const files = Array.from(e.dataTransfer.files);
-      if (files.length > 0) addFiles(files);
+      if (files.length > 0) {
+        setUnsupportedPayloadError(t("chat.attachmentsUnsupported"));
+      }
     },
-    [addFiles]
+    [t]
   );
 
   const [dragOver, setDragOver] = React.useState(false);
@@ -140,14 +125,15 @@ export function ChatInput({
   const onFileInputChange = React.useCallback(
     (e) => {
       const files = Array.from(e.target.files || []);
-      if (files.length > 0) addFiles(files);
+      if (files.length > 0) {
+        setUnsupportedPayloadError(t("chat.attachmentsUnsupported"));
+      }
       e.target.value = "";
     },
-    [addFiles]
+    [t]
   );
 
-  const hasPayload =
-    text.trim() || images.length > 0 || attachments.length > 0;
+  const hasPayload = text.trim();
   const placeholder = isHero
     ? t("chat.heroPlaceholder")
     : t("chat.followUpPlaceholder");
@@ -176,51 +162,13 @@ export function ChatInput({
         ${dragOver &&
         html`
           <div className="pointer-events-none absolute inset-1 z-10 flex items-center justify-center rounded-[16px] border border-dashed border-[color-mix(in_srgb,var(--v2-accent)_55%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-canvas)_82%,transparent)] text-sm font-medium text-[var(--v2-accent-text)]">
-            ${t("chat.dropToAttach")}
+            ${t("chat.attachmentsUnsupported")}
           </div>
         `}
-        ${(images.length > 0 || attachments.length > 0) &&
+        ${unsupportedPayloadError &&
         html`
-          <div className="mb-3 flex flex-wrap gap-2">
-            ${images.map(
-              (img, i) => html`
-                <div key=${i} className="group relative">
-                  <img
-                    src=${img.dataUrl}
-                    className="h-16 w-16 rounded-lg border border-iron-700 object-cover"
-                    alt=""
-                  />
-                  <button
-                    onClick=${() => removeImage(i)}
-                    className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full border border-red-300/30 bg-red-500 text-white opacity-0 group-hover:opacity-100"
-                    aria-label=${t("chat.removeImage")}
-                  >
-                    <${Icon} name="close" className="h-3 w-3" />
-                  </button>
-                </div>
-              `
-            )}
-            ${attachments.map(
-              (att, i) => html`
-                <div
-                  key=${i}
-                  className="flex max-w-full items-center gap-2 rounded-md border border-iron-700 bg-iron-900 px-2 py-1 text-xs"
-                >
-                  <${Icon} name="file" className="h-3.5 w-3.5 shrink-0 text-signal" />
-                  <span className="truncate">${att.filename}</span>
-                  <span className="shrink-0 text-iron-200"
-                    >${formatSize(att.size)}</span
-                  >
-                  <button
-                    onClick=${() => removeAttachment(i)}
-                    className="ml-1 text-iron-200 hover:text-white"
-                    aria-label=${t("chat.removeAttachment")}
-                  >
-                    <${Icon} name="close" className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              `
-            )}
+          <div className="mb-3 rounded-md border border-red-400/25 bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-100">
+            ${unsupportedPayloadError}
           </div>
         `}
 
@@ -247,7 +195,7 @@ export function ChatInput({
           <div className="ml-auto flex items-center gap-1.5">
             <label
               className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-full text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-accent-text)]"
-              title=${t("chat.attachFiles")}
+              title=${t("chat.attachmentsUnsupported")}
             >
               <input
                 type="file"

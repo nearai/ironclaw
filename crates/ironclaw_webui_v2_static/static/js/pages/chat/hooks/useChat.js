@@ -24,6 +24,8 @@ import { useSSE } from "./useSSE.js";
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
+const UNSUPPORTED_MULTIMODAL_PAYLOAD_ERROR =
+  "webui_v2_multimodal_payload_unsupported";
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
@@ -51,6 +53,12 @@ function threadNeedsSidebarRefresh(threadId) {
   if (!Array.isArray(threads)) return true;
   const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
   return !thread?.title;
+}
+
+function unsupportedMultimodalPayloadError() {
+  const error = new Error("webchat v2 multimodal payload unsupported");
+  error.safeErrorCode = UNSUPPORTED_MULTIMODAL_PAYLOAD_ERROR;
+  return error;
 }
 
 function submitResponseResumedTurnGate(response) {
@@ -257,10 +265,9 @@ export function useChat(threadId) {
   });
 
   // Accepts the fork's call shape `{ images, attachments, threadId,
-  // timezone }`. v2 SendMessage carries `content` only — images /
-  // attachments / timezone are silently dropped until the v2
-  // contract grows the matching fields. Composer UI still shows
-  // attachment chips; this is the TODO surface.
+  // timezone }`. v2 SendMessage carries `content` only; image and
+  // file payloads are rejected until the v2 contract grows typed
+  // multimodal fields.
   //
   // v2 send-message requires `thread_id` as a path parameter — the
   // facade refuses to implicitly create a missing thread. When the
@@ -270,6 +277,11 @@ export function useChat(threadId) {
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
     async (content, opts = {}) => {
+      const { threadId: targetThreadId, images = [], attachments = [] } = opts;
+      if (images.length > 0 || attachments.length > 0) {
+        throw unsupportedMultimodalPayloadError();
+      }
+
       const connectable = await resolveConnectAction(content);
       if (connectable) {
         setChannelConnectAction(connectable);
@@ -277,7 +289,6 @@ export function useChat(threadId) {
       }
       setChannelConnectAction(null);
 
-      const { threadId: targetThreadId } = opts;
       let sendThreadId = targetThreadId || threadId;
 
       if (!sendThreadId) {
