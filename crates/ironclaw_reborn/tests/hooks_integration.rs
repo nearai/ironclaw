@@ -2298,7 +2298,7 @@ async fn factory_hook_security_audit_sink_records_deny_through_build() {
     // security-audit sink; pair it with `with_hook_security_audit_sink`.
     let host = fixture
         .factory()
-        .with_hook_dispatcher_builder_factory(predicate_deny_builder)
+        .with_hook_dispatcher_builder_factory(|| Ok(predicate_deny_builder()))
         .with_hook_security_audit_sink(sink_dyn)
         .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
         .await

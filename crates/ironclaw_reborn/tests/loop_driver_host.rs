@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_hooks::{
     HookId, HookLocalId, HookRegistrar, HookRegistry, HookVersion,
     dispatch::HookDispatcherBuilder,
@@ -22,9 +22,9 @@ use ironclaw_hooks::{
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    HostPortCatalog, MountView, NetworkPolicy, PackageId, PermissionMode, Principal, ProcessId,
-    ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId, ThreadId,
-    TrustClass, UserId, VirtualPath,
+    HostPath, HostPortCatalog, MountView, NetworkPolicy, PackageId, PermissionMode, Principal,
+    ProcessId, ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId,
+    ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -46,7 +46,7 @@ use ironclaw_loop_support::{
     IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
-    identity_message_ref,
+    identity_message_ref, loop_driver_execution_extension_id,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::driver_registry::{
@@ -821,11 +821,10 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
 
     let requests = fixture.gateway.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].messages.len(), 1);
-    assert_eq!(
-        requests[0].messages[0].content,
-        "RAW_PROMPT_TEXT_SENTINEL sk-prompt-secret /host/path tool_input"
-    );
+    assert_eq!(requests[0].messages.len(), 2);
+    assert!(requests[0].messages.iter().any(|message| {
+        message.content == "RAW_PROMPT_TEXT_SENTINEL sk-prompt-secret /host/path tool_input"
+    }));
     assert_eq!(
         fixture.milestone_names(),
         vec![
@@ -1587,7 +1586,7 @@ async fn turn_runner_worker_drives_script_capability_through_real_host_runtime()
     let runtime: Arc<dyn HostRuntime + Send + Sync> = Arc::new(
         HostRuntimeServices::new(
             Arc::new(e2e_registry_with_manifest(E2E_SCRIPT_MANIFEST)),
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(e2e_script_filesystem().await),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
             ProcessServices::in_memory(),
@@ -1999,7 +1998,12 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
     let requests = fixture.gateway.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].resolved_model_route, Some(persisted_route));
-    assert_eq!(requests[0].messages[0].content, "hello routed e2e");
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content == "hello routed e2e")
+    );
     assert!(reply_ref.as_str().starts_with("msg:"));
     assert!(
         fixture
@@ -2666,6 +2670,7 @@ async fn build_runtime_host_with_optional_hooks(
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
+        hook_security_audit_sink: None,
         turn_event_sink: None,
         hook_dispatcher_builder_factory: hook_factory,
     })
@@ -3548,7 +3553,7 @@ async fn text_only_host_prompt_accepts_empty_surface_version() {
         .await
         .unwrap();
 
-    assert_eq!(prompt_bundle.messages.len(), 1);
+    assert_eq!(prompt_bundle.messages.len(), 2);
 }
 
 #[tokio::test]
@@ -3794,7 +3799,12 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
         .unwrap();
 
     let requests = fixture.gateway.requests();
-    assert_eq!(requests[0].messages[0].content, "factory identity content");
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content == "factory identity content")
+    );
 }
 
 #[tokio::test]
@@ -4385,7 +4395,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 2);
+    assert_eq!(prompt_bundle.messages.len(), 3);
 
     let surface = host
         .visible_capabilities(VisibleCapabilityRequest)
@@ -4456,7 +4466,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
 
     assert!(prompt_bundle.instruction_fingerprint.is_some());
     assert_eq!(prompt_bundle.surface_version, Some(surface.version.clone()));
-    assert_eq!(prompt_bundle.messages.len(), 2);
+    assert_eq!(prompt_bundle.messages.len(), 3);
 
     host.stream_model(LoopModelRequest {
         messages: prompt_bundle.messages,
@@ -5783,7 +5793,7 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
     let runtime: Arc<dyn HostRuntime + Send + Sync> = Arc::new(
         HostRuntimeServices::new(
             Arc::new(e2e_registry_with_manifest(E2E_SCRIPT_MANIFEST)),
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(e2e_script_filesystem().await),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
             ProcessServices::in_memory(),
@@ -6520,10 +6530,11 @@ fn host_runtime_visible_request_with_dispatch_grant(
     capability_id: CapabilityId,
 ) -> ironclaw_host_runtime::VisibleCapabilityRequest {
     let mut request = host_runtime_visible_request(fixture, ["script"]);
+    let loop_driver_extension = loop_driver_execution_extension_id(&fixture.context).unwrap();
     request.context.grants.grants.push(CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: capability_id,
-        grantee: Principal::Extension(request.context.extension_id.clone()),
+        grantee: Principal::Extension(loop_driver_extension),
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
             allowed_effects: vec![EffectKind::DispatchCapability],
@@ -6536,6 +6547,41 @@ fn host_runtime_visible_request_with_dispatch_grant(
         },
     });
     request
+}
+
+async fn e2e_script_filesystem() -> LocalFilesystem {
+    let storage = tempfile::tempdir().unwrap().keep();
+    let mut filesystem = LocalFilesystem::new();
+    filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").unwrap(),
+            HostPath::from_path_buf(storage),
+        )
+        .unwrap();
+    filesystem
+        .write_file(
+            &VirtualPath::new("/system/extensions/script/schemas/script/echo.input.v1.json")
+                .unwrap(),
+            br#"{"type":"object"}"#,
+        )
+        .await
+        .unwrap();
+    filesystem
+        .write_file(
+            &VirtualPath::new("/system/extensions/script/schemas/script/echo.output.v1.json")
+                .unwrap(),
+            br#"{"type":"object"}"#,
+        )
+        .await
+        .unwrap();
+    filesystem
+        .write_file(
+            &VirtualPath::new("/system/extensions/script/prompt/script/echo.md").unwrap(),
+            b"Echo the input JSON through the script runtime.",
+        )
+        .await
+        .unwrap();
+    filesystem
 }
 
 fn e2e_registry_with_manifest(manifest: &str) -> ExtensionRegistry {

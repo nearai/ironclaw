@@ -23,11 +23,11 @@ enum CredentialCacheKey {
 
 struct CredentialCacheEntry {
     key: CredentialCacheKey,
-    /// Leased secret material kept inside `SecretString` so the bytes are
-    /// zeroized when this entry — and its enclosing `Vec` — is dropped at
-    /// the end of the egress call. Holding plaintext as `String` here
-    /// instead would leave the leased credential on the heap for the
-    /// duration of the request, defeating `SecretMaterial::ZeroizeOnDrop`.
+    /// Resolved secret material kept inside `SecretString` so the bytes are
+    /// zeroized when this entry, and its enclosing `Vec`, are dropped at the
+    /// end of the egress call. Holding plaintext as `String` here instead
+    /// would leave the credential on the heap for the duration of the request,
+    /// defeating `SecretMaterial::ZeroizeOnDrop`.
     value: Option<SecretMaterial>,
 }
 

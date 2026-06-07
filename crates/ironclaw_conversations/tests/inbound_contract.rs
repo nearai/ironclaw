@@ -219,6 +219,7 @@ async fn trusted_scope_is_persisted_on_first_bind() {
             ),
             Some(AgentId::new("agent-alpha").unwrap()),
             Some(ProjectId::new("project-alpha").unwrap()),
+            None,
         )
         .await
         .expect("first bind");
@@ -226,6 +227,7 @@ async fn trusted_scope_is_persisted_on_first_bind() {
         first.turn_scope.agent_id.as_ref().map(AgentId::as_str),
         Some("agent-alpha")
     );
+    assert!(!first.turn_scope.has_explicit_thread_owner());
 
     let second = services
         .resolve_or_create_binding_with_trusted_scope(
@@ -237,6 +239,7 @@ async fn trusted_scope_is_persisted_on_first_bind() {
             ),
             Some(AgentId::new("agent-beta").unwrap()),
             Some(ProjectId::new("project-beta").unwrap()),
+            None,
         )
         .await
         .expect("existing bind");
@@ -247,6 +250,65 @@ async fn trusted_scope_is_persisted_on_first_bind() {
     assert_eq!(
         second.turn_scope.project_id.as_ref().map(ProjectId::as_str),
         Some("project-alpha")
+    );
+    assert!(!second.turn_scope.has_explicit_thread_owner());
+}
+
+#[tokio::test]
+async fn trusted_owner_is_persisted_on_first_bind() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+
+    let first = services
+        .resolve_or_create_binding_with_trusted_scope(
+            resolve_request(
+                telegram(),
+                external_actor("telegram-user-1"),
+                external_conversation("chat-trusted-owner", None),
+                "telegram-event-trusted-owner-1",
+            ),
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+            Some(user("owner-alpha")),
+        )
+        .await
+        .expect("first bind");
+    assert_eq!(
+        first
+            .turn_scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("owner-alpha")
+    );
+
+    let second = services
+        .resolve_or_create_binding_with_trusted_scope(
+            resolve_request(
+                telegram(),
+                external_actor("telegram-user-1"),
+                external_conversation("chat-trusted-owner", None),
+                "telegram-event-trusted-owner-2",
+            ),
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+            Some(user("owner-beta")),
+        )
+        .await
+        .expect("existing bind");
+    assert_eq!(
+        second
+            .turn_scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("owner-alpha")
     );
 }
 
@@ -300,6 +362,7 @@ async fn trusted_scope_rejects_existing_unscoped_binding() {
             trusted_shared,
             Some(AgentId::new("agent-alpha").unwrap()),
             Some(ProjectId::new("project-alpha").unwrap()),
+            None,
         )
         .await
         .expect_err("trusted scope must not reinterpret legacy bindings");
@@ -318,6 +381,56 @@ async fn trusted_scope_rejects_existing_unscoped_binding() {
         .await
         .expect_err("rejected trusted resolve must not widen route access");
     assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn trusted_owner_backfills_legacy_shared_binding() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+
+    let legacy = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-legacy-owner", None),
+            "telegram-event-legacy-owner-unscoped",
+        ))
+        .await
+        .expect("legacy unscoped bind");
+    assert!(!legacy.turn_scope.has_explicit_thread_owner());
+
+    let mut trusted_owner_shared = resolve_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("chat-legacy-owner", None),
+        "telegram-event-legacy-owner-backfill",
+    );
+    trusted_owner_shared.route_kind = ConversationRouteKind::Shared;
+    let migrated = services
+        .resolve_or_create_binding_with_trusted_scope(
+            trusted_owner_shared,
+            None,
+            None,
+            Some(user("owner-alpha")),
+        )
+        .await
+        .expect("trusted owner should backfill legacy shared binding");
+
+    assert_eq!(
+        migrated
+            .turn_scope
+            .explicit_owner_user_id()
+            .map(UserId::as_str),
+        Some("owner-alpha")
+    );
 }
 
 #[tokio::test]
@@ -2768,6 +2881,7 @@ impl ConversationBindingService for DriftBindingService {
         request: ironclaw_conversations::ResolveConversationRequest,
         _trusted_agent_id: Option<AgentId>,
         _trusted_project_id: Option<ProjectId>,
+        _trusted_owner_user_id: Option<UserId>,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
         self.resolve_or_create_binding(request).await
     }
@@ -2841,6 +2955,7 @@ impl ConversationBindingService for UntrustedOnlyBindingService {
         _request: ironclaw_conversations::ResolveConversationRequest,
         _trusted_agent_id: Option<AgentId>,
         _trusted_project_id: Option<ProjectId>,
+        _trusted_owner_user_id: Option<UserId>,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
         *self.trusted_calls.lock().unwrap() += 1;
         panic!("untrusted inbound must not call trusted resolver path")

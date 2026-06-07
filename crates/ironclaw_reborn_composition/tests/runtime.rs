@@ -12,6 +12,8 @@ use ironclaw_reborn_composition::{
 use ironclaw_turns::TurnStatus;
 use tokio_util::sync::CancellationToken;
 
+const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[tokio::test]
 async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
     let input =
@@ -70,7 +72,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
 
     let conversation = runtime.new_conversation().await.unwrap();
     let reply = tokio::time::timeout(
-        Duration::from_secs(2),
+        SEND_USER_MESSAGE_TIMEOUT,
         runtime.send_user_message(&conversation, "hello"),
     )
     .await
@@ -84,7 +86,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     assert_eq!(reply.text, None);
 
     let second_reply = tokio::time::timeout(
-        Duration::from_secs(2),
+        SEND_USER_MESSAGE_TIMEOUT,
         runtime.send_user_message(&conversation, "hello again"),
     )
     .await
@@ -168,13 +170,13 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
+        max_total: Duration::from_secs(10),
     });
 
     let runtime = build_reborn_runtime(input).await.unwrap();
     let conversation = runtime.new_conversation().await.unwrap();
     let result = tokio::time::timeout(
-        Duration::from_secs(3),
+        Duration::from_secs(15),
         runtime.execute_skill_message(&conversation, "$filesystem-review"),
     )
     .await

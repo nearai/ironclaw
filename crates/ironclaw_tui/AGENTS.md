@@ -11,7 +11,7 @@
 
 ## What This Crate Owns
 
-- Ratatui terminal UI primitives: `TuiApp`, event/input loop, layout/theme rendering, widgets, approval overlays, model/thread pickers, and clipboard-gated UI behavior.
+- Ratatui terminal UI primitives: the app entrypoint (`start_tui`, `TuiAppConfig`, `TuiAppHandle`), `TuiEvent`/`TuiUiAction` event/input loop, `TuiLayout` layout/theme rendering, widgets (approval overlays, command palette, model/thread pickers, tool/logs panels, status/tab bars), and clipboard-gated UI behavior.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here
