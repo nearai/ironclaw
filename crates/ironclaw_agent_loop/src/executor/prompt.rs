@@ -51,6 +51,15 @@ pub(super) struct PromptOutput {
 pub(super) enum PromptStep {
     Prepared(Box<PromptOutput>),
     Exit(LoopExit),
+    /// Compaction-only turn: PromptCompactionStep ran (forced by the
+    /// `skip_model_this_iteration` flag), no prompt was assembled, no
+    /// model call this iteration. canonical.rs bypasses ModelStage +
+    /// CapabilityStage + PostCapabilityStage and routes directly to
+    /// StopStage.observe().
+    // Boxed to avoid a large_enum_variant warning; the field is unused
+    // until Step 7 wires the canonical.rs arm.
+    #[allow(dead_code)]
+    SkipModel(Box<LoopExecutionState>),
 }
 
 pub(super) struct BuiltPromptBundle {
@@ -170,6 +179,22 @@ impl<'a> PromptPlanningPipeline<'a> {
         let surface_filter = self.ctx.planner.capability().filter(&self.state).await;
         if let Some(exit) = self.cancel_boundary().await? {
             return Ok(PromptStep::Exit(exit));
+        }
+
+        // NEW: skip_model_this_iteration short-circuit
+        // PostCapabilityStage flipped this flag last turn after CompactionPolicy
+        // tripped. Force the compaction here and skip the model call entirely.
+        if self.state.post_capability_state.skip_model_this_iteration {
+            self.state.post_capability_state.skip_model_this_iteration = false;
+            let compaction = PromptCompactionStep::new(self.ctx, &mut self.pending_input_ack)
+                .run(self.state)
+                .await?;
+            let state = match compaction {
+                PromptCompactionOutcome::Exited(exit) => return Ok(PromptStep::Exit(exit)),
+                PromptCompactionOutcome::Skipped(state) => state,
+                PromptCompactionOutcome::Compacted(state) => state,
+            };
+            return Ok(PromptStep::SkipModel(Box::new(state)));
         }
 
         let surface = self.visible_surface(surface_filter).await?;

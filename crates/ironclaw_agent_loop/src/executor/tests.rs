@@ -262,6 +262,7 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 2);
     assert_eq!(
@@ -336,6 +337,7 @@ async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 1);
     assert_eq!(
@@ -417,6 +419,7 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
         output.state.compaction_state.last_compacted_through_seq,
@@ -501,6 +504,7 @@ async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
         output.state.compaction_prompt.message_index,
@@ -552,6 +556,7 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
         }
         PromptStep::Prepared(_) => panic!("expected cancelled exit"),
         PromptStep::Exit(exit) => panic!("expected cancelled exit, got {exit:?}"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     }
     assert_eq!(host.prompt_requests().len(), 1);
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
@@ -653,6 +658,7 @@ async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
         }
         PromptStep::Prepared(_) => panic!("security rejection should end the run"),
         PromptStep::Exit(exit) => panic!("expected failed exit, got {exit:?}"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     }
     assert_eq!(host.prompt_requests().len(), 1);
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
@@ -2653,5 +2659,48 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
         appended[0]
             .safe_summary
             .starts_with("capability failed with output_too_large: ")
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_returns_skip_model_when_flag_set() {
+    // A plain host with no model responses: the model should never be called.
+    let host = MockHost::new(Vec::new());
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.post_capability_state.skip_model_this_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    let returned_state = match step {
+        PromptStep::SkipModel(state) => *state,
+        PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
+        PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
+    };
+
+    // The flag must be cleared so subsequent iterations call the model normally.
+    assert!(
+        !returned_state.post_capability_state.skip_model_this_iteration,
+        "skip_model_this_iteration must be cleared after PromptStage consumes it"
+    );
+
+    // No prompt bundle was built: the surface/prompt build is bypassed entirely.
+    assert_eq!(
+        host.prompt_requests().len(),
+        0,
+        "no prompt bundle should be requested when skipping the model"
     );
 }

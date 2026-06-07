@@ -98,6 +98,7 @@ impl DefaultExecutorPipeline {
             {
                 PromptStep::Prepared(prompt) => *prompt,
                 PromptStep::Exit(exit) => return Ok(exit),
+                PromptStep::SkipModel(_) => unreachable!("wired in Step 7"),
             };
             state = prompt.state;
             pending_input_ack = prompt.pending_input_ack;
