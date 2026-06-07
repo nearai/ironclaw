@@ -27,10 +27,7 @@ use ironclaw_loop_support::{
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedToolResultContent,
     ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
 };
-use ironclaw_threads::{
-    ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope,
-    ToolResultReferenceEnvelope,
-};
+use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
     TurnId, TurnRunId,
@@ -43,7 +40,7 @@ use ironclaw_turns::{
         LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall, ProviderToolDefinition,
     },
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
@@ -1314,35 +1311,14 @@ fn tool_result_replay_message(
         match message.tool_result_content.as_ref() {
             Some(HostManagedToolResultContent::Reference { envelope }) => {
                 let safe_summary = envelope.safe_summary.as_str().to_string();
-                if let Some(model_observation) = envelope.model_observation.as_ref() {
-                    if let Err(error) = ToolResultReferenceEnvelope::with_model_observation(
-                        envelope.result_ref.clone(),
-                        envelope.safe_summary.clone(),
-                        model_observation.clone(),
-                    ) {
-                        warn!(
-                            reason = %error,
-                            result_ref = %envelope.result_ref,
-                            "dropping invalid model-visible tool observation during replay"
-                        );
-                        (safe_summary.clone(), safe_summary, true)
-                    } else {
-                        let model_content =
-                            serde_json::to_string(model_observation).map_err(|_| {
-                                HostManagedModelError::safe(
-                                    HostManagedModelErrorKind::InvalidRequest,
-                                    "tool result model observation is invalid",
-                                )
-                            })?;
-                        (safe_summary, model_content, true)
-                    }
-                } else {
+                if envelope.model_observation.is_none() {
                     debug!(
                         result_ref = %envelope.result_ref,
                         "tool result resolved content unavailable; replaying safe summary fallback"
                     );
-                    (safe_summary.clone(), safe_summary, true)
                 }
+                let model_content = envelope.model_visible_content_or_safe_summary();
+                (safe_summary, model_content, true)
             }
             Some(HostManagedToolResultContent::Resolved { safe_summary }) => (
                 safe_summary.as_str().to_string(),
