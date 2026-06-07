@@ -11,8 +11,14 @@
 
 ## What This Crate Owns
 
-- Typed event/audit substrate contracts and redacted event envelopes.
+- Typed redacted event/audit substrate, currently:
+- Runtime/process event records: `RuntimeEvent`, `RuntimeEventId`, `RuntimeEventKind`, plus redaction helpers `sanitize_error_kind` / `UNCLASSIFIED_ERROR_KIND` (`runtime_event`).
+- Best-effort sink traits (`EventSink`, `AuditSink`) and explicit-error durable-log traits (`DurableEventLog`, `DurableAuditLog`) with their `DurableEventSink` / `DurableAuditSink` adapters (`sink`).
+- Per-scope cursor/replay envelope: `EventCursor`, `EventLogEntry`, `EventReplay`, `EventStreamKey`, `ReadScope` (`cursor`).
+- In-memory durable/sink backends for tests and reference loops (`in_memory`) and the byte-level `parse_jsonl` / `replay_jsonl` helpers (`jsonl`).
+- `EventError` (`error`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
+- Production backend selection lives in `ironclaw_reborn_event_store`, not here — downstream store crates depend on this substrate, never the reverse.
 
 ## Do Not Move In Here
 

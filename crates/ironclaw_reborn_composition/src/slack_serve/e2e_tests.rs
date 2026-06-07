@@ -227,6 +227,7 @@ async fn build_harness_with_actor_user_resolver_and_auth_challenges(
             ProjectId::new(PROJECT).expect("project"), // safety: static test project id is valid.
         ),
     )
+    .with_default_subject_user_id(UserId::new(USER).expect("user")) // safety: static test user id is valid.
     .with_actor_user_resolver(actor_user_resolver, actor_pairings);
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(adapter_id, installation_id.clone()),

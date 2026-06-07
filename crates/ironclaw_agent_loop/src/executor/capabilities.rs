@@ -23,10 +23,10 @@ use super::{
     CancelCheck, CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, GateInput, GateStage,
     MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep, append_capability_error_ref,
     append_capability_result_ref, append_capability_safe_summary_ref, batch_policy_kind,
-    cancelled_exit, capability_batch_counts, capability_error_class, capability_failure_kind,
-    capability_host_error, capability_invocation_from_candidate, capability_is_visible,
-    capability_summary, failed_exit, honor_retry_alteration, push_call_signature_once,
-    push_completed_result, sanitized_strategy_summary,
+    cancelled_exit, capability_batch_counts, capability_call_signature, capability_error_class,
+    capability_failure_kind, capability_host_error, capability_invocation_from_candidate,
+    capability_is_visible, capability_summary, failed_exit, honor_retry_alteration,
+    push_call_signature_once, push_completed_result, sanitized_strategy_summary,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -696,7 +696,8 @@ async fn append_completed_capability_result(
     capability_batch: &mut CapabilityBatchTurnSummary,
 ) -> Result<(), AgentLoopExecutorError> {
     append_capability_result_ref(host, call, &result).await?;
-    capability_batch.record_result(result.progress, result.terminate_hint);
+    let signature = capability_call_signature(call)?;
+    capability_batch.record_result(signature, result.progress, result.terminate_hint);
     push_completed_result(state, result);
     Ok(())
 }

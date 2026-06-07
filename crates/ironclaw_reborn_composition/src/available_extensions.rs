@@ -218,16 +218,7 @@ fn can_merge_credential_setup(
     existing: &LifecycleExtensionCredentialSetup,
     candidate: &LifecycleExtensionCredentialSetup,
 ) -> bool {
-    matches!(
-        (existing, candidate),
-        (
-            LifecycleExtensionCredentialSetup::ManualToken,
-            LifecycleExtensionCredentialSetup::ManualToken
-        ) | (
-            LifecycleExtensionCredentialSetup::OAuth { .. },
-            LifecycleExtensionCredentialSetup::OAuth { .. }
-        )
-    )
+    existing == candidate
 }
 
 fn merge_credential_setup(
@@ -1608,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    fn bundled_google_credentials_project_single_oauth_setup_per_account() {
+    fn bundled_google_credentials_project_oauth_setup_per_declared_scope_set() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
         for extension_id in [
@@ -1665,17 +1656,21 @@ mod tests {
 
             assert_eq!(
                 google_requirements.len(),
-                1,
-                "{extension_id} lifecycle setup should show one Google OAuth request per account"
+                expected_setup_scopes.len(),
+                "{extension_id} lifecycle setup should show one Google OAuth request per distinct scope set"
             );
-            let requirement = google_requirements[0];
-            let LifecycleExtensionCredentialSetup::OAuth { scopes } = &requirement.setup else {
-                panic!("{extension_id} should expose Google OAuth setup");
-            };
-            assert_eq!(
-                scopes, &expected_setup_scopes,
-                "{extension_id} lifecycle setup should request the union of capability OAuth scopes once"
-            );
+            for (requirement, expected_scope) in
+                google_requirements.iter().zip(expected_setup_scopes.iter())
+            {
+                let LifecycleExtensionCredentialSetup::OAuth { scopes } = &requirement.setup else {
+                    panic!("{extension_id} should expose Google OAuth setup");
+                };
+                assert_eq!(
+                    scopes.as_slice(),
+                    std::slice::from_ref(expected_scope),
+                    "{extension_id} lifecycle setup should preserve each capability OAuth scope set"
+                );
+            }
             assert!(
                 credential_count > 0,
                 "{extension_id} should declare runtime credentials"

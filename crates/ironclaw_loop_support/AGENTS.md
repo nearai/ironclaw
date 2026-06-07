@@ -17,6 +17,7 @@
 - `capability_port.rs`, `capability_surface_filter.rs`, and `capability_allow_set.rs` capability-surface adapters.
 - `input_queue.rs` / `input_port.rs` steering and followup queues.
 - `cancellation_port.rs` cancellation observation adapter.
+- `skill_bundle_source.rs` / `filesystem_skill_bundle_source.rs` skill-bundle source ports (`SkillBundleSource`, `FilesystemSkillBundleSource`, `SkillBundleDescriptor`/`SkillBundleId`/`SkillBundleProvenance`).
 
 ## Do Not Move In Here
 

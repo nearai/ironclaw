@@ -31,11 +31,11 @@ use ironclaw_product_workflow::{
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
     PendingAuthInteractionView, ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductCommandName, ProductConversationBindingService, ProductInstallationKey,
-    ProductInstallationScope, ProductWorkflowError, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding, SourceBindingKey,
-    StaticProductInstallationResolver, approval_gate_ref,
+    ProductCommandName, ProductConversationBindingService, ProductConversationRouteKey,
+    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
+    ResolvedBinding, SourceBindingKey, StaticProductInstallationResolver, approval_gate_ref,
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
@@ -1971,7 +1971,7 @@ async fn actor_user_resolver_propagates_resolver_error_without_turn_submission()
 }
 
 #[tokio::test]
-async fn lookup_binding_with_actor_user_resolver_uses_existing_pairings_only() {
+async fn lookup_binding_with_actor_user_resolver_requires_resolved_actor() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let (binding, actor_resolver) = product_binding_service_with_actor_user_resolver(
         conversations,
@@ -1985,15 +1985,12 @@ async fn lookup_binding_with_actor_user_resolver_uses_existing_pairings_only() {
         .await
         .expect_err("lookup must require an existing durable actor pairing");
 
-    assert!(
-        actor_resolver.calls().is_empty(),
-        "existing-only lookup must not trigger resolver pairing challenges"
-    );
+    assert_eq!(actor_resolver.calls().len(), 1);
     assert!(matches!(err, ProductWorkflowError::BindingRequired { .. }));
 }
 
 #[tokio::test]
-async fn lookup_binding_with_actor_user_resolver_ignores_resolver_failures() {
+async fn lookup_binding_with_actor_user_resolver_propagates_resolver_failures() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let binding = product_binding_service_with_actor_user_resolver_arc(
         conversations,
@@ -2005,13 +2002,16 @@ async fn lookup_binding_with_actor_user_resolver_ignores_resolver_failures() {
             "lookup-resolver-error",
         )))
         .await
-        .expect_err("lookup should fail from missing durable pairing, not resolver backend");
+        .expect_err("lookup must verify actor identity before using a durable binding");
 
-    assert!(matches!(err, ProductWorkflowError::BindingRequired { .. }));
+    assert!(matches!(
+        err,
+        ProductWorkflowError::BindingResolutionFailed { .. }
+    ));
 }
 
 #[tokio::test]
-async fn lookup_binding_with_actor_user_resolver_returns_existing_actor_pairing() {
+async fn lookup_binding_with_actor_user_resolver_denies_mismatched_existing_actor_pairing() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     conversations
         .pair_external_actor(
@@ -2045,15 +2045,56 @@ async fn lookup_binding_with_actor_user_resolver_returns_existing_actor_pairing(
         )],
     );
 
+    let error = binding
+        .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect_err("lookup must reject a durable binding for a different resolved actor");
+
+    assert_eq!(actor_resolver.calls().len(), 1);
+    assert!(matches!(error, ProductWorkflowError::BindingAccessDenied));
+}
+
+#[tokio::test]
+async fn lookup_binding_with_actor_user_resolver_returns_verified_existing_actor_pairing() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            TenantId::new("tenant:alpha").expect("tenant"),
+            ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+            ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:paired-bob").expect("user"),
+        )
+        .await;
+    let seed_binding = product_binding_service(
+        conversations.clone(),
+        vec![(
+            "test_adapter",
+            "install_alpha",
+            "tenant:alpha",
+            "agent:alpha",
+            Some("project:alpha"),
+        )],
+    );
+    let envelope = sample_envelope("lookup-resolver-match");
+    seed_binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect("seed canonical conversation binding");
+    let (binding, actor_resolver) = product_binding_service_with_actor_user_resolver(
+        conversations,
+        [(
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+            UserId::new("user:paired-bob").expect("user"),
+        )],
+    );
+
     let resolved = binding
         .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
         .await
-        .expect("lookup should use the existing durable actor pairing");
+        .expect("lookup should use the verified durable actor pairing");
 
-    assert!(
-        actor_resolver.calls().is_empty(),
-        "existing-only lookup must not reinterpret durable pairing through resolver"
-    );
+    assert_eq!(actor_resolver.calls().len(), 1);
     assert_eq!(resolved.actor_user_id.as_str(), "user:paired-bob");
 }
 
@@ -2376,7 +2417,7 @@ async fn concrete_product_workflow_keeps_installations_tenant_isolated() {
 }
 
 #[tokio::test]
-async fn shared_route_without_configured_subject_yields_none_subject_user_id() {
+async fn shared_route_without_configured_subject_requires_binding() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
     let installation_id =
@@ -2413,20 +2454,77 @@ async fn shared_route_without_configured_subject_yields_none_subject_user_id() {
         ),
     );
 
+    let error = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect_err("shared binding must require an explicit subject user");
+
+    assert!(matches!(
+        error,
+        ProductWorkflowError::BindingRequired { reason }
+            if reason == "shared product route requires a configured subject user"
+    ));
+}
+
+#[tokio::test]
+async fn shared_route_uses_conversation_specific_subject_over_installation_default() {
+    let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
+    let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
+    let installation_id =
+        ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            tenant_id.clone(),
+            adapter_kind,
+            installation_id,
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations;
+    let scope = ProductInstallationScope::with_default_scope(
+        tenant_id,
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_default_subject_user_id(UserId::new("user:default-team").expect("default subject"))
+    .with_conversation_subject_route(
+        ProductConversationRouteKey::new(Some("T-team".to_string()), "C-eng".to_string())
+            .expect("route key"),
+        UserId::new("user:eng-team").expect("route subject"),
+    );
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        scope,
+    )]);
+    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+    let envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-route-subject").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-1"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+
     let resolved = binding
         .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
         .await
-        .expect("shared binding should resolve without a configured subject");
+        .expect("shared binding should resolve");
 
     assert_eq!(resolved.actor_user_id.as_str(), "user:alice");
-    assert_eq!(resolved.subject_user_id, None);
     assert_eq!(
-        resolved.agent_id.as_ref().map(AgentId::as_str),
-        Some("agent:alpha")
-    );
-    assert_eq!(
-        resolved.project_id.as_ref().map(ProjectId::as_str),
-        Some("project:alpha")
+        resolved.subject_user_id.as_ref().map(UserId::as_str),
+        Some("user:eng-team")
     );
 }
 

@@ -122,6 +122,24 @@ pub struct ValueKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PredicateEventId(String);
 
+/// Maximum byte length of a [`PredicateEventId`]. The id is stored verbatim
+/// in the durable backends' `event_id` TEXT column (no DB-level length
+/// constraint), so an attacker who can drive `event_id` through a
+/// `record_invocation` / `record_value` path could otherwise insert
+/// arbitrarily large strings — up to PostgreSQL's 1 GiB row limit — into
+/// durable storage, and with [`MAX_SAMPLES_PER_KEY`] in-window samples per
+/// key the multiplier is large (henrypark133 MEDIUM, PR #3937). The
+/// [`WindowOverflow`] error also embeds a key label in its message, so an
+/// unbounded id amplifies into error-message memory.
+///
+/// `512` is ~4× a 64-char blake3 hex digest (the canonical synth shape) and
+/// matches [`crate::manifest::MAX_MANIFEST_REASON_BYTES`], the other
+/// operator-facing byte cap in this crate. Measured in bytes (not chars) so a
+/// multibyte-UTF-8 id can't slip past a char count.
+///
+/// [`WindowOverflow`]: PredicateBackendError::WindowOverflow
+pub const MAX_EVENT_ID_LEN: usize = 512;
+
 /// Format-validation error for [`PredicateEventId::new`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PredicateEventIdError {
@@ -129,11 +147,14 @@ pub enum PredicateEventIdError {
     Empty,
     #[error("predicate event id must not contain NUL bytes")]
     ContainsNul,
+    #[error("predicate event id is {len} bytes, exceeding the maximum of {max}")]
+    TooLong { len: usize, max: usize },
 }
 
 impl PredicateEventId {
-    /// Construct from any string-like value, validating non-empty and
-    /// NUL-free at the type boundary. Returns
+    /// Construct from any string-like value, validating non-empty,
+    /// within [`MAX_EVENT_ID_LEN`] bytes, and NUL-free at the type
+    /// boundary. Returns
     /// [`PredicateEventIdError`] on rejection. Validation happens HERE
     /// (not at the `BeforeCapabilityHookContext::with_caller_event_id`
     /// setter) because the field on the context is `pub` and a caller
@@ -149,6 +170,12 @@ impl PredicateEventId {
         let value = value.into();
         if value.is_empty() {
             return Err(PredicateEventIdError::Empty);
+        }
+        if value.len() > MAX_EVENT_ID_LEN {
+            return Err(PredicateEventIdError::TooLong {
+                len: value.len(),
+                max: MAX_EVENT_ID_LEN,
+            });
         }
         if value.as_bytes().contains(&0) {
             return Err(PredicateEventIdError::ContainsNul);
@@ -375,6 +402,18 @@ pub trait PredicateStateBackend: Send + Sync {
     /// Lockable into the trait signature now (rather than at the durable
     /// backend PR) so trait-object callers don't break when the durable
     /// impl lands — henrypark133 important #5 on PR #3635.
+    ///
+    /// # Operator requirement (durable backends)
+    ///
+    /// Durable backends MUST have this scheduled periodically (typically at the
+    /// slowest configured window). The per-tenant LRU quota counts ALL stored
+    /// rows for a tenant, including expired-but-unreaped rows from idle keys;
+    /// without a reaper, short-window workloads can appear at
+    /// `MAX_KEYS_PER_TENANT` and trigger LRU eviction (advancing
+    /// `evictions_observed`) below their active key count. The `record_*` path
+    /// only trims the current key's window, never sibling keys, so this method
+    /// is the only thing that reclaims idle expired rows. See
+    /// `docs/successors/03-persistent-counter.md` (Reaper requirement).
     #[allow(dead_code)] // operator reaper hook for future durable backends
     async fn evict_older_than(&self, _cutoff: DateTime<Utc>) -> Result<u64, PredicateBackendError> {
         Ok(0)
@@ -520,7 +559,20 @@ impl Default for InMemoryPredicateStateBackend {
 /// meaning nothing is trimmed (conservative for a rate/value cap). Unlike
 /// the prior `Instant::checked_sub`, `DateTime<Utc>` subtraction never
 /// panics or underflows.
-fn window_cutoff(now: DateTime<Utc>, window: Duration) -> DateTime<Utc> {
+///
+/// # Canonical cross-backend cutoff (do not reimplement)
+///
+/// This is the **single source of truth** for the sliding-window cutoff rule
+/// (`occurred_at < cutoff` is trimmed; an entry exactly at `cutoff` is
+/// retained). Durable backends (libSQL, Postgres) MUST derive their cutoff from
+/// this function rather than reimplementing the `Duration → wall-clock`
+/// conversion, so the overflow/boundary behaviour cannot drift per backend. A
+/// libSQL backend storing epoch-millis converts the result with
+/// [`DateTime::timestamp_millis`]; the `i64::MAX`-saturating-then-`saturating_sub`
+/// shortcut a backend might write independently is **not** equivalent — on an
+/// oversized window it trims nothing, whereas this canonical rule trims to
+/// `now`. The cross-backend parity suite (#3937) covers this boundary.
+pub fn window_cutoff(now: DateTime<Utc>, window: Duration) -> DateTime<Utc> {
     match chrono::Duration::from_std(window) {
         Ok(d) => now.checked_sub_signed(d).unwrap_or(now),
         Err(_) => now,
@@ -1203,63 +1255,188 @@ pub mod contract {
         );
     }
 
-    /// Run every contract against `factory`. Per-impl test files invoke
-    /// this via [`contract_test!`].
+    /// Contract: `evict_older_than` reaps rows STRICTLY older than the cutoff
+    /// (`occurred_at < cutoff`, not `<=`) across BOTH the invocation and value
+    /// tables, and the returned count equals the number of rows actually
+    /// deleted. A backend that reaped with `<=` would also drop the row at the
+    /// exact cutoff; a backend that reaped only one table would leave the other
+    /// unreaped — both are caught here.
+    pub async fn evict_older_than_reaps_strictly_older_rows<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let inv = inv_key("alpha", "cap.reap");
+        let val = val_key("alpha", "cap.reap", "amount");
+        // A window large enough that no record_* call trims a sibling — we want
+        // evict_older_than to be the only thing that removes rows.
+        let window = Duration::from_secs(86_400);
+        // Seed t0 (strictly before cutoff), t10 (exactly at cutoff), t20 (after)
+        // in BOTH tables.
+        for (i, secs) in [0i64, 10, 20].iter().enumerate() {
+            backend
+                .record_invocation(&inv, &ev(&format!("i{i}")), at(*secs), window)
+                .await
+                .expect("ok");
+            backend
+                .record_value(
+                    &val,
+                    &ev(&format!("v{i}")),
+                    at(*secs),
+                    Decimal::from(10),
+                    window,
+                )
+                .await
+                .expect("ok");
+        }
+
+        // Reap everything strictly older than t10. The t0 row in each table is
+        // strictly older and must go; the t10 row is exactly at the cutoff and
+        // must be retained (< vs <=); t20 survives. Two rows total (one per
+        // table) are deleted.
+        let dropped = backend.evict_older_than(at(10)).await.expect("evict ok");
+        assert_eq!(
+            dropped, 2,
+            "exactly the two strictly-older rows (one per table) are reaped; \
+             the exact-cutoff rows are retained"
+        );
+
+        // Observe surviving rows via a probe whose own window cutoff sits before
+        // t10, so the probe never trims a survivor. The invocation count and the
+        // value sum after the probe expose how many rows the reaper left behind.
+        let probe_window = Duration::from_secs(86_400);
+        let inv_count = backend
+            .record_invocation(&inv, &ev("probe-i"), at(20), probe_window)
+            .await
+            .expect("ok");
+        assert_eq!(
+            inv_count, 3,
+            "invocation table keeps the t10 (exact-cutoff) and t20 rows; \
+             a <= reaper would have dropped t10 and left a count of 2"
+        );
+        let val_sum = backend
+            .record_value(
+                &val,
+                &ev("probe-v"),
+                at(20),
+                Decimal::from(10),
+                probe_window,
+            )
+            .await
+            .expect("ok");
+        assert_eq!(
+            val_sum,
+            Decimal::from(30),
+            "value table keeps the t10 (exact-cutoff) and t20 rows summing 20, \
+             plus the 10 probe; a reaper that skipped the value table would sum 40"
+        );
+    }
+
+    /// Contract: the row whose `occurred_at` equals the cutoff is RETAINED by
+    /// `evict_older_than`. Pinpoints the `<` vs `<=` boundary in isolation:
+    /// seed a single row at the cutoff, reap at that exact instant, and assert
+    /// nothing was dropped and the row is still observable.
+    pub async fn evict_older_than_retains_entry_at_exact_cutoff<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let inv = inv_key("alpha", "cap.cutoff");
+        let val = val_key("alpha", "cap.cutoff", "amount");
+        let window = Duration::from_secs(86_400);
+        backend
+            .record_invocation(&inv, &ev("i0"), at(10), window)
+            .await
+            .expect("ok");
+        backend
+            .record_value(&val, &ev("v0"), at(10), Decimal::from(10), window)
+            .await
+            .expect("ok");
+
+        let dropped = backend.evict_older_than(at(10)).await.expect("evict ok");
+        assert_eq!(
+            dropped, 0,
+            "the row exactly at the cutoff is retained (< cutoff, not <=)"
+        );
+
+        let probe_window = Duration::from_secs(86_400);
+        let inv_count = backend
+            .record_invocation(&inv, &ev("probe-i"), at(10), probe_window)
+            .await
+            .expect("ok");
+        assert_eq!(
+            inv_count, 2,
+            "exact-cutoff invocation row survived the reaper"
+        );
+        let val_sum = backend
+            .record_value(
+                &val,
+                &ev("probe-v"),
+                at(10),
+                Decimal::from(10),
+                probe_window,
+            )
+            .await
+            .expect("ok");
+        assert_eq!(
+            val_sum,
+            Decimal::from(20),
+            "exact-cutoff value row survived the reaper"
+        );
+    }
+
+    /// The **single canonical inventory** of `PredicateStateBackend` contract
+    /// cases. Every shared invariant is listed here exactly once, by the
+    /// `pub async fn` name in this module. Both the default-harness wiring
+    /// ([`predicate_backend_contract_test!`]) and any out-of-crate custom
+    /// runner (e.g. the libSQL serial runner, which cannot use the default
+    /// libtest harness) drive their case lists from this macro, so a contract
+    /// added here is automatically run against every backend — there is no
+    /// hand-maintained second list to drift out of sync.
+    ///
+    /// `$emit` is a `macro_rules!`-style callback macro the caller supplies; it
+    /// is invoked once per case as `$emit!([$($ctx)*] case_name);` where
+    /// `case_name` is the identifier of the `contract::` function and `$ctx` is
+    /// arbitrary caller context (e.g. a factory expression) threaded through
+    /// unchanged. The caller decides what each expansion becomes (a
+    /// `#[tokio::test]` fn, a serial-runner line, …).
+    #[macro_export]
+    macro_rules! predicate_backend_contract_cases {
+        ($emit:ident, $($ctx:tt)*) => {
+            $emit!([$($ctx)*] invocation_counts_within_window);
+            $emit!([$($ctx)*] invocation_trims_outside_window);
+            $emit!([$($ctx)*] value_sums_within_window);
+            $emit!([$($ctx)*] tenant_isolation);
+            $emit!([$($ctx)*] duplicate_event_id_is_noop_for_invocations);
+            $emit!([$($ctx)*] duplicate_event_id_is_noop_for_values);
+            $emit!([$($ctx)*] invocation_retains_entry_at_exact_window_cutoff);
+            $emit!([$($ctx)*] event_id_dedup_isolated_across_maps);
+            $emit!([$($ctx)*] record_invocation_overflow_is_fail_closed);
+            $emit!([$($ctx)*] evict_older_than_reaps_strictly_older_rows);
+            $emit!([$($ctx)*] evict_older_than_retains_entry_at_exact_cutoff);
+        };
+    }
+
+    /// Run every contract against `factory` under the default libtest harness.
+    /// Per-impl test files invoke this via [`predicate_backend_contract_test!`].
+    /// The case inventory is the canonical [`predicate_backend_contract_cases!`]
+    /// list — this macro only decides that each case becomes a
+    /// `#[tokio::test]`.
     #[macro_export]
     macro_rules! predicate_backend_contract_test {
         ($label:ident, $factory:expr) => {
             mod $label {
-                #[tokio::test]
-                async fn invocation_counts_within_window() {
-                    $crate::predicate_state::contract::invocation_counts_within_window($factory)
-                        .await;
+                macro_rules! emit_case {
+                    ([$factory_expr:expr] $case:ident) => {
+                        #[tokio::test]
+                        async fn $case() {
+                            $crate::predicate_state::contract::$case($factory_expr).await;
+                        }
+                    };
                 }
-                #[tokio::test]
-                async fn invocation_trims_outside_window() {
-                    $crate::predicate_state::contract::invocation_trims_outside_window($factory)
-                        .await;
-                }
-                #[tokio::test]
-                async fn value_sums_within_window() {
-                    $crate::predicate_state::contract::value_sums_within_window($factory).await;
-                }
-                #[tokio::test]
-                async fn tenant_isolation() {
-                    $crate::predicate_state::contract::tenant_isolation($factory).await;
-                }
-                #[tokio::test]
-                async fn duplicate_event_id_is_noop_for_invocations() {
-                    $crate::predicate_state::contract::duplicate_event_id_is_noop_for_invocations(
-                        $factory,
-                    )
-                    .await;
-                }
-                #[tokio::test]
-                async fn duplicate_event_id_is_noop_for_values() {
-                    $crate::predicate_state::contract::duplicate_event_id_is_noop_for_values(
-                        $factory,
-                    )
-                    .await;
-                }
-                #[tokio::test]
-                async fn invocation_retains_entry_at_exact_window_cutoff() {
-                    $crate::predicate_state::contract::invocation_retains_entry_at_exact_window_cutoff(
-                        $factory,
-                    )
-                    .await;
-                }
-                #[tokio::test]
-                async fn event_id_dedup_isolated_across_maps() {
-                    $crate::predicate_state::contract::event_id_dedup_isolated_across_maps($factory)
-                        .await;
-                }
-                #[tokio::test]
-                async fn record_invocation_overflow_is_fail_closed() {
-                    $crate::predicate_state::contract::record_invocation_overflow_is_fail_closed(
-                        $factory,
-                    )
-                    .await;
-                }
+                $crate::predicate_backend_contract_cases!(emit_case, $factory);
             }
         };
     }
@@ -1361,6 +1538,68 @@ mod tests {
             b.as_str(),
             "synth must not be content-addressable: identical inputs would leak \
              argument-shape equality across tenants"
+        );
+    }
+
+    /// henrypark133 MEDIUM on PR #3937: `PredicateEventId::new` must cap
+    /// length so an attacker-driven `event_id` can't insert arbitrarily large
+    /// strings into the durable `event_id` TEXT column. Boundary: exactly
+    /// `MAX_EVENT_ID_LEN` bytes is accepted; one byte over is rejected with
+    /// the typed `TooLong` variant carrying the observed length and cap.
+    #[test]
+    fn predicate_event_id_accepts_max_length() {
+        let at_cap = "a".repeat(MAX_EVENT_ID_LEN);
+        assert!(
+            PredicateEventId::new(at_cap.clone()).is_ok(),
+            "exactly MAX_EVENT_ID_LEN bytes is in-bounds"
+        );
+    }
+
+    #[test]
+    fn predicate_event_id_rejects_too_long() {
+        let over = "a".repeat(MAX_EVENT_ID_LEN + 1);
+        assert_eq!(
+            PredicateEventId::new(over),
+            Err(PredicateEventIdError::TooLong {
+                len: MAX_EVENT_ID_LEN + 1,
+                max: MAX_EVENT_ID_LEN,
+            })
+        );
+    }
+
+    /// Length is measured in BYTES, not chars: a multibyte-UTF-8 id whose
+    /// char count is under the cap but whose byte length is over must still be
+    /// rejected (the durable column is sized in bytes).
+    #[test]
+    fn predicate_event_id_length_cap_is_measured_in_bytes() {
+        // '𝄞' (U+1D11E) is 4 bytes. (MAX/4 + 1) of them exceeds the byte cap
+        // while the char count stays well under it.
+        let multibyte = "𝄞".repeat(MAX_EVENT_ID_LEN / 4 + 1);
+        assert!(multibyte.chars().count() <= MAX_EVENT_ID_LEN);
+        assert!(
+            multibyte.len() > MAX_EVENT_ID_LEN,
+            "fixture must exceed the byte cap"
+        );
+        assert!(matches!(
+            PredicateEventId::new(multibyte),
+            Err(PredicateEventIdError::TooLong { .. })
+        ));
+    }
+
+    /// henrypark133 MEDIUM on PR #3937: pin the `Err(_) => now` overflow branch
+    /// of the canonical `window_cutoff`. A `std::time::Duration` larger than
+    /// `chrono::Duration::MAX` (~292 million years) overflows
+    /// `chrono::Duration::from_std`; the canonical rule trims to `now` (NOT
+    /// nothing — the divergence the rustdoc warns against). No other test
+    /// exercises this branch, so a refactor to a `saturating_sub`/`unwrap_or`
+    /// shortcut would silently regress without it.
+    #[test]
+    fn window_cutoff_oversized_window_trims_to_now() {
+        let now = base();
+        assert_eq!(
+            window_cutoff(now, Duration::MAX),
+            now,
+            "an oversized window overflows from_std and trims to now, not nothing"
         );
     }
 
