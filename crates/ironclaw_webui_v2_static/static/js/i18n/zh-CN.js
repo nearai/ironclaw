@@ -49,8 +49,6 @@ registerPack("zh-CN", {
 
   "chat.placeholder": "给 IronClaw 发消息...",
   "chat.send": "发送消息",
-  "chat.removeImage": "移除图片",
-  "chat.removeAttachment": "移除附件",
 
   "chat.conversations": "对话",
   "chat.threads": "{count} 个线程",
@@ -513,7 +511,6 @@ registerPack("zh-CN", {
   "chat.suggestion3Desc": "验证设置、认证、配对和可用能力。",
   "chat.heroPlaceholder": "向 IronClaw 提问。",
   "chat.followUpPlaceholder": "请求后续修改",
-  "chat.attachFiles": "附加文件",
   "chat.modeAutoReview": "自动审查",
   "chat.runtimeLocal": "本地工作",
   "chat.statusWorking": "正在工作",

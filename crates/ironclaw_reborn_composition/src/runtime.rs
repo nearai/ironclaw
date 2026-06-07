@@ -559,6 +559,114 @@ fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWork
     }
 }
 
+/// Fold legacy pre-#4381 WebUI `user_identities` rows into the canonical
+/// identity store. The old store wrote those rows into the same libSQL
+/// substrate; reading that SQL table is a substrate-level concern handled
+/// here in the host layer (not the identity crate), then each row is bound
+/// into the filesystem-backed store so an existing SSO user keeps their
+/// `UserId` across upgrade. Idempotent (bind re-points to the same user) and
+/// a no-op when the legacy table is absent (fresh installs).
+#[cfg(feature = "webui-v2-beta")]
+async fn fold_legacy_webui_identities<R>(
+    db: &libsql::Database,
+    tenant_id: &TenantId,
+    store: &R,
+) -> Result<(), ironclaw_reborn_identity::RebornIdentityError>
+where
+    R: ironclaw_reborn_identity::RebornIdentityResolver + ?Sized,
+{
+    use ironclaw_reborn_identity::{
+        ExternalSubjectId, ProviderKind, RebornIdentityError, ResolveExternalIdentity, SurfaceKind,
+    };
+
+    fn backend(error: libsql::Error) -> RebornIdentityError {
+        RebornIdentityError::Backend(error.to_string())
+    }
+    fn invalid_key(error: ironclaw_reborn_identity::IdentityKeyError) -> RebornIdentityError {
+        RebornIdentityError::Backend(error.to_string())
+    }
+
+    let conn = db.connect().map_err(backend)?;
+    // Scope the existence-check cursor so it is dropped (read lock released)
+    // before any write; a lingering open cursor would block the
+    // filesystem-backed writes below with `database is locked`.
+    let legacy_table_exists = {
+        let mut table = conn
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'user_identities'",
+                (),
+            )
+            .await
+            .map_err(backend)?;
+        table.next().await.map_err(backend)?.is_some()
+    };
+    if !legacy_table_exists {
+        return Ok(());
+    }
+
+    // Drain the read cursor fully BEFORE writing: the store's writes go
+    // through a different libSQL connection on the same file, and an open
+    // read cursor here would block them with `database is locked`.
+    //
+    // Carry the verified-email fields too: the legacy WebUI store recorded
+    // `email` / `email_verified`, and dropping them on migration would leave
+    // the canonical verified-email index unseeded. A migrated Google user
+    // would keep their id for the same provider/subject, but a later GitHub
+    // login with the same verified email would find no index and mint a
+    // second user — a permanent split. `adopt_migrated_identity` preserves
+    // both the user id and the verified-email linkage.
+    //
+    // This intentionally GRANDFATHERS each row's `email_verified` as recorded
+    // under the policy in force when the row was written; the one-time fold
+    // does NOT re-validate the legacy email against the CURRENT operator
+    // allowlist. That is safe because admission is enforced per login, not
+    // per index: every live SSO login is gated by `WebuiUserDirectory` against
+    // the current allowed-email-domains BEFORE the resolver is consulted, so a
+    // grandfathered index for a domain the operator has since removed is never
+    // reached (the login is rejected at admission). Re-gating the migration on
+    // the current allowlist would need the allowlist plumbed into this
+    // substrate-level fold; admission already bounds exploitability, so the
+    // migration faithfully preserves prior verified-email links instead.
+    let mut legacy = Vec::new();
+    let mut rows = conn
+        .query(
+            "SELECT provider, provider_user_id, user_id, email, email_verified \
+             FROM user_identities",
+            (),
+        )
+        .await
+        .map_err(backend)?;
+    while let Some(row) = rows.next().await.map_err(backend)? {
+        let provider: String = row.get(0).map_err(backend)?;
+        let subject: String = row.get(1).map_err(backend)?;
+        let user: String = row.get(2).map_err(backend)?;
+        let email: Option<String> = row.get(3).map_err(backend)?;
+        // Legacy column is an INTEGER (0/1); read as i64 so a NULL or odd
+        // encoding fails loud rather than silently coercing to unverified.
+        let email_verified: i64 = row.get(4).map_err(backend)?;
+        legacy.push((provider, subject, user, email, email_verified != 0));
+    }
+    drop(rows);
+    drop(conn);
+
+    for (provider, subject, user, email, email_verified) in legacy {
+        let identity = ResolveExternalIdentity {
+            tenant_id: tenant_id.clone(),
+            surface_kind: SurfaceKind::Oauth,
+            provider_kind: ProviderKind::new(provider).map_err(invalid_key)?,
+            provider_instance_id: None,
+            external_subject_id: ExternalSubjectId::new(subject).map_err(invalid_key)?,
+            email,
+            email_verified,
+            display_name: None,
+        };
+        let user_id = UserId::new(user)
+            .map_err(|error| RebornIdentityError::InvalidUserId(error.to_string()))?;
+        store.adopt_migrated_identity(identity, &user_id).await?;
+    }
+    Ok(())
+}
+
 impl RebornRuntime {
     /// Snapshot of the substrate facades produced by `build_reborn_services`.
     /// Exposed for diagnostics / readiness reporting; **not** for traffic.
@@ -663,6 +771,50 @@ impl RebornRuntime {
         &self,
     ) -> Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>> {
         self.trigger_conversation_pairing.as_ref().map(Arc::clone)
+    }
+
+    /// Open the canonical Reborn identity resolver on the runtime's existing
+    /// local-dev libSQL substrate handle, running the store's idempotent
+    /// schema migrations plus the one-time legacy WebUI identity fold under
+    /// `tenant_id`. Rides the same `reborn-local-dev.db` handle the runtime
+    /// already owns rather than opening a second handle to that file (the
+    /// host filesystem abstraction owns the substrate, not the caller).
+    /// Returns `None` when the runtime was built without a local-runtime
+    /// substrate (production-shape profiles not yet wired), so callers fail
+    /// closed.
+    #[cfg(feature = "webui-v2-beta")]
+    pub async fn open_reborn_identity_resolver(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Option<
+        Result<
+            Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>,
+            ironclaw_reborn_identity::RebornIdentityError,
+        >,
+    > {
+        let local = self.services.local_runtime.as_ref()?;
+        // Build the store on the host scoped filesystem (same substrate
+        // boundary as every other durable store), scoped by the runtime-owner
+        // caller identity. Data is partitioned by tenant in the record path.
+        let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+            Arc::clone(&local.identity_filesystem),
+            self.thread_scope.tenant_id.clone(),
+            self.actor_user_id.clone(),
+            self.thread_scope.agent_id.clone(),
+            self.thread_scope.project_id.clone(),
+        );
+        // One-time legacy fold: the pre-#4381 WebUI store wrote `user_identities`
+        // rows into the same libSQL substrate. Reading that SQL table is a
+        // substrate-level concern, so it lives here in the host layer (not the
+        // identity crate) and binds each row into the filesystem-backed store.
+        if let Err(err) =
+            fold_legacy_webui_identities(&local.identity_substrate_db, tenant_id, &store).await
+        {
+            return Some(Err(err));
+        }
+        Some(Ok(
+            Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>
+        ))
     }
 
     pub(crate) fn webui_thread_service(&self) -> Arc<dyn SessionThreadService> {
@@ -4628,6 +4780,199 @@ mod tests {
             .expect("route response");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn open_reborn_identity_resolver_migrates_legacy_webui_identities_through_runtime() {
+        use ironclaw_reborn_identity::{
+            ExternalSubjectId, ProviderKind, ResolveExternalIdentity, SurfaceKind,
+        };
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-identity-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-identity-tenant".to_string(),
+            agent_id: "runtime-identity-agent".to_string(),
+            source_binding_id: "runtime-identity-source".to_string(),
+            reply_target_binding_id: "runtime-identity-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let tenant = TenantId::new("runtime-identity-tenant").expect("tenant");
+
+        // Seed a legacy pre-#4381 WebUI identity into the SAME substrate DB the
+        // runtime owns, exactly as the old store wrote it.
+        let substrate = Arc::clone(
+            &runtime
+                .services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime substrate")
+                .identity_substrate_db,
+        );
+        let seed = substrate.connect().expect("substrate connection");
+        seed.execute_batch(
+            "CREATE TABLE user_identities (\
+                 provider TEXT NOT NULL, provider_user_id TEXT NOT NULL, \
+                 user_id TEXT NOT NULL, email TEXT, email_verified INTEGER NOT NULL, \
+                 created_at TEXT NOT NULL, \
+                 PRIMARY KEY (provider, provider_user_id));",
+        )
+        .await
+        .expect("seed legacy schema");
+        seed.execute(
+            "INSERT INTO user_identities \
+                 (provider, provider_user_id, user_id, email, email_verified, created_at) \
+                 VALUES ('google', 'g-legacy', 'legacy-runtime-user', 'legacy@x.com', 1, \
+                     '2026-01-01T00:00:00Z')",
+            (),
+        )
+        .await
+        .expect("seed legacy identity");
+        // Drop the raw seed connection before the fold runs: production never
+        // holds a second raw handle on the substrate, and an idle extra
+        // connection here would contend with the filesystem-backed writes.
+        drop(seed);
+
+        // The production accessor `serve` relies on: it opens the resolver on
+        // the runtime-owned substrate handle and runs the legacy fold, so the
+        // returning legacy user must resolve to their original UserId rather
+        // than being re-minted.
+        let resolver = runtime
+            .open_reborn_identity_resolver(&tenant)
+            .await
+            .expect("runtime carries a local-runtime substrate")
+            .expect("resolver opens");
+        let resolved = resolver
+            .resolve_or_create(ResolveExternalIdentity {
+                tenant_id: tenant.clone(),
+                surface_kind: SurfaceKind::Oauth,
+                provider_kind: ProviderKind::new("google").expect("provider"),
+                provider_instance_id: None,
+                external_subject_id: ExternalSubjectId::new("g-legacy").expect("subject"),
+                email: Some("legacy@x.com".to_string()),
+                email_verified: true,
+                display_name: None,
+            })
+            .await
+            .expect("resolve");
+        assert_eq!(
+            resolved.as_str(),
+            "legacy-runtime-user",
+            "a returning legacy SSO user keeps their UserId through the runtime accessor"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn open_reborn_identity_resolver_migrates_legacy_verified_email_linking() {
+        use ironclaw_reborn_identity::{
+            ExternalSubjectId, ProviderKind, ResolveExternalIdentity, SurfaceKind,
+        };
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-identity-link-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-identity-link-tenant".to_string(),
+            agent_id: "runtime-identity-link-agent".to_string(),
+            source_binding_id: "runtime-identity-link-source".to_string(),
+            reply_target_binding_id: "runtime-identity-link-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let tenant = TenantId::new("runtime-identity-link-tenant").expect("tenant");
+
+        // Seed a legacy pre-#4381 WebUI Google identity with a VERIFIED email.
+        let substrate = Arc::clone(
+            &runtime
+                .services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime substrate")
+                .identity_substrate_db,
+        );
+        let seed = substrate.connect().expect("substrate connection");
+        seed.execute_batch(
+            "CREATE TABLE user_identities (\
+                 provider TEXT NOT NULL, provider_user_id TEXT NOT NULL, \
+                 user_id TEXT NOT NULL, email TEXT, email_verified INTEGER NOT NULL, \
+                 created_at TEXT NOT NULL, \
+                 PRIMARY KEY (provider, provider_user_id));",
+        )
+        .await
+        .expect("seed legacy schema");
+        seed.execute(
+            "INSERT INTO user_identities \
+                 (provider, provider_user_id, user_id, email, email_verified, created_at) \
+                 VALUES ('google', 'g-legacy', 'legacy-link-user', 'shared@x.com', 1, \
+                     '2026-01-01T00:00:00Z')",
+            (),
+        )
+        .await
+        .expect("seed legacy identity");
+        drop(seed);
+
+        // The fold must seed the canonical verified-email index from the
+        // migrated row's verified email — not just preserve the per-subject id.
+        let resolver = runtime
+            .open_reborn_identity_resolver(&tenant)
+            .await
+            .expect("runtime carries a local-runtime substrate")
+            .expect("resolver opens");
+
+        // The upgrade case: a LATER login through a DIFFERENT OAuth provider
+        // with the SAME verified email must link to the migrated user instead
+        // of minting a second one.
+        let via_github = resolver
+            .resolve_or_create(ResolveExternalIdentity {
+                tenant_id: tenant.clone(),
+                surface_kind: SurfaceKind::Oauth,
+                provider_kind: ProviderKind::new("github").expect("provider"),
+                provider_instance_id: None,
+                external_subject_id: ExternalSubjectId::new("gh-new").expect("subject"),
+                email: Some("shared@x.com".to_string()),
+                email_verified: true,
+                display_name: None,
+            })
+            .await
+            .expect("resolve");
+        assert_eq!(
+            via_github.as_str(),
+            "legacy-link-user",
+            "a migrated verified legacy email must link a later different-provider login"
+        );
+
         runtime.shutdown().await.expect("runtime shutdown");
     }
 

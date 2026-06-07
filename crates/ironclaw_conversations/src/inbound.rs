@@ -132,6 +132,7 @@ where
                         resolve_request,
                         trusted_agent_id,
                         trusted_project_id,
+                        None,
                     )
                     .await?
             }
@@ -963,6 +964,7 @@ mod tests {
             request: crate::ResolveConversationRequest,
             trusted_agent_id: Option<AgentId>,
             trusted_project_id: Option<ProjectId>,
+            trusted_owner_user_id: Option<UserId>,
         ) -> Result<ConversationBindingResolution, InboundTurnError> {
             self.resolve_requests.lock().unwrap().push(request.clone());
             self.trusted_scopes
@@ -974,6 +976,7 @@ mod tests {
                     request,
                     trusted_agent_id,
                     trusted_project_id,
+                    trusted_owner_user_id,
                 )
                 .await
         }
@@ -1037,6 +1040,7 @@ mod tests {
             request: crate::ResolveConversationRequest,
             trusted_agent_id: Option<AgentId>,
             trusted_project_id: Option<ProjectId>,
+            _trusted_owner_user_id: Option<UserId>,
         ) -> Result<ConversationBindingResolution, InboundTurnError> {
             self.resolve_requests.lock().unwrap().push(request);
             self.trusted_scopes
