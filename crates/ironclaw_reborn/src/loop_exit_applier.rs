@@ -531,10 +531,10 @@ fn message_content_matches_result_ref(
     };
     // Cheap metadata checks run before this helper. Keep the envelope parse so
     // forged or malformed transcript content cannot satisfy completion evidence.
-    let Ok(envelope) = serde_json::from_str::<ToolResultReferenceEnvelope>(content) else {
+    let Ok(envelope) = ToolResultReferenceEnvelope::from_json_str(content) else {
         return false;
     };
-    envelope.version == 1 && envelope.result_ref == result_ref.as_str()
+    envelope.result_ref == result_ref.as_str()
 }
 
 #[cfg(test)]

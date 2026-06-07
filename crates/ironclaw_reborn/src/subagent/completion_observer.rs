@@ -2419,6 +2419,7 @@ mod tests {
                 result_ref: result_ref.as_str().to_string(),
                 safe_summary: ToolResultSafeSummary::new("subagent spawned in background").unwrap(),
                 provider_call: None,
+                model_observation: None,
             })
             .await
             .unwrap();
@@ -2611,6 +2612,7 @@ mod tests {
                 result_ref: result_ref.as_str().to_string(),
                 safe_summary: ToolResultSafeSummary::new("subagent spawned in background").unwrap(),
                 provider_call: None,
+                model_observation: None,
             })
             .await
             .unwrap();
@@ -2771,6 +2773,7 @@ mod tests {
                 result_ref: result_ref.as_str().to_string(),
                 safe_summary: ToolResultSafeSummary::new("subagent spawned in background").unwrap(),
                 provider_call: None,
+                model_observation: None,
             })
             .await
             .unwrap();
@@ -3070,6 +3073,7 @@ mod tests {
                 result_ref: result_ref.as_str().to_string(),
                 safe_summary: ToolResultSafeSummary::new("subagent spawned in background").unwrap(),
                 provider_call: None,
+                model_observation: None,
             })
             .await
             .unwrap();
@@ -3311,6 +3315,7 @@ mod tests {
                 result_ref: result_ref.as_str().to_string(),
                 safe_summary: ToolResultSafeSummary::new("subagent spawned blocking").unwrap(),
                 provider_call: None,
+                model_observation: None,
             })
             .await
             .unwrap();
@@ -3476,6 +3481,7 @@ mod tests {
                 result_ref: result_ref.as_str().to_string(),
                 safe_summary: ToolResultSafeSummary::new("subagents spawned blocking").unwrap(),
                 provider_call: None,
+                model_observation: None,
             })
             .await
             .unwrap();
@@ -3675,6 +3681,7 @@ mod tests {
                     result_ref: result_ref.as_str().to_string(),
                     safe_summary: ToolResultSafeSummary::new("subagent spawned blocking").unwrap(),
                     provider_call: None,
+                    model_observation: None,
                 })
                 .await
                 .unwrap();
@@ -3893,6 +3900,7 @@ mod tests {
                 result_ref: result_ref.as_str().to_string(),
                 safe_summary: ToolResultSafeSummary::new("subagents spawned background").unwrap(),
                 provider_call: None,
+                model_observation: None,
             })
             .await
             .unwrap();
@@ -4127,6 +4135,7 @@ mod tests {
                 result_ref: result_ref.as_str().to_string(),
                 safe_summary: ToolResultSafeSummary::new("subagents completed").unwrap(),
                 provider_call: None,
+                model_observation: None,
             })
             .await
             .unwrap();

@@ -12,6 +12,11 @@ use crate::{
     LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
 };
 
+const OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES: usize = 512;
+const OUTBOUND_DELIVERY_CHANNEL_MAX_BYTES: usize = 128;
+const OUTBOUND_DELIVERY_DISPLAY_NAME_MAX_BYTES: usize = 256;
+const OUTBOUND_DELIVERY_DESCRIPTION_MAX_BYTES: usize = 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornConnectableChannelListResponse {
     pub channels: Vec<RebornConnectableChannelInfo>,
@@ -248,6 +253,383 @@ pub struct RebornListThreadsResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornListAutomationsResponse {
     pub automations: Vec<RebornAutomationInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOutboundPreferencesResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_reply_target: Option<RebornOutboundDeliveryTargetSummary>,
+    #[serde(default)]
+    pub default_modality: RebornOutboundDeliveryModality,
+}
+
+impl Default for RebornOutboundPreferencesResponse {
+    fn default() -> Self {
+        Self {
+            final_reply_target: None,
+            default_modality: RebornOutboundDeliveryModality::Text,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOutboundDeliveryTargetListResponse {
+    pub targets: Vec<RebornOutboundDeliveryTargetOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOutboundDeliveryTargetOption {
+    pub target: RebornOutboundDeliveryTargetSummary,
+    pub capabilities: RebornOutboundDeliveryTargetCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "UncheckedRebornOutboundDeliveryTargetSummary")]
+pub struct RebornOutboundDeliveryTargetSummary {
+    pub target_id: RebornOutboundDeliveryTargetId,
+    pub channel: RebornOutboundDeliveryTargetChannel,
+    pub display_name: RebornOutboundDeliveryTargetDisplayName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<RebornOutboundDeliveryTargetDescription>,
+}
+
+impl RebornOutboundDeliveryTargetSummary {
+    pub fn new(
+        target_id: RebornOutboundDeliveryTargetId,
+        channel: impl Into<String>,
+        display_name: impl Into<String>,
+        description: Option<String>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            target_id,
+            channel: RebornOutboundDeliveryTargetChannel::new(channel)?,
+            display_name: RebornOutboundDeliveryTargetDisplayName::new(display_name)?,
+            description: description
+                .map(RebornOutboundDeliveryTargetDescription::new)
+                .transpose()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct UncheckedRebornOutboundDeliveryTargetSummary {
+    target_id: RebornOutboundDeliveryTargetId,
+    channel: String,
+    display_name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+impl TryFrom<UncheckedRebornOutboundDeliveryTargetSummary> for RebornOutboundDeliveryTargetSummary {
+    type Error = String;
+
+    fn try_from(value: UncheckedRebornOutboundDeliveryTargetSummary) -> Result<Self, Self::Error> {
+        Self::new(
+            value.target_id,
+            value.channel,
+            value.display_name,
+            value.description,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct RebornOutboundDeliveryTargetChannel(String);
+
+impl RebornOutboundDeliveryTargetChannel {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        validate_outbound_delivery_display_field(
+            "outbound delivery channel",
+            &value,
+            OUTBOUND_DELIVERY_CHANNEL_MAX_BYTES,
+            true,
+        )?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for RebornOutboundDeliveryTargetChannel {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for RebornOutboundDeliveryTargetChannel {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for RebornOutboundDeliveryTargetChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<RebornOutboundDeliveryTargetChannel> for String {
+    fn from(value: RebornOutboundDeliveryTargetChannel) -> Self {
+        value.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct RebornOutboundDeliveryTargetDisplayName(String);
+
+impl RebornOutboundDeliveryTargetDisplayName {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        validate_outbound_delivery_display_field(
+            "outbound delivery display name",
+            &value,
+            OUTBOUND_DELIVERY_DISPLAY_NAME_MAX_BYTES,
+            true,
+        )?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for RebornOutboundDeliveryTargetDisplayName {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for RebornOutboundDeliveryTargetDisplayName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for RebornOutboundDeliveryTargetDisplayName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<RebornOutboundDeliveryTargetDisplayName> for String {
+    fn from(value: RebornOutboundDeliveryTargetDisplayName) -> Self {
+        value.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct RebornOutboundDeliveryTargetDescription(String);
+
+impl RebornOutboundDeliveryTargetDescription {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        validate_outbound_delivery_display_field(
+            "outbound delivery description",
+            &value,
+            OUTBOUND_DELIVERY_DESCRIPTION_MAX_BYTES,
+            false,
+        )?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for RebornOutboundDeliveryTargetDescription {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for RebornOutboundDeliveryTargetDescription {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for RebornOutboundDeliveryTargetDescription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<RebornOutboundDeliveryTargetDescription> for String {
+    fn from(value: RebornOutboundDeliveryTargetDescription) -> Self {
+        value.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOutboundDeliveryTargetCapabilities {
+    pub final_replies: bool,
+    pub gate_prompts: bool,
+    pub auth_prompts: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornOutboundDeliveryModality {
+    #[default]
+    Text,
+}
+
+/// Client-safe opaque outbound delivery target id.
+///
+/// Must be non-empty, at most 512 bytes, and free of leading/trailing
+/// whitespace, control characters, and unsafe invisible Unicode formatting
+/// characters.
+///
+/// Composition resolves this id to an adapter-owned reply target before writing
+/// outbound preferences.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct RebornOutboundDeliveryTargetId(String);
+
+impl RebornOutboundDeliveryTargetId {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+
+    fn validate(value: &str) -> Result<(), String> {
+        validate_outbound_delivery_display_field(
+            "outbound delivery target id",
+            value,
+            OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES,
+            true,
+        )
+    }
+}
+
+impl TryFrom<String> for RebornOutboundDeliveryTargetId {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for RebornOutboundDeliveryTargetId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for RebornOutboundDeliveryTargetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<RebornOutboundDeliveryTargetId> for String {
+    fn from(value: RebornOutboundDeliveryTargetId) -> Self {
+        value.0
+    }
+}
+
+fn validate_outbound_delivery_display_field(
+    field_name: &str,
+    value: &str,
+    max_bytes: usize,
+    require_non_empty: bool,
+) -> Result<(), String> {
+    if require_non_empty && value.trim().is_empty() {
+        return Err(format!("{field_name} must not be empty"));
+    }
+    if value.len() > max_bytes {
+        return Err(format!("{field_name} must be at most {max_bytes} bytes"));
+    }
+    if value.trim() != value {
+        return Err(format!(
+            "{field_name} must not contain leading or trailing whitespace"
+        ));
+    }
+    if value.chars().any(|c| c.is_control()) {
+        return Err(format!("{field_name} must not contain control characters"));
+    }
+    if has_unsafe_unicode_format_character(value) {
+        return Err(format!(
+            "{field_name} must not contain unsafe Unicode formatting characters"
+        ));
+    }
+    if has_line_or_paragraph_separator(value) {
+        return Err(format!(
+            "{field_name} must not contain line or paragraph separators"
+        ));
+    }
+    Ok(())
+}
+
+fn has_unsafe_unicode_format_character(value: &str) -> bool {
+    value.chars().any(|c| {
+        matches!(
+            c,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{00ad}'
+                | '\u{034f}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200d}'
+                | '\u{2060}'
+                | '\u{feff}'
+        )
+    })
+}
+
+fn has_line_or_paragraph_separator(value: &str) -> bool {
+    value.chars().any(|c| matches!(c, '\u{2028}' | '\u{2029}'))
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSetOutboundPreferencesRequest {
+    /// `Some(id)` sets the final-reply target; `None` clears it.
+    ///
+    /// The field defaults to `None` when omitted, so clients that want to leave
+    /// an existing value unchanged must use the read endpoint instead of
+    /// submitting a partial update without this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_reply_target_id: Option<RebornOutboundDeliveryTargetId>,
 }
 
 /// Allowlisted terminal status exposed by automation list projections.

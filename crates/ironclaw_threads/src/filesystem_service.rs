@@ -940,8 +940,12 @@ where
         request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let provider_call = request.provider_call;
-        let envelope = ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary)
-            .map_err(SessionThreadError::Serialization)?;
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            request.result_ref,
+            request.safe_summary,
+            request.model_observation,
+        )
+        .map_err(SessionThreadError::Serialization)?;
         let existing = self
             .list_thread_messages(&request.scope, &request.thread_id)
             .await?;
@@ -954,35 +958,53 @@ where
             // Idempotent replay. If new provider metadata arrives, validate
             // and attach it (or reject on conflict) — matching the in-memory
             // contract semantics.
-            if let Some(provider_call) = provider_call.as_ref() {
+            let provider_call_update = if let Some(provider_call) = provider_call.as_ref() {
                 provider_call
                     .validate()
                     .map_err(SessionThreadError::Serialization)?;
                 match existing.tool_result_provider_call.as_ref() {
-                    Some(existing_call) if existing_call == provider_call => {
-                        return Ok(existing);
-                    }
+                    Some(existing_call) if existing_call == provider_call => None,
                     Some(_) => {
                         return Err(SessionThreadError::Serialization(
                             "tool result provider metadata conflicts with existing record"
                                 .to_string(),
                         ));
                     }
-                    None => {
-                        let provider_call = provider_call.clone();
-                        return self
-                            .apply_message_update(
-                                &request.scope,
-                                &request.thread_id,
-                                existing.message_id,
-                                |message| {
-                                    message.tool_result_provider_call = Some(provider_call.clone());
-                                    Ok(())
-                                },
-                            )
-                            .await;
-                    }
+                    None => Some(provider_call.clone()),
                 }
+            } else {
+                None
+            };
+            let model_observation = envelope.model_observation.clone();
+            if provider_call_update.is_some() || model_observation.is_some() {
+                return self
+                    .apply_message_update(
+                        &request.scope,
+                        &request.thread_id,
+                        existing.message_id,
+                        |message| {
+                            if let Some(provider_call) = provider_call_update.as_ref() {
+                                message.tool_result_provider_call = Some(provider_call.clone());
+                            }
+                            if let Some(model_observation) = model_observation.as_ref() {
+                                let content = message.content.as_deref().ok_or_else(|| {
+                                    SessionThreadError::Serialization(
+                                        "tool result reference content is missing".to_string(),
+                                    )
+                                })?;
+                                if let Some(content) = ToolResultReferenceEnvelope::merge_model_observation_content_if_absent(
+                                    content,
+                                    model_observation.clone(),
+                                )
+                                .map_err(SessionThreadError::Serialization)?
+                                {
+                                    message.content = Some(content);
+                                }
+                            }
+                            Ok(())
+                        },
+                    )
+                    .await;
             }
             return Ok(existing);
         }
@@ -1102,11 +1124,6 @@ where
         &self,
         request: UpdateToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        let envelope =
-            ToolResultReferenceEnvelope::new(request.result_ref.clone(), request.safe_summary)
-                .map_err(SessionThreadError::Serialization)?;
-        let content = serde_json::to_string(&envelope)
-            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
         let existing = self
             .list_thread_messages(&request.scope, &request.thread_id)
             .await?;
@@ -1130,6 +1147,7 @@ where
         let turn_run_id = request.turn_run_id.clone();
         let result_ref = request.result_ref.clone();
         let thread_id_for_error = request.thread_id.clone();
+        let safe_summary = request.safe_summary;
         self.apply_message_update(
             &request.scope,
             &request.thread_id,
@@ -1140,6 +1158,16 @@ where
                         "tool result reference {result_ref} was not found in thread {thread_id_for_error}",
                     )));
                 }
+                let content = message.content.as_deref().ok_or_else(|| {
+                    SessionThreadError::Serialization(
+                        "tool result reference content is missing".to_string(),
+                    )
+                })?;
+                let envelope = ToolResultReferenceEnvelope::from_json_str(content)
+                    .map_err(SessionThreadError::Serialization)?
+                    .with_safe_summary(safe_summary.clone());
+                let content = serde_json::to_string(&envelope)
+                    .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
                 message.content = Some(content.clone());
                 Ok(())
             },

@@ -20,6 +20,7 @@ use crate::{
 use super::{
     compaction::{CompactionInitiator, LoopCompactionPort},
     instruction_bundle::InstructionBundleFingerprint,
+    model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation},
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
     snapshot::ResolvedRunProfile,
     system_inference::SystemInferenceTaskId,
@@ -1548,6 +1549,8 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
 pub struct CapabilityFailure {
     pub error_kind: CapabilityFailureKind,
     pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<CapabilityFailureDetail>,
 }
 
 #[non_exhaustive]
@@ -1736,6 +1739,8 @@ pub struct AppendCapabilityResultRef {
     pub safe_summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_call: Option<ProviderToolCallReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelVisibleToolObservation>,
 }
 
 #[async_trait]
