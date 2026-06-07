@@ -53,7 +53,14 @@ const CHANNEL_ROUTE_CACHE_CAPACITY: usize = 4096;
 const CHANNEL_ROUTE_REPLACE_LIST_LIMIT: usize = 500;
 const CHANNEL_ROUTE_REPLACE_LOCK_RETRIES: usize = 16;
 const CHANNEL_ROUTE_REPLACE_LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
+#[cfg(not(test))]
 const CHANNEL_ROUTE_REPLACE_LOCK_TTL_SECONDS: i64 = 10;
+#[cfg(test)]
+const CHANNEL_ROUTE_REPLACE_LOCK_TTL_SECONDS: i64 = 1;
+#[cfg(not(test))]
+const CHANNEL_ROUTE_REPLACE_LOCK_RENEW_INTERVAL: Duration = Duration::from_secs(3);
+#[cfg(test)]
+const CHANNEL_ROUTE_REPLACE_LOCK_RENEW_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
 struct CachedSlackChannelRoute {
@@ -61,7 +68,6 @@ struct CachedSlackChannelRoute {
     loaded_at: Instant,
 }
 
-#[derive(Clone)]
 pub(crate) struct FilesystemSlackHostState<F>
 where
     F: RootFilesystem + 'static,
@@ -71,6 +77,21 @@ where
     pairing_ttl: Duration,
     locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
     route_cache: Arc<Mutex<lru::LruCache<SlackChannelRouteKey, CachedSlackChannelRoute>>>,
+}
+
+impl<F> Clone for FilesystemSlackHostState<F>
+where
+    F: RootFilesystem + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            filesystem: Arc::clone(&self.filesystem),
+            scope: self.scope.clone(),
+            pairing_ttl: self.pairing_ttl,
+            locks: Arc::clone(&self.locks),
+            route_cache: Arc::clone(&self.route_cache),
+        }
+    }
 }
 
 impl<F> std::fmt::Debug for FilesystemSlackHostState<F>
@@ -253,14 +274,51 @@ where
         let current = self
             .read_record::<StoredSlackChannelRouteReplaceLock>(&lease.path)
             .await;
-        let Ok(Some((record, _))) = current else {
+        let Ok(Some((record, version))) = current else {
             return;
         };
         if record.nonce != lease.nonce {
             return;
         }
-        if self.delete_record(&lease.path).await.is_err() {
-            tracing::warn!("failed to release Slack channel route replacement lease");
+        match self.delete_record(&lease.path).await {
+            Ok(()) => {}
+            Err(error) if is_unsupported_delete_error(&error) => {
+                let expired = StoredSlackChannelRouteReplaceLock::expired(lease.nonce);
+                if self
+                    .write_record(&lease.path, &expired, CasExpectation::Version(version))
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("failed to expire Slack channel route replacement lease");
+                }
+            }
+            Err(_) => {
+                tracing::warn!("failed to release Slack channel route replacement lease");
+            }
+        }
+    }
+
+    async fn renew_channel_route_replace_lease(
+        &self,
+        lease: &SlackChannelRouteReplaceLease,
+    ) -> Result<(), SlackChannelRouteError> {
+        let Some((record, version)) = self
+            .read_record::<StoredSlackChannelRouteReplaceLock>(&lease.path)
+            .await
+            .map_err(map_route_fs_error)?
+        else {
+            return Err(SlackChannelRouteError::StoreUnavailable);
+        };
+        if record.nonce != lease.nonce {
+            return Err(SlackChannelRouteError::StoreUnavailable);
+        }
+        let renewed = StoredSlackChannelRouteReplaceLock::new(lease.nonce.clone());
+        match self
+            .write_record(&lease.path, &renewed, CasExpectation::Version(version))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => Err(map_route_fs_error(error)),
         }
     }
 
@@ -848,6 +906,7 @@ where
         let lease = self
             .acquire_channel_route_replace_lease(installation_id, team_id)
             .await?;
+        let renewer = ChannelRouteReplaceLeaseRenewer::start(self.clone(), lease.clone());
         let result = async {
             let requested = assignments
                 .iter()
@@ -902,6 +961,7 @@ where
             Ok(replaced)
         }
         .await;
+        renewer.stop().await;
         self.release_channel_route_replace_lease(lease).await;
         result
     }
@@ -1136,9 +1196,51 @@ struct StoredSlackChannelRoute {
     deleted_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone)]
 struct SlackChannelRouteReplaceLease {
     path: ScopedPath,
     nonce: String,
+}
+
+struct ChannelRouteReplaceLeaseRenewer<F>
+where
+    F: RootFilesystem + 'static,
+{
+    stop: tokio::sync::oneshot::Sender<()>,
+    handle: tokio::task::JoinHandle<()>,
+    _marker: std::marker::PhantomData<F>,
+}
+
+impl<F> ChannelRouteReplaceLeaseRenewer<F>
+where
+    F: RootFilesystem + 'static,
+{
+    fn start(state: FilesystemSlackHostState<F>, lease: SlackChannelRouteReplaceLease) -> Self {
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(CHANNEL_ROUTE_REPLACE_LOCK_RENEW_INTERVAL) => {
+                        if let Err(error) = state.renew_channel_route_replace_lease(&lease).await {
+                            tracing::warn!(?error, "failed to renew Slack channel route replacement lease");
+                            return;
+                        }
+                    }
+                    _ = &mut stopped => return,
+                }
+            }
+        });
+        Self {
+            stop,
+            handle,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    async fn stop(self) {
+        let _ = self.stop.send(());
+        let _ = self.handle.await;
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1153,6 +1255,13 @@ impl StoredSlackChannelRouteReplaceLock {
             nonce,
             expires_at: Utc::now()
                 + chrono::Duration::seconds(CHANNEL_ROUTE_REPLACE_LOCK_TTL_SECONDS),
+        }
+    }
+
+    fn expired(nonce: String) -> Self {
+        Self {
+            nonce,
+            expires_at: Utc::now() - chrono::Duration::seconds(1),
         }
     }
 }
@@ -1268,7 +1377,11 @@ fn is_unsupported_delete_error(error: &FilesystemError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_filesystem::InMemoryBackend;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ironclaw_filesystem::{
+        BackendCapabilities, DirEntry, FileStat, Filter, InMemoryBackend, Page, VersionedEntry,
+    };
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
     use crate::slack_personal_binding::{RebornIdentityProviderId, RebornIdentityProviderUserId};
@@ -1686,6 +1799,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_slack_host_state_replace_expires_lock_when_delete_is_unsupported() {
+        let root = Arc::new(RouteLockTestBackend::reject_lock_delete());
+        let state = state_with_backend(root.clone());
+        let tenant_id = TenantId::new("tenant-alpha").unwrap();
+        let installation_id = installation();
+        let assigner = crate::slack_channel_routes::SlackChannelSubjectAssigner::new(
+            tenant_id.clone(),
+            installation_id.clone(),
+            "T123".to_string(),
+        );
+
+        state
+            .replace_managed_routes(
+                &tenant_id,
+                &installation_id,
+                "T123",
+                vec![assigner.assignment_for("CENG".to_string()).unwrap()],
+            )
+            .await
+            .expect("first replace succeeds");
+        let second = state
+            .replace_managed_routes(
+                &tenant_id,
+                &installation_id,
+                "T123",
+                vec![assigner.assignment_for("COPS".to_string()).unwrap()],
+            )
+            .await
+            .expect("second replace should not wait for stale lock ttl");
+
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].channel_id, "COPS");
+        assert!(
+            root.lock_delete_attempts() >= 2,
+            "test backend must exercise unsupported lock delete fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_replace_renews_lock_during_slow_route_writes() {
+        let root = Arc::new(RouteLockTestBackend::delay_route_writes(
+            CHANNEL_ROUTE_REPLACE_LOCK_RENEW_INTERVAL * 2,
+        ));
+        let state = state_with_backend(root.clone());
+        let tenant_id = TenantId::new("tenant-alpha").unwrap();
+        let installation_id = installation();
+        let assigner = crate::slack_channel_routes::SlackChannelSubjectAssigner::new(
+            tenant_id.clone(),
+            installation_id.clone(),
+            "T123".to_string(),
+        );
+
+        state
+            .replace_managed_routes(
+                &tenant_id,
+                &installation_id,
+                "T123",
+                vec![assigner.assignment_for("CENG".to_string()).unwrap()],
+            )
+            .await
+            .expect("replace succeeds while renewal task runs");
+
+        assert!(
+            root.lock_puts() >= 2,
+            "lock must be written for acquisition and at least one renewal"
+        );
+    }
+
+    #[tokio::test]
     async fn filesystem_slack_host_state_rejects_cross_tenant_route_operations() {
         let state = state();
         let key = SlackChannelRouteKey::new(
@@ -1813,6 +1995,13 @@ mod tests {
     }
 
     fn state_with_root(root: Arc<InMemoryBackend>) -> FilesystemSlackHostState<InMemoryBackend> {
+        state_with_backend(root)
+    }
+
+    fn state_with_backend<F>(root: Arc<F>) -> FilesystemSlackHostState<F>
+    where
+        F: RootFilesystem + 'static,
+    {
         let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
             root,
             MountView::new(vec![MountGrant::new(
@@ -1829,6 +2018,112 @@ mod tests {
             AgentId::new("agent:host").unwrap(),
             Some(ProjectId::new("project:host").unwrap()),
         )
+    }
+
+    struct RouteLockTestBackend {
+        inner: InMemoryBackend,
+        reject_lock_delete: bool,
+        route_write_delay: Option<Duration>,
+        lock_puts: AtomicUsize,
+        lock_delete_attempts: AtomicUsize,
+    }
+
+    impl RouteLockTestBackend {
+        fn reject_lock_delete() -> Self {
+            Self {
+                inner: InMemoryBackend::default(),
+                reject_lock_delete: true,
+                route_write_delay: None,
+                lock_puts: AtomicUsize::new(0),
+                lock_delete_attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn delay_route_writes(delay: Duration) -> Self {
+            Self {
+                inner: InMemoryBackend::default(),
+                reject_lock_delete: false,
+                route_write_delay: Some(delay),
+                lock_puts: AtomicUsize::new(0),
+                lock_delete_attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn lock_puts(&self) -> usize {
+            self.lock_puts.load(Ordering::SeqCst)
+        }
+
+        fn lock_delete_attempts(&self) -> usize {
+            self.lock_delete_attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RootFilesystem for RouteLockTestBackend {
+        fn capabilities(&self) -> BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn put(
+            &self,
+            path: &VirtualPath,
+            entry: Entry,
+            cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            if is_replace_lock_path(path) {
+                self.lock_puts.fetch_add(1, Ordering::SeqCst);
+            } else if is_channel_route_record_path(path) {
+                if let Some(delay) = self.route_write_delay {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            self.inner.put(path, entry, cas).await
+        }
+
+        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            self.inner.get(path).await
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn query(
+            &self,
+            path: &VirtualPath,
+            filter: &Filter,
+            page: Page,
+        ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+            self.inner.query(path, filter, page).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+
+        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            if is_replace_lock_path(path) {
+                self.lock_delete_attempts.fetch_add(1, Ordering::SeqCst);
+                if self.reject_lock_delete {
+                    return Err(FilesystemError::Backend {
+                        path: path.clone(),
+                        operation: FilesystemOperation::Delete,
+                        reason: "delete is not supported by this backend".to_string(),
+                    });
+                }
+            }
+            self.inner.delete(path).await
+        }
+    }
+
+    fn is_replace_lock_path(path: &VirtualPath) -> bool {
+        path.as_str().ends_with("/replace-lock")
+    }
+
+    fn is_channel_route_record_path(path: &VirtualPath) -> bool {
+        path.as_str().contains("/slack-channel-routes/")
+            && path.as_str().ends_with(".json")
+            && !is_replace_lock_path(path)
     }
 
     fn binding(user_id: &str) -> RebornUserIdentityBinding {
