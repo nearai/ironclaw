@@ -45,6 +45,7 @@ pub(super) struct PromptOutput {
     pub(super) surface: VisibleCapabilitySurface,
     pub(super) messages: Vec<ironclaw_turns::run_profile::LoopModelMessage>,
     pub(super) capability_view: LoopModelCapabilityView,
+    pub(super) rendered_repeated_call_warning: bool,
 }
 
 pub(super) enum PromptStep {
@@ -56,6 +57,7 @@ pub(super) struct BuiltPromptBundle {
     messages: Vec<LoopModelMessage>,
     compaction_message_index: Vec<LoopContextCompactionMetadata>,
     rendered_reply_admission_control: bool,
+    rendered_repeated_call_warning: bool,
 }
 
 impl BuiltPromptBundle {
@@ -135,6 +137,10 @@ impl FinalPromptBundle {
 
     fn rendered_reply_admission_control(&self) -> bool {
         self.bundle.rendered_reply_admission_control
+    }
+
+    fn rendered_repeated_call_warning(&self) -> bool {
+        self.bundle.rendered_repeated_call_warning
     }
 }
 
@@ -217,6 +223,7 @@ impl<'a> PromptPlanningPipeline<'a> {
         if final_bundle.rendered_reply_admission_control() {
             self.state.reply_admission_state.pending_rejection_rendered = true;
         }
+        let rendered_repeated_call_warning = final_bundle.rendered_repeated_call_warning();
 
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
             state: self.state,
@@ -224,6 +231,7 @@ impl<'a> PromptPlanningPipeline<'a> {
             surface,
             messages: final_bundle.into_messages(),
             capability_view,
+            rendered_repeated_call_warning,
         })))
     }
 
@@ -527,6 +535,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
     context_request.capability_view = Some(capability_view);
     let prompt_mode = context_request.mode;
     let rendered_reply_admission_control = context_plan.emitted_admission_control;
+    let rendered_repeated_call_warning = context_plan.emitted_repeated_call_warning;
     let prompt_bundle = ctx
         .host
         .build_prompt_bundle(context_request)
@@ -556,6 +565,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
         messages: prompt_bundle.messages,
         compaction_message_index: prompt_bundle.compaction_message_index,
         rendered_reply_admission_control,
+        rendered_repeated_call_warning,
     })
 }
 

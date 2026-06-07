@@ -508,6 +508,18 @@ mod tests {
 
     const CLI_HELP_RENDER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
+    fn normalize_help_snapshot(help: String) -> String {
+        let mut normalized = help
+            .lines()
+            .map(|line| if line.trim().is_empty() { "" } else { line })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if help.ends_with('\n') {
+            normalized.push('\n');
+        }
+        normalized
+    }
+
     fn render_cli_help(long: bool) -> String {
         // The generated Clap tree includes the Trace Commons subcommands and can
         // overflow Rust's default test-thread stack while rendering snapshots.
@@ -524,12 +536,7 @@ mod tests {
             .expect("CLI help render thread should spawn")
             .join()
             .expect("CLI help render thread should not panic");
-
-        help.lines()
-            .map(str::trim_end)
-            .collect::<Vec<_>>()
-            .join("\n")
-            + if help.ends_with('\n') { "\n" } else { "" }
+        normalize_help_snapshot(help)
     }
 
     #[test]

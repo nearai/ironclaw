@@ -46,6 +46,12 @@ use crate::path::{MemoryDocumentPath, MemoryDocumentScope};
 use crate::repo::MemoryDocumentRepository;
 use crate::search::MemorySearchRequest;
 
+/// Factory closure shape every contract takes.
+///
+/// Must return a fresh, empty repository — contracts assume nothing
+/// leaks between calls.
+pub type RepoFactory<R> = fn() -> R; // pub-api-exempt: contract-test consumers name this factory type from downstream crates.
+
 #[cfg(any(test, feature = "contract-tests"))]
 fn scope_a() -> MemoryDocumentScope {
     MemoryDocumentScope::new("tenant-a", "alice", Some("project-1")).expect("valid scope a")

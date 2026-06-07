@@ -1,15 +1,25 @@
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    fmt,
+    future::Future,
+    sync::{Arc, LazyLock, Mutex, mpsc},
 };
 
 use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
-    CapabilityId, NetworkTargetPattern, RuntimeCredentialInjection, RuntimeCredentialSource,
+    CapabilityId, CredentialStageError, ExtensionId, NetworkTargetPattern,
+    RuntimeCredentialInjection, RuntimeCredentialRequirementSource, RuntimeCredentialSource,
     RuntimeCredentialTarget, RuntimeKind, SecretHandle,
 };
 use ironclaw_network::{network_target_for_url, target_matches_pattern};
+use ironclaw_secrets::SecretStore;
 use ironclaw_wasm::{WasmHostError, WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest};
+use tokio::runtime::{Handle, RuntimeFlavor};
+
+use crate::{
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
+    obligations::RuntimeSecretInjectionStore,
+};
 
 /// Host-derived WASM credential provider built from validated extension manifests.
 ///
@@ -26,7 +36,10 @@ pub(crate) struct HostWasmRuntimeCredentials {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HostWasmRuntimeCredential {
     pub(crate) capability_id: CapabilityId,
+    pub(crate) requester_extension: ExtensionId,
     pub(crate) handle: SecretHandle,
+    pub(crate) source: RuntimeCredentialRequirementSource,
+    pub(crate) provider_scopes: Vec<String>,
     pub(crate) audience: NetworkTargetPattern,
     pub(crate) target: RuntimeCredentialTarget,
     pub(crate) required: bool,
@@ -53,10 +66,11 @@ impl HostWasmRuntimeCredentials {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct SharedHostWasmRuntimeCredentials {
     registry: SharedExtensionRegistry,
     cache: Arc<Mutex<SharedCredentialCache>>,
+    restager: Option<RuntimeCredentialRestager>,
 }
 
 impl SharedHostWasmRuntimeCredentials {
@@ -64,7 +78,33 @@ impl SharedHostWasmRuntimeCredentials {
         Self {
             registry,
             cache: Arc::new(Mutex::new(SharedCredentialCache::default())),
+            restager: None,
         }
+    }
+
+    pub(crate) fn with_product_auth_restaging(
+        mut self,
+        secret_store: Arc<dyn SecretStore>,
+        secret_injections: Arc<RuntimeSecretInjectionStore>,
+        account_resolver: Arc<dyn RuntimeCredentialAccountResolver>,
+    ) -> Self {
+        self.restager = Some(RuntimeCredentialRestager {
+            secret_store,
+            secret_injections,
+            account_resolver,
+        });
+        self
+    }
+}
+
+impl fmt::Debug for SharedHostWasmRuntimeCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedHostWasmRuntimeCredentials")
+            .field("registry", &self.registry)
+            .field("cache", &self.cache)
+            .field("restager", &self.restager.as_ref().map(|_| "<configured>"))
+            .finish()
     }
 }
 
@@ -74,21 +114,97 @@ struct SharedCredentialCache {
     credentials: HostWasmRuntimeCredentials,
 }
 
+#[derive(Clone)]
+struct RuntimeCredentialRestager {
+    secret_store: Arc<dyn SecretStore>,
+    secret_injections: Arc<RuntimeSecretInjectionStore>,
+    account_resolver: Arc<dyn RuntimeCredentialAccountResolver>,
+}
+
+impl fmt::Debug for RuntimeCredentialRestager {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeCredentialRestager")
+            .field("secret_store", &"[REDACTED]")
+            .field("secret_injections", &self.secret_injections)
+            .field("account_resolver", &"<resolver>")
+            .finish()
+    }
+}
+
+impl RuntimeCredentialRestager {
+    fn stage_for_request(
+        &self,
+        request: WasmRuntimeCredentialRequest,
+        credential: HostWasmRuntimeCredential,
+    ) -> Result<(), CredentialStageError> {
+        let restager = self.clone();
+        block_on_credential_restage(async move {
+            restager
+                .stage_for_request_async(&request, &credential)
+                .await
+        })
+    }
+
+    async fn stage_for_request_async(
+        &self,
+        request: &WasmRuntimeCredentialRequest,
+        credential: &HostWasmRuntimeCredential,
+    ) -> Result<(), CredentialStageError> {
+        let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, .. } =
+            &credential.source
+        else {
+            return Ok(());
+        };
+        let access_secret = self
+            .account_resolver
+            .resolve_access_secret(RuntimeCredentialAccountRequest {
+                scope: &request.scope,
+                provider,
+                provider_scopes: &credential.provider_scopes,
+                requester_extension: &credential.requester_extension,
+            })
+            .await?;
+        let lease = self
+            .secret_store
+            .lease_once(&access_secret.scope, &access_secret.handle)
+            .await
+            .map_err(crate::services::stage_secret_error)?;
+        let material = self
+            .secret_store
+            .consume(&access_secret.scope, lease.id)
+            .await
+            .map_err(crate::services::stage_secret_error)?;
+        self.secret_injections
+            .insert(
+                &request.scope,
+                &request.capability_id,
+                &credential.handle,
+                material,
+            )
+            .map_err(|_| CredentialStageError::Backend)
+    }
+}
+
 impl WasmRuntimeCredentialProvider for SharedHostWasmRuntimeCredentials {
     fn credential_injections(
         &self,
         request: &WasmRuntimeCredentialRequest,
     ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
         let registry_version = self.registry.version();
-        let mut cache = self
-            .cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if cache.registry_version != Some(registry_version) {
-            cache.credentials = wasm_runtime_credentials_from_registry(&self.registry.snapshot());
-            cache.registry_version = Some(registry_version);
-        }
-        cache.credentials.credential_injections(request)
+        let credentials = {
+            let mut cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cache.registry_version != Some(registry_version) {
+                cache.credentials =
+                    wasm_runtime_credentials_from_registry(&self.registry.snapshot());
+                cache.registry_version = Some(registry_version);
+            }
+            cache.credentials.clone()
+        };
+        credentials.credential_injections_with_restager(request, self.restager.as_ref())
     }
 }
 
@@ -97,25 +213,45 @@ impl WasmRuntimeCredentialProvider for HostWasmRuntimeCredentials {
         &self,
         request: &WasmRuntimeCredentialRequest,
     ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
+        self.credential_injections_with_restager(request, None)
+    }
+}
+
+impl HostWasmRuntimeCredentials {
+    fn credential_injections_with_restager(
+        &self,
+        request: &WasmRuntimeCredentialRequest,
+        restager: Option<&RuntimeCredentialRestager>,
+    ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
         let Ok(target) = network_target_for_url(&request.url) else {
             return Ok(Vec::new());
         };
-        Ok(self
+        let matching_credentials = self
             .by_capability
             .get(&request.capability_id)
             .into_iter()
             .flat_map(|indices| indices.iter())
             .map(|idx| &self.credentials[*idx])
-            .filter(|credential| target_matches_pattern(&target, &credential.audience))
-            .map(|credential| RuntimeCredentialInjection {
+            .filter(|credential| target_matches_pattern(&target, &credential.audience));
+        let mut injections = Vec::new();
+        for credential in matching_credentials {
+            if let Some(restager) = restager {
+                restager
+                    .stage_for_request(request.clone(), credential.clone())
+                    .map_err(|_| {
+                        WasmHostError::Unavailable("credential_unavailable".to_string())
+                    })?;
+            }
+            injections.push(RuntimeCredentialInjection {
                 handle: credential.handle.clone(),
                 source: RuntimeCredentialSource::StagedObligation {
                     capability_id: request.capability_id.clone(),
                 },
                 target: credential.target.clone(),
                 required: credential.required,
-            })
-            .collect())
+            });
+        }
+        Ok(injections)
     }
 }
 
@@ -132,7 +268,10 @@ pub(crate) fn wasm_runtime_credentials_from_registry(
                     .iter()
                     .map(move |credential| HostWasmRuntimeCredential {
                         capability_id: descriptor.id.clone(),
+                        requester_extension: descriptor.provider.clone(),
                         handle: credential.handle.clone(),
+                        source: credential.source.clone(),
+                        provider_scopes: credential.provider_scopes.clone(),
                         audience: credential.audience.clone(),
                         target: credential.target.clone(),
                         required: credential.required,
@@ -141,6 +280,56 @@ pub(crate) fn wasm_runtime_credentials_from_registry(
             .collect(),
     )
 }
+
+fn block_on_credential_restage<F, T>(future: F) -> Result<T, CredentialStageError>
+where
+    F: Future<Output = Result<T, CredentialStageError>> + Send + 'static,
+    T: Send + 'static,
+{
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(future))
+        }
+        Ok(_) => run_credential_restage_on_worker(future),
+        Err(_) => run_credential_restage_future(future),
+    }
+}
+
+fn run_credential_restage_on_worker<F, T>(future: F) -> Result<T, CredentialStageError>
+where
+    F: Future<Output = Result<T, CredentialStageError>> + Send + 'static,
+    T: Send + 'static,
+{
+    let runtime = WASM_CREDENTIAL_RESTAGE_RUNTIME
+        .as_ref()
+        .map_err(|error| *error)?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    runtime.spawn(async move {
+        let _ = sender.send(future.await);
+    });
+    receiver.recv().map_err(|_| CredentialStageError::Backend)?
+}
+
+fn run_credential_restage_future<F, T>(future: F) -> Result<T, CredentialStageError>
+where
+    F: Future<Output = Result<T, CredentialStageError>>,
+{
+    let runtime = WASM_CREDENTIAL_RESTAGE_RUNTIME
+        .as_ref()
+        .map_err(|error| *error)?;
+    runtime.block_on(future)
+}
+
+static WASM_CREDENTIAL_RESTAGE_RUNTIME: LazyLock<
+    Result<tokio::runtime::Runtime, CredentialStageError>,
+> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("wasm-credential-restage")
+        .enable_all()
+        .build()
+        .map_err(|_| CredentialStageError::Backend)
+});
 
 #[cfg(test)]
 mod tests {
@@ -218,7 +407,10 @@ runtime_credentials = [
     fn manifest_wasm_credentials_match_default_url_ports() {
         let credentials = HostWasmRuntimeCredentials::new(vec![HostWasmRuntimeCredential {
             capability_id: CapabilityId::new("test-wasm.fetch").unwrap(),
+            requester_extension: ExtensionId::new("test-wasm").unwrap(),
             handle: SecretHandle::new("api_token").unwrap(),
+            source: RuntimeCredentialRequirementSource::SecretHandle,
+            provider_scopes: Vec::new(),
             audience: NetworkTargetPattern {
                 scheme: Some(NetworkScheme::Https),
                 host_pattern: "api.example.test".to_string(),
@@ -246,7 +438,10 @@ runtime_credentials = [
     fn manifest_wasm_credentials_are_scoped_to_capability_and_audience() {
         let credentials = HostWasmRuntimeCredentials::new(vec![HostWasmRuntimeCredential {
             capability_id: CapabilityId::new("test-wasm.fetch").unwrap(),
+            requester_extension: ExtensionId::new("test-wasm").unwrap(),
             handle: SecretHandle::new("api_token").unwrap(),
+            source: RuntimeCredentialRequirementSource::SecretHandle,
+            provider_scopes: Vec::new(),
             audience: NetworkTargetPattern {
                 scheme: Some(NetworkScheme::Https),
                 host_pattern: "api.example.test".to_string(),
@@ -354,7 +549,10 @@ runtime_credentials = [
     fn manifest_wasm_credentials_ignore_malformed_and_non_http_urls() {
         let credentials = HostWasmRuntimeCredentials::new(vec![HostWasmRuntimeCredential {
             capability_id: CapabilityId::new("test-wasm.fetch").unwrap(),
+            requester_extension: ExtensionId::new("test-wasm").unwrap(),
             handle: SecretHandle::new("api_token").unwrap(),
+            source: RuntimeCredentialRequirementSource::SecretHandle,
+            provider_scopes: Vec::new(),
             audience: NetworkTargetPattern {
                 scheme: Some(NetworkScheme::Https),
                 host_pattern: "api.example.test".to_string(),

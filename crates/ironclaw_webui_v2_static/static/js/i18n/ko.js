@@ -49,8 +49,6 @@ registerPack("ko", {
 
   "chat.placeholder": "IronClaw에 메시지 보내기...",
   "chat.send": "메시지 보내기",
-  "chat.removeImage": "이미지 제거",
-  "chat.removeAttachment": "첨부 파일 제거",
 
   "chat.conversations": "대화",
   "chat.threads": "{count}개 스레드",
@@ -513,7 +511,6 @@ registerPack("ko", {
   "chat.suggestion3Desc": "설정, 인증, 페어링, 사용 가능한 기능을 확인합니다.",
   "chat.heroPlaceholder": "IronClaw에 무엇이든 물어보세요.",
   "chat.followUpPlaceholder": "후속 변경 요청",
-  "chat.attachFiles": "파일 첨부",
   "chat.modeAutoReview": "자동 리뷰",
   "chat.runtimeLocal": "로컬에서 작업",
   "chat.statusWorking": "작업 중",

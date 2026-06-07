@@ -13,8 +13,8 @@ use ironclaw_turns::{
 };
 
 use crate::state::{
-    CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind, LoopExecutionState,
-    MessageIndexEntry,
+    CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
+    LoopExecutionState, MessageIndexEntry, RepeatedCallWarningPhase, RepeatedCallWarningState,
 };
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
@@ -1391,6 +1391,11 @@ async fn capability_stage_returns_after_batch_summary() {
     match step {
         TurnCompletedStep::Continue { state, summary } => {
             assert_eq!(state.result_refs, vec![result_ref.clone()]);
+            let signature = CapabilityCallSignature::from_call(
+                capability_id(),
+                &serde_json::json!({ "input_ref": "input:demo" }),
+            )
+            .expect("valid signature");
             assert_eq!(
                 summary,
                 TurnSummary::after_capability_batch(
@@ -1399,12 +1404,51 @@ async fn capability_stage_returns_after_batch_summary() {
                         invocation_count: 1,
                         terminate_hint_count: 0,
                         no_progress_count: 0,
+                        observed_signatures: vec![signature.clone()],
+                        made_progress_signatures: vec![signature],
                     },
                 )
             );
         }
         TurnCompletedStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
     }
+}
+
+#[tokio::test]
+async fn repeated_call_warning_checkpoint_stays_pending_until_model_request() {
+    let host = MockHost::new(vec![reply_response()]);
+    let executor = CanonicalAgentLoopExecutor;
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    let signature = CapabilityCallSignature::from_call(
+        capability_id(),
+        &serde_json::json!({ "input_ref": "input:demo" }),
+    )
+    .expect("valid signature");
+    state.stop_state.repeated_call_warning =
+        Some(RepeatedCallWarningState::pending_render(signature.clone()));
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let prompt_requests = host.prompt_requests();
+    assert_eq!(prompt_requests.len(), 1);
+    assert!(
+        prompt_requests[0].inline_messages.iter().any(|message| {
+            message.safe_body.as_str()
+                == "loop control repeated capability call detected change strategy explain new evidence or answer from current evidence"
+        }),
+        "model prompt should include the warning"
+    );
+    let before_model = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeModel);
+    let warning = before_model
+        .stop_state
+        .repeated_call_warning
+        .expect("warning should be checkpointed");
+    assert_eq!(warning.signature, signature.clone());
+    assert_eq!(warning.phase, RepeatedCallWarningPhase::PendingRender);
 }
 
 #[test]
@@ -1562,6 +1606,8 @@ async fn stop_stage_preserves_ack_and_returns_stop_kind() {
                         invocation_count: 1,
                         terminate_hint_count: 1,
                         no_progress_count: 0,
+                        observed_signatures: Vec::new(),
+                        made_progress_signatures: Vec::new(),
                     },
                 ),
                 pending_input_ack,
