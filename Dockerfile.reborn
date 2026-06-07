@@ -71,11 +71,11 @@ ENV HOME=/home/ironclaw \
     IRONCLAW_REBORN_SERVE_HOST=0.0.0.0
 
 RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
-    && mkdir -p /data/ironclaw-reborn \
-    && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn \
+    && mkdir -p /data/ironclaw-reborn /workspace \
+    && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn /workspace \
     && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint
 
-WORKDIR /data/ironclaw-reborn
+WORKDIR /workspace
 
 EXPOSE 3000
 

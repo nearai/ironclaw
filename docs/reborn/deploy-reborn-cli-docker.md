@@ -98,7 +98,8 @@ production Reborn deployment profile is fully wired for this service.
 
 Set `IRONCLAW_REBORN_HOME` to a mounted volume path if state should survive
 redeploys. The image default is `/data/ironclaw-reborn`; without a Railway
-volume, that path is ephemeral.
+volume, that path is ephemeral. The container workdir is `/workspace` so the
+local-dev workspace root stays separate from Reborn's state and skill roots.
 
 To seed a custom config instead of the bundled default, set
 `IRONCLAW_REBORN_DEFAULT_CONFIG` to a mounted TOML path. On first start, the
