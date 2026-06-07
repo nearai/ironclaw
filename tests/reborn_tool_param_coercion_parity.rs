@@ -33,7 +33,7 @@ async fn reborn_provider_tool_arguments_are_schema_coerced_before_http_dispatch(
                     "headers": "[{\"name\":\"x-coercion\",\"value\":\"ok\"}]",
                     "body": "{\"ok\":true}",
                     "timeout_ms": "2500",
-                    "response_body_limit": "10485760"
+                    "response_body_limit": "4096"
                 }),
             )],
             expected_tool_results: Vec::new(),
@@ -79,7 +79,7 @@ async fn reborn_provider_tool_arguments_are_schema_coerced_before_http_dispatch(
     assert_eq!(request.method, NetworkMethod::Post);
     assert_eq!(request.url.as_str(), "https://api.example.test/v1/coercion");
     assert_eq!(request.timeout_ms, Some(2500));
-    assert_eq!(request.response_body_limit, Some(10 * 1024 * 1024));
+    assert_eq!(request.response_body_limit, Some(4096));
     assert!(
         request
             .headers

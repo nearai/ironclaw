@@ -58,9 +58,9 @@ mod sse_capacity;
 pub use descriptors::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_CANCEL_RUN,
     WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_ROUTE_CREATE_THREAD,
-    WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER, WEBUI_V2_ROUTE_GET_EXTENSION_SETUP,
-    WEBUI_V2_ROUTE_GET_LLM_CONFIG, WEBUI_V2_ROUTE_GET_SKILL, WEBUI_V2_ROUTE_GET_TIMELINE,
-    WEBUI_V2_ROUTE_INSTALL_EXTENSION, WEBUI_V2_ROUTE_INSTALL_SKILL,
+    WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER, WEBUI_V2_ROUTE_DELETE_THREAD,
+    WEBUI_V2_ROUTE_GET_EXTENSION_SETUP, WEBUI_V2_ROUTE_GET_LLM_CONFIG, WEBUI_V2_ROUTE_GET_SKILL,
+    WEBUI_V2_ROUTE_GET_TIMELINE, WEBUI_V2_ROUTE_INSTALL_EXTENSION, WEBUI_V2_ROUTE_INSTALL_SKILL,
     WEBUI_V2_ROUTE_LIST_AUTOMATIONS, WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS,
     WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY, WEBUI_V2_ROUTE_LIST_EXTENSIONS,
     WEBUI_V2_ROUTE_LIST_LLM_MODELS, WEBUI_V2_ROUTE_LIST_SKILLS, WEBUI_V2_ROUTE_LIST_THREADS,
@@ -76,9 +76,8 @@ pub use descriptors::{
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 #[cfg(feature = "webui-v2-beta")]
 pub use handlers::{
-    activate_extension, cancel_run, complete_nearai_wallet_login, create_thread,
-    delete_llm_provider, get_extension_setup, get_llm_config, get_skill_content, get_timeline,
-    install_extension, install_skill, list_automations, list_connectable_channels,
+    delete_llm_provider, delete_thread, get_extension_setup, get_llm_config, get_skill_content,
+    get_timeline, install_extension, install_skill, list_automations, list_connectable_channels,
     list_extension_registry, list_extensions, list_llm_models, list_skills, list_threads,
     remove_extension, remove_skill, resolve_gate, search_skills, send_message, set_active_llm,
     setup_extension, start_codex_login, start_nearai_login, stream_events, stream_events_ws,

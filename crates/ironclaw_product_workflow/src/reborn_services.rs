@@ -4,7 +4,10 @@
 //! instead of reaching into turn coordination, thread stores, runtime lanes, DB
 //! stores, dispatchers, or capability hosts directly.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex as StdMutex, Weak},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -28,6 +31,7 @@ use ironclaw_turns::{
     TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 use crate::{
@@ -68,22 +72,23 @@ pub use types::{
     RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
-    RebornExtensionSetupSecret, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError> + Send + Sync;
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
+type ThreadOperationLocks = StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>;
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -335,6 +340,12 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiSendMessageRequest,
     ) -> Result<RebornSubmitTurnResponse, RebornServicesError>;
+
+    async fn delete_thread(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError>;
 
     async fn get_timeline(
         &self,
@@ -604,6 +615,7 @@ pub struct RebornServices {
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
+    thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
 impl RebornServices {
@@ -627,6 +639,7 @@ impl RebornServices {
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
+            thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -819,6 +832,7 @@ impl RebornServicesApi for RebornServices {
         };
 
         let (scope, thread_scope) = self.resolve_webui_thread_metadata(scope, &actor).await?;
+        let _thread_operation_guard = self.lock_thread_operation(&scope).await;
         let source_binding_id = webui_source_binding_id(&scope, &actor);
         let external_event_id = client_action_id.as_str().to_string();
 
@@ -977,6 +991,27 @@ impl RebornServicesApi for RebornServices {
                 Err(map_turn_error(error))
             }
         }
+    }
+
+    async fn delete_thread(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let scope = caller.turn_scope(thread_id.clone());
+        let thread_scope = thread_scope_from_turn_scope(&scope, Some(caller.user_id.clone()))?;
+        let _thread_operation_guard = self.lock_thread_operation(&scope).await;
+        self.reject_delete_with_active_run(&scope, &thread_scope, &thread_id)
+            .await?;
+        self.thread_service
+            .delete_thread(&thread_scope, &thread_id)
+            .await
+            .map_err(map_ownership_probe_error)?;
+        Ok(RebornDeleteThreadResponse {
+            thread_id,
+            deleted: true,
+        })
     }
 
     async fn get_timeline(
@@ -1451,6 +1486,70 @@ impl RebornServicesApi for RebornServices {
             .complete_nearai_wallet_login(caller, request)
             .await
             .map_err(llm_config::map_llm_config_error)
+    }
+}
+
+impl RebornServices {
+    fn thread_operation_lock(&self, scope: &TurnScope) -> Arc<AsyncMutex<()>> {
+        let key = thread_operation_key(scope);
+        let mut locks = match self.thread_operation_locks.lock() {
+            Ok(locks) => locks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(AsyncMutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
+    }
+
+    async fn lock_thread_operation(&self, scope: &TurnScope) -> OwnedMutexGuard<()> {
+        self.thread_operation_lock(scope).lock_owned().await
+    }
+
+    async fn reject_delete_with_active_run(
+        &self,
+        scope: &TurnScope,
+        thread_scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), RebornServicesError> {
+        let history = self
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .map_err(map_timeline_probe_error)?;
+        let mut seen = HashSet::new();
+        for run_id in history
+            .messages
+            .iter()
+            .filter_map(|message| message.turn_run_id.as_deref())
+            .map(parse_persisted_turn_run_id)
+        {
+            let run_id = run_id?;
+            if !seen.insert(run_id) {
+                continue;
+            }
+            match self
+                .turn_coordinator
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+            {
+                Ok(state) if state.status.keeps_active_lock() => {
+                    return Err(delete_thread_busy());
+                }
+                Ok(_) | Err(TurnError::ScopeNotFound) => {}
+                Err(error) => return Err(map_turn_error(error)),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1990,6 +2089,10 @@ fn parse_run_id_field(
         })
 }
 
+fn parse_persisted_turn_run_id(value: &str) -> Result<TurnRunId, RebornServicesError> {
+    TurnRunId::parse(value).map_err(|_| RebornServicesError::internal_invariant())
+}
+
 fn accepted_message_ref(message_id: String) -> Result<AcceptedMessageRef, RebornServicesError> {
     AcceptedMessageRef::new(format!("msg:{message_id}")).map_err(|_| {
         RebornServicesError::from_status(RebornServicesErrorCode::Internal, 500, false)
@@ -2075,6 +2178,33 @@ fn legacy_webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> Strin
         ),
         segment("thread", scope.thread_id.as_str()),
         segment("actor", actor.user_id.as_str())
+    )
+}
+
+fn thread_operation_key(scope: &TurnScope) -> String {
+    format!(
+        "{}{}{}{}{}",
+        segment("tenant", scope.tenant_id.as_str()),
+        segment(
+            "agent",
+            scope.agent_id.as_ref().map(AgentId::as_str).unwrap_or("")
+        ),
+        segment(
+            "project",
+            scope
+                .project_id
+                .as_ref()
+                .map(ProjectId::as_str)
+                .unwrap_or("")
+        ),
+        segment("thread", scope.thread_id.as_str()),
+        segment(
+            "owner",
+            scope
+                .explicit_owner_user_id()
+                .map(UserId::as_str)
+                .unwrap_or("")
+        )
     )
 }
 
@@ -2278,6 +2408,15 @@ fn map_thread_error(error: SessionThreadError) -> RebornServicesError {
         | SessionThreadError::Deserialization(_)
         | SessionThreadError::Backend(_) => RebornServicesError::service_unavailable(true),
     }
+}
+
+fn delete_thread_busy() -> RebornServicesError {
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::Conflict,
+        RebornServicesErrorKind::Busy,
+        409,
+        false,
+    )
 }
 
 fn map_turn_error(error: TurnError) -> RebornServicesError {
