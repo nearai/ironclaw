@@ -277,10 +277,11 @@ impl ServeCommand {
                  value is {token_byte_len} bytes — generate one with e.g. `openssl rand -hex 32`."
             ));
         }
-        // The user-identity tables live IN the reborn local-dev substrate
-        // database (a second handle to the same `reborn-local-dev.db` the
-        // runtime opens), not a separate identity-store file — so there is
-        // one durable user source, not two.
+        // Substrate DB the reborn local-dev runtime opens (a second handle to
+        // the same `reborn-local-dev.db`). It backs the local trigger-fire
+        // access store used to seed default-user and SSO-user trigger access;
+        // canonical identity itself lives on the runtime's scoped filesystem,
+        // not in this file.
         let user_store_path = boot_config
             .home()
             .path()
@@ -348,28 +349,6 @@ impl ServeCommand {
             )
             .await?;
 
-            // Assemble the WebChat v2 auth surface before the runtime is
-            // built so SSO local-trigger access reconciliation completes
-            // before the trigger poller can start firing queued triggers.
-            let crate::commands::webui_auth::WebuiAuthSurface {
-                authenticator,
-                public_mount,
-            } = crate::commands::webui_auth::build_webui_auth_surface(
-                sso_startup,
-                &user_store_path,
-                tenant_id.clone(),
-                session_signing_secret,
-                env_authenticator,
-                Some(
-                    crate::commands::webui_auth::LocalTriggerAccessBootstrapConfig {
-                        tenant_id: tenant_id.clone(),
-                        agent_id: default_agent_id.clone(),
-                        project_id: default_project_id.clone(),
-                    },
-                ),
-            )
-            .await?;
-
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
@@ -390,6 +369,53 @@ impl ServeCommand {
             )?;
             #[cfg(not(feature = "slack-v2-host-beta"))]
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
+
+            // Open the canonical Reborn identity resolver on the runtime's
+            // existing substrate handle (the same `reborn-local-dev.db` the
+            // runtime owns) rather than opening a second handle to the file.
+            // Only SSO-enabled WebUI needs it: an env-bearer-only deployment
+            // resolves its single configured user without any identity store,
+            // so skip opening (and its legacy migration) when SSO is disabled
+            // — otherwise a disabled-SSO deployment could fail startup on an
+            // unused identity backend. `None` also covers the case where the
+            // runtime carries no local-runtime substrate; the auth surface
+            // fails closed when SSO is configured but no resolver is available.
+            let identity_resolver = if sso_startup.is_some() {
+                match runtime.open_reborn_identity_resolver(&tenant_id).await {
+                    Some(result) => {
+                        Some(result.context("failed to initialize the Reborn identity resolver")?)
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+
+            // Assemble the WebChat v2 auth surface (authenticator + optional
+            // public login mount). The auth/identity module owns the
+            // signed-session wiring; `serve` supplies host config, the
+            // runtime-owned identity resolver, and the local trigger-access
+            // bootstrap that seeds an admitted SSO user's trigger access on
+            // login.
+            let crate::commands::webui_auth::WebuiAuthSurface {
+                authenticator,
+                public_mount,
+            } = crate::commands::webui_auth::build_webui_auth_surface(
+                sso_startup,
+                identity_resolver,
+                tenant_id.clone(),
+                session_signing_secret,
+                env_authenticator,
+                Some(
+                    crate::commands::webui_auth::LocalTriggerAccessBootstrapConfig {
+                        access_store_path: user_store_path.clone(),
+                        tenant_id: tenant_id.clone(),
+                        agent_id: default_agent_id.clone(),
+                        project_id: default_project_id.clone(),
+                    },
+                ),
+            )
+            .await?;
 
             print_serve_banner(
                 listen_addr,
@@ -434,7 +460,8 @@ impl ServeCommand {
             if let Some(slack_mounts) = slack_mounts {
                 serve_config = serve_config
                     .with_public_route_mount(slack_mounts.events)
-                    .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing);
+                    .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing)
+                    .with_slack_channel_routes(slack_mounts.channel_routes);
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.

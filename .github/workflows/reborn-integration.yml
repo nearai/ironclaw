@@ -121,7 +121,7 @@ jobs:
             cargo test -p "${{ matrix.package }}" ${feature_flags} --all-targets -- --nocapture
 
   root-reborn-parity-tests:
-    name: Reborn parity tests (${{ matrix.group }})
+    name: Reborn root tests (${{ matrix.partition }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -130,16 +130,12 @@ jobs:
       LLM_USE_CODEX_AUTH: "false"
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
+      REBORN_ROOT_TEST_PARTITIONS: 4
+      REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
     strategy:
       fail-fast: true
       matrix:
-        include:
-          - group: scope-isolation
-            tests: "reborn_agent_scope_isolation_parity reborn_direct_chat_user_scope_isolation_parity reborn_wrong_scope_access_isolation_parity"
-          - group: trace-parity
-            tests: "reborn_approval_traces_parity reborn_trace_core_builtin_tools_parity reborn_trace_file_tools_parity"
-          - group: runtime-parity
-            tests: "reborn_minimal_dispatch_parity reborn_response_order_parity reborn_subagent_spawn_e2e"
+        partition: [0, 1, 2, 3]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -153,17 +149,11 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: reborn-integration-root-${{ matrix.group }}
+          key: reborn-integration-root-${{ matrix.partition }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/reborn-integration' }}
 
-      - name: Run Reborn root parity tests
-        run: |
-          for test_name in ${{ matrix.tests }}; do
-            echo "::group::cargo test --test ${test_name}"
-            timeout --signal=INT --kill-after=30s 12m \
-              cargo test --test "${test_name}" -- --nocapture
-            echo "::endgroup::"
-          done
+      - name: Run Reborn root tests
+        run: scripts/ci/run-reborn-root-partition.sh
 
   reborn-integration-crate-tests:
     name: Reborn Integration Binary Crate Tests
@@ -185,6 +175,6 @@ jobs:
             exit 1
           fi
           if [[ "${{ needs.root-reborn-parity-tests.result }}" != "success" ]]; then
-            echo "One or more Reborn root parity tests failed"
+            echo "One or more Reborn root tests failed"
             exit 1
           fi

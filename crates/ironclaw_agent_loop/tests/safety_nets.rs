@@ -153,9 +153,9 @@ async fn repeated_signature_made_progress_after_warning_clears_warning_and_conti
 async fn typed_no_progress_results_escape_without_repeated_call_signature() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
-            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo_1")]),
-            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo_2")]),
-            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo_3")]),
+            ScriptedModelResponse::Calls(vec![call_with_input("input:no-change-1")]),
+            ScriptedModelResponse::Calls(vec![call_with_input("input:no-change-2")]),
+            ScriptedModelResponse::Calls(vec![call_with_input("input:no-change-3")]),
         ]),
         capability_outcomes: VecDeque::from([
             vec![ScriptedCapabilityOutcome::completed_no_change(
@@ -194,9 +194,9 @@ async fn typed_no_progress_results_escape_without_repeated_call_signature() {
 async fn typed_blocked_results_escape_without_repeated_call_signature() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
-            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo_1")]),
-            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo_2")]),
-            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo_3")]),
+            ScriptedModelResponse::Calls(vec![call_with_input("input:blocked-1")]),
+            ScriptedModelResponse::Calls(vec![call_with_input("input:blocked-2")]),
+            ScriptedModelResponse::Calls(vec![call_with_input("input:blocked-3")]),
         ]),
         capability_outcomes: VecDeque::from([
             vec![ScriptedCapabilityOutcome::completed_blocked(
@@ -232,7 +232,7 @@ async fn typed_blocked_results_escape_without_repeated_call_signature() {
 }
 
 #[tokio::test]
-async fn failure_run_length_escape() {
+async fn repeated_failure_kind_does_not_trigger_no_progress_escape() {
     let (host, _) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::same_failure_repeated(
             "demo.echo",
@@ -248,13 +248,16 @@ async fn failure_run_length_escape() {
         .expect("loop execution should succeed");
 
     match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(completed.reply_message_refs.len(), 1);
-            assert!(completed.final_checkpoint_id.is_some());
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelError);
         }
-        other => panic!("expected no-progress fallback completion, got {other:?}"),
+        other => panic!("expected model exhaustion failure after continuing, got {other:?}"),
     }
-    assert_no_progress_fallback(&host);
+    assert!(host.finalized_assistant_messages().is_empty());
+    assert!(
+        host.model_call_count() > 3,
+        "coarse repeated failure kinds must not stop the run at the old threshold"
+    );
 }
 
 #[tokio::test]
@@ -334,6 +337,13 @@ fn assert_no_progress_fallback(host: &MockAgentLoopDriverHost) {
     assert_eq!(messages.len(), 1);
     assert!(messages[0].contains("repeating the same step without making progress"));
     assert!(messages[0].contains("repeated calls, results, and any failure summaries"));
+}
+
+fn call_with_input(input_ref: &str) -> ScriptedCapabilityCall {
+    ScriptedCapabilityCall {
+        name: "demo.echo".to_string(),
+        input_ref: input_ref.to_string(),
+    }
 }
 
 fn repeated_call_warning_prompt_count(host: &MockAgentLoopDriverHost) -> usize {

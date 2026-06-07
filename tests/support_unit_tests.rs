@@ -587,7 +587,7 @@ mod reborn_support_tests {
             .await
             .expect_err("unadvertised scripted capability should fail");
 
-        assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
+        assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
         assert!(
             error
                 .safe_summary

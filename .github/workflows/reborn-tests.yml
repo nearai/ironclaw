@@ -61,8 +61,9 @@ jobs:
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
-          CHANGED_FILES="$(git diff --name-only "$BASE_SHA"...HEAD)"
+          CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
 
           echo "Changed files:"
           if [ -n "$CHANGED_FILES" ]; then
@@ -163,7 +164,7 @@ jobs:
             cargo test -p "${{ matrix.package }}" ${feature_flags} --all-targets -- --nocapture
 
   root-reborn-parity-tests:
-    name: Reborn parity tests (${{ matrix.group }})
+    name: Reborn root tests (${{ matrix.partition }})
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
@@ -174,16 +175,12 @@ jobs:
       LLM_USE_CODEX_AUTH: "false"
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
+      REBORN_ROOT_TEST_PARTITIONS: 4
+      REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
     strategy:
       fail-fast: true
       matrix:
-        include:
-          - group: scope-isolation
-            tests: "reborn_agent_scope_isolation_parity reborn_direct_chat_user_scope_isolation_parity reborn_wrong_scope_access_isolation_parity"
-          - group: trace-parity
-            tests: "reborn_approval_traces_parity reborn_trace_core_builtin_tools_parity reborn_trace_file_tools_parity"
-          - group: runtime-parity
-            tests: "reborn_minimal_dispatch_parity reborn_response_order_parity reborn_subagent_spawn_e2e"
+        partition: [0, 1, 2, 3]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -197,17 +194,11 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: reborn-tests-root-${{ matrix.group }}
+          key: reborn-tests-root-${{ matrix.partition }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
-      - name: Run Reborn root parity tests
-        run: |
-          for test_name in ${{ matrix.tests }}; do
-            echo "::group::cargo test --test ${test_name}"
-            timeout --signal=INT --kill-after=30s 12m \
-              cargo test --test "${test_name}" -- --nocapture
-            echo "::endgroup::"
-          done
+      - name: Run Reborn root tests
+        run: scripts/ci/run-reborn-root-partition.sh
 
   reborn-tests:
     name: Tests (Reborn)
@@ -247,6 +238,6 @@ jobs:
           fi
 
           if [[ "${{ needs.root-reborn-parity-tests.result }}" != "success" ]]; then
-            echo "One or more Reborn root parity tests failed: ${{ needs.root-reborn-parity-tests.result }}"
+            echo "One or more Reborn root tests failed: ${{ needs.root-reborn-parity-tests.result }}"
             exit 1
           fi
