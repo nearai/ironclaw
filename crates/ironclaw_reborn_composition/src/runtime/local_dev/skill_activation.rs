@@ -77,7 +77,7 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
             "activated": activated,
             "count": activated.len(),
         });
-        let result_ref = invocation
+        let (result_ref, _byte_len) = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {
                 run_context: &invocation.run_context,

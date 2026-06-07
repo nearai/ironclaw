@@ -227,7 +227,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
         let CapabilityResultWrite {
             run_context,
             input_ref,
@@ -275,7 +275,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             },
             display_preview.as_ref(),
         );
-        Ok(result_ref)
+        Ok((result_ref, byte_len as u64))
     }
 
     async fn update_capability_result(
@@ -871,6 +871,7 @@ mod tests {
             display_preview: None,
         })
         .await
+        .map(|_| ())
         .expect("result staged");
 
         let record = io
@@ -920,6 +921,7 @@ mod tests {
             }),
         })
         .await
+        .map(|_| ())
         .expect("result staged");
         let record = io
             .display_previews
@@ -957,6 +959,7 @@ mod tests {
             display_preview: None,
         })
         .await
+        .map(|_| ())
         .expect("result staged");
         assert!(
             io.display_previews

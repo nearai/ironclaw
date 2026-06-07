@@ -6319,7 +6319,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
         let mut remaining_failures = self.fail_result_writes_remaining.lock().unwrap();
         if *remaining_failures > 0 {
             *remaining_failures -= 1;
@@ -6339,12 +6339,13 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
             write.capability_id.as_str()
         );
         self.result_refs.lock().unwrap().push(result_ref.clone());
-        LoopResultRef::new(result_ref).map_err(|_| {
+        let result_ref = LoopResultRef::new(result_ref).map_err(|_| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
                 "capability result ref could not be represented",
             )
-        })
+        })?;
+        Ok((result_ref, 0))
     }
 }
 

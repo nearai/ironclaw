@@ -471,7 +471,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
         let CapabilityResultWrite {
             run_context,
             input_ref,
@@ -512,7 +512,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             self.display_previews
                 .attach_timeline_message_id(invocation_id, message_id);
         }
-        Ok(result_ref)
+        Ok((result_ref, output_bytes))
     }
 
     async fn update_capability_result(

@@ -2484,15 +2484,15 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
         let capability_id = write.capability_id.clone();
         let output = write.output.clone();
-        let result_ref = self.inner.write_capability_result(write).await?;
+        let (result_ref, byte_len) = self.inner.write_capability_result(write).await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
             capability_id,
             output,
         });
-        Ok(result_ref)
+        Ok((result_ref, byte_len))
     }
 
     async fn update_capability_result(

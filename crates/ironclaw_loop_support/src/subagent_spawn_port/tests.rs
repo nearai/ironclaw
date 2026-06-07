@@ -507,8 +507,8 @@ impl LoopCapabilityResultWriter for NoopResultWriter {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
-        Ok(LoopResultRef::new("result:spawn").unwrap())
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        Ok((LoopResultRef::new("result:spawn").unwrap(), 0))
     }
 }
 

@@ -722,7 +722,7 @@ impl SubagentSpawnCapabilityPort {
             "spawned",
             false,
         );
-        let result_ref = self
+        let (result_ref, _byte_len) = self
             .deps
             .result_writer
             .write_capability_result(CapabilityResultWrite {

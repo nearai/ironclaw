@@ -141,10 +141,15 @@ impl LoopCapabilityInputResolver for ProviderToolCallInputResolver {
 
 #[async_trait]
 pub trait LoopCapabilityResultWriter: Send + Sync {
+    /// Write the result of a completed capability invocation.
+    ///
+    /// Returns a tuple of `(LoopResultRef, u64)` where the `u64` is the
+    /// serialized byte length of the staged result JSON, for downstream
+    /// per-capability byte accounting (no PII; pure size).
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError>;
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError>;
 
     async fn update_capability_result(
         &self,
@@ -922,7 +927,7 @@ impl HostRuntimeLoopCapabilityPort {
             }
             Err(error) => return Err(error),
         };
-        let result_ref = self
+        let (result_ref, _byte_len) = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
                 run_context: &self.run_context,
@@ -1747,7 +1752,7 @@ async fn runtime_outcome_to_loop(
     ensure_runtime_outcome_matches(requested_capability_id, &outcome)?;
     Ok(match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
-            let result_ref = result_writer
+            let (result_ref, _byte_len) = result_writer
                 .write_capability_result(CapabilityResultWrite {
                     run_context,
                     input_ref,
@@ -5875,13 +5880,14 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
-            LoopResultRef::new("result:mount-test").map_err(|_| {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+            let result_ref = LoopResultRef::new("result:mount-test").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",
                 )
-            })
+            })?;
+            Ok((result_ref, 0))
         }
     }
 
@@ -5901,19 +5907,21 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::TranscriptWriteFailed,
                     "transient result write failure",
                 ));
             }
-            LoopResultRef::new("result:capability-info-retry").map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Internal,
-                    "result ref could not be built",
-                )
-            })
+            let result_ref =
+                LoopResultRef::new("result:capability-info-retry").map_err(|_| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::Internal,
+                        "result ref could not be built",
+                    )
+                })?;
+            Ok((result_ref, 0))
         }
     }
 
@@ -5941,7 +5949,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             self.records
                 .lock()
                 .expect("records lock")
@@ -5950,12 +5958,13 @@ mod tests {
                 .lock()
                 .expect("display previews lock")
                 .push(write.display_preview);
-            LoopResultRef::new("result:capability-info").map_err(|_| {
+            let result_ref = LoopResultRef::new("result:capability-info").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",
                 )
-            })
+            })?;
+            Ok((result_ref, 0))
         }
     }
 
@@ -6021,7 +6030,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             unreachable!("noop capability io should not be called")
         }
     }

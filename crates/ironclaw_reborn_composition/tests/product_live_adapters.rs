@@ -65,15 +65,17 @@ async fn write_capability_result_for_test(
     output: serde_json::Value,
 ) -> Result<LoopResultRef, AgentLoopHostError> {
     let capability_id = capability_id(capability);
-    io.write_capability_result(CapabilityResultWrite {
-        run_context,
-        input_ref,
-        invocation_id: InvocationId::new(),
-        capability_id: &capability_id,
-        output,
-        display_preview: None,
-    })
-    .await
+    let (result_ref, _byte_len) = io
+        .write_capability_result(CapabilityResultWrite {
+            run_context,
+            input_ref,
+            invocation_id: InvocationId::new(),
+            capability_id: &capability_id,
+            output,
+            display_preview: None,
+        })
+        .await?;
+    Ok(result_ref)
 }
 
 #[tokio::test]
@@ -1660,8 +1662,8 @@ impl LoopCapabilityResultWriter for UnusedCapabilityIo {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
-        Ok(LoopResultRef::new("result:adapter-test").unwrap())
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        Ok((LoopResultRef::new("result:adapter-test").unwrap(), 0))
     }
 }
 

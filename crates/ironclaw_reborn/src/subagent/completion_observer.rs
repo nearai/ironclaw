@@ -1293,9 +1293,9 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             self.writes.lock().unwrap().push(write.output);
-            Ok(self.result_ref.clone())
+            Ok((self.result_ref.clone(), 0))
         }
 
         async fn update_capability_result(
@@ -1337,9 +1337,9 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             self.writes.lock().unwrap().push(write.output);
-            Ok(self.result_ref.clone())
+            Ok((self.result_ref.clone(), 0))
         }
 
         async fn update_capability_result(

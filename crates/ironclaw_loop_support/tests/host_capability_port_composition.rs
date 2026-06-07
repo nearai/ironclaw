@@ -413,13 +413,14 @@ impl LoopCapabilityResultWriter for UnusedResultWriter {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
-        LoopResultRef::new("result:factory").map_err(|_| {
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        let result_ref = LoopResultRef::new("result:factory").map_err(|_| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
                 "result ref could not be represented",
             )
-        })
+        })?;
+        Ok((result_ref, 0))
     }
 }
 
