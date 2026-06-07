@@ -676,6 +676,7 @@ async fn gateway_replays_model_observation_from_tool_result_reference_before_saf
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
     );
     let observation = serde_json::json!({
+        "schema_version": 1,
         "status": "error",
         "summary": "Tool input failed schema validation.",
         "detail": {
@@ -859,6 +860,7 @@ async fn gateway_replays_model_observation_for_orphan_tool_reference() {
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
     );
     let observation = serde_json::json!({
+        "schema_version": 1,
         "status": "error",
         "summary": "Tool input failed schema validation.",
         "detail": {

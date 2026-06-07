@@ -1502,6 +1502,7 @@ mod tests {
     #[test]
     fn tool_result_replay_prefers_model_observation_over_safe_summary() {
         let observation = serde_json::json!({
+            "schema_version": 1,
             "status": "error",
             "summary": "Tool input failed schema validation.",
             "detail": {
