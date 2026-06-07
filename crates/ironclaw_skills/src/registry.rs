@@ -303,6 +303,29 @@ impl SkillRegistry {
         registry
     }
 
+    /// Build a fresh registry for a hosted user's private skill mount.
+    ///
+    /// User-scoped roots are nested below the owner user dir under a hidden
+    /// `.users/<hash>` directory. Shared discovery skips hidden directories, so
+    /// private user skills do not leak into the owner/shared registry scan.
+    pub fn clone_config_for_user_scope(&self, user_id: &str) -> Self {
+        let user_root = self
+            .user_dir
+            .join(".users")
+            .join(Self::user_scope_segment(user_id));
+        self.clone_config_for_user_dirs(
+            user_root.join("skills"),
+            Some(user_root.join("installed_skills")),
+        )
+    }
+
+    /// Stable filesystem segment for hosted per-user skill roots.
+    pub fn user_scope_segment(user_id: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(user_id.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
     /// Discover and load skills from all configured directories.
     ///
     /// Discovery order (earlier wins on name collision):

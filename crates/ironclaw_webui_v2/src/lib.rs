@@ -76,6 +76,7 @@ pub use descriptors::{
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 #[cfg(feature = "webui-v2-beta")]
 pub use handlers::{
+    activate_extension, cancel_run, complete_nearai_wallet_login, create_thread,
     delete_llm_provider, delete_thread, get_extension_setup, get_llm_config, get_skill_content,
     get_timeline, install_extension, install_skill, list_automations, list_connectable_channels,
     list_extension_registry, list_extensions, list_llm_models, list_skills, list_threads,

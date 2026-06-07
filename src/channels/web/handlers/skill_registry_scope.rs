@@ -5,11 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axum::http::StatusCode;
-use sha2::{Digest, Sha256};
-
 use crate::channels::web::auth::UserIdentity;
 use crate::channels::web::platform::state::GatewayState;
+use axum::http::StatusCode;
 
 type HandlerResult<T> = Result<T, (StatusCode, String)>;
 type RegistryResult<T> = Result<T, ironclaw_skills::SkillRegistryError>;
@@ -59,7 +57,7 @@ async fn cached_scoped_registry(
     template: &SharedSkillRegistry,
     user: &UserIdentity,
 ) -> HandlerResult<SharedSkillRegistry> {
-    let segment = scoped_user_skills_segment(&user.user_id);
+    let segment = ironclaw_skills::SkillRegistry::user_scope_segment(&user.user_id);
     let key = ScopedSkillRegistryCacheKey {
         template_ptr: Arc::as_ptr(template) as usize,
         user_segment: segment.clone(),
@@ -71,7 +69,7 @@ async fn cached_scoped_registry(
 
     let mut scoped = {
         let guard = template.read().map_err(lock_error_response)?;
-        scoped_registry_from_template(&guard, &segment)
+        scoped_registry_from_template(&guard, &user.user_id)
     };
     scoped.discover_all().await;
     let scoped = Arc::new(RwLock::new(scoped));
@@ -225,18 +223,9 @@ impl ScopedSkillRegistry {
 
 fn scoped_registry_from_template(
     template: &ironclaw_skills::SkillRegistry,
-    user_segment: &str,
+    user_id: &str,
 ) -> ironclaw_skills::SkillRegistry {
-    let user_root = template.user_dir().join(".users").join(user_segment);
-    let user_dir = user_root.join("skills");
-    let installed_dir = Some(user_root.join("installed_skills"));
-    template.clone_config_for_user_dirs(user_dir, installed_dir)
-}
-
-fn scoped_user_skills_segment(user_id: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(user_id.as_bytes());
-    hex::encode(hasher.finalize())
+    template.clone_config_for_user_scope(user_id)
 }
 
 fn lock_error_response(e: std::sync::PoisonError<impl Sized>) -> (StatusCode, String) {
