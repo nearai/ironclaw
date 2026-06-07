@@ -355,7 +355,7 @@ pub async fn skills_install_handler(
         .map_err(|e| skill_registry_error_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     // Commit: brief write lock for in-memory addition
-    let commit_result = scoped_registry.commit_install(&skill_name, loaded_skill);
+    let commit_result = scoped_registry.commit_install(&skill_name, loaded_skill)?;
 
     match commit_result {
         Ok(()) => Ok(Json(ActionResponse::ok(format!(
@@ -394,7 +394,7 @@ pub async fn skills_remove_handler(
 
     // Validate removal under a brief read lock
     let skill_path = scoped_registry
-        .validate_remove(&name)
+        .validate_remove(&name)?
         .map_err(|e| skill_registry_error_response(StatusCode::BAD_REQUEST, e))?;
 
     // Delete files from disk (async I/O, no lock held)
@@ -403,7 +403,7 @@ pub async fn skills_remove_handler(
         .map_err(|e| skill_registry_error_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     // Remove from in-memory registry under a brief write lock
-    let commit_result = scoped_registry.commit_remove(&name);
+    let commit_result = scoped_registry.commit_remove(&name)?;
 
     match commit_result {
         Ok(()) => Ok(Json(ActionResponse::ok(format!(
@@ -426,7 +426,7 @@ pub async fn skills_get_handler(
     let _mutation_guard = SKILL_MUTATION_LOCK.lock().await;
 
     let (skill_path, _, _) = scoped_registry
-        .validate_update(&name)
+        .validate_update(&name)?
         .map_err(|e| skill_registry_error_response(StatusCode::BAD_REQUEST, e))?;
 
     let content =
@@ -463,7 +463,7 @@ pub async fn skills_update_handler(
     let _mutation_guard = SKILL_MUTATION_LOCK.lock().await;
 
     let (skill_path, trust, source) = scoped_registry
-        .validate_update(&name)
+        .validate_update(&name)?
         .map_err(|e| skill_registry_error_response(StatusCode::BAD_REQUEST, e))?;
 
     validate_skill_content_safety(&req.content)?;
@@ -478,7 +478,7 @@ pub async fn skills_update_handler(
     .await
     .map_err(|e| skill_registry_error_response(StatusCode::BAD_REQUEST, e))?;
 
-    let commit_result = scoped_registry.commit_update(&name, loaded_skill);
+    let commit_result = scoped_registry.commit_update(&name, loaded_skill)?;
 
     match commit_result {
         Ok(()) => Ok(Json(ActionResponse::ok(format!(

@@ -6,7 +6,8 @@ use sha2::{Digest, Sha256};
 use crate::channels::web::auth::UserIdentity;
 use crate::channels::web::platform::state::GatewayState;
 
-type RegistryError = ironclaw_skills::SkillRegistryError;
+type HandlerResult<T> = Result<T, (StatusCode, String)>;
+type RegistryResult<T> = Result<T, ironclaw_skills::SkillRegistryError>;
 
 pub(super) enum ScopedSkillRegistry {
     Shared(Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>),
@@ -16,7 +17,7 @@ pub(super) enum ScopedSkillRegistry {
 pub(super) async fn scoped_skill_registry(
     state: &GatewayState,
     user: &UserIdentity,
-) -> Result<ScopedSkillRegistry, (StatusCode, String)> {
+) -> HandlerResult<ScopedSkillRegistry> {
     let registry = Arc::clone(state.skill_registry.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Skills system not enabled".to_string(),
@@ -27,7 +28,7 @@ pub(super) async fn scoped_skill_registry(
     }
 
     let mut scoped = {
-        let guard = registry.read().map_err(registry_lock_error)?;
+        let guard = registry.read().map_err(lock_error_response)?;
         scoped_registry_from_template(&guard, user)
     };
     scoped.discover_all().await;
@@ -37,32 +38,31 @@ pub(super) async fn scoped_skill_registry(
 impl ScopedSkillRegistry {
     pub(super) fn skills_snapshot(
         &self,
-    ) -> Result<Vec<ironclaw_skills::types::LoadedSkill>, (StatusCode, String)> {
+    ) -> HandlerResult<Vec<ironclaw_skills::types::LoadedSkill>> {
         self.read(|registry| registry.skills().to_vec())
     }
 
-    pub(super) fn has(&self, name: &str) -> Result<bool, (StatusCode, String)> {
+    pub(super) fn has(&self, name: &str) -> HandlerResult<bool> {
         self.read(|registry| registry.has(name))
     }
 
-    pub(super) fn install_target_dir(&self) -> Result<PathBuf, (StatusCode, String)> {
+    pub(super) fn install_target_dir(&self) -> HandlerResult<PathBuf> {
         self.read(|registry| registry.install_target_dir().to_path_buf())
     }
 
-    pub(super) fn validate_remove(&self, name: &str) -> Result<PathBuf, RegistryError> {
+    pub(super) fn validate_remove(&self, name: &str) -> HandlerResult<RegistryResult<PathBuf>> {
         self.try_read(|registry| registry.validate_remove(name))
     }
 
     pub(super) fn validate_update(
         &self,
         name: &str,
-    ) -> Result<
-        (
+    ) -> HandlerResult<
+        RegistryResult<(
             PathBuf,
             ironclaw_skills::SkillTrust,
             ironclaw_skills::types::SkillSource,
-        ),
-        RegistryError,
+        )>,
     > {
         self.try_read(|registry| registry.validate_update(name))
     }
@@ -71,11 +71,11 @@ impl ScopedSkillRegistry {
         &mut self,
         name: &str,
         skill: ironclaw_skills::types::LoadedSkill,
-    ) -> Result<(), RegistryError> {
+    ) -> HandlerResult<RegistryResult<()>> {
         self.try_write(|registry| registry.commit_install(name, skill))
     }
 
-    pub(super) fn commit_remove(&mut self, name: &str) -> Result<(), RegistryError> {
+    pub(super) fn commit_remove(&mut self, name: &str) -> HandlerResult<RegistryResult<()>> {
         self.try_write(|registry| registry.commit_remove(name))
     }
 
@@ -83,17 +83,17 @@ impl ScopedSkillRegistry {
         &mut self,
         name: &str,
         skill: ironclaw_skills::types::LoadedSkill,
-    ) -> Result<(), RegistryError> {
+    ) -> HandlerResult<RegistryResult<()>> {
         self.try_write(|registry| registry.commit_update(name, skill))
     }
 
     fn read<T>(
         &self,
         operation: impl FnOnce(&ironclaw_skills::SkillRegistry) -> T,
-    ) -> Result<T, (StatusCode, String)> {
+    ) -> HandlerResult<T> {
         match self {
             Self::Shared(registry) => {
-                let guard = registry.read().map_err(registry_lock_error)?;
+                let guard = registry.read().map_err(lock_error_response)?;
                 Ok(operation(&guard))
             }
             Self::User(registry) => Ok(operation(registry)),
@@ -102,27 +102,27 @@ impl ScopedSkillRegistry {
 
     fn try_read<T>(
         &self,
-        operation: impl FnOnce(&ironclaw_skills::SkillRegistry) -> Result<T, RegistryError>,
-    ) -> Result<T, RegistryError> {
+        operation: impl FnOnce(&ironclaw_skills::SkillRegistry) -> RegistryResult<T>,
+    ) -> HandlerResult<RegistryResult<T>> {
         match self {
             Self::Shared(registry) => {
-                let guard = registry.read().map_err(read_lock_registry_error)?;
-                operation(&guard)
+                let guard = registry.read().map_err(lock_error_response)?;
+                Ok(operation(&guard))
             }
-            Self::User(registry) => operation(registry),
+            Self::User(registry) => Ok(operation(registry)),
         }
     }
 
     fn try_write<T>(
         &mut self,
-        operation: impl FnOnce(&mut ironclaw_skills::SkillRegistry) -> Result<T, RegistryError>,
-    ) -> Result<T, RegistryError> {
+        operation: impl FnOnce(&mut ironclaw_skills::SkillRegistry) -> RegistryResult<T>,
+    ) -> HandlerResult<RegistryResult<T>> {
         match self {
             Self::Shared(registry) => {
-                let mut guard = registry.write().map_err(write_lock_registry_error)?;
-                operation(&mut guard)
+                let mut guard = registry.write().map_err(lock_error_response)?;
+                Ok(operation(&mut guard))
             }
-            Self::User(registry) => operation(registry),
+            Self::User(registry) => Ok(operation(registry)),
         }
     }
 }
@@ -149,24 +149,10 @@ fn scoped_user_skills_segment(user_id: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn registry_lock_error(e: std::sync::PoisonError<impl Sized>) -> (StatusCode, String) {
+fn lock_error_response(e: std::sync::PoisonError<impl Sized>) -> (StatusCode, String) {
     tracing::error!("Skill registry lock poisoned: {e}");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         "Can't access skills right now".to_string(),
     )
-}
-
-fn read_lock_registry_error(e: std::sync::PoisonError<impl Sized>) -> RegistryError {
-    RegistryError::ReadError {
-        path: "<skill-registry>".to_string(),
-        reason: format!("skill registry lock poisoned: {e}"),
-    }
-}
-
-fn write_lock_registry_error(e: std::sync::PoisonError<impl Sized>) -> RegistryError {
-    RegistryError::WriteError {
-        path: "<skill-registry>".to_string(),
-        reason: format!("skill registry lock poisoned: {e}"),
-    }
 }
