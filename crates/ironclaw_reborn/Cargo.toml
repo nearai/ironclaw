@@ -52,7 +52,7 @@ ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0", optional =
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
-libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 parking_lot = "0.12"
 secrecy = { version = "0.10", optional = true }
 serde = { version = "1", features = ["derive"] }
@@ -80,7 +80,7 @@ serde = "1"
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-wat = "1.245.1"
+wat = "1.251.0"
 tracing-test = "0.2"
 
 [[test]]

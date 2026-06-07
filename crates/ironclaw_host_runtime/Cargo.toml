@@ -48,20 +48,20 @@ ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_wasm = { path = "../ironclaw_wasm" }
-libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
-jsonschema = { version = "0.45", default-features = false }
+libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+jsonschema = { version = "0.46", default-features = false }
 libc = "0.2"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
@@ -69,7 +69,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-postgres = "0.7"
 zeroize = "1"
-wat = "1.245.1"
+wat = "1.251.0"
 wit-component = "0.245.1"
 wit-parser = "0.245.1"
 

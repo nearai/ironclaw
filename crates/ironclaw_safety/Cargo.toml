@@ -21,7 +21,7 @@ tracing = "0.1"
 url = "2"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "safety_check"

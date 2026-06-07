@@ -23,6 +23,6 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
-wat = "1.245.1"
+wat = "1.251.0"
 wit-component = "0.245.1"
 wit-parser = "0.245.1"
