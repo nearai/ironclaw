@@ -171,9 +171,8 @@ pub(crate) enum StopOutcome {
 pub(crate) enum StopKind {
     /// Strategy is satisfied; the executor maps this to graceful completion.
     GracefulStop,
-    /// Safety-net escape for repeated calls or repeated failures; default
-    /// logic should read `state.recent_call_signatures` and
-    /// `state.recent_failure_kinds`.
+    /// Safety-net escape for specific no-progress evidence such as repeated
+    /// call signatures or typed no-change capability results.
     NoProgressDetected,
     /// Strategy aborts with an explicit failure kind.
     Aborted(LoopFailureKind),
@@ -191,15 +190,12 @@ pub(crate) enum StopKind {
 ///    (default 5) iterations → render a model-visible warning. If the warning
 ///    was rendered and the same repeated call then reports no progress →
 ///    `Stop { NoProgressDetected }`.
-/// 4. **Failure-run escape**: the same `LoopFailureKind` appears
-///    `failure_run_threshold` (default 3) times in a row →
-///    `Stop { NoProgressDetected }`.
-/// 5. **Typed no-progress escape**: completed capability batches whose results
+/// 4. **Typed no-progress escape**: completed capability batches whose results
 ///    all report `NoChange` or `Blocked` progress for
 ///    `typed_progress_run_threshold` turns in a row →
 ///    `Stop { NoProgressDetected }`.
-/// 6. **Rejected-reply escape**: reply admission rejects
-///    `failure_run_threshold` replies in a row →
+/// 5. **Rejected-reply escape**: reply admission rejects
+///    `rejected_reply_threshold` replies in a row →
 ///    `Stop { Aborted(InvalidModelOutput) }`.
 ///
 /// On no signal, returns `Continue`.
@@ -209,9 +205,11 @@ pub struct DefaultStopConditionStrategy {
     pub repetition_window: usize,
     /// Min repeated count within the window to trigger `NoProgressDetected`.
     pub repetition_threshold: usize,
-    /// Min trailing run length of identical failure kinds to trigger
-    /// `NoProgressDetected`.
-    pub failure_run_threshold: usize,
+    /// Min trailing rejected replies required before aborting as invalid model
+    /// output. Capability failures are deliberately not counted here:
+    /// `LoopFailureKind` is too coarse to distinguish repeated failure from
+    /// unrelated model attempts that happen to share the same category.
+    pub rejected_reply_threshold: usize,
     /// Diminishing-returns: turns whose assistant output stays at or
     /// below this many tokens count as "no progress" (#3841 follow-up
     /// F1). Tune low for productive loops, higher for prompts that
@@ -233,7 +231,7 @@ impl Default for DefaultStopConditionStrategy {
         Self {
             repetition_window: 5,
             repetition_threshold: 3,
-            failure_run_threshold: 3,
+            rejected_reply_threshold: 3,
             // Conservative defaults: a model that returns 4 tokens or
             // fewer for 4 turns in a row is wedged.
             min_delta_tokens: 4,
@@ -330,14 +328,7 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
             };
         }
 
-        // (e) failure-run escape — same failure kind ≥ threshold in a row.
-        if state.recent_failure_kinds.same_run_length() >= self.failure_run_threshold {
-            return StopOutcome::Stop {
-                kind: StopKind::NoProgressDetected,
-            };
-        }
-
-        // (f) diminishing-returns escape (#3841 follow-up F1): the
+        // (e) diminishing-returns escape (#3841 follow-up F1): the
         // last `noprogress_window` turns all produced ≤
         // `min_delta_tokens` of assistant output. Distinguishes a wedged
         // loop from a productive one without relying on capability
@@ -359,11 +350,11 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
             }
         }
 
-        // (g) rejected-reply escape — repeated rejected final-answer
+        // (f) rejected-reply escape — repeated rejected final-answer
         // candidates are invalid model output, not generic no-progress.
         // This threshold permits extra model calls after each rejection; keep
         // deployments with tight LLM budgets on a low value.
-        if state.stop_state.trailing_rejected_replies as usize >= self.failure_run_threshold {
+        if state.stop_state.trailing_rejected_replies as usize >= self.rejected_reply_threshold {
             return StopOutcome::Stop {
                 kind: StopKind::Aborted(LoopFailureKind::InvalidModelOutput),
             };
@@ -696,7 +687,7 @@ mod tests {
             let strategy = DefaultStopConditionStrategy::default();
             assert_eq!(strategy.repetition_window, 5);
             assert_eq!(strategy.repetition_threshold, 3);
-            assert_eq!(strategy.failure_run_threshold, 3);
+            assert_eq!(strategy.rejected_reply_threshold, 3);
             assert_eq!(strategy.typed_progress_run_threshold, 3);
         }
 
@@ -1004,9 +995,8 @@ mod tests {
 
         /// F1 regression: four consecutive turns with output ≤
         /// `min_delta_tokens` trip the diminishing-returns escape.
-        /// Different from the repetition / failure-run escapes — the
-        /// model isn't calling the same tool or failing, it's just
-        /// emitting nothing useful.
+        /// Different from the repeated-call escape — the model isn't calling
+        /// the same tool, it's just emitting nothing useful.
         #[tokio::test]
         async fn four_consecutive_low_token_turns_trigger_no_progress() {
             let strategy = DefaultStopConditionStrategy::default();
@@ -1067,7 +1057,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn same_failure_kind_three_times_triggers_no_progress() {
+        async fn same_failure_kind_three_times_does_not_trigger_no_progress() {
             let strategy = DefaultStopConditionStrategy::default();
             let mut state = LoopExecutionState::initial_for_run(&test_run_context());
             for _ in 0..3 {
@@ -1076,12 +1066,7 @@ mod tests {
 
             let (_state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
 
-            assert!(matches!(
-                outcome,
-                StopOutcome::Stop {
-                    kind: StopKind::NoProgressDetected
-                }
-            ));
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
         }
 
         #[tokio::test]
