@@ -183,14 +183,9 @@ impl ToolResultReferenceEnvelope {
 
         match validate_model_observation(&model_observation) {
             Ok(()) => {
-                let model_observation_bytes = serde_json::to_vec(&model_observation)
-                    .map(|encoded| encoded.len())
-                    .unwrap_or(0);
-                tracing::debug!(
-                    result_ref = %envelope.result_ref,
-                    model_observation_bytes,
-                    "accepted model-visible tool observation"
-                );
+                let model_observation_content =
+                    serde_json::to_string(&model_observation).unwrap_or_default();
+                log_model_observation_constructed(&envelope.result_ref, &model_observation_content);
                 envelope.model_observation = Some(model_observation);
             }
             Err(error) => {
@@ -225,11 +220,7 @@ impl ToolResultReferenceEnvelope {
         };
         match model_observation_content(model_observation) {
             Ok(content) => {
-                tracing::debug!(
-                    result_ref = %self.result_ref,
-                    model_observation_bytes = content.len(),
-                    "replaying model-visible tool observation"
-                );
+                log_model_observation_replayed(&self.result_ref, &content);
                 content
             }
             Err(error) => {
@@ -438,6 +429,22 @@ fn validate_model_observation_text(value: &str) -> Result<(), String> {
         return Err("model observation must not contain API-key-like tokens".to_string());
     }
     Ok(())
+}
+
+fn log_model_observation_constructed(result_ref: &str, model_observation_content: &str) {
+    tracing::debug!(
+        result_ref,
+        model_observation = %model_observation_content,
+        "accepted model-visible tool observation"
+    );
+}
+
+fn log_model_observation_replayed(result_ref: &str, model_observation_content: &str) {
+    tracing::debug!(
+        result_ref,
+        model_observation = %model_observation_content,
+        "replaying model-visible tool observation"
+    );
 }
 
 fn is_disallowed_control_character(character: char) -> bool {
