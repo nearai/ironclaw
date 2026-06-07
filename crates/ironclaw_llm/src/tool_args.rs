@@ -42,7 +42,7 @@ pub(crate) struct ArgsParseError {
 /// should be rejected. Only a parse failure produces `Err`.
 pub(crate) fn parse_tool_call_args(raw: &str) -> Result<Value, ArgsParseError> {
     serde_json::from_str(raw).map_err(|e| ArgsParseError {
-        reason: e.to_string(),
+        reason: format!("failed to parse tool-call arguments JSON: {e}"),
     })
 }
 
@@ -64,24 +64,24 @@ pub(crate) fn parse_tool_call_args_lossy(raw: &str) -> (Value, Option<String>) {
             Some("empty arguments string".to_owned()),
         );
     }
-    match serde_json::from_str(raw) {
+    match parse_tool_call_args(raw) {
         Ok(v) => (v, None),
-        Err(e) => (Value::Object(serde_json::Map::new()), Some(e.to_string())),
+        Err(ArgsParseError { reason }) => (Value::Object(serde_json::Map::new()), Some(reason)),
     }
 }
 
 /// Ordered probe over candidate reasoning-field names.
 ///
-/// Iterates `fields` in order; returns the first value that is a non-empty
-/// string. Skips missing keys, non-string values, and empty strings.
-/// Returns `None` for non-object inputs or when no candidate matches.
-pub(crate) fn probe_reasoning_field(json: &Value, fields: &[&str]) -> Option<String> {
+/// Iterates `fields` in order; returns a borrowed reference to the first value
+/// that is a non-empty string. Skips missing keys, non-string values, and empty
+/// strings. Returns `None` for non-object inputs or when no candidate matches.
+pub(crate) fn probe_reasoning_field<'a>(json: &'a Value, fields: &[&str]) -> Option<&'a str> {
     let obj = json.as_object()?;
     for &field in fields {
         if let Some(Value::String(s)) = obj.get(field)
-            && !s.is_empty()
+            && !s.trim().is_empty()
         {
-            return Some(s.clone());
+            return Some(s);
         }
     }
     None
@@ -107,7 +107,10 @@ mod tests {
     #[test]
     fn parse_args_invalid_json_returns_err() {
         let err = parse_tool_call_args(r#"{not valid"#).expect_err("should fail");
-        assert!(!err.reason.is_empty());
+        assert!(
+            err.reason
+                .starts_with("failed to parse tool-call arguments JSON: ")
+        );
     }
 
     #[test]
@@ -115,7 +118,7 @@ mod tests {
         let (val, err) = parse_tool_call_args_lossy(r#"{not valid"#);
         assert!(val.as_object().expect("should be object").is_empty());
         let reason = err.expect("should have error");
-        assert!(!reason.is_empty());
+        assert!(reason.starts_with("failed to parse tool-call arguments JSON: "));
     }
 
     #[test]
@@ -137,10 +140,10 @@ mod tests {
         let json = json!({"reasoning": "first", "reasoning_content": "second"});
 
         let result = probe_reasoning_field(&json, &["reasoning", "reasoning_content"]);
-        assert_eq!(result.as_deref(), Some("first"));
+        assert_eq!(result, Some("first"));
 
         let result = probe_reasoning_field(&json, &["reasoning_content", "reasoning"]);
-        assert_eq!(result.as_deref(), Some("second"));
+        assert_eq!(result, Some("second"));
     }
 
     #[test]
@@ -148,21 +151,26 @@ mod tests {
         // Empty string is skipped; falls through to next candidate.
         let json = json!({"reasoning": "", "reasoning_content": "x"});
         let result = probe_reasoning_field(&json, &["reasoning", "reasoning_content"]);
-        assert_eq!(result.as_deref(), Some("x"));
+        assert_eq!(result, Some("x"));
 
         // Empty object → no candidates match → None.
-        let result = probe_reasoning_field(&json!({}), &["reasoning", "reasoning_content"]);
+        let empty_json = json!({});
+        let result = probe_reasoning_field(&empty_json, &["reasoning", "reasoning_content"]);
         assert!(result.is_none());
 
         // Non-object input → None.
-        let result = probe_reasoning_field(&json!(null), &["reasoning"]);
+        let null_json = json!(null);
+        let result = probe_reasoning_field(&null_json, &["reasoning"]);
         assert!(result.is_none());
     }
 
     #[test]
     fn parse_args_empty_string_returns_err() {
         let err = parse_tool_call_args("").expect_err("empty string is not valid JSON");
-        assert!(!err.reason.is_empty());
+        assert!(
+            err.reason
+                .starts_with("failed to parse tool-call arguments JSON: ")
+        );
     }
 
     #[test]
@@ -182,12 +190,12 @@ mod tests {
         // Number at first candidate → skip, fall through.
         let json = json!({"reasoning": 42, "reasoning_content": "actual"});
         let result = probe_reasoning_field(&json, &["reasoning", "reasoning_content"]);
-        assert_eq!(result.as_deref(), Some("actual"));
+        assert_eq!(result, Some("actual"));
 
         // Object / bool / array at first candidate also skipped.
         let json = json!({"reasoning": {"x": 1}, "reasoning_content": "actual"});
         let result = probe_reasoning_field(&json, &["reasoning", "reasoning_content"]);
-        assert_eq!(result.as_deref(), Some("actual"));
+        assert_eq!(result, Some("actual"));
     }
 
     #[test]
@@ -195,5 +203,31 @@ mod tests {
         let json = json!({"reasoning": "x"});
         let result = probe_reasoning_field(&json, &[]);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn probe_reasoning_field_skips_whitespace_only_values() {
+        let json = json!({"reasoning": "   \n\t", "reasoning_content": "actual"});
+        let result = probe_reasoning_field(&json, &["reasoning", "reasoning_content"]);
+        assert_eq!(result, Some("actual"));
+
+        let json = json!({"reasoning": "   "});
+        let result = probe_reasoning_field(&json, &["reasoning"]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_args_lossy_non_object_passthrough() {
+        let result = parse_tool_call_args_lossy("null");
+        assert_eq!(result.0, Value::Null);
+        assert!(result.1.is_none());
+
+        let result = parse_tool_call_args_lossy("42");
+        assert_eq!(result.0, 42);
+        assert!(result.1.is_none());
+
+        let result = parse_tool_call_args_lossy("[1,2,3]");
+        assert_eq!(result.0, json!([1, 2, 3]));
+        assert!(result.1.is_none());
     }
 }
