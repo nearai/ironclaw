@@ -364,7 +364,7 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle
             .contains("safe alpha description")
     );
     assert!(
-        bundle.instruction_snippets[0]
+        !bundle.instruction_snippets[0]
             .model_content
             .contains("Use trusted alpha prompt content.")
     );

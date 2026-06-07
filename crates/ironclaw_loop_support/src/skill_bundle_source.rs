@@ -191,6 +191,31 @@ pub struct SkillBundleDescriptor {
     trust: Option<SkillTrust>,
     visibility: Option<SkillVisibility>,
     provenance: SkillBundleProvenance,
+    discovery_metadata: Option<SkillBundleDiscoveryMetadata>,
+}
+
+/// Safe manifest metadata that can be shown before a skill is loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillBundleDiscoveryMetadata {
+    name: String,
+    description: String,
+}
+
+impl SkillBundleDiscoveryMetadata {
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
 }
 
 impl SkillBundleDescriptor {
@@ -206,6 +231,7 @@ impl SkillBundleDescriptor {
             skill_md_path: SkillFilePath::skill_md(),
             trust,
             visibility,
+            discovery_metadata: None,
         }
     }
 
@@ -224,6 +250,13 @@ impl SkillBundleDescriptor {
     pub fn with_provenance(mut self, mut provenance: SkillBundleProvenance) -> Self {
         provenance.source_kind = self.id.source_kind();
         self.provenance = provenance;
+        self
+    }
+
+    /// Attaches safe manifest metadata that may be shown before prompt loading.
+    #[must_use]
+    pub fn with_discovery_metadata(mut self, metadata: SkillBundleDiscoveryMetadata) -> Self {
+        self.discovery_metadata = Some(metadata);
         self
     }
 
@@ -250,6 +283,11 @@ impl SkillBundleDescriptor {
     /// Returns provenance metadata for this descriptor.
     pub fn provenance(&self) -> &SkillBundleProvenance {
         &self.provenance
+    }
+
+    /// Returns safe discovery metadata, if the source already validated it.
+    pub fn discovery_metadata(&self) -> Option<&SkillBundleDiscoveryMetadata> {
+        self.discovery_metadata.as_ref()
     }
 
     /// Returns the deterministic ordering key used by [`Ord`].

@@ -1626,8 +1626,7 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert!(
             selected[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("CODE_REVIEW_SENTINEL")
         );
@@ -1679,7 +1678,7 @@ mod tests {
 
         let combined = selected
             .iter()
-            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .map(|candidate| candidate.loaded_skill_md().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -1719,8 +1718,7 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert!(
             selected[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("CODE_REVIEW_SENTINEL")
         );
@@ -1777,8 +1775,7 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert!(
             selected[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("CODE_REVIEW_SENTINEL")
         );
@@ -1822,8 +1819,7 @@ mod tests {
         assert_eq!(selected_again.len(), 1);
         assert!(
             selected_again[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("CODE_REVIEW_SENTINEL")
         );
@@ -1870,8 +1866,7 @@ mod tests {
         );
         assert!(
             selected[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("CODE_REVIEW_SENTINEL")
         );
@@ -1982,7 +1977,7 @@ mod tests {
 
         let combined = selected
             .iter()
-            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .map(|candidate| candidate.loaded_skill_md().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(selected.len(), 2);
@@ -2469,7 +2464,7 @@ mod tests {
             .expect("selection succeeds");
         let combined = selected
             .iter()
-            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .map(|candidate| candidate.loaded_skill_md().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
 

@@ -5,15 +5,18 @@
 //!
 //! # Trust and Visibility Model
 //!
-//! Every installed skill in a run has two dimensions that gate what the model sees:
+//! Every installed skill in a run has three dimensions that gate what the model sees:
 //!
 //! - **Trust level** ([`SkillTrustLevel`]): determines how much content the model receives.
-//!   `Trusted` skills include their full prompt content; `Installed` skills expose only
-//!   a safe description.
+//!   `Trusted` skills may include prompt content after activation; `Installed` skills expose
+//!   only a safe description.
 //!
 //! - **Visibility** ([`SkillVisibility`]): determines whether the model sees the skill at all.
 //!   `Visible` skills appear in the context; `Hidden` and `Denied` skills are omitted entirely
 //!   so the model has no knowledge of their existence.
+//!
+//! - **Activation state** ([`SkillActivationState`]): determines whether a visible trusted
+//!   skill is only discoverable metadata or loaded prompt context.
 //!
 //! # Fail-closed semantics
 //!
@@ -106,13 +109,13 @@ pub enum SkillVisibility {
 /// on `ironclaw_skills`.
 ///
 /// - `Installed`: read-only context; the model sees only the safe description.
-/// - `Trusted`: full context; the model sees description and prompt content.
+/// - `Trusted`: loaded context may include description and prompt content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillTrustLevel {
     /// Registry/external skill — description only, no prompt content.
     Installed,
-    /// User-placed/trusted skill — description and prompt content.
+    /// User-placed/trusted skill — description and, once loaded, prompt content.
     Trusted,
 }
 
@@ -121,6 +124,28 @@ impl SkillTrustLevel {
         match self {
             Self::Installed => "installed",
             Self::Trusted => "trusted",
+        }
+    }
+}
+
+/// Activation state for a skill in the current run.
+///
+/// Discovery exposes only safe metadata. Loaded skills may expose prompt
+/// content when the host also marks them trusted and visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillActivationState {
+    /// The model may know this skill exists, but prompt content is withheld.
+    Discoverable,
+    /// The skill was deterministically selected for the run.
+    Loaded,
+}
+
+impl SkillActivationState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Discoverable => "discoverable",
+            Self::Loaded => "loaded",
         }
     }
 }
@@ -180,8 +205,11 @@ pub struct InstalledSkillSnapshot {
     pub trust: SkillTrustLevel,
     /// Visibility — determines whether the model sees this skill at all.
     pub visibility: SkillVisibility,
+    /// Activation state — determines whether prompt content may be disclosed.
+    pub activation_state: SkillActivationState,
     /// Full prompt content. Only included in model context when
-    /// `trust == Trusted` and `visibility == Visible`.
+    /// `trust == Trusted`, `visibility == Visible`, and
+    /// `activation_state == Loaded`.
     pub prompt_content: Option<String>,
     /// Sanitized description safe for model consumption.
     pub safe_description: String,
@@ -224,6 +252,7 @@ impl SkillRunSnapshot {
             return Self::empty();
         }
 
+        entries.iter_mut().for_each(canonicalize_skill_entry);
         entries.sort_by(compare_skill_entries);
         let version = compute_snapshot_version(&entries);
         Self {
@@ -342,15 +371,14 @@ impl SkillContextSource for SkillContextService {
         let mut total_bytes = 0usize;
 
         for entry in visible {
-            let model_content = match entry.trust {
-                SkillTrustLevel::Trusted => {
-                    if let Some(ref content) = entry.prompt_content {
-                        format!("{}\n\n{}", entry.safe_description, content)
-                    } else {
-                        entry.safe_description.clone()
-                    }
+            let model_content = if can_disclose_prompt_content(entry) {
+                if let Some(ref content) = entry.prompt_content {
+                    format!("{}\n\n{}", entry.safe_description, content)
+                } else {
+                    entry.safe_description.clone()
                 }
-                SkillTrustLevel::Installed => entry.safe_description.clone(),
+            } else {
+                entry.safe_description.clone()
             };
             let safe_summary = entry.safe_description.clone();
 
@@ -518,8 +546,21 @@ fn compare_skill_entries(a: &InstalledSkillSnapshot, b: &InstalledSkillSnapshot)
         .then_with(|| a.name.cmp(&b.name))
         .then_with(|| trust_rank(a.trust).cmp(&trust_rank(b.trust)))
         .then_with(|| visibility_rank(a.visibility).cmp(&visibility_rank(b.visibility)))
+        .then_with(|| activation_rank(a.activation_state).cmp(&activation_rank(b.activation_state)))
         .then_with(|| a.safe_description.cmp(&b.safe_description))
         .then_with(|| a.prompt_content.cmp(&b.prompt_content))
+}
+
+fn canonicalize_skill_entry(entry: &mut InstalledSkillSnapshot) {
+    if !can_disclose_prompt_content(entry) {
+        entry.prompt_content = None;
+    }
+}
+
+fn can_disclose_prompt_content(entry: &InstalledSkillSnapshot) -> bool {
+    entry.trust == SkillTrustLevel::Trusted
+        && entry.visibility == SkillVisibility::Visible
+        && entry.activation_state == SkillActivationState::Loaded
 }
 
 const fn trust_rank(trust: SkillTrustLevel) -> u8 {
@@ -534,6 +575,13 @@ const fn visibility_rank(visibility: SkillVisibility) -> u8 {
         SkillVisibility::Visible => 0,
         SkillVisibility::Hidden => 1,
         SkillVisibility::Denied => 2,
+    }
+}
+
+const fn activation_rank(activation_state: SkillActivationState) -> u8 {
+    match activation_state {
+        SkillActivationState::Discoverable => 0,
+        SkillActivationState::Loaded => 1,
     }
 }
 
@@ -659,6 +707,7 @@ fn compute_snapshot_version(sorted_entries: &[InstalledSkillSnapshot]) -> String
                 SkillVisibility::Denied => b"denied",
             },
         );
+        feed_digest_field(&mut digest, entry.activation_state.as_str().as_bytes());
         match entry.prompt_content {
             Some(ref content) => {
                 digest.update([1]);
@@ -695,6 +744,7 @@ mod tests {
             name: "alpha".to_string(),
             trust: SkillTrustLevel::Trusted,
             visibility: SkillVisibility::Visible,
+            activation_state: SkillActivationState::Loaded,
             prompt_content: Some("prompt".to_string()),
             safe_description: "description".to_string(),
             ordering_key: "alpha".to_string(),

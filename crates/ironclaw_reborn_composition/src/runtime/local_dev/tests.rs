@@ -958,8 +958,7 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert!(
             selected[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("UNIT_ACTIVATE_SENTINEL")
         );

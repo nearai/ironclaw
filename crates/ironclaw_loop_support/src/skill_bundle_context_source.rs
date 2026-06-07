@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
+use ironclaw_skills::{SkillTrust, parse_skill_md};
 
 use crate::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
@@ -17,9 +18,9 @@ const MAX_SKILL_BUNDLE_CONTEXT_FILE_BYTES: usize = 256 * 1024;
 /// Adapts portable skill bundles into model-context candidates.
 ///
 /// This adapter is intentionally policy-thin: it requires host-supplied trust
-/// and visibility metadata from [`crate::SkillBundleDescriptor`], reads raw `SKILL.md`
-/// content only for visible bundles, and leaves final snapshot trust/visibility
-/// enforcement to [`crate::build_skill_run_snapshot`].
+/// and visibility metadata from [`crate::SkillBundleDescriptor`], prefers safe
+/// descriptor discovery metadata for visible bundles, and leaves final snapshot
+/// trust/visibility enforcement to [`crate::build_skill_run_snapshot`].
 pub struct SkillBundleContextSource<S>
 where
     S: SkillBundleSource + ?Sized,
@@ -105,6 +106,35 @@ where
                 .with_ordering_key(ordering_key));
         }
 
+        let Some(discovery_metadata) = descriptor.discovery_metadata() else {
+            return self
+                .load_legacy_descriptor_context_candidate(
+                    run_context,
+                    descriptor,
+                    trust,
+                    visibility,
+                    ordering_key,
+                )
+                .await;
+        };
+
+        Ok(HostSkillContextCandidate::discoverable(
+            discovery_metadata.name(),
+            discovery_metadata.description(),
+            trust,
+            visibility,
+        )
+        .with_ordering_key(ordering_key))
+    }
+
+    async fn load_legacy_descriptor_context_candidate(
+        &self,
+        run_context: &LoopRunContext,
+        descriptor: SkillBundleDescriptor,
+        trust: Option<SkillTrust>,
+        visibility: Option<SkillVisibility>,
+        ordering_key: String,
+    ) -> Result<HostSkillContextCandidate, HostSkillContextBuildError> {
         let skill_md = self
             .bundle_source
             .read_skill_bundle_file(run_context, descriptor.id(), descriptor.skill_md_path())
@@ -114,8 +144,16 @@ where
         let skill_md =
             String::from_utf8(skill_md).map_err(|_| HostSkillContextBuildError::ParseFailed)?;
 
-        Ok(HostSkillContextCandidate::new(skill_md, trust, visibility)
-            .with_ordering_key(ordering_key))
+        let parsed =
+            parse_skill_md(&skill_md).map_err(|_| HostSkillContextBuildError::ParseFailed)?;
+
+        Ok(HostSkillContextCandidate::discoverable(
+            parsed.manifest.name,
+            parsed.manifest.description,
+            trust,
+            visibility,
+        )
+        .with_ordering_key(ordering_key))
     }
 }
 
@@ -208,7 +246,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        SkillBundleDescriptor, SkillFilePath, skill_context::build_skill_instruction_snippets,
+        SkillBundleDescriptor, SkillBundleDiscoveryMetadata, SkillFilePath,
+        skill_context::build_skill_instruction_snippets,
     };
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
 
@@ -449,32 +488,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_reads_visible_trusted_bundle_into_model_snippet() {
-        let source = Arc::new(
-            StaticSkillBundleSource::new(vec![descriptor(
+    async fn adapter_reads_visible_trusted_bundle_as_discoverable_model_snippet() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            descriptor(
                 crate::SkillSourceKind::System,
                 "alpha",
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
-            )])
-            .with_skill_md(
-                crate::SkillSourceKind::System,
+            )
+            .with_discovery_metadata(SkillBundleDiscoveryMetadata::new(
                 "alpha",
-                skill_md("alpha", "safe alpha description", "trusted alpha prompt"),
-            ),
-        );
-        let adapter = SkillBundleContextSource::new(source);
+                "safe alpha description",
+            )),
+        ]));
+        let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
         let snippets = build_skill_instruction_snippets(&adapter, &run_context().await)
             .await
             .unwrap();
 
+        assert!(source.reads().is_empty());
         assert_eq!(snippets.len(), 1);
         assert_eq!(snippets[0].snippet_ref, "skill:alpha");
         assert!(snippets[0].safe_summary.contains("safe alpha description"));
         assert!(!snippets[0].safe_summary.contains("trusted alpha prompt"));
         assert!(snippets[0].model_content.contains("safe alpha description"));
-        assert!(snippets[0].model_content.contains("trusted alpha prompt"));
+        assert!(!snippets[0].model_content.contains("trusted alpha prompt"));
     }
 
     #[tokio::test]
@@ -698,14 +737,21 @@ mod tests {
             .iter()
             .map(|candidate| candidate.ordering_key.as_deref().unwrap())
             .collect::<Vec<_>>();
-        let skill_md = candidates
+        let descriptions = candidates
             .iter()
-            .map(|candidate| candidate.skill_md.as_deref().unwrap())
+            .map(|candidate| {
+                let (_, description) = candidate.discoverable_metadata().unwrap();
+                description
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(ordering_keys, vec!["0000000000000000", "0000000000000001"]);
-        assert!(skill_md[0].contains("root description"));
-        assert!(skill_md[1].contains("nested description"));
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.loaded_skill_md().is_none())
+        );
+        assert_eq!(descriptions, vec!["root description", "nested description"]);
     }
 
     #[tokio::test]
@@ -735,7 +781,7 @@ mod tests {
         assert!(
             candidates
                 .iter()
-                .all(|candidate| candidate.skill_md.is_none())
+                .all(HostSkillContextCandidate::is_unavailable)
         );
         assert_eq!(candidates[0].trust, Some(SkillTrust::Trusted));
         assert_eq!(candidates[0].visibility, Some(SkillVisibility::Hidden));

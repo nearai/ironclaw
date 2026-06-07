@@ -75,12 +75,13 @@ pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
 pub use skill_bundle_context_source::SkillBundleContextSource;
 pub use skill_bundle_source::{
-    SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
-    SkillBundleSourceError, SkillFilePath, SkillSourceKind, sort_skill_bundle_descriptors,
+    SkillBundleDescriptor, SkillBundleDiscoveryMetadata, SkillBundleId, SkillBundleProvenance,
+    SkillBundleSource, SkillBundleSourceError, SkillFilePath, SkillSourceKind,
+    sort_skill_bundle_descriptors,
 };
 pub use skill_context::{
-    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    build_skill_run_snapshot,
+    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextCandidatePayload,
+    HostSkillContextSource, build_skill_run_snapshot,
 };
 pub use subagent_prompt_port::{
     DEFAULT_SUBAGENT_GOAL_MAX_BYTES, SubagentLoopPromptPort, SubagentPromptComposer,

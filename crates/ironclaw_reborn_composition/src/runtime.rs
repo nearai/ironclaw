@@ -5530,7 +5530,7 @@ mod tests {
             .expect("webui-recorded skill context should load");
         let combined_skill_context = selected
             .iter()
-            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .map(|candidate| candidate.loaded_skill_md().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(selected.len(), 1);

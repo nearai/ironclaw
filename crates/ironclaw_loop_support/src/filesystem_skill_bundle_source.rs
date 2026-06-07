@@ -12,8 +12,9 @@ use parking_lot::Mutex;
 use tracing::debug;
 
 use crate::{
-    SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
-    SkillBundleSourceError, SkillFilePath, SkillSourceKind, sort_skill_bundle_descriptors,
+    SkillBundleDescriptor, SkillBundleDiscoveryMetadata, SkillBundleId, SkillBundleProvenance,
+    SkillBundleSource, SkillBundleSourceError, SkillFilePath, SkillSourceKind,
+    sort_skill_bundle_descriptors,
 };
 
 const DEFAULT_MAX_BUNDLE_FILE_BYTES: usize = 256 * 1024;
@@ -212,11 +213,11 @@ where
                 }
             };
             let skill_md_path = bundle_scoped_path(root.root(), &bundle_id, &skill_md_file)?;
-            match self
+            let discovery_metadata = match self
                 .validate_bundle_manifest(scope, &skill_md_path, &bundle_id)
                 .await
             {
-                Ok(()) => {}
+                Ok(discovery_metadata) => discovery_metadata,
                 Err(error) if is_skippable_manifest_error(&error) => {
                     debug!(
                         bundle_id = %bundle_id,
@@ -226,12 +227,13 @@ where
                     continue;
                 }
                 Err(error) => return Err(error),
-            }
+            };
             self.validated_manifests.lock().insert(skill_md_path);
             let trust = self.bundle_trust(scope, root, &bundle_id).await?;
 
             descriptors.push(
                 SkillBundleDescriptor::new(bundle_id, trust, root.visibility().copied())
+                    .with_discovery_metadata(discovery_metadata)
                     .with_provenance(SkillBundleProvenance::new(root.source_kind())),
             );
         }
@@ -244,7 +246,7 @@ where
         scope: &ResourceScope,
         skill_md_path: &ScopedPath,
         bundle_id: &SkillBundleId,
-    ) -> Result<(), SkillBundleSourceError> {
+    ) -> Result<SkillBundleDiscoveryMetadata, SkillBundleSourceError> {
         let skill_md = self
             .read_bounded(scope, skill_md_path, self.max_skill_md_bytes)
             .await?;
@@ -255,7 +257,10 @@ where
         if parsed.manifest.name != bundle_id.name() {
             return Err(SkillBundleSourceError::InvalidSkillBundle);
         }
-        Ok(())
+        Ok(SkillBundleDiscoveryMetadata::new(
+            parsed.manifest.name,
+            parsed.manifest.description,
+        ))
     }
 
     async fn bundle_trust(
