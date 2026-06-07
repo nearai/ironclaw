@@ -991,7 +991,7 @@ impl Agent {
     ) -> Option<Vec<ironclaw_skills::LoadedSkill>> {
         if self.config.multi_tenant && user_id != self.owner_id() {
             let mut scoped = match registry.read() {
-                Ok(guard) => guard.clone_config_for_user_scope(user_id),
+                Ok(guard) => guard.clone_config_for_tenant_user_scope(self.owner_id(), user_id),
                 Err(e) => {
                     tracing::error!("Skill registry lock poisoned: {}", e);
                     return None;
@@ -2705,7 +2705,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let registry = ironclaw_skills::SkillRegistry::new(temp.path().join("owner-skills"))
             .with_installed_dir(temp.path().join("owner-installed"));
-        let scoped = registry.clone_config_for_user_scope("alice");
+        let scoped = registry.clone_config_for_tenant_user_scope("owner", "alice");
         let skill_content = r#"---
 name: tenant-skill
 description: Tenant runtime skill
