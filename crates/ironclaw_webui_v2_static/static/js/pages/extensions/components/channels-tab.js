@@ -36,22 +36,40 @@ export function isSlackInboundProofCodeAction(connectAction) {
 }
 
 export function findSlackConnectAction(connectableChannels) {
-  const channels = connectableChannels || [];
-  return (
-    channels.find(isSlackAdminManagedAction) ||
-    channels.find(isSlackInboundProofCodeAction) ||
-    channels.find((channel) => channel.channel === "slack")
-  );
+  return findSlackConnectActions(connectableChannels)[0] || null;
 }
 
-export function SlackBuiltInConnectAction({ slackConnectAction }) {
-  if (isSlackAdminManagedAction(slackConnectAction)) {
-    return html`<${SlackChannelPicker} action=${slackConnectAction.action} />`;
-  }
-  if (isSlackInboundProofCodeAction(slackConnectAction)) {
-    return html`<${SlackPairingSection} action=${slackConnectAction.action} />`;
-  }
-  return null;
+export function findSlackConnectActions(connectableChannels) {
+  const channels = connectableChannels || [];
+  const actions = [
+    channels.find(isSlackAdminManagedAction),
+    channels.find(isSlackInboundProofCodeAction),
+  ].filter(Boolean);
+  if (actions.length > 0) return actions;
+  const fallback = channels.find((channel) => channel.channel === "slack");
+  return fallback ? [fallback] : [];
+}
+
+export function SlackBuiltInConnectAction({
+  slackConnectAction,
+  slackConnectActions,
+}) {
+  const actions =
+    slackConnectActions || (slackConnectAction ? [slackConnectAction] : []);
+  const sections = actions
+    .map((action) => {
+      if (isSlackAdminManagedAction(action)) {
+        return html`<${SlackChannelPicker} action=${action.action} />`;
+      }
+      if (isSlackInboundProofCodeAction(action)) {
+        return html`<${SlackPairingSection} action=${action.action} />`;
+      }
+      return null;
+    })
+    .filter(Boolean);
+  return sections.length > 0
+    ? html`<div className="space-y-3">${sections}</div>`
+    : null;
 }
 
 export function ChannelsTab({
@@ -67,7 +85,8 @@ export function ChannelsTab({
 }) {
   const enabledChannels = status.enabled_channels || [];
   const slackEnabled = isSlackChannelEnabled(enabledChannels);
-  const slackConnectAction = findSlackConnectAction(connectableChannels);
+  const slackConnectActions = findSlackConnectActions(connectableChannels);
+  const slackConnectAction = slackConnectActions[0] || null;
   const slackStatus = slackBuiltinStatus(slackEnabled, slackConnectAction);
 
   return html`
@@ -101,7 +120,7 @@ export function ChannelsTab({
           statusTone=${slackStatus.tone}
           detail="Tenant Slack app install"
         >
-          <${SlackBuiltInConnectAction} slackConnectAction=${slackConnectAction} />
+          <${SlackBuiltInConnectAction} slackConnectActions=${slackConnectActions} />
         <//>
         <${BuiltinRow}
           name="CLI"

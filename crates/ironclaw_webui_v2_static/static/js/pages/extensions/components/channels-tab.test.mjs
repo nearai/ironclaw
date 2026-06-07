@@ -10,10 +10,10 @@ function channelsTabSourceForTest() {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackBuiltInConnectAction, isSlackChannelEnabled, slackBuiltinStatus, isSlackAdminManagedAction, isSlackInboundProofCodeAction, findSlackConnectAction };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackBuiltInConnectAction, isSlackChannelEnabled, slackBuiltinStatus, isSlackAdminManagedAction, isSlackInboundProofCodeAction, findSlackConnectAction, findSlackConnectActions };`;
 }
 
-function slackBuiltInConnectActionForTest(slackConnectAction) {
+function slackBuiltInConnectActionForTest(slackConnectAction, slackConnectActions) {
   const context = {
     globalThis: {},
     SlackChannelPicker() {},
@@ -24,7 +24,10 @@ function slackBuiltInConnectActionForTest(slackConnectAction) {
   };
   vm.runInNewContext(channelsTabSourceForTest(), context);
   return {
-    rendered: context.globalThis.__testExports.SlackBuiltInConnectAction({ slackConnectAction }),
+    rendered: context.globalThis.__testExports.SlackBuiltInConnectAction({
+      slackConnectAction,
+      slackConnectActions,
+    }),
     SlackChannelPicker: context.SlackChannelPicker,
     SlackPairingSection: context.SlackPairingSection,
   };
@@ -89,26 +92,35 @@ test("Slack built-in action predicates keep admin picker and proof-code pairing 
   );
 });
 
-test("findSlackConnectAction prefers admin channel management over personal pairing", () => {
+test("findSlackConnectActions keeps admin channel management and personal pairing", () => {
   const context = { globalThis: {} };
   vm.runInNewContext(channelsTabSourceForTest(), context);
-  const { findSlackConnectAction } = context.globalThis.__testExports;
+  const { findSlackConnectAction, findSlackConnectActions } =
+    context.globalThis.__testExports;
   const personal = { channel: "slack", strategy: "inbound_proof_code" };
   const admin = { channel: "slack", strategy: "admin_managed_channels" };
 
   assert.equal(findSlackConnectAction([personal]), personal);
   assert.equal(findSlackConnectAction([personal, admin]), admin);
+  const actions = findSlackConnectActions([personal, admin]);
+  assert.equal(actions.length, 2);
+  assert.equal(actions[0].strategy, "admin_managed_channels");
+  assert.equal(actions[1].strategy, "inbound_proof_code");
 });
 
-test("SlackBuiltInConnectAction renders the picker only for admin-managed actions", () => {
+test("SlackBuiltInConnectAction renders every supported Slack action", () => {
   const personal = { channel: "slack", strategy: "inbound_proof_code", action: {} };
   const admin = { channel: "slack", strategy: "admin_managed_channels", action: {} };
 
   const adminView = slackBuiltInConnectActionForTest(admin);
-  assert.equal(adminView.rendered.values[0], adminView.SlackChannelPicker);
+  assert.equal(adminView.rendered.values[0][0].values[0], adminView.SlackChannelPicker);
 
   const personalView = slackBuiltInConnectActionForTest(personal);
-  assert.equal(personalView.rendered.values[0], personalView.SlackPairingSection);
+  assert.equal(personalView.rendered.values[0][0].values[0], personalView.SlackPairingSection);
+
+  const combinedView = slackBuiltInConnectActionForTest(null, [admin, personal]);
+  assert.equal(combinedView.rendered.values[0][0].values[0], combinedView.SlackChannelPicker);
+  assert.equal(combinedView.rendered.values[0][1].values[0], combinedView.SlackPairingSection);
 
   const unhandledView = slackBuiltInConnectActionForTest({
     channel: "slack",

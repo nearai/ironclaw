@@ -145,7 +145,9 @@ mod tests {
         assert!(channels_tab.contains("inbound_proof_code"));
         assert!(channels_tab.contains("SlackChannelPicker"));
         assert!(channels_tab.contains("SlackPairingSection"));
-        assert!(channels_tab.contains("action=${slackConnectAction.action}"));
+        assert!(channels_tab.contains("findSlackConnectActions"));
+        assert!(channels_tab.contains("slackConnectActions"));
+        assert!(channels_tab.contains("action=${action.action}"));
 
         let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
         assert!(regression.contains("channel connect requests return an action"));
