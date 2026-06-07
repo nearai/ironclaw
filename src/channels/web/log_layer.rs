@@ -74,12 +74,12 @@ impl LogBroadcaster {
             .unwrap_or_else(|_| "[log message redacted: contained blocked secret]".to_string());
 
         // Persist info+ to DB (fire-and-forget; drops on full channel).
-        if entry.level != "DEBUG" && entry.level != "TRACE" {
-            if let Ok(guard) = self.db_writer.lock() {
-                if let Some(ref tx) = *guard {
-                    let _ = tx.try_send(entry.clone());
-                }
-            }
+        if entry.level != "DEBUG"
+            && entry.level != "TRACE"
+            && let Ok(guard) = self.db_writer.lock()
+            && let Some(ref tx) = *guard
+        {
+            let _ = tx.try_send(entry.clone());
         }
 
         // Broadcast to live SSE subscribers.

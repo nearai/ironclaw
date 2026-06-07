@@ -258,6 +258,30 @@ SKILL.md files extend the agent's prompt with domain-specific instructions. See 
 
 See `.env.example` for all environment variables. LLM backends (`openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, `bedrock`) documented in `src/llm/CLAUDE.md`.
 
+## Pinning the trinity tool surface
+
+The `t3n-mcp-sidecar` image bundles trinity `client/` (`t3n-sdk` + `mcp/t3n-mcp`). That code defines the **agent-facing MCP tool surface** — tool names, descriptions, and schemas the CodeAct agent reads — so a change to it can change agent behaviour.
+
+The three sidecar build workflows (`build-sidecar.yml`, `staging-gcp.yml`, `testnet-gcp.yml`) check trinity out at a **pinned commit**, never floating on trinity `main`. The pinned SHA is the single source of truth in **`.github/trinity-sdk-ref`**; each workflow reads it and fails the build if it is empty (so the float can never silently return). This is the tool-surface analogue of the trinity→contracts `rev` pin in trinity's `node/Cargo.toml`.
+
+**Two-layer verification:**
+
+1. *Automated (CI) — surface-drift guard.* `.github/workflows/trinity-tool-surface.yml` recomputes a checksum manifest of the tool surface (`index.ts` + `metadata.ts` + `schema.ts` per tool — names, descriptions, schemas; `handler.ts`/helpers excluded) from the pinned trinity ref and fails if it differs from the committed `.github/trinity-tool-surface.snapshot`. So a ref bump cannot *silently* change the agent's tool surface — CI blocks until the snapshot is regenerated and reviewed.
+2. *Manual — does-it-still-work gate.* The snapshot proves *that* the surface changed, not that the agent still completes the cycle on it. CI cannot run this (it needs a live stack + LLM + creds), so it stays a required manual step.
+
+**Bumping the surface** (e.g. to pick up a trinity MCP change):
+
+```
+# 1. point the pin at the new trinity commit
+$EDITOR .github/trinity-sdk-ref
+# 2. regenerate + review the surface manifest (CI runs the same script)
+./scripts/gen-trinity-tool-surface-snapshot.sh trinity/client/mcp/t3n-mcp/src/server/tools > .github/trinity-tool-surface.snapshot
+# 3. drive the payroll chat cycle on a sidecar built from the new ref — require a clean run
+# 4. commit ref + snapshot together; open the PR
+```
+
+Because the ref is pinned, the surface you verify in step 3 is byte-identical to what ships to staging and testnet.
+
 ## Adding a New Channel
 
 1. Create `src/channels/my_channel.rs`

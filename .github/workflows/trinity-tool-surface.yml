@@ -1,0 +1,59 @@
+name: Trinity tool surface
+
+# Guards the agent-facing MCP tool surface bundled into the sidecar. The
+# surface is pinned via .github/trinity-sdk-ref; this job recomputes the
+# tool-surface checksum manifest from that pinned trinity commit and fails if
+# it differs from the committed snapshot. Bumping the pinned ref therefore
+# cannot ship a changed tool surface until someone regenerates and reviews the
+# snapshot — the silent-drift failure mode that broke the agent mid-cycle.
+#
+# This catches *that the surface changed*; it does not prove the agent still
+# completes the cycle on the new surface — that verification is the manual
+# chat-cycle step documented in CLAUDE.md → "Pinning the trinity tool surface".
+
+on:
+  pull_request:
+  push:
+    branches: [staging, testnet]
+
+permissions:
+  contents: read
+
+jobs:
+  tool-surface-snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout t3-claw
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Resolve pinned trinity ref
+        id: trinity_ref
+        run: |
+          ref="$(grep -vE '^[[:space:]]*#' .github/trinity-sdk-ref | grep -vE '^[[:space:]]*$' | head -1 | tr -d '[:space:]')"
+          if [ -z "$ref" ]; then
+            echo "::error::.github/trinity-sdk-ref holds no SHA — refusing to float on trinity main"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout trinity tool sources (pinned, sparse)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: Terminal-3/trinity
+          ref: ${{ steps.trinity_ref.outputs.ref }}
+          path: trinity
+          token: ${{ secrets.TRINITY_CHECKOUT_TOKEN }}
+          sparse-checkout: client/mcp/t3n-mcp/src/server/tools
+
+      - name: Verify tool surface matches committed snapshot
+        run: |
+          ./scripts/gen-trinity-tool-surface-snapshot.sh \
+            trinity/client/mcp/t3n-mcp/src/server/tools > /tmp/trinity-tool-surface.new
+          if ! diff -u .github/trinity-tool-surface.snapshot /tmp/trinity-tool-surface.new; then
+            echo "::error::t3n-mcp tool surface at the pinned trinity ref differs from the committed snapshot."
+            echo "If this change is intended (e.g. you bumped .github/trinity-sdk-ref), regenerate and review:"
+            echo "  ./scripts/gen-trinity-tool-surface-snapshot.sh trinity/client/mcp/t3n-mcp/src/server/tools > .github/trinity-tool-surface.snapshot"
+            echo "then verify the agent chat cycle on the new surface before merging (see CLAUDE.md)."
+            exit 1
+          fi
+          echo "Tool surface matches the committed snapshot."

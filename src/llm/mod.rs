@@ -182,7 +182,9 @@ fn create_registry_provider(
     }
 
     match config.protocol {
-        ProviderProtocol::OpenAiCompletions => create_openai_compat_from_registry(config),
+        ProviderProtocol::OpenAiCompletions => {
+            create_openai_compat_from_registry(config, request_timeout_secs)
+        }
         ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
         ProviderProtocol::Ollama => create_ollama_from_registry(config),
         ProviderProtocol::GithubCopilot => {
@@ -250,6 +252,7 @@ async fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvid
 
 fn create_openai_compat_from_registry(
     config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     use rig::providers::openai;
 
@@ -286,7 +289,23 @@ fn create_openai_compat_from_registry(
             "no-key".to_string()
         });
 
-    let mut builder = openai::Client::builder().api_key(&api_key);
+    // Bound the HTTP client with an explicit request timeout. rig-core's default
+    // reqwest client has no timeout, so a stalled upstream (no response body, or a
+    // mid-flight TCP stall) parks the whole agent turn until the OS tears the socket
+    // down — minutes — and never returns an error for RetryProvider to act on. A
+    // bounded timeout converts a stall into a fast, retryable error. Mirrors the
+    // timeout the NearAI provider already sets on its own reqwest client.
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(request_timeout_secs))
+        .build()
+        .map_err(|e| LlmError::RequestFailed {
+            provider: config.provider_id.clone(),
+            reason: format!("Failed to build HTTP client: {e}"),
+        })?;
+
+    let mut builder = openai::Client::<reqwest::Client>::builder()
+        .api_key(&api_key)
+        .http_client(http_client);
     if !config.base_url.is_empty() {
         let base_url = normalize_openai_base_url(&config.base_url);
         builder = builder.base_url(&base_url);

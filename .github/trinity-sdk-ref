@@ -1,0 +1,13 @@
+# Pinned Terminal-3/trinity commit whose client/ sources (t3n-sdk + mcp/t3n-mcp)
+# the t3n-mcp-sidecar image bundles. This is the agent-facing MCP TOOL SURFACE
+# (tool names, descriptions, schemas) the CodeAct agent reads — changing it can
+# change agent behaviour, so it is pinned rather than floated on trinity main.
+#
+# Single source of truth: all three sidecar build workflows
+# (build-sidecar.yml, staging-gcp.yml, testnet-gcp.yml) read THIS file. Bump it
+# deliberately, in a PR, and re-verify the agent chat cycle on the new surface
+# before merging — see CLAUDE.md ("Pinning the trinity tool surface").
+#
+# Format: a single line holding the full 40-char trinity commit SHA. Comment
+# lines (starting with #) and blank lines are ignored.
+4d38b134ef36ed4e60580a09ada118a7fbc3bb4a

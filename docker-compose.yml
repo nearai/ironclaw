@@ -7,7 +7,9 @@
 #   # Set GATEWAY_AUTH_TOKEN, SECRETS_MASTER_KEY, and your LLM key in .env
 #   docker compose --profile app --profile mcp up --build
 #
-# Gateway: http://127.0.0.1:3000
+# Gateway: http://127.0.0.1:3000 (override with T3CLAW_HOST_PORT in .env to move
+# off :3000 — useful when another local service needs that port, e.g. running
+# alongside a Trinity node cluster whose N1 also binds :3000).
 # For production put Caddy/nginx in front for TLS; Postgres is never exposed externally.
 
 services:
@@ -37,7 +39,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${T3CLAW_HOST_PORT:-3000}:3000"
     # The t3claw process (uid 1000) needs read-write access to the Docker
     # socket.  The socket is owned by the group whose GID matches the host's
     # docker group.  We add that GID to the container's supplementary groups so

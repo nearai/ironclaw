@@ -30,10 +30,25 @@ jobs:
         with:
           persist-credentials: false
 
+      # Pin the bundled trinity tool surface to a reviewed commit rather than
+      # floating on trinity main — a silent main change would alter the MCP
+      # tools the agent sees. Single source of truth: .github/trinity-sdk-ref.
+      - name: Resolve pinned trinity ref
+        id: trinity_ref
+        run: |
+          ref="$(grep -vE '^[[:space:]]*#' .github/trinity-sdk-ref | grep -vE '^[[:space:]]*$' | head -1 | tr -d '[:space:]')"
+          if [ -z "$ref" ]; then
+            echo "::error::.github/trinity-sdk-ref holds no SHA — refusing to float on trinity main"
+            exit 1
+          fi
+          echo "Pinned trinity ref: $ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Checkout trinity (sidecar sources)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: Terminal-3/trinity
+          ref: ${{ steps.trinity_ref.outputs.ref }}
           path: trinity
           token: ${{ secrets.TRINITY_CHECKOUT_TOKEN }}
 

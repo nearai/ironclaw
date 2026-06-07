@@ -171,6 +171,8 @@ Add the printed values as GitHub repository secrets (**Settings → Secrets → 
 | `WIF_SERVICE_ACCOUNT` | Printed by `wif-setup.sh` |
 | `TRINITY_CHECKOUT_TOKEN` | PAT with `contents:read` on `Terminal-3/trinity` |
 
+> **Trinity tool surface is pinned.** The sidecar bundles trinity `client/` at the commit in `.github/trinity-sdk-ref`, not `main` — so a redeploy never silently changes the agent's MCP tools. To pick up a trinity tool-surface change, bump that SHA in a PR and re-verify the agent chat cycle first. See the repo `CLAUDE.md` → "Pinning the trinity tool surface".
+
 ---
 
 ## Day-to-day operations
