@@ -75,7 +75,8 @@ https://<public-host>/auth/callback/google
 ## Railway
 
 Set the service Dockerfile path to `Dockerfile.reborn`. Railway sets `PORT`;
-keep `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0`.
+keep `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0`. The Reborn WebUI service serves
+`/api/health` for Railway's healthcheck.
 
 Do not use `IRONCLAW_REBORN_PROFILE=local-dev-yolo` for a public Railway
 listener. That profile grants trusted host access and `serve` refuses to bind it
