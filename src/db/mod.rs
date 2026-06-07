@@ -386,6 +386,18 @@ pub struct UserIdentityRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+pub(crate) fn scoped_conversation_id(channel: &str, user_id: &str, scope: &str) -> Uuid {
+    Uuid::parse_str(scope).unwrap_or_else(|_| {
+        let mut seed = Vec::new();
+        seed.extend_from_slice(b"scoped-conversation");
+        for component in [channel.as_bytes(), user_id.as_bytes(), scope.as_bytes()] {
+            seed.extend_from_slice(&(component.len() as u64).to_be_bytes());
+            seed.extend_from_slice(component);
+        }
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, &seed)
+    })
+}
+
 // ==================== Sub-traits ====================
 //
 // Each sub-trait groups related persistence methods. The `Database` supertrait
@@ -456,6 +468,23 @@ pub trait ConversationStore: Send + Sync {
         user_id: &str,
         channel: &str,
     ) -> Result<Uuid, DatabaseError>;
+    async fn get_or_create_scoped_conversation(
+        &self,
+        user_id: &str,
+        channel: &str,
+        scope: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        let id = scoped_conversation_id(channel, user_id, scope);
+        let writable = self
+            .ensure_conversation(id, channel, user_id, Some(scope), Some(channel))
+            .await?;
+        if writable {
+            return Ok(id);
+        }
+        Err(DatabaseError::Constraint(format!(
+            "scoped conversation {id} is not writable for user={user_id} channel={channel}"
+        )))
+    }
     async fn create_conversation_with_metadata(
         &self,
         channel: &str,
@@ -1285,6 +1314,22 @@ pub trait Database:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_conversation_id_preserves_uuid_scope() {
+        let scope = Uuid::new_v4();
+        assert_eq!(
+            scoped_conversation_id("wecom", "default", &scope.to_string()),
+            scope
+        );
+    }
+
+    #[test]
+    fn scoped_conversation_id_length_prefixes_components() {
+        let first = scoped_conversation_id("a", "b\x1fc", "d");
+        let second = scoped_conversation_id("a\x1fb", "c", "d");
+        assert_ne!(first, second);
+    }
 
     /// Regression test: `create_secrets_store` selects the correct backend at
     /// runtime based on `DatabaseConfig`, not at compile time. Previously the

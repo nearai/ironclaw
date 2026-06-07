@@ -60,10 +60,13 @@ pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
     publish_hot_capability_catalog,
 };
-pub use egress::HostHttpEgressService;
+pub use egress::{
+    HostHttpEgressService, HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort,
+    HostRuntimeHttpEgressRequest, RuntimeSecretMaterialStager, RuntimeSecretStageError,
+};
 pub use extension_contracts::{
     default_host_api_contract_registry, default_host_port_catalog,
-    discover_extensions_with_default_host_api_contracts,
+    discover_extensions_tolerant_bounded, discover_extensions_with_default_host_api_contracts,
     discover_extensions_with_default_host_api_contracts_and_catalog,
 };
 pub use first_party::{
@@ -78,7 +81,8 @@ pub use first_party_tools::{
     READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
     SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
     TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    TRIGGER_REMOVE_CAPABILITY_ID, TriggerCreateHook, WRITE_FILE_CAPABILITY_ID,
+    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
     builtin_first_party_package,
 };
 #[cfg(any(test, feature = "test-support"))]
@@ -88,7 +92,7 @@ pub use first_party_tools::{
 pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
 pub use invocation_services::{
     InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
-    InvocationServicesResolver, LocalInvocationServicesResolver,
+    InvocationServicesResolver, LocalInvocationServicesResolver, ToolCallHttpEgress,
 };
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,

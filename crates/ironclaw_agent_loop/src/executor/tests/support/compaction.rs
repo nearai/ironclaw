@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use ironclaw_turns::run_profile::{
-    LoopCancelReasonKind, LoopCompactionError, LoopCompactionRequest, LoopCompactionResponse,
-    LoopContextCompactionMetadata,
+    LoopCancelReasonKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
+    LoopCompactionResponse, LoopContextCompactionMetadata,
 };
 
 use super::MockHost;
@@ -11,7 +11,7 @@ use super::MockHost;
 #[derive(Clone)]
 pub(super) struct MockCompactionSupport {
     prompt_indexes: Arc<Mutex<VecDeque<Vec<LoopContextCompactionMetadata>>>>,
-    result: Arc<Mutex<Result<LoopCompactionResponse, LoopCompactionError>>>,
+    result: Arc<Mutex<Result<LoopCompactionOutcome, LoopCompactionError>>>,
     delay: Arc<Mutex<Option<std::time::Duration>>>,
     cancel_after_success: Arc<Mutex<bool>>,
     cancel_on_start: Arc<Mutex<bool>>,
@@ -45,6 +45,10 @@ impl MockCompactionSupport {
     }
 
     pub(super) fn set_result(&self, result: Result<LoopCompactionResponse, LoopCompactionError>) {
+        *self.result.lock().expect("lock") = result.map(LoopCompactionOutcome::Compacted);
+    }
+
+    pub(super) fn set_outcome(&self, result: Result<LoopCompactionOutcome, LoopCompactionError>) {
         *self.result.lock().expect("lock") = result;
     }
 
@@ -71,7 +75,7 @@ impl MockCompactionSupport {
     pub(super) async fn compact_loop_context(
         &self,
         _request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
         let delay = *self.delay.lock().expect("lock");
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
@@ -105,6 +109,14 @@ impl MockHost {
         self
     }
 
+    pub(in crate::executor::tests) fn with_compaction_outcome(
+        self,
+        outcome: Result<LoopCompactionOutcome, LoopCompactionError>,
+    ) -> Self {
+        self.compaction.set_outcome(outcome);
+        self
+    }
+
     pub(in crate::executor::tests) fn with_compaction_delay(
         self,
         delay: std::time::Duration,
@@ -126,7 +138,7 @@ impl MockHost {
     pub(super) async fn compact_loop_context_for_tests(
         &self,
         request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
         if self.compaction.take_cancel_on_start() {
             self.request_cancellation(LoopCancelReasonKind::UserRequested);
         }

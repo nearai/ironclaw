@@ -51,6 +51,13 @@ export function providerDefaultModel(provider, overrides) {
   return override.model || provider.env_model || provider.default_model || "";
 }
 
+export function providerAcceptsApiKey(provider) {
+  if (!provider) return false;
+  if (!provider.builtin) return provider.adapter !== "ollama";
+  if (provider.accepts_api_key !== undefined) return provider.accepts_api_key !== false;
+  return provider.api_key_required !== false;
+}
+
 export function isProviderConfigured(provider, overrides) {
   const override = provider.builtin ? overrides[provider.id] || {} : {};
   const needsKey = provider.builtin ? provider.api_key_required !== false : provider.adapter !== "ollama";
@@ -62,6 +69,21 @@ export function isProviderConfigured(provider, overrides) {
   const needsBaseUrl = provider.builtin ? provider.base_url_required === true : true;
   if (!needsBaseUrl) return true;
   return providerEffectiveBaseUrl(provider, overrides).trim().length > 0;
+}
+
+export function providerStatus(provider, overrides, activeProviderId) {
+  if (provider.id === activeProviderId) return "active";
+  return isProviderConfigured(provider, overrides) ? "ready" : "setup";
+}
+
+export function groupProvidersByStatus(providers, overrides, activeProviderId) {
+  const buckets = { active: [], ready: [], setup: [] };
+  if (!Array.isArray(providers)) return buckets;
+  for (const provider of providers) {
+    const status = providerStatus(provider, overrides, activeProviderId);
+    if (buckets[status]) buckets[status].push(provider);
+  }
+  return buckets;
 }
 
 export function providerMissingReason(provider, overrides) {

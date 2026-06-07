@@ -88,9 +88,13 @@ pub struct AuthInteractionScope {
 
 impl AuthInteractionScope {
     pub fn from_turn(scope: &TurnScope, actor: &TurnActor) -> Self {
+        let user_id = scope
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(|| actor.user_id.clone());
         Self {
             tenant_id: scope.tenant_id.clone(),
-            user_id: actor.user_id.clone(),
+            user_id,
             agent_id: scope.agent_id.clone(),
             project_id: scope.project_id.clone(),
             thread_id: scope.thread_id.clone(),
@@ -346,4 +350,38 @@ pub(super) fn is_pending_auth_status(status: AuthFlowStatus) -> bool {
 
 fn display_safe_auth_summary() -> String {
     FALLBACK_AUTH_SUMMARY.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+
+    use super::*;
+
+    #[test]
+    fn auth_interaction_scope_from_turn_uses_scope_owner_over_actor() {
+        let actor = TurnActor::new(UserId::new("user:actor").unwrap());
+        let owner_user_id = UserId::new("user:subject").unwrap();
+        let thread_id = ThreadId::new("thread:shared").unwrap();
+        let scope = TurnScope::new_with_owner(
+            TenantId::new("tenant:shared").unwrap(),
+            Some(AgentId::new("agent:shared").unwrap()),
+            Some(ProjectId::new("project:shared").unwrap()),
+            thread_id.clone(),
+            Some(owner_user_id.clone()),
+        );
+
+        let interaction_scope = AuthInteractionScope::from_turn(&scope, &actor);
+
+        assert_eq!(interaction_scope.user_id, owner_user_id);
+        assert_eq!(interaction_scope.thread_id, thread_id);
+        assert_eq!(
+            interaction_scope.agent_id.as_ref().map(AgentId::as_str),
+            Some("agent:shared")
+        );
+        assert_eq!(
+            interaction_scope.project_id.as_ref().map(ProjectId::as_str),
+            Some("project:shared")
+        );
+    }
 }

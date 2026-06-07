@@ -23,12 +23,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
 use ironclaw_reborn_config::BudgetDefaults;
-use ironclaw_triggers::TriggerPollerWorkerConfig;
+#[cfg(feature = "root-llm-provider")]
+use ironclaw_reborn_config::RebornBootConfig;
+use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
+use crate::hooks::HooksActivationConfig;
 use crate::input::RebornBuildInput;
 
 /// Caller-owned identity for an assembled Reborn runtime.
@@ -63,6 +68,59 @@ impl Default for RebornRuntimeIdentity {
 
 pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Fire-time access request for a persisted trigger.
+///
+/// This is the host/composition-facing access check shape. Checks are exact:
+/// `None` for `agent_id` or `project_id` means the trigger has no value for
+/// that scope dimension, not that the checker should treat it as a wildcard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerFireAccessCheck {
+    /// Tenant that owns the persisted trigger.
+    pub tenant_id: TenantId,
+    /// User that created the persisted trigger and whose access is evaluated
+    /// again at fire time.
+    pub creator_user_id: UserId,
+    /// Optional agent scope stored on the trigger.
+    pub agent_id: Option<AgentId>,
+    /// Optional project scope stored on the trigger.
+    pub project_id: Option<ProjectId>,
+    /// Trigger being fired. Included so production access checks can audit or
+    /// apply trigger-specific policy without changing this request shape.
+    pub trigger_id: TriggerId,
+    /// Deterministic fire slot being submitted. Included for audit and policy
+    /// decisions that depend on scheduled fire identity.
+    pub fire_slot: Timestamp,
+}
+
+/// Result of a fire-time trigger access check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerFireAccessDecision {
+    /// The trigger creator is still authorized for the exact trigger scope.
+    Allowed,
+    /// The trigger creator is not authorized for the exact trigger scope.
+    Denied { reason: String },
+}
+
+/// Error returned when the access backend cannot answer the request.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TriggerFireAccessError {
+    /// The backing access source was unavailable; trigger fire handling should
+    /// treat this as retryable rather than a permanent denial.
+    #[error("trigger fire access backend unavailable: {reason}")]
+    Unavailable { reason: String },
+}
+
+/// Fire-time trigger access checker supplied by the composition root.
+#[async_trait]
+pub trait TriggerFireAccessChecker: Send + Sync {
+    /// Check whether the persisted trigger creator may fire the trigger for
+    /// the exact stored tenant/agent/project scope.
+    async fn check_trigger_fire_access(
+        &self,
+        request: TriggerFireAccessCheck,
+    ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError>;
+}
 
 #[cfg(feature = "root-llm-provider")]
 #[derive(Debug, Clone)]
@@ -135,6 +193,14 @@ pub struct TriggerPollerSettings {
     pub worker: TriggerPollerWorkerConfig,
     pub startup_jitter_max: Duration,
     pub tick_jitter_max: Duration,
+    pub(crate) authorizer: TriggerPollerAuthorizerConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerPollerAuthorizerConfig {
+    CreatorAccessRequired,
+    #[cfg(any(test, feature = "test-support"))]
+    TenantScopedPlaceholderForTest,
 }
 
 impl Default for TriggerPollerSettings {
@@ -144,6 +210,7 @@ impl Default for TriggerPollerSettings {
             worker: TriggerPollerWorkerConfig::default(),
             startup_jitter_max: Duration::ZERO,
             tick_jitter_max: Duration::ZERO,
+            authorizer: TriggerPollerAuthorizerConfig::CreatorAccessRequired,
         }
     }
 }
@@ -155,6 +222,22 @@ impl TriggerPollerSettings {
             ..Self::default()
         }
     }
+
+    pub fn with_worker_config(mut self, worker: TriggerPollerWorkerConfig) -> Self {
+        self.worker = worker;
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn enabled_with_tenant_scoped_authorizer_for_test() -> Self {
+        Self::enabled().with_tenant_scoped_authorizer_for_test()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_tenant_scoped_authorizer_for_test(mut self) -> Self {
+        self.authorizer = TriggerPollerAuthorizerConfig::TenantScopedPlaceholderForTest;
+        self
+    }
 }
 
 /// Full input for `build_reborn_runtime` — substrate config plus the extras
@@ -164,12 +247,25 @@ pub struct RebornRuntimeInput {
     pub services: Option<RebornBuildInput>,
     #[cfg(feature = "root-llm-provider")]
     pub llm: Option<ResolvedRebornLlm>,
+    /// Operator boot config. When present (and `root-llm-provider` is on), the
+    /// WebUI facade composes the LLM-config settings service from it so the
+    /// settings surface can read/write `providers.json` + `config.toml`.
+    #[cfg(feature = "root-llm-provider")]
+    pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
     pub trigger_poller: TriggerPollerSettings,
+    pub trigger_fire_access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
+    /// Optional project scope for runtime-owned thread I/O. Channel adapters
+    /// that stamp a project onto inbound turns must set the same project here,
+    /// otherwise the loop host rejects the run before model execution.
+    pub default_project_id: Option<ProjectId>,
     pub regex_skill_activation_enabled: bool,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    /// Hook-framework activation knobs. Default OFF. Callers resolve
+    /// environment or config into this typed value once at the edge.
+    pub hooks: HooksActivationConfig,
     /// Pre-resolved budget defaults to seed the model-budget accountant.
     /// The caller owns the config-layer precedence (compiled -> section
     /// -> env) and must call [`BudgetDefaults::validate`] before
@@ -207,12 +303,17 @@ impl RebornRuntimeInput {
             services: Some(services),
             #[cfg(feature = "root-llm-provider")]
             llm: None,
+            #[cfg(feature = "root-llm-provider")]
+            boot: None,
             runner: TurnRunnerSettings::default(),
             trigger_poller: TriggerPollerSettings::default(),
+            trigger_fire_access_checker: None,
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
+            default_project_id: None,
             regex_skill_activation_enabled: true,
             skill_context_source: None,
+            hooks: HooksActivationConfig::default(),
             budget_defaults: None,
             budget_event_observer: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -252,6 +353,14 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Supply the operator boot config so the WebUI facade can compose the
+    /// LLM-config settings service.
+    #[cfg(feature = "root-llm-provider")]
+    pub fn with_boot_config(mut self, boot: RebornBootConfig) -> Self {
+        self.boot = Some(boot);
+        self
+    }
+
     pub fn with_runner_settings(mut self, runner: TurnRunnerSettings) -> Self {
         self.runner = runner;
         self
@@ -262,6 +371,14 @@ impl RebornRuntimeInput {
         self
     }
 
+    pub fn with_trigger_fire_access_checker(
+        mut self,
+        checker: Arc<dyn TriggerFireAccessChecker>,
+    ) -> Self {
+        self.trigger_fire_access_checker = Some(checker);
+        self
+    }
+
     pub fn with_poll_settings(mut self, poll: PollSettings) -> Self {
         self.poll = poll;
         self
@@ -269,6 +386,11 @@ impl RebornRuntimeInput {
 
     pub fn with_identity(mut self, identity: RebornRuntimeIdentity) -> Self {
         self.identity = identity;
+        self
+    }
+
+    pub fn with_default_project_id(mut self, project_id: ProjectId) -> Self {
+        self.default_project_id = Some(project_id);
         self
     }
 
@@ -290,6 +412,11 @@ impl RebornRuntimeInput {
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    pub fn with_hooks_config(mut self, hooks: HooksActivationConfig) -> Self {
+        self.hooks = hooks;
         self
     }
 

@@ -60,7 +60,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_INSTALL_CAPABILITY_ID,
-            "Install a locally available Reborn extension into durable local-dev lifecycle state",
+            "Install a locally available Reborn extension into durable local-dev lifecycle state. If install fails because the extension is already installed, use builtin.extension_activate instead.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
@@ -262,6 +262,14 @@ mod tests {
 
         let install = descriptor_for(&surface, EXTENSION_INSTALL_CAPABILITY_ID);
         assert_eq!(install.default_permission, PermissionMode::Ask);
+        assert!(
+            install.description.contains("already installed")
+                && install
+                    .description
+                    .contains(EXTENSION_ACTIVATE_CAPABILITY_ID),
+            "extension_install description should route already-installed failures to activation: {}",
+            install.description
+        );
         assert_eq!(
             install.parameters_schema["required"],
             serde_json::json!(["extension_id"])

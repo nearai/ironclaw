@@ -11,8 +11,16 @@
 
 ## What This Crate Owns
 
-- Scoped filesystem substrate: root/scoped/composite filesystem surfaces and path authority.
+- The universal storage-dispatch fabric: one trait, one entry type, one mount table behind which every persistence concern in the workspace lives. Currently:
+- The single `RootFilesystem` trait (`root`) — every backend *and* the composite dispatcher implement it; no parallel "backend" trait.
+- The universal stored value `Entry`/`VersionedEntry` and its primitives `RecordKind`/`RecordVersion`/`SeqNo`/`CasExpectation`/`ContentType` (`record`).
+- Declarative index/query primitives `IndexSpec`/`IndexName`/`IndexKey`/`IndexValue`/`IndexKind`/`Filter`/`Page` (`index`) — no SQL strings cross the boundary; plus shared brute-force vector ranking helpers (`vector`).
+- Filesystem vocabulary in `types`: `BackendCapabilities`/`BackendId`/`BackendKind`/`Capability`/`TxnCapability`, `FileStat`/`DirEntry`/`FileType`/`ContentKind`, `StorageClass`, `IndexPolicy`/`IndexConflictReason`, `FilesystemError`/`FilesystemOperation`; supporting handles `StorageTxn`/`EventRecord` (`backend`).
+- Mount table + catalog: `CompositeRootFilesystem`, `MountDescriptor`, `FilesystemCatalog`, `PathPlacement` (`catalog`) — longest-prefix mount routing.
+- Invocation-scoped view `ScopedFilesystem` + `MountViewResolver` (`scoped`) — checks permission against `MountView` before any backend dispatch.
+- Backends, all implementing `RootFilesystem`: `LocalFilesystem`, `PostgresRootFilesystem`, `LibSqlRootFilesystem`, `InMemoryBackend`, `HsmBackend`; plus backend containment (symlink traversal, mount escape, raw-host-path prevention).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
+- Note: this supersedes the older "bytes mount; structured records stay typed" boundary (ADR `docs/reborn/2026-05-14-universal-fs-dispatch.md`). The legacy bytes-plane methods and `src/db.rs` are transitional and slated for removal — do not add new consumers.
 
 ## Do Not Move In Here
 

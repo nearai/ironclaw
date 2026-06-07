@@ -24,7 +24,7 @@ use budget::{BudgetInput, BudgetStage, BudgetStep};
 use capabilities::{CapabilityInput, CapabilityStage};
 use capability_helpers::{
     CapabilitySurfaceIndex, append_capability_error_ref, append_capability_result_ref,
-    append_capability_safe_summary_ref, apply_capability_filter,
+    append_capability_safe_summary_ref, apply_capability_filter, capability_call_signature,
     capability_invocation_from_candidate, capability_is_visible, capability_summary,
     gate_tool_result_summary, push_call_signature_once, push_completed_result,
 };
@@ -56,8 +56,8 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopCancelledReasonKind, LoopDiagnosticRef, LoopExit,
     run_profile::{
-        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, LoopInputAckToken,
-        LoopSafeSummary,
+        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind,
+        AgentLoopHostErrorReasonKind, LoopInputAckToken, LoopSafeSummary,
     },
 };
 
@@ -98,6 +98,7 @@ pub enum AgentLoopExecutorError {
         stage: HostStage,
         kind: AgentLoopHostErrorKind,
         safe_summary: LoopSafeSummary,
+        reason_kind: Option<AgentLoopHostErrorReasonKind>,
         diagnostic_ref: Option<LoopDiagnosticRef>,
     },
     #[error("planner returned a contract violation: {detail}")]

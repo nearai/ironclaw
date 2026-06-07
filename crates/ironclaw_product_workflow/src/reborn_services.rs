@@ -54,25 +54,67 @@ mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
 mod lifecycle_setup;
+mod llm_config;
 mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
+pub use llm_config::{
+    CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
+    NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+};
 pub use types::{
     RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
+    RebornExtensionListResponse, RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
+    RebornExtensionSetupSecret, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
+    RebornResumeGateResponse, RebornSetupExtensionResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError> + Send + Sync;
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
+
+#[async_trait]
+pub trait ConnectableChannelsProductFacade: Send + Sync {
+    async fn list_connectable_channels(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StaticConnectableChannelsProductFacade {
+    channels: Arc<[RebornConnectableChannelInfo]>,
+}
+
+impl StaticConnectableChannelsProductFacade {
+    pub fn new(channels: impl Into<Vec<RebornConnectableChannelInfo>>) -> Self {
+        Self {
+            channels: Arc::from(channels.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade {
+    async fn list_connectable_channels(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
+        Ok(RebornConnectableChannelListResponse {
+            channels: self.channels.iter().cloned().collect(),
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionCredentialStatusRequest {
@@ -276,6 +318,15 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
 
+    async fn list_connectable_channels(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
+        Ok(RebornConnectableChannelListResponse {
+            channels: Vec::new(),
+        })
+    }
+
     async fn list_extensions(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -322,6 +373,98 @@ pub trait RebornServicesApi: Send + Sync {
         package_ref: LifecyclePackageRef,
         request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
+
+    /// LLM provider configuration: merged catalog + active selection.
+    ///
+    /// The six LLM-config methods default to "service unavailable" so facade
+    /// impls (and test fakes) that don't wire an [`LlmConfigService`] inherit a
+    /// safe surface; the default `RebornServices` overrides them all.
+    async fn get_llm_config(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let _ = caller;
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Add or update a custom LLM provider (and optionally its key / active state).
+    async fn upsert_llm_provider(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Remove a custom LLM provider and any stored key for it.
+    async fn delete_llm_provider(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        provider_id: String,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let _ = (caller, provider_id);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Select the active LLM provider + model.
+    async fn set_active_llm(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Probe an LLM provider's credentials/endpoint without persisting.
+    async fn test_llm_connection(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// List the models an LLM provider exposes, without persisting.
+    async fn list_llm_models(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Begin a NEAR AI browser login; returns the authorization URL to open.
+    async fn start_nearai_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Complete a NEAR AI wallet (NEP-413) login from a browser-signed message.
+    async fn complete_nearai_wallet_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Begin an OpenAI Codex device-code login; returns the user code + URL.
+    async fn start_codex_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<CodexLoginStart, RebornServicesError> {
+        let _ = caller;
+        Err(llm_config::llm_config_unavailable())
+    }
 }
 
 /// Default facade implementation composed at the WebUI boundary.
@@ -332,11 +475,13 @@ pub struct RebornServices {
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
+    connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
+    llm_config: Option<Arc<dyn LlmConfigService>>,
 }
 
 impl RebornServices {
@@ -352,16 +497,23 @@ impl RebornServices {
                 "reborn_lifecycle_facade_unwired",
             )),
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
+            connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             extension_credentials: None,
             skill_activation_recorder: None,
             skill_activation_clearer: None,
+            llm_config: None,
         }
     }
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
+        self.llm_config = Some(llm_config);
         self
     }
 
@@ -378,6 +530,14 @@ impl RebornServices {
         automation_facade: Arc<dyn AutomationProductFacade>,
     ) -> Self {
         self.automation_facade = automation_facade;
+        self
+    }
+
+    pub fn with_connectable_channels_facade(
+        mut self,
+        connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
+    ) -> Self {
+        self.connectable_channels_facade = connectable_channels_facade;
         self
     }
 
@@ -915,6 +1075,15 @@ impl RebornServicesApi for RebornServices {
         Ok(RebornListAutomationsResponse { automations })
     }
 
+    async fn list_connectable_channels(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
+        self.connectable_channels_facade
+            .list_connectable_channels(caller)
+            .await
+    }
+
     async fn list_extensions(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -967,6 +1136,139 @@ impl RebornServicesApi for RebornServices {
             request,
         )
         .await
+    }
+
+    async fn get_llm_config(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .snapshot(caller)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn upsert_llm_provider(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .upsert_provider(caller, request)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn delete_llm_provider(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        provider_id: String,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .delete_provider(caller, provider_id)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn set_active_llm(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .set_active(caller, request)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn test_llm_connection(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .test_connection(caller, request)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn list_llm_models(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .list_models(caller, request)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn start_nearai_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .start_nearai_login(caller, request)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn start_codex_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<CodexLoginStart, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .start_codex_login(caller)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn complete_nearai_wallet_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .complete_nearai_wallet_login(caller, request)
+            .await
+            .map_err(llm_config::map_llm_config_error)
     }
 }
 

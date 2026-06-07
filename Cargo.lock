@@ -3953,7 +3953,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "ironclaw"
-version = "0.28.2"
+version = "0.29.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4370,6 +4370,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "tracing-test",
  "uuid",
 ]
 
@@ -4445,6 +4446,58 @@ dependencies = [
  "uuid",
  "wasmtime",
  "wat",
+]
+
+[[package]]
+name = "ironclaw_hooks_libsql"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "ironclaw_hooks",
+ "ironclaw_host_api",
+ "libsql",
+ "rust_decimal",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ironclaw_hooks_parity"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "deadpool-postgres",
+ "ironclaw_hooks",
+ "ironclaw_hooks_libsql",
+ "ironclaw_hooks_postgres",
+ "ironclaw_host_api",
+ "libsql",
+ "rust_decimal",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "ironclaw_hooks_postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "deadpool-postgres",
+ "ironclaw_hooks",
+ "ironclaw_host_api",
+ "rust_decimal",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4851,7 +4904,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "uuid",
+ "tracing-test",
  "wat",
 ]
 
@@ -4892,6 +4945,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "deadpool-postgres",
+ "fs4",
  "futures",
  "hmac 0.12.1",
  "http 1.4.1",
@@ -4909,6 +4963,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_first_party_extension_ports",
  "ironclaw_first_party_extensions",
+ "ironclaw_hooks",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_llm",
@@ -4923,6 +4978,7 @@ dependencies = [
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_event_store",
+ "ironclaw_reborn_identity",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runtime_policy",
@@ -4999,6 +5055,23 @@ dependencies = [
  "tracing",
  "urlencoding",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "ironclaw_reborn_identity"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

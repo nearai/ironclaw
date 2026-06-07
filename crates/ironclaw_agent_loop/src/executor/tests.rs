@@ -4,17 +4,21 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureKind,
         CapabilityInputRef, CapabilityOutcome, CapabilityResultMessage, LoopCancelReasonKind,
-        LoopCheckpointKind, LoopCompactionError, LoopCompactionResponse, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopInput, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary,
-        LoopSummaryArtifactId, ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay,
-        VisibleCapabilityRequest,
+        LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
+        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopInput, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopRunInfoPort,
+        LoopSafeSummary, LoopSummaryArtifactId, ParentLoopOutput, ProcessHandleSummary,
+        ProviderToolCallReplay, VisibleCapabilityRequest,
     },
 };
 
-use crate::state::{CheckpointKind, IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
+use crate::state::{
+    CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
+    LoopExecutionState, MessageIndexEntry, RepeatedCallWarningPhase, RepeatedCallWarningState,
+};
 use crate::strategies::{
-    CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome, StopKind, TurnSummary,
+    CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
+    StopKind, TurnSummary,
 };
 
 use super::{
@@ -297,6 +301,180 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
             "compaction_completed",
             "checkpoint_written",
             "prompt_bundle_built",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
+        .with_compaction_outcome(Ok(LoopCompactionOutcome::Deferred {
+            safe_summary: LoopSafeSummary::new("compaction deferred until transcript stabilizes")
+                .unwrap(),
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 100,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+    };
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert_eq!(
+        output.state.compaction_state.last_compacted_through_seq,
+        None
+    );
+    assert_eq!(
+        output.state.compaction_state.last_deferred,
+        Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: output.state.compaction_prompt.fingerprint(),
+        })
+    );
+    assert!(
+        !output
+            .state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
+    assert_eq!(
+        output.state.compaction_prompt.message_index,
+        vec![MessageIndexEntry {
+            sequence: 1,
+            kind: IndexedMessageKind::User,
+            estimated_tokens: 10,
+        }]
+    );
+    assert!(host.checkpoint_kinds().is_empty());
+    assert_eq!(
+        host.progress_event_names(),
+        vec!["prompt_bundle_built", "compaction_started"]
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(vec![
+            vec![
+                compaction_metadata(1, LoopContextCompactionKind::User, 10),
+                compaction_metadata(2, LoopContextCompactionKind::Assistant, 10),
+            ],
+            vec![compaction_metadata(
+                2,
+                LoopContextCompactionKind::Assistant,
+                10,
+            )],
+        ])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 1,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+    state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+        through_seq: 99,
+        prompt_fingerprint: 123,
+    });
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+    };
+    assert_eq!(
+        output.state.compaction_state.last_compacted_through_seq,
+        Some(1)
+    );
+    assert_eq!(output.state.compaction_state.last_deferred, None);
+}
+
+#[tokio::test]
+async fn prompt_stage_cancellation_after_deferred_compaction_returns_cancelled_exit() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
+        .with_compaction_outcome(Ok(LoopCompactionOutcome::Deferred {
+            safe_summary: LoopSafeSummary::new("compaction deferred until transcript stabilizes")
+                .unwrap(),
+        }))
+        .cancel_after_compaction_success();
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 100,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    assert!(matches!(step, PromptStep::Exit(LoopExit::Cancelled(_))));
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    assert_eq!(
+        host.progress_event_names(),
+        vec![
+            "prompt_bundle_built",
+            "compaction_started",
+            "checkpoint_written",
         ]
     );
 }
@@ -939,6 +1117,7 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
                 safe_summary: "done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
             })],
             stopped_on_suspension: false,
@@ -1007,6 +1186,7 @@ async fn reply_admission_rendered_flag_stays_false_when_context_suppresses_contr
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
                 safe_summary: "done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
             })],
             stopped_on_suspension: false,
@@ -1174,6 +1354,7 @@ async fn capability_stage_returns_after_batch_summary() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
                 safe_summary: "done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
             })],
             stopped_on_suspension: false,
@@ -1210,13 +1391,64 @@ async fn capability_stage_returns_after_batch_summary() {
     match step {
         TurnCompletedStep::Continue { state, summary } => {
             assert_eq!(state.result_refs, vec![result_ref.clone()]);
+            let signature = CapabilityCallSignature::from_call(
+                capability_id(),
+                &serde_json::json!({ "input_ref": "input:demo" }),
+            )
+            .expect("valid signature");
             assert_eq!(
                 summary,
-                TurnSummary::after_capability_batch(vec![result_ref])
+                TurnSummary::after_capability_batch(
+                    vec![result_ref],
+                    CapabilityBatchTurnSummary {
+                        invocation_count: 1,
+                        terminate_hint_count: 0,
+                        no_progress_count: 0,
+                        observed_signatures: vec![signature.clone()],
+                        made_progress_signatures: vec![signature],
+                    },
+                )
             );
         }
         TurnCompletedStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
     }
+}
+
+#[tokio::test]
+async fn repeated_call_warning_checkpoint_stays_pending_until_model_request() {
+    let host = MockHost::new(vec![reply_response()]);
+    let executor = CanonicalAgentLoopExecutor;
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    let signature = CapabilityCallSignature::from_call(
+        capability_id(),
+        &serde_json::json!({ "input_ref": "input:demo" }),
+    )
+    .expect("valid signature");
+    state.stop_state.repeated_call_warning =
+        Some(RepeatedCallWarningState::pending_render(signature.clone()));
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let prompt_requests = host.prompt_requests();
+    assert_eq!(prompt_requests.len(), 1);
+    assert!(
+        prompt_requests[0].inline_messages.iter().any(|message| {
+            message.safe_body.as_str()
+                == "loop control repeated capability call detected change strategy explain new evidence or answer from current evidence"
+        }),
+        "model prompt should include the warning"
+    );
+    let before_model = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeModel);
+    let warning = before_model
+        .stop_state
+        .repeated_call_warning
+        .expect("warning should be checkpointed");
+    assert_eq!(warning.signature, signature.clone());
+    assert_eq!(warning.phase, RepeatedCallWarningPhase::PendingRender);
 }
 
 #[test]
@@ -1321,6 +1553,7 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
                 safe_summary: "stopped batch completed".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
             })],
             stopped_on_suspension: true,
@@ -1354,9 +1587,7 @@ async fn stop_stage_preserves_ack_and_returns_stop_kind() {
         planner: family.planner(),
         host: &host,
     };
-    let mut state = LoopExecutionState::initial_for_run(host.run_context());
-    state.stop_state.last_batch_total = 1;
-    state.stop_state.terminate_hints_in_last_batch = 1;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
     let mut pending_input_ack = PendingInputAck::default();
     pending_input_ack
         .replace(vec![
@@ -1369,9 +1600,16 @@ async fn stop_stage_preserves_ack_and_returns_stop_kind() {
             ctx,
             StopInput {
                 state,
-                summary: TurnSummary::after_capability_batch(vec![
-                    LoopResultRef::new("result:done").expect("valid"),
-                ]),
+                summary: TurnSummary::after_capability_batch(
+                    vec![LoopResultRef::new("result:done").expect("valid")],
+                    CapabilityBatchTurnSummary {
+                        invocation_count: 1,
+                        terminate_hint_count: 1,
+                        no_progress_count: 0,
+                        observed_signatures: Vec::new(),
+                        made_progress_signatures: Vec::new(),
+                    },
+                ),
                 pending_input_ack,
             },
         )
@@ -1403,6 +1641,7 @@ async fn terminate_hint_after_batch_completes_without_extra_model_call() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: LoopResultRef::new("result:done").expect("valid"),
                 safe_summary: "done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
             })],
             stopped_on_suspension: false,
@@ -1612,6 +1851,7 @@ async fn parallel_batch_records_completed_results_before_blocking_on_suspension(
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: completed_ref.clone(),
                     safe_summary: "parallel call completed".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                 }),
             ],
@@ -1669,11 +1909,13 @@ async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:first").expect("valid"),
                     safe_summary: "first".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                 }),
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:second").expect("valid"),
                     safe_summary: "second".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                 }),
             ],
@@ -1847,6 +2089,7 @@ async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
             stage: HostStage::Model,
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
+            reason_kind: None,
             diagnostic_ref: Some(LoopDiagnosticRef::new("diag:model-credentials").expect("valid")),
         }
     );
@@ -1884,20 +2127,16 @@ async fn stale_surface_capability_call_is_policy_denied_before_host_invocation()
             .iter()
             .any(|kind| *kind == LoopFailureKind::PolicyDenied)
     }));
-    assert!(
-        staged_states
-            .iter()
-            .any(|state| state.stop_state.last_batch_total == 0)
-    );
 }
 
 #[tokio::test]
-async fn last_batch_total_counts_only_visible_invoked_calls() {
+async fn terminate_hint_counts_only_visible_invoked_calls() {
     let host = MockHost::new(vec![mixed_surface_calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: LoopResultRef::new("result:visible").expect("valid"),
                 safe_summary: "visible call completed".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
             })],
             stopped_on_suspension: false,
@@ -1985,6 +2224,7 @@ async fn retry_uses_single_call_invocation() {
                 CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:retry").expect("valid"),
                     safe_summary: "retry completed".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: true,
                 },
             )]);
@@ -2018,6 +2258,7 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
             CapabilityResultMessage {
                 result_ref: LoopResultRef::new("result:policy-retry").expect("valid"), // safety: test-only fixture
                 safe_summary: "policy retry completed".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
             },
         )]);
@@ -2138,6 +2379,7 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
                 safe_summary: "provider call completed".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
             })],
             stopped_on_suspension: false,
@@ -2182,6 +2424,7 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: result_ref.clone(),
                     safe_summary: "provider call completed".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: true,
                 }),
                 CapabilityOutcome::Denied(ironclaw_turns::run_profile::CapabilityDenied {

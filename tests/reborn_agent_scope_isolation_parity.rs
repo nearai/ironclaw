@@ -56,22 +56,22 @@ async fn reborn_agent_scope_isolation_parity() {
         .await
         .expect("agent B harness");
 
-    agent_a.start();
-    agent_b.start();
-
     let alpha = agent_a
         .submit_text_for(ROOM, "alice", EVENT, "agent alpha turn")
         .await
         .expect("submit agent A turn");
+    agent_a.start();
     agent_a
         .wait_for_submitted_status(&alpha, TurnStatus::Completed)
         .await
         .expect("agent A completed");
+    agent_a.shutdown().await;
 
     let beta = agent_b
         .submit_text_for(ROOM, "alice", EVENT, "agent beta turn")
         .await
         .expect("submit agent B turn with same external event id");
+    agent_b.start();
     agent_b
         .wait_for_submitted_status(&beta, TurnStatus::Completed)
         .await
@@ -108,7 +108,6 @@ async fn reborn_agent_scope_isolation_parity() {
 
     agent_a.assert_model_exhausted();
     agent_b.assert_model_exhausted();
-    agent_a.shutdown().await;
     agent_b.shutdown().await;
 }
 

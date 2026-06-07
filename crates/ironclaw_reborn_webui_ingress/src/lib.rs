@@ -194,6 +194,10 @@ impl WebuiAuthenticator for EnvBearerAuthenticator {
             None
         }
     }
+
+    fn allows_operator_webui_config(&self) -> bool {
+        true
+    }
 }
 
 /// Concrete type alias for the trait object the standalone CLI builds

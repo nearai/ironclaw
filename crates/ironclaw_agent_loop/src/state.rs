@@ -10,8 +10,9 @@ pub use ironclaw_turns::LoopFailureKind;
 pub use signature::{ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError};
 pub use slots::{
     CapabilityStrategyState, CompactionPromptSnapshot, CompactionStrategyState,
-    ContextStrategyState, GateStrategyState, GoalRefreshStrategyState, IndexedMessageKind,
-    MessageIndexEntry, ModelStrategyState, RecoveryAttemptClass, RecoveryStrategyState,
+    ContextStrategyState, DeferredCompactionWatermark, GateStrategyState, GoalRefreshStrategyState,
+    IndexedMessageKind, MessageIndexEntry, ModelStrategyState, RecoveryAttemptClass,
+    RecoveryStrategyState, RepeatedCallWarningPhase, RepeatedCallWarningState,
     ReplyAdmissionRejection, ReplyAdmissionRejectionReason, ReplyAdmissionStrategyState,
     StopStrategyState,
 };

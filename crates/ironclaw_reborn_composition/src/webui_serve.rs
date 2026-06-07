@@ -47,13 +47,29 @@ use axum::{
 use ironclaw_auth::GoogleOAuthRouteConfig;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
+use ironclaw_webui_v2::{
+    WebUiV2RouteOptions, WebUiV2State, is_webui_v2_llm_config_route_id,
+    webui_v2_router_with_options,
+};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::product_auth_serve::{ProductAuthRouteState, product_auth_route_mount};
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::slack_channel_routes::{
+    SlackChannelRouteAdminRouteConfig, slack_channel_route_admin_route_mount,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::slack_personal_binding_pairing_serve::{
+    SlackPersonalBindingPairingRouteConfig, slack_personal_binding_pairing_route_mount,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::slack_personal_binding_serve::{
+    SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteState,
+    slack_personal_binding_route_mount,
+};
 use crate::webui::RebornWebuiBundle;
 use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
@@ -87,6 +103,21 @@ pub(crate) const DEFAULT_WEBUI_CSP: &str =
 #[async_trait::async_trait]
 pub trait WebuiAuthenticator: Send + Sync + 'static {
     async fn authenticate(&self, token: &str) -> Option<UserId>;
+
+    /// Whether bearer tokens accepted by this authenticator represent a
+    /// single trusted operator. Operator-wide WebUI config routes mutate
+    /// shared host configuration such as provider catalogs, secrets, active
+    /// models, or Slack channel routes, so host composition only mounts them
+    /// for authenticators that explicitly opt in.
+    fn allows_operator_webui_config(&self) -> bool {
+        #[allow(deprecated)]
+        self.allows_operator_llm_config()
+    }
+
+    #[deprecated(since = "0.1.0", note = "Renamed to allows_operator_webui_config")]
+    fn allows_operator_llm_config(&self) -> bool {
+        false
+    }
 }
 
 /// Host-installation composition the Reborn HTTP gateway needs in
@@ -163,6 +194,18 @@ pub struct WebuiServeConfig {
     /// credential onboarding. When absent, the mounted Google setup
     /// route fails closed with a sanitized service-unavailable response.
     pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
+    /// Optional Slack personal-binding WebUI OAuth route config.
+    /// Host binaries must opt in explicitly after wiring a host-owned
+    /// Slack OAuth client plus identity binding store.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_personal_binding: Option<SlackPersonalBindingRouteConfig>,
+    /// Optional Slack personal-binding pairing-code redeem route config.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_personal_binding_pairing: Option<SlackPersonalBindingPairingRouteConfig>,
+    /// Optional Slack channel route admin surface mounted under the WebUI
+    /// channels settings path.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_channel_routes: Option<SlackChannelRouteAdminRouteConfig>,
 }
 
 /// Async drain hook for public route mounts that schedule work outside the
@@ -250,11 +293,39 @@ impl WebuiServeConfig {
             default_project_id: None,
             public_mounts: Vec::new(),
             google_oauth: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_personal_binding: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_personal_binding_pairing: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_channel_routes: None,
         }
     }
 
     pub fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
         self.google_oauth = Some(config);
+        self
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[rustfmt::skip]
+    pub fn with_slack_personal_binding(mut self, config: SlackPersonalBindingRouteConfig) -> Self { // pub-api-exempt: host OAuth hook
+        self.slack_personal_binding = Some(config);
+        self
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn with_slack_personal_binding_pairing(
+        mut self,
+        config: SlackPersonalBindingPairingRouteConfig,
+    ) -> Self {
+        self.slack_personal_binding_pairing = Some(config);
+        self
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn with_slack_channel_routes(mut self, config: SlackChannelRouteAdminRouteConfig) -> Self {
+        self.slack_channel_routes = Some(config);
         self
     }
 
@@ -452,6 +523,24 @@ pub fn webui_v2_app_with_lifecycle(
         }
         product_auth_route_mount(state)
     });
+    #[cfg(feature = "slack-v2-host-beta")]
+    let slack_personal_binding_mount = config
+        .slack_personal_binding
+        .clone()
+        .map(SlackPersonalBindingRouteState::new)
+        .map(slack_personal_binding_route_mount);
+    #[cfg(feature = "slack-v2-host-beta")]
+    let slack_personal_binding_pairing_mount = config
+        .slack_personal_binding_pairing
+        .clone()
+        .map(slack_personal_binding_pairing_route_mount);
+    let mount_operator_routes = config.authenticator.allows_operator_webui_config();
+    #[cfg(feature = "slack-v2-host-beta")]
+    let slack_channel_routes_mount = config
+        .slack_channel_routes
+        .clone()
+        .filter(|_| mount_operator_routes)
+        .map(slack_channel_route_admin_route_mount);
     let public_mounts = config.public_mounts;
     let public_route_drains = PublicRouteDrains::new(
         public_mounts
@@ -460,7 +549,23 @@ pub fn webui_v2_app_with_lifecycle(
             .collect(),
     );
     let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
+    if !mount_operator_routes {
+        descriptors
+            .retain(|descriptor| !is_webui_v2_llm_config_route_id(descriptor.route_id().as_str()));
+    }
     if let Some(mount) = &product_auth_mount {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = &slack_personal_binding_mount {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = &slack_personal_binding_pairing_mount {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = &slack_channel_routes_mount {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     for mount in &public_mounts {
@@ -477,14 +582,36 @@ pub fn webui_v2_app_with_lifecycle(
     // Inner: the v2 route surface, retagged to `Router<()>` so it can
     // merge into the outer stateless router. `webui_v2_router` has
     // already baked its own `WebUiV2State` into every handler.
+    let route_options = if mount_operator_routes {
+        WebUiV2RouteOptions::all()
+    } else {
+        WebUiV2RouteOptions::without_llm_config_routes()
+    };
     let v2_inner: Router<()> =
-        webui_v2_router(WebUiV2State::new(bundle.api.clone())).with_state(());
+        webui_v2_router_with_options(WebUiV2State::new(bundle.api.clone()), route_options)
+            .with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
     let mut public_inner: Option<Router> = None;
     if let Some(mount) = product_auth_mount {
         protected_inner = protected_inner.merge(mount.protected);
         public_inner = Some(mount.public);
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = slack_personal_binding_mount {
+        protected_inner = protected_inner.merge(mount.protected);
+        public_inner = Some(match public_inner {
+            Some(existing) => existing.merge(mount.public),
+            None => mount.public,
+        });
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = slack_personal_binding_pairing_mount {
+        protected_inner = protected_inner.merge(mount.protected);
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = slack_channel_routes_mount {
+        protected_inner = protected_inner.merge(mount.protected);
     }
     for mount in public_mounts {
         public_inner = Some(match public_inner {

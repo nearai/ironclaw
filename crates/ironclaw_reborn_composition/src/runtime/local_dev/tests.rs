@@ -42,21 +42,21 @@ mod tests {
     use crate::runtime::local_dev_filesystem_skill_context_source;
 
     async fn run_context(label: &str) -> LoopRunContext {
+        run_context_with_scope(TurnScope::new(
+            TenantId::new(format!("tenant-{label}")).expect("tenant id"),
+            Some(AgentId::new(format!("agent-{label}")).expect("agent id")),
+            Some(ProjectId::new(format!("project-{label}")).expect("project id")),
+            ThreadId::new(format!("thread-{label}")).expect("thread id"),
+        ))
+        .await
+    }
+
+    async fn run_context_with_scope(scope: TurnScope) -> LoopRunContext {
         let resolved = InMemoryRunProfileResolver::default()
             .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
             .await
             .expect("profile resolves");
-        LoopRunContext::new(
-            TurnScope::new(
-                TenantId::new(format!("tenant-{label}")).expect("tenant id"),
-                Some(AgentId::new(format!("agent-{label}")).expect("agent id")),
-                Some(ProjectId::new(format!("project-{label}")).expect("project id")),
-                ThreadId::new(format!("thread-{label}")).expect("thread id"),
-            ),
-            TurnId::new(),
-            TurnRunId::new(),
-            resolved,
-        )
+        LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved)
     }
 
     #[tokio::test]
@@ -71,6 +71,30 @@ mod tests {
 
         assert_eq!(request.context.user_id.as_str(), "sso-user");
         assert_eq!(request.context.resource_scope.user_id.as_str(), "sso-user");
+    }
+
+    #[tokio::test]
+    async fn local_dev_visible_capability_request_uses_explicit_subject_for_runtime_scope() {
+        let subject_user_id = UserId::new("team-agent-user").expect("subject user id");
+        let run_context = run_context_with_scope(TurnScope::new_with_owner(
+            TenantId::new("tenant-subject").expect("tenant id"),
+            Some(AgentId::new("agent-subject").expect("agent id")),
+            Some(ProjectId::new("project-subject").expect("project id")),
+            ThreadId::new("thread-subject").expect("thread id"),
+            Some(subject_user_id),
+        ))
+        .await
+        .with_actor(TurnActor::new(
+            UserId::new("slack-sender").expect("actor user id"),
+        ));
+        let fallback_user_id = UserId::new("env-operator").expect("fallback user id");
+        let request = visible_request_for_runtime_scope(&run_context, &fallback_user_id);
+
+        assert_eq!(request.context.user_id.as_str(), "team-agent-user");
+        assert_eq!(
+            request.context.resource_scope.user_id.as_str(),
+            "team-agent-user"
+        );
     }
 
     #[tokio::test]
@@ -462,7 +486,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_io_fails_result_when_durable_preview_append_fails() {
+    async fn capability_io_keeps_result_when_durable_preview_append_fails() {
         let run_context = run_context("durable-preview-failure").await;
         let thread_scope = ThreadScope {
             tenant_id: run_context.scope.tenant_id.clone(),
@@ -488,7 +512,7 @@ mod tests {
         let invocation_id = InvocationId::new();
 
         let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
-        let error = capability_io
+        let result_ref = capability_io
             .write_capability_result(CapabilityResultWrite {
                 run_context: &run_context,
                 input_ref: &input_ref,
@@ -498,9 +522,14 @@ mod tests {
                 display_preview: None,
             })
             .await
-            .expect_err("missing thread rejects durable preview append");
+            .expect("missing thread does not reject staged capability result");
 
-        assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+        assert_eq!(
+            capability_io
+                .result_output(result_ref.as_str())
+                .expect("staged result reads"),
+            Some(serde_json::json!({"content": "hello"}))
+        );
         let preview_record = display_previews
             .record_for_invocation(invocation_id)
             .expect("live preview record was staged before durable append");

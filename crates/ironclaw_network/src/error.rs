@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::types::NetworkHttpResponse;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkHttpErrorKind {
     InvalidUrl,
@@ -52,6 +54,7 @@ pub enum NetworkHttpError {
         limit: u64,
         request_bytes: u64,
         response_bytes: u64,
+        partial_response: Option<NetworkHttpResponse>,
     },
 }
 
@@ -87,6 +90,15 @@ impl NetworkHttpError {
             | Self::Dns { response_bytes, .. }
             | Self::Transport { response_bytes, .. }
             | Self::ResponseBodyLimit { response_bytes, .. } => *response_bytes,
+        }
+    }
+
+    pub fn into_partial_response(self) -> Option<NetworkHttpResponse> {
+        match self {
+            Self::ResponseBodyLimit {
+                partial_response, ..
+            } => partial_response,
+            _ => None,
         }
     }
 }

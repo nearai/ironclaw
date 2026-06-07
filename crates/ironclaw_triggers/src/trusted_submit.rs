@@ -1,5 +1,9 @@
 use crate::{TriggerFire, TriggerInboundContentRef};
 
+pub const TRIGGER_TRUSTED_ADAPTER_KIND: &str = "trigger";
+pub const TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID: &str = "reborn-trigger-poller";
+pub const TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE: &str = "user";
+
 /// Canonical conversation identity for a trusted trigger fire.
 ///
 /// Composition computes this once while materializing the trigger prompt, uses
@@ -20,9 +24,9 @@ pub struct TriggerTrustedInboundBinding {
 impl TriggerTrustedInboundBinding {
     pub fn for_fire(fire: &TriggerFire) -> Self {
         Self {
-            adapter_kind: "trigger".to_string(),
-            adapter_installation_id: "reborn-trigger-poller".to_string(),
-            external_actor_namespace: "user".to_string(),
+            adapter_kind: TRIGGER_TRUSTED_ADAPTER_KIND.to_string(),
+            adapter_installation_id: TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID.to_string(),
+            external_actor_namespace: TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE.to_string(),
             external_actor_id: fire.creator_user_id.as_str().to_string(),
             external_conversation_id: format!("trigger-{}", fire.identity.trigger_id()),
             route_thread_id: fire.identity.route_thread_id().as_str().to_string(),

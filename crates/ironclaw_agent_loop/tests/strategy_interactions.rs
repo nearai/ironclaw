@@ -9,7 +9,7 @@ use ironclaw_agent_loop::{
         ScriptedCapabilityOutcome, ScriptedModelResponse,
     },
 };
-use ironclaw_turns::{LoopExit, run_profile::LoopRunInfoPort};
+use ironclaw_turns::{LoopExit, LoopFailureKind, run_profile::LoopRunInfoPort};
 
 #[tokio::test]
 async fn gate_blocks_before_recovery_budget_exhausts() {
@@ -59,7 +59,7 @@ async fn terminate_hint_after_batch_stops_without_extra_model_call() {
 }
 
 #[tokio::test]
-async fn denied_call_skips_and_repetition_net_finalizes_fallback_reply() {
+async fn denied_call_repetition_does_not_trip_coarse_failure_escape() {
     let (host, _) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::same_failure_repeated(
             "demo.echo",
@@ -75,16 +75,16 @@ async fn denied_call_skips_and_repetition_net_finalizes_fallback_reply() {
         .expect("loop execution should succeed");
 
     match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(completed.reply_message_refs.len(), 1);
-            assert!(completed.final_checkpoint_id.is_some());
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelError);
         }
-        other => panic!("expected no-progress fallback completion, got {other:?}"),
+        other => panic!("expected model exhaustion failure after continuing, got {other:?}"),
     }
-    let messages = host.finalized_assistant_messages();
-    assert_eq!(messages.len(), 1);
-    assert!(messages[0].contains("repeating the same step without making progress"));
-    assert_eq!(host.model_call_count(), 3);
+    assert!(host.finalized_assistant_messages().is_empty());
+    assert!(
+        host.model_call_count() > 3,
+        "policy-denied failure kind alone must not stop the run at the old threshold"
+    );
 }
 
 #[tokio::test]

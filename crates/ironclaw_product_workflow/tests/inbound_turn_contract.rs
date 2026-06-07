@@ -61,7 +61,7 @@ fn sample_user_message_envelope(event_suffix: &str) -> ProductInboundEnvelope {
     sample_user_message_envelope_with_install_and_text(event_suffix, "install_alpha", "hello world")
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct CapturingTurnCoordinator {
     last_submit: Arc<Mutex<Option<SubmitTurnRequest>>>,
 }
@@ -407,13 +407,25 @@ fn test_safety_context() -> InstructionSafetyContext {
 }
 
 fn binding_with_user(user: &str, thread: &str) -> ironclaw_product_workflow::ResolvedBinding {
+    let user_id = UserId::new(user).expect("valid user");
     ironclaw_product_workflow::ResolvedBinding {
         tenant_id: TenantId::new("tenant:install_alpha").expect("valid tenant"),
-        user_id: UserId::new(user).expect("valid user"),
+        actor_user_id: user_id.clone(),
+        subject_user_id: Some(user_id),
         thread_id: ThreadId::new(thread).expect("valid thread"),
         agent_id: Some(AgentId::new("agent:fake").expect("valid agent")),
         project_id: None,
     }
+}
+
+fn turn_scope_for_binding(binding: &ironclaw_product_workflow::ResolvedBinding) -> TurnScope {
+    TurnScope::new_with_owner(
+        binding.tenant_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+        binding.subject_user_id.clone(),
+    )
 }
 
 fn sample_user_message_envelope_with_text(
@@ -427,6 +439,20 @@ fn sample_user_message_envelope_with_install_and_text(
     event_suffix: &str,
     installation_id: &str,
     text: &str,
+) -> ProductInboundEnvelope {
+    sample_user_message_envelope_with_install_text_and_trigger(
+        event_suffix,
+        installation_id,
+        text,
+        ProductTriggerReason::DirectChat,
+    )
+}
+
+fn sample_user_message_envelope_with_install_text_and_trigger(
+    event_suffix: &str,
+    installation_id: &str,
+    text: &str,
+    trigger: ProductTriggerReason,
 ) -> ProductInboundEnvelope {
     let evidence = ProtocolAuthEvidence::test_verified(
         AuthRequirement::SharedSecretHeader {
@@ -447,7 +473,7 @@ fn sample_user_message_envelope_with_install_and_text(
         ExternalActorRef::new("test", "user1", Option::<String>::None).expect("valid"),
         ExternalConversationRef::new(None, "conv1", None, None).expect("valid"),
         ProductInboundPayload::UserMessage(
-            UserMessagePayload::new(text, vec![], ProductTriggerReason::DirectChat).expect("valid"),
+            UserMessagePayload::new(text, vec![], trigger).expect("valid"),
         ),
     )
     .expect("parsed");
@@ -481,7 +507,7 @@ async fn user_message_resolves_binding_persists_message_and_submits_turn() {
                 tenant_id: binding.tenant_id.clone(),
                 agent_id: binding.agent_id.clone().expect("agent id"),
                 project_id: binding.project_id.clone(),
-                owner_user_id: Some(binding.user_id.clone()),
+                owner_user_id: binding.subject_user_id.clone(),
                 mission_id: None,
             },
             thread_id: binding.thread_id.clone(),
@@ -492,6 +518,64 @@ async fn user_message_resolves_binding_persists_message_and_submits_turn() {
     assert_eq!(history.messages[0].content.as_deref(), Some("hello world"));
     assert_eq!(history.messages[0].status, MessageStatus::Submitted);
     assert!(history.messages[0].turn_run_id.is_some());
+}
+
+#[tokio::test]
+async fn shared_user_message_submits_subject_owned_turn_scope() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = CapturingTurnCoordinator::default();
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator.clone(),
+    );
+    let envelope = sample_user_message_envelope_with_install_text_and_trigger(
+        "shared-turn-owner",
+        "install_alpha",
+        "hello shared channel",
+        ProductTriggerReason::BotMention,
+    );
+
+    let outcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("shared route should submit");
+    let binding = match &outcome {
+        InboundTurnOutcome::Submitted { binding, .. } => binding,
+        _ => panic!("expected Submitted, got {outcome:?}"),
+    };
+
+    let submitted = coordinator
+        .last_submit
+        .lock()
+        .expect("captured submit lock")
+        .clone()
+        .expect("turn should be submitted");
+    assert_eq!(
+        submitted.scope.explicit_owner_user_id(),
+        binding.subject_user_id.as_ref()
+    );
+    assert_eq!(submitted.actor.user_id, binding.actor_user_id);
+
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: binding.subject_user_id.clone(),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("shared route history should use the resolved subject");
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(
+        history.messages[0].content.as_deref(),
+        Some("hello shared channel")
+    );
 }
 
 #[tokio::test]
@@ -522,12 +606,7 @@ async fn user_message_no_profile_submission_uses_planned_reborn_default() {
     };
     let state = store
         .get_run_state(GetRunStateRequest {
-            scope: ironclaw_turns::TurnScope::new(
-                binding.tenant_id,
-                binding.agent_id,
-                binding.project_id,
-                binding.thread_id,
-            ),
+            scope: turn_scope_for_binding(&binding),
             run_id: submitted_run_id,
         })
         .await
@@ -558,7 +637,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         tenant_id: binding.tenant_id.clone(),
         agent_id: binding.agent_id.clone().expect("agent id"),
         project_id: binding.project_id.clone(),
-        owner_user_id: Some(binding.user_id.clone()),
+        owner_user_id: binding.subject_user_id.clone(),
         mission_id: None,
     };
     let model_route_resolver = Arc::new(
@@ -613,6 +692,8 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
+        hook_dispatcher_builder_factory: None,
+        hook_security_audit_sink: None,
         turn_event_sink: None,
     })
     .expect("product-live runtime should build");
@@ -637,12 +718,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
     else {
         panic!("expected submitted outcome");
     };
-    let turn_scope = TurnScope::new(
-        binding.tenant_id.clone(),
-        binding.agent_id.clone(),
-        binding.project_id.clone(),
-        binding.thread_id.clone(),
-    );
+    let turn_scope = turn_scope_for_binding(&binding);
     let state = match timeout(Duration::from_secs(3), async {
         loop {
             let state = turn_store
@@ -729,7 +805,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         tenant_id: binding.tenant_id.clone(),
         agent_id: binding.agent_id.clone().expect("agent id"),
         project_id: binding.project_id.clone(),
-        owner_user_id: Some(binding.user_id.clone()),
+        owner_user_id: binding.subject_user_id.clone(),
         mission_id: None,
     };
     let model_route_resolver = Arc::new(
@@ -783,6 +859,8 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
+        hook_dispatcher_builder_factory: None,
+        hook_security_audit_sink: None,
         turn_event_sink: None,
     })
     .expect("product-live runtime should build");
@@ -822,17 +900,12 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
     .await
     .expect("product live run should reach model call");
 
-    let turn_scope = TurnScope::new(
-        binding.tenant_id.clone(),
-        binding.agent_id.clone(),
-        binding.project_id.clone(),
-        binding.thread_id.clone(),
-    );
+    let turn_scope = turn_scope_for_binding(&binding);
     let cancel_response = composition
         .coordinator
         .cancel_run(CancelRunRequest {
             scope: turn_scope.clone(),
-            actor: TurnActor::new(binding.user_id.clone()),
+            actor: TurnActor::new(binding.actor_user_id.clone()),
             run_id: submitted_run_id,
             reason: SanitizedCancelReason::UserRequested,
             idempotency_key: IdempotencyKey::new("idem-product-live-cancel").expect("valid"),
@@ -913,7 +986,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         tenant_id: binding.tenant_id.clone(),
         agent_id: binding.agent_id.clone().expect("agent id"),
         project_id: binding.project_id.clone(),
-        owner_user_id: Some(binding.user_id.clone()),
+        owner_user_id: binding.subject_user_id.clone(),
         mission_id: None,
     };
     let model_route_resolver = Arc::new(
@@ -965,6 +1038,8 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
+        hook_dispatcher_builder_factory: None,
+        hook_security_audit_sink: None,
         turn_event_sink: None,
     }) {
         Ok(_) => panic!("product-live readiness must reject inert cancellation"),
@@ -1002,7 +1077,7 @@ async fn busy_thread_persists_second_message_as_deferred() {
                 tenant_id: binding.tenant_id.clone(),
                 agent_id: binding.agent_id.clone().expect("agent id"),
                 project_id: binding.project_id.clone(),
-                owner_user_id: Some(binding.user_id.clone()),
+                owner_user_id: binding.subject_user_id.clone(),
                 mission_id: None,
             },
             thread_id: binding.thread_id.clone(),
@@ -1050,7 +1125,7 @@ async fn retry_validates_live_binding_before_accepted_message_replay() {
     let InboundTurnOutcome::Submitted { binding, .. } = outcome else {
         panic!("expected submitted retry")
     };
-    assert_eq!(binding.user_id.as_str(), "user:churned");
+    assert_eq!(binding.actor_user_id.as_str(), "user:churned");
     assert_eq!(binding.thread_id.as_str(), "thread:churned");
     assert_eq!(
         binding_handle.resolve_count(),
@@ -1064,7 +1139,7 @@ async fn retry_validates_live_binding_before_accepted_message_replay() {
                 tenant_id: binding.tenant_id.clone(),
                 agent_id: binding.agent_id.clone().expect("agent id"),
                 project_id: binding.project_id.clone(),
-                owner_user_id: Some(binding.user_id.clone()),
+                owner_user_id: binding.subject_user_id.clone(),
                 mission_id: None,
             },
             thread_id: binding.thread_id.clone(),
@@ -1126,7 +1201,7 @@ async fn replay_lookup_is_namespaced_by_installation() {
                 tenant_id: binding.tenant_id.clone(),
                 agent_id: binding.agent_id.clone().expect("agent id"),
                 project_id: binding.project_id.clone(),
-                owner_user_id: Some(binding.user_id.clone()),
+                owner_user_id: binding.subject_user_id.clone(),
                 mission_id: None,
             },
             thread_id: binding.thread_id.clone(),
@@ -1171,7 +1246,7 @@ async fn deferred_busy_retry_resubmits_existing_message() {
                 tenant_id: binding.tenant_id.clone(),
                 agent_id: binding.agent_id.clone().expect("agent id"),
                 project_id: binding.project_id.clone(),
-                owner_user_id: Some(binding.user_id.clone()),
+                owner_user_id: binding.subject_user_id.clone(),
                 mission_id: None,
             },
             thread_id: binding.thread_id.clone(),

@@ -9,7 +9,9 @@ import {
 
 export function ChatInput({
   onSend,
+  onCancel,
   disabled,
+  canCancel = false,
   initialText = "",
   resetKey = "",
   variant = "dock",
@@ -20,6 +22,7 @@ export function ChatInput({
   const isHero = variant === "hero";
   const [text, setText] = React.useState("");
   const [isSending, setIsSending] = React.useState(false);
+  const [isCancelling, setIsCancelling] = React.useState(false);
   const textareaRef = React.useRef(null);
   const {
     images,
@@ -82,6 +85,16 @@ export function ChatInput({
     onSend,
     clearAttachments,
   ]);
+
+  const handleCancel = React.useCallback(async () => {
+    if (!canCancel || isCancelling || !onCancel) return;
+    setIsCancelling(true);
+    try {
+      await onCancel();
+    } finally {
+      setIsCancelling(false);
+    }
+  }, [canCancel, isCancelling, onCancel]);
 
   const onKeyDown = React.useCallback(
     (e) => {
@@ -244,22 +257,37 @@ export function ChatInput({
               />
               <${Icon} name="attach" className="h-5 w-5" />
             </label>
-            <${Button}
-              type="button"
-              variant="primary"
-              size="icon-sm"
-              onClick=${handleSend}
-              disabled=${disabled || isSending || !hasPayload}
-              aria-label=${t("chat.send")}
-              className="rounded-full"
-            >
-              <${Icon} name="send" className="h-5 w-5" />
-            <//>
+            ${canCancel
+              ? html`
+                <${Button}
+                  type="button"
+                  variant="danger"
+                  size="icon-sm"
+                  onClick=${handleCancel}
+                  disabled=${isCancelling}
+                  aria-label=${t("common.cancel")}
+                  title=${t("common.cancel")}
+                  className="rounded-full"
+                >
+                  <${Icon} name="close" className="h-5 w-5" />
+                <//>
+              `
+              : html`
+                <${Button}
+                  type="button"
+                  variant="primary"
+                  size="icon-sm"
+                  onClick=${handleSend}
+                  disabled=${disabled || isSending || !hasPayload}
+                  aria-label=${t("chat.send")}
+                  className="rounded-full"
+                >
+                  <${Icon} name="send" className="h-5 w-5" />
+                <//>
+              `}
           </div>
         </div>
       </div>
     </div>
   `;
 }
-
-

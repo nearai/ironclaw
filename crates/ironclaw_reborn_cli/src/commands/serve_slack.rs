@@ -7,7 +7,9 @@ use std::env;
 use std::path::Path;
 
 #[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_reborn_composition::{SlackHostBetaConfig, SlackHostBetaConfigInput};
+use ironclaw_reborn_composition::{
+    SlackHostBetaChannelRoute, SlackHostBetaConfig, SlackHostBetaConfigInput, SlackTeamId,
+};
 #[cfg(feature = "slack-v2-host-beta")]
 use secrecy::SecretString;
 
@@ -15,6 +17,38 @@ use secrecy::SecretString;
 const DEFAULT_SLACK_SIGNING_SECRET_ENV_VAR: &str = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET";
 #[cfg(feature = "slack-v2-host-beta")]
 const DEFAULT_SLACK_BOT_TOKEN_ENV_VAR: &str = "IRONCLAW_REBORN_SLACK_BOT_TOKEN";
+
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn resolve_slack_config_for_serve(
+    section: Option<&ironclaw_reborn_config::SlackSection>,
+    tenant_id: &ironclaw_reborn_composition::host_api::TenantId,
+    default_agent_id: &ironclaw_reborn_composition::host_api::AgentId,
+    default_project_id: Option<&ironclaw_reborn_composition::host_api::ProjectId>,
+    default_user_id: &ironclaw_reborn_composition::host_api::UserId,
+    config_path: &Path,
+) -> anyhow::Result<Option<SlackHostBetaConfig>> {
+    resolve_slack_host_beta_config(
+        section,
+        tenant_id,
+        default_agent_id,
+        default_project_id,
+        default_user_id,
+        config_path,
+    )
+}
+
+#[cfg(not(feature = "slack-v2-host-beta"))]
+pub(crate) fn resolve_slack_config_for_serve(
+    section: Option<&ironclaw_reborn_config::SlackSection>,
+    _tenant_id: &ironclaw_reborn_composition::host_api::TenantId,
+    _default_agent_id: &ironclaw_reborn_composition::host_api::AgentId,
+    _default_project_id: Option<&ironclaw_reborn_composition::host_api::ProjectId>,
+    _default_user_id: &ironclaw_reborn_composition::host_api::UserId,
+    _config_path: &std::path::Path,
+) -> anyhow::Result<Option<()>> {
+    reject_enabled_slack_without_feature(section)?;
+    Ok(None)
+}
 
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn resolve_slack_host_beta_config(
@@ -35,24 +69,20 @@ pub(crate) fn resolve_slack_host_beta_config(
     let installation_id =
         required_slack_config_value("installation_id", &section.installation_id, config_path)?;
     let team_id = required_slack_config_value("team_id", &section.team_id, config_path)?;
-    let api_app_id = optional_slack_config_value("api_app_id", &section.api_app_id)?;
-    let slack_user_id =
-        required_slack_config_value("slack_user_id", &section.slack_user_id, config_path)?;
-    let mapped_user_id = match optional_slack_config_value("user_id", &section.user_id)? {
-        Some(raw) => {
-            let user_id = ironclaw_reborn_composition::host_api::UserId::new(&raw)
-                .map_err(|err| anyhow!("[slack].user_id `{raw}` is invalid: {err}"))?;
-            if user_id != *default_user_id {
-                anyhow::bail!(
-                    "[slack].user_id `{raw}` must match the Reborn WebUI runtime owner `{default_user_id}`. \
-                     A mismatch makes Slack-originated threads unreadable by the turn runner. \
-                     Remove [slack].user_id or set it to `{default_user_id}`."
-                );
-            }
-            user_id
-        }
-        None => default_user_id.clone(),
-    };
+    let api_app_id = required_slack_config_value("api_app_id", &section.api_app_id, config_path)?;
+    let slack_user_id = optional_slack_config_value("slack_user_id", &section.slack_user_id)?;
+    let mapped_user_id = optional_slack_user_id_config_value("user_id", &section.user_id)?
+        .unwrap_or_else(|| default_user_id.clone());
+    let shared_subject_user_id = optional_slack_user_id_config_value(
+        "shared_subject_user_id",
+        &section.shared_subject_user_id,
+    )?;
+    let channel_routes = section
+        .channel_routes
+        .iter()
+        .enumerate()
+        .map(parse_slack_channel_route_config)
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     let signing_secret_env =
         optional_slack_config_value("signing_secret_env", &section.signing_secret_env)?
@@ -72,10 +102,12 @@ pub(crate) fn resolve_slack_host_beta_config(
         agent_id: default_agent_id.clone(),
         project_id: default_project_id.cloned(),
         installation_id,
-        team_id,
-        api_app_id,
+        team_id: SlackTeamId::new(team_id),
+        api_app_id: Some(api_app_id),
         slack_user_id,
         user_id: mapped_user_id,
+        shared_subject_user_id,
+        channel_routes,
         signing_secret: SecretString::from(signing_secret),
         bot_token: SecretString::from(bot_token),
     })?))
@@ -83,7 +115,7 @@ pub(crate) fn resolve_slack_host_beta_config(
 
 #[cfg(feature = "slack-v2-host-beta")]
 fn required_slack_config_value(
-    field: &'static str,
+    field: &str,
     value: &Option<String>,
     config_path: &Path,
 ) -> anyhow::Result<String> {
@@ -97,7 +129,7 @@ fn required_slack_config_value(
 
 #[cfg(feature = "slack-v2-host-beta")]
 fn optional_slack_config_value(
-    field: &'static str,
+    field: &str,
     value: &Option<String>,
 ) -> anyhow::Result<Option<String>> {
     let Some(value) = value else {
@@ -110,6 +142,33 @@ fn optional_slack_config_value(
         anyhow::bail!("[slack].{field} must not contain leading or trailing whitespace when set");
     }
     Ok(Some(value.clone()))
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn optional_slack_user_id_config_value(
+    field: &str,
+    value: &Option<String>,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::host_api::UserId>> {
+    optional_slack_config_value(field, value)?
+        .map(|raw| {
+            ironclaw_reborn_composition::host_api::UserId::new(&raw)
+                .map_err(|err| anyhow!("[slack].{field} `{raw}` is invalid: {err}"))
+        })
+        .transpose()
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn parse_slack_channel_route_config(
+    (index, route): (usize, &ironclaw_reborn_config::SlackChannelRouteSection),
+) -> anyhow::Result<SlackHostBetaChannelRoute> {
+    let channel_field = format!("channel_routes[{index}].channel_id");
+    let subject_field = format!("channel_routes[{index}].subject_user_id");
+    let channel_id = optional_slack_config_value(&channel_field, &route.channel_id)?
+        .ok_or_else(|| anyhow!("[slack].{channel_field} must be set"))?;
+    let subject_user_id =
+        optional_slack_user_id_config_value(&subject_field, &route.subject_user_id)?
+            .ok_or_else(|| anyhow!("[slack].{subject_field} must be set"))?;
+    Ok(SlackHostBetaChannelRoute::new(channel_id, subject_user_id))
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -285,10 +344,75 @@ mod tests {
 
         assert_eq!(resolved.installation_id.as_str(), "install-alpha");
         assert!(format!("{:?}", resolved.installation_selector).contains("AppTeam"));
-        assert_eq!(resolved.slack_actor.id(), "U123");
+        assert_eq!(
+            resolved.slack_actor.as_ref().expect("legacy actor").id(),
+            "U123"
+        );
         assert_eq!(resolved.user_id, user_id("web-user"));
         assert_eq!(resolved.signing_secret.expose_secret(), "signing-secret");
         assert_eq!(resolved.bot_token.expose_secret(), "xoxb-token");
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_config_does_not_require_static_slack_user() {
+        let _lock = env_lock();
+        let _signing = EnvGuard::set(
+            "IRONCLAW_TEST_SLACK_SIGNING_SECRET_NO_STATIC_USER",
+            "signing-secret",
+        );
+        let _bot = EnvGuard::set("IRONCLAW_TEST_SLACK_BOT_TOKEN_NO_STATIC_USER", "xoxb-token");
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
+            signing_secret_env: Some(
+                "IRONCLAW_TEST_SLACK_SIGNING_SECRET_NO_STATIC_USER".to_string(),
+            ),
+            bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_NO_STATIC_USER".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_slack_host_beta_config(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect("Slack config should resolve")
+        .expect("Slack should be enabled");
+
+        assert!(resolved.slack_actor.is_none());
+        assert_eq!(resolved.user_id, user_id("web-user"));
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_config_requires_api_app_id_for_pairing() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            ..Default::default()
+        };
+
+        let error = resolve_slack_host_beta_config(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("enabled Slack pairing must require api_app_id");
+
+        assert!(
+            error.to_string().contains("[slack].api_app_id"),
+            "message: {error}"
+        );
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -301,6 +425,7 @@ mod tests {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
             signing_secret_env: Some("IRONCLAW_TEST_SLACK_EMPTY_SIGNING_SECRET".to_string()),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_EMPTY_BOT_TOKEN".to_string()),
@@ -340,11 +465,13 @@ mod tests {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
             user_id: Some("web-user".to_string()),
+            shared_subject_user_id: None,
+            channel_routes: Vec::new(),
             signing_secret_env: Some("IRONCLAW_TEST_SLACK_SIGNING_SECRET_MAPPED_USER".to_string()),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_MAPPED_USER".to_string()),
-            ..Default::default()
         };
 
         let resolved = resolve_slack_host_beta_config(
@@ -359,11 +486,12 @@ mod tests {
         .expect("Slack should be enabled");
 
         assert_eq!(resolved.user_id, user_id("web-user"));
+        assert_eq!(resolved.shared_subject_user_id, None);
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
-    fn slack_host_beta_config_rejects_divergent_user_mapping() {
+    fn slack_host_beta_config_accepts_distinct_shared_subject_user() {
         let _lock = env_lock();
         let _signing = EnvGuard::set(
             "IRONCLAW_TEST_SLACK_SIGNING_SECRET_DIVERGENT_USER",
@@ -374,12 +502,93 @@ mod tests {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
-            user_id: Some("slack-mapped-user".to_string()),
+            user_id: Some("web-user".to_string()),
+            shared_subject_user_id: Some("slack-shared-subject".to_string()),
+            channel_routes: Vec::new(),
             signing_secret_env: Some(
                 "IRONCLAW_TEST_SLACK_SIGNING_SECRET_DIVERGENT_USER".to_string(),
             ),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_DIVERGENT_USER".to_string()),
+        };
+
+        let resolved = resolve_slack_host_beta_config(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect("Slack config should resolve")
+        .expect("Slack should be enabled");
+
+        assert_eq!(resolved.user_id, user_id("web-user"));
+        assert_eq!(
+            resolved.shared_subject_user_id,
+            Some(user_id("slack-shared-subject"))
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_config_accepts_channel_routes() {
+        let _lock = env_lock();
+        let _signing = EnvGuard::set(
+            "IRONCLAW_TEST_SLACK_SIGNING_SECRET_CHANNEL_ROUTES",
+            "signing-secret",
+        );
+        let _bot = EnvGuard::set("IRONCLAW_TEST_SLACK_BOT_TOKEN_CHANNEL_ROUTES", "xoxb-token");
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
+            slack_user_id: Some("U123".to_string()),
+            user_id: Some("web-user".to_string()),
+            shared_subject_user_id: None,
+            channel_routes: vec![ironclaw_reborn_config::SlackChannelRouteSection {
+                channel_id: Some("CENG".to_string()),
+                subject_user_id: Some("eng-team-agent".to_string()),
+            }],
+            signing_secret_env: Some(
+                "IRONCLAW_TEST_SLACK_SIGNING_SECRET_CHANNEL_ROUTES".to_string(),
+            ),
+            bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_CHANNEL_ROUTES".to_string()),
+        };
+
+        let resolved = resolve_slack_host_beta_config(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect("Slack config should resolve")
+        .expect("Slack should be enabled");
+
+        assert_eq!(resolved.channel_routes.len(), 1);
+        assert_eq!(resolved.channel_routes[0].channel_id, "CENG");
+        assert_eq!(
+            resolved.channel_routes[0].subject_user_id,
+            user_id("eng-team-agent")
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_config_channel_route_rejects_missing_channel_id() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
+            channel_routes: vec![ironclaw_reborn_config::SlackChannelRouteSection {
+                channel_id: None,
+                subject_user_id: Some("eng-team-agent".to_string()),
+            }],
             ..Default::default()
         };
 
@@ -391,12 +600,78 @@ mod tests {
             &user_id("web-user"),
             Path::new("/tmp/reborn-config.toml"),
         )
-        .expect_err("Slack user mapping must match the runtime owner");
+        .expect_err("channel route must require channel_id");
 
         assert!(
             error
                 .to_string()
-                .contains("must match the Reborn WebUI runtime owner"),
+                .contains("[slack].channel_routes[0].channel_id must be set"),
+            "message: {error}"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_config_channel_route_rejects_missing_subject_user_id() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
+            channel_routes: vec![ironclaw_reborn_config::SlackChannelRouteSection {
+                channel_id: Some("CENG".to_string()),
+                subject_user_id: None,
+            }],
+            ..Default::default()
+        };
+
+        let error = resolve_slack_host_beta_config(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("channel route must require subject_user_id");
+
+        assert!(
+            error
+                .to_string()
+                .contains("[slack].channel_routes[0].subject_user_id must be set"),
+            "message: {error}"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_config_channel_route_rejects_invalid_subject_user_id() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
+            channel_routes: vec![ironclaw_reborn_config::SlackChannelRouteSection {
+                channel_id: Some("CENG".to_string()),
+                subject_user_id: Some("invalid\nuser".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let error = resolve_slack_host_beta_config(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("channel route subject_user_id must be valid");
+
+        assert!(
+            error
+                .to_string()
+                .contains("[slack].channel_routes[0].subject_user_id"),
             "message: {error}"
         );
     }
@@ -408,6 +683,7 @@ mod tests {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
             user_id: Some(" web-user".to_string()),
             ..Default::default()
@@ -434,13 +710,23 @@ mod tests {
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_host_beta_config_rejects_invalid_user_id_mapping() {
+        let _lock = env_lock();
+        let _signing = EnvGuard::set(
+            "IRONCLAW_TEST_SLACK_SIGNING_SECRET_INVALID_USER",
+            "signing-secret",
+        );
+        let _bot = EnvGuard::set("IRONCLAW_TEST_SLACK_BOT_TOKEN_INVALID_USER", "xoxb-token");
         let section = ironclaw_reborn_config::SlackSection {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
-            user_id: Some("invalid user".to_string()),
-            ..Default::default()
+            user_id: Some("invalid\nuser".to_string()),
+            shared_subject_user_id: None,
+            channel_routes: Vec::new(),
+            signing_secret_env: Some("IRONCLAW_TEST_SLACK_SIGNING_SECRET_INVALID_USER".to_string()),
+            bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_INVALID_USER".to_string()),
         };
 
         let error = resolve_slack_host_beta_config(
@@ -461,6 +747,37 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
+    fn slack_host_beta_config_rejects_padded_shared_subject_user_id() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
+            slack_user_id: Some("U123".to_string()),
+            shared_subject_user_id: Some(" shared-subject".to_string()),
+            ..Default::default()
+        };
+
+        let error = resolve_slack_host_beta_config(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("padded shared subject user id must fail at config resolution");
+
+        assert!(
+            error.to_string().contains(
+                "[slack].shared_subject_user_id must not contain leading or trailing whitespace"
+            ),
+            "message: {error}"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
     fn slack_host_beta_config_reports_unset_signing_secret_env() {
         let _lock = env_lock();
         let _signing = EnvGuard::remove("IRONCLAW_TEST_SLACK_UNSET_SIGNING_SECRET");
@@ -469,6 +786,7 @@ mod tests {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
             signing_secret_env: Some("IRONCLAW_TEST_SLACK_UNSET_SIGNING_SECRET".to_string()),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_UNSET_SIGNING".to_string()),
@@ -508,6 +826,25 @@ mod tests {
             error.to_string().contains("slack-v2-host-beta"),
             "message: {error}"
         );
+    }
+
+    #[cfg(not(feature = "slack-v2-host-beta"))]
+    #[test]
+    fn reject_enabled_slack_without_feature_allows_disabled_section() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(false),
+            ..Default::default()
+        };
+
+        reject_enabled_slack_without_feature(Some(&section))
+            .expect("disabled Slack config should be a no-op without the host-beta feature");
+    }
+
+    #[cfg(not(feature = "slack-v2-host-beta"))]
+    #[test]
+    fn reject_enabled_slack_without_feature_allows_absent_section() {
+        reject_enabled_slack_without_feature(None)
+            .expect("absent Slack config should be a no-op without the host-beta feature");
     }
 
     #[cfg(feature = "slack-v2-host-beta")]

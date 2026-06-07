@@ -84,18 +84,27 @@ pub(super) fn push_call_signature_once(
     state: &mut LoopExecutionState,
     signatures: &mut HashSet<CapabilityCallSignature>,
     call: &CapabilityCallCandidate,
-) -> Result<(), AgentLoopExecutorError> {
-    let args = serde_json::json!({ "input_ref": call.input_ref.as_str() });
-    let signature =
-        CapabilityCallSignature::from_call(call.capability_id.clone(), &args).map_err(|_| {
-            AgentLoopExecutorError::PlannerContract {
-                detail: "capability call signature could not be built",
-            }
-        })?;
+) -> Result<CapabilityCallSignature, AgentLoopExecutorError> {
+    let signature = capability_call_signature(call)?;
     if signatures.insert(signature.clone()) {
-        state.recent_call_signatures.push(signature);
+        state.recent_call_signatures.push(signature.clone());
     }
-    Ok(())
+    Ok(signature)
+}
+
+pub(super) fn capability_call_signature(
+    call: &CapabilityCallCandidate,
+) -> Result<CapabilityCallSignature, AgentLoopExecutorError> {
+    let args = call
+        .provider_replay
+        .as_ref()
+        .map(|replay| replay.arguments.clone())
+        .unwrap_or_else(|| serde_json::json!({ "input_ref": call.input_ref.as_str() }));
+    CapabilityCallSignature::from_call(call.capability_id.clone(), &args).map_err(|_| {
+        AgentLoopExecutorError::PlannerContract {
+            detail: "capability call signature could not be built",
+        }
+    })
 }
 
 pub(super) async fn append_capability_result_ref(
@@ -217,10 +226,4 @@ pub(super) fn push_completed_result(
 ) {
     state.recovery_state = state.recovery_state.cleared_attempts();
     state.result_refs.push(result.result_ref);
-    if result.terminate_hint {
-        state.stop_state.terminate_hints_in_last_batch = state
-            .stop_state
-            .terminate_hints_in_last_batch
-            .saturating_add(1);
-    }
 }

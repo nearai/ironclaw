@@ -5,6 +5,10 @@ import vm from "node:vm";
 
 import { messagesFromTimeline } from "./history-messages.js";
 import {
+  looksLikeChannelConnectCommand,
+  resolveChannelConnectCommand,
+} from "../../../lib/channel-connect.js";
+import {
   addPending,
   recordAcceptedMessageRef,
   removePending,
@@ -31,17 +35,24 @@ function useChatSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { useChat };`;
 }
 
-function createReactStub() {
+function createReactStub({ initialByIndex = new Map(), setCalls = [] } = {}) {
+  let stateIndex = 0;
   return {
     useCallback: (fn) => fn,
     useEffect: () => {},
     useRef: (value) => ({ current: value }),
     useState: (initial) => {
-      let value = typeof initial === "function" ? initial() : initial;
+      const index = stateIndex++;
+      let value = initialByIndex.has(index)
+        ? initialByIndex.get(index)
+        : typeof initial === "function"
+          ? initial()
+          : initial;
       return [
         value,
         (next) => {
           value = typeof next === "function" ? next(value) : next;
+          setCalls.push({ index, value });
         },
       ];
     },
@@ -67,9 +78,19 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    queryClient: { invalidateQueries: () => {} },
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
     recordAcceptedMessageRef,
     removePending,
+    resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async () => ({
       accepted_message_ref: "msg:message-1",
@@ -132,4 +153,389 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
     renderedMessages.map((message) => message.id),
     ["msg-message-1"],
   );
+});
+
+test("useChat.cancelRun clears local state before cancel request resolves", async () => {
+  const threadId = "thread-1";
+  const stateUpdates = [];
+  let cancelRequest = null;
+  let resolveCancelRequest;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      // useChat state call order: cooldownUntil, now, activeRun,
+      // channelConnectAction, isProcessing, pendingGate.
+      initialByIndex: new Map([
+        [2, { runId: "run-1", threadId, status: "running" }],
+        [4, true],
+        [5, { runId: "run-1", gateRef: "gate-1" }],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    cancelRunRequest: async (request) => {
+      cancelRequest = request;
+      return new Promise((resolve) => {
+        resolveCancelRequest = resolve;
+      });
+    },
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => ({
+      channels: [],
+    }),
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => ({ channels: [] }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  const cancelPromise = chat.cancelRun("user_requested");
+
+  assert.equal(cancelRequest.threadId, threadId);
+  assert.equal(cancelRequest.runId, "run-1");
+  assert.equal(cancelRequest.reason, "user_requested");
+  assert.deepEqual(stateUpdates.slice(0, 3), [
+    { index: 5, value: null },
+    { index: 4, value: false },
+    { index: 2, value: null },
+  ]);
+
+  resolveCancelRequest({});
+  await cancelPromise;
+});
+
+test("useChat.cancelRun completion does not clear a newer run", async () => {
+  const threadId = "thread-1";
+  const stateUpdates = [];
+  let resolveCancelRequest;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [2, { runId: "run-1", threadId, status: "running" }],
+        [4, true],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    cancelRunRequest: async () =>
+      new Promise((resolve) => {
+        resolveCancelRequest = resolve;
+      }),
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => ({
+      accepted_message_ref: "msg:message-2",
+      run_id: "run-2",
+      status: "queued",
+      thread_id: threadId,
+    }),
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  const cancelPromise = chat.cancelRun("user_requested");
+  await chat.send("next request");
+
+  const newerRunUpdate = stateUpdates.find(
+    (update) => update.index === 2 && update.value?.runId === "run-2",
+  );
+  assert.equal(newerRunUpdate?.value.threadId, threadId);
+  assert.equal(newerRunUpdate?.value.status, "queued");
+  assert.equal(newerRunUpdate?.value.source, "local");
+
+  const updatesBeforeCancelResolution = stateUpdates.length;
+  resolveCancelRequest({});
+  await cancelPromise;
+
+  assert.deepEqual(stateUpdates.slice(updatesBeforeCancelResolution), []);
+});
+
+test("useChat.send: channel connect requests return an action without submitting a prompt", async () => {
+  let createThreadCalled = false;
+  let sendMessageCalled = false;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      createThreadCalled = true;
+      throw new Error("connect action should not create a thread");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => ({
+      channels: [
+        {
+          channel: "slack",
+          display_name: "Slack",
+          strategy: "inbound_proof_code",
+          command_aliases: ["slack", "slack account"],
+          action: {
+            title: "Slack account connection",
+            instructions: "Message the Slack app, then enter the code here.",
+          },
+        },
+      ],
+    }),
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async ({ queryFn }) => queryFn(),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      sendMessageCalled = true;
+      throw new Error("connect action should not submit a model prompt");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(null);
+  const response = await chat.send("connect my Slack account");
+
+  assert.equal(createThreadCalled, false);
+  assert.equal(sendMessageCalled, false);
+  assert.equal(response.channel_connect_action.channel, "slack");
+  assert.equal(response.channel_connect_action.strategy, "inbound_proof_code");
+});
+
+test("useChat.send: unmatched channel connect requests submit the prompt", async () => {
+  let createThreadCalled = false;
+  let sentContent = null;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      createThreadCalled = true;
+      return { thread: { thread_id: "thread-created" } };
+    },
+    globalThis: {},
+    listConnectableChannels: async () => ({
+      channels: [
+        {
+          channel: "slack",
+          display_name: "Slack",
+          strategy: "inbound_proof_code",
+          command_aliases: ["slack", "slack account"],
+          action: {
+            title: "Slack account connection",
+            instructions: "Message the Slack app, then enter the code here.",
+          },
+        },
+      ],
+    }),
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async ({ queryFn }) => queryFn(),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ content, threadId }) => {
+      sentContent = content;
+      return {
+        accepted_message_ref: "msg:message-2",
+        run_id: "run-2",
+        status: "queued",
+        thread_id: threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(null);
+  const response = await chat.send("connect telegram account");
+
+  assert.equal(createThreadCalled, true);
+  assert.equal(sentContent, "connect telegram account");
+  assert.equal(response.channel_connect_action, undefined);
+  assert.equal(response.thread_id, "thread-created");
+});
+
+test("useChat.send: connectable channel fetch failures submit the prompt", async () => {
+  let createThreadCalled = false;
+  let sentContent = null;
+  const loggedErrors = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    console: {
+      error: (...args) => loggedErrors.push(args),
+    },
+    createThreadRequest: async () => {
+      createThreadCalled = true;
+      return { thread: { thread_id: "thread-created" } };
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("connectable channel service unavailable");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async ({ queryFn }) => queryFn(),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ content, threadId }) => {
+      sentContent = content;
+      return {
+        accepted_message_ref: "msg:message-3",
+        run_id: "run-3",
+        status: "queued",
+        thread_id: threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(null);
+  const response = await chat.send("connect my Slack account");
+
+  assert.equal(createThreadCalled, true);
+  assert.equal(sentContent, "connect my Slack account");
+  assert.equal(response.channel_connect_action, undefined);
+  assert.equal(response.thread_id, "thread-created");
+  assert.equal(loggedErrors[0][0], "Failed to resolve connectable channels:");
 });

@@ -11,7 +11,9 @@
 
 ## What This Crate Owns
 
-- Durable event and audit store backends for Reborn events.
+- Reborn-owned durable event/audit store backends and their selection facade, currently:
+- Backend selection/composition: `RebornEventStoreConfig`, `RebornProfile`, `RebornEventStores`, `RebornEventStoreError`.
+- Concrete durable-log backends implementing the `ironclaw_events` `DurableEventLog`/`DurableAuditLog` traits: filesystem (`FilesystemDurableEventLog`, `FilesystemDurableAuditLog`), JSONL (`JsonlDurableEventLog`, `JsonlDurableAuditLog`), and the feature-gated libSQL/Postgres backends (behind the `libsql` / `postgres` features).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

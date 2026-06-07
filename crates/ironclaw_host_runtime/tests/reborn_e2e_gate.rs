@@ -20,7 +20,7 @@ use ironclaw_events::{
     ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
@@ -50,9 +50,11 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let filesystem = Arc::new(InMemoryBackend::new());
+    seed_script_manifest_assets(filesystem.as_ref()).await;
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        filesystem,
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -835,6 +837,28 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     .unwrap();
     registry.insert(package).unwrap();
     registry
+}
+
+async fn seed_script_manifest_assets(filesystem: &InMemoryBackend) {
+    for path in [
+        "/system/extensions/script/schemas/test/input.v1.json",
+        "/system/extensions/script/schemas/test/output.v1.json",
+    ] {
+        filesystem
+            .write_file(
+                &VirtualPath::new(path).unwrap(),
+                br#"{"type":"object","additionalProperties":true}"#,
+            )
+            .await
+            .unwrap();
+    }
+    filesystem
+        .write_file(
+            &VirtualPath::new("/system/extensions/script/prompts/test.md").unwrap(),
+            b"Echo script test capability.",
+        )
+        .await
+        .unwrap();
 }
 
 fn parse_manifest(manifest: &str) -> ExtensionManifest {

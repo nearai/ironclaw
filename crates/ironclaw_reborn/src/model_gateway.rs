@@ -42,10 +42,15 @@ use ironclaw_turns::{
 };
 use tracing::debug;
 
-use crate::model_routes::{
-    ModelRoute, ModelRouteError, ModelRouteErrorKind, ModelRouteProviderKey, ModelRouteResolver,
-    ModelSelectionMode, ModelSlot, ResolvedModelRouteSnapshot,
+use crate::{
+    failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
+    model_routes::{
+        ModelRoute, ModelRouteError, ModelRouteErrorKind, ModelRouteProviderKey,
+        ModelRouteResolver, ModelSelectionMode, ModelSlot, ResolvedModelRouteSnapshot,
+    },
 };
+
+const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 
 /// Fail-closed routing policy from resolved Reborn model profile ids to the
 /// host-selected provider/model envelope.
@@ -288,14 +293,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = pinned_model_override(route)?;
+        let model_override = request_model_override(route, self.provider.as_ref())?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, model_override)?;
+        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
         let mut completion =
             CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
-        completion.model = Some(model_override.to_string());
+        completion.model = Some(model_override);
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         complete_model_request(
@@ -322,14 +327,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = pinned_model_override(route)?;
+        let model_override = request_model_override(route, self.provider.as_ref())?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, model_override)?;
+        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
         let mut completion =
             CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
-        completion.model = Some(model_override.to_string());
+        completion.model = Some(model_override);
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let provider_turn_scope = format!(
@@ -682,35 +687,45 @@ fn map_model_route_error(error: ModelRouteError) -> HostManagedModelError {
 
 fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
     let diagnostic_ref = error.diagnostic_ref;
+    let reason_kind = error.reason_kind;
     let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
         Ok(error) => error,
         Err(_) => LoopModelGatewayError {
             kind: error.kind,
             safe_summary: LoopSafeSummary::model_gateway_failed(),
+            reason_kind: None,
             diagnostic_ref: None,
         },
     };
+    if let Some(reason_kind) = reason_kind {
+        converted = converted.with_reason_kind(reason_kind);
+    }
     if let Some(diagnostic_ref) = diagnostic_ref {
         converted = converted.with_diagnostic_ref(diagnostic_ref);
     }
     converted
 }
 
-fn pinned_model_override(route: &LlmModelProfileRoute) -> Result<&str, HostManagedModelError> {
-    let Some(model_override) = route.model_override.as_deref() else {
-        return Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::PolicyDenied,
-            "model profile route must pin a concrete provider model",
-        ));
-    };
+fn request_model_override<P>(
+    route: &LlmModelProfileRoute,
+    provider: &P,
+) -> Result<String, HostManagedModelError>
+where
+    P: LlmProvider + ?Sized,
+{
+    let model_override = route
+        .model_override
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| provider.active_model_name());
     let trimmed = model_override.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
         return Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::PolicyDenied,
-            "model profile route must pin a concrete provider model",
+            "model profile route must resolve to a concrete provider model",
         ));
     }
-    Ok(trimmed)
+    Ok(trimmed.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1352,6 +1367,13 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         error_debug = ?error,
         "reborn model provider error mapped to safe summary"
     );
+    if is_credit_exhaustion_error(&error) {
+        return HostManagedModelError::safe(
+            HostManagedModelErrorKind::CredentialUnavailable,
+            MODEL_CREDITS_EXHAUSTED_SUMMARY,
+        )
+        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND);
+    }
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
@@ -1371,5 +1393,93 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
             HostManagedModelErrorKind::Unavailable,
             "model service is unavailable",
         ),
+    }
+}
+
+fn is_credit_exhaustion_error(error: &LlmError) -> bool {
+    let LlmError::RequestFailed { reason, .. } = error else {
+        return false;
+    };
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("http 402")
+        || lower.contains("402 payment required")
+        || lower.contains("payment required")
+        || lower.contains("insufficient credit")
+        || lower.contains("insufficient credits")
+        || lower.contains("not enough credit")
+        || lower.contains("not enough credits")
+        || lower.contains("credits exhausted")
+        || lower.contains("out of credits")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_failed(reason: &str) -> LlmError {
+        LlmError::RequestFailed {
+            provider: "test_provider".to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    #[test]
+    fn is_credit_exhaustion_error_matches_all_trigger_phrases() {
+        let phrases = [
+            "HTTP 402",
+            "402 Payment Required",
+            "Payment Required",
+            "insufficient credit",
+            "insufficient credits",
+            "not enough credit",
+            "not enough credits",
+            "credits exhausted",
+            "out of credits",
+        ];
+        for phrase in &phrases {
+            let err = request_failed(&format!("error: {phrase}: some detail"));
+            assert!(
+                is_credit_exhaustion_error(&err),
+                "should match phrase: {phrase}"
+            );
+        }
+        // Case-insensitive
+        let err = request_failed("HTTP 402 payment required");
+        assert!(is_credit_exhaustion_error(&err), "should match lowercase");
+    }
+
+    #[test]
+    fn is_credit_exhaustion_error_returns_false_for_non_request_failed_variants() {
+        let non_request_failed = [
+            LlmError::ContextLengthExceeded {
+                used: 1000,
+                limit: 500,
+            },
+            LlmError::ModelNotAvailable {
+                provider: "p".to_string(),
+                model: "m".to_string(),
+            },
+            LlmError::AuthFailed {
+                provider: "p".to_string(),
+            },
+            LlmError::SessionExpired {
+                provider: "p".to_string(),
+            },
+        ];
+        for err in &non_request_failed {
+            assert!(
+                !is_credit_exhaustion_error(err),
+                "should not match: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_credit_exhaustion_error_returns_false_for_non_matching_request_failed() {
+        let err = request_failed("Internal server error");
+        assert!(!is_credit_exhaustion_error(&err));
+
+        let err = request_failed("rate limit exceeded");
+        assert!(!is_credit_exhaustion_error(&err));
     }
 }

@@ -11,7 +11,11 @@
 
 ## What This Crate Owns
 
-- MCP runtime lane with fail-closed process policy and host-mediated HTTP integration.
+- The Reborn MCP runtime lane (fail-closed process policy, host-mediated egress), currently:
+- Runtime + executor: `McpRuntime`, the `McpExecutor` trait, and `McpRuntimeConfig`.
+- Execution request/result types: `McpInvocation`, `McpExecutionRequest`, `McpExecutionResult`, `McpCapabilityResult`; `McpError`.
+- Client abstraction: the `McpClient` trait with `McpClientRequest` / `McpClientOutput` (JSON-RPC exchange).
+- Host-mediated HTTP: the `McpHostHttp` trait, `McpRuntimeHttpAdapter`, `McpHostHttpClient`, the egress planner (`McpHostHttpEgressPlanner` / `StaticMcpHostHttpEgressPlanner`, `McpHostHttpEgressPlan`/`McpHostHttpEgressPlanRequest`), and `McpHostHttpRequest`/`McpHostHttpResponse`/`McpHostHttpError`.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

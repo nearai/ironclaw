@@ -1165,3 +1165,346 @@ input_schema_ref = "schemas/github-mcp/search_issues.input.v1.json"
 output_schema_ref = "schemas/github-mcp/search_issues.output.v1.json"
 prompt_doc_ref = "prompts/github-mcp/search_issues.md"
 "#;
+
+// ─── [[hooks]] declaration section (clean-boundary DTO) ───────────────────
+//
+// `ironclaw_extensions` carries hook declarations as structurally-typed
+// `HookSectionEntryV2` payloads and never imports the hook predicate
+// vocabulary. These tests pin the parse-time structural contract; the
+// semantic projection into typed `ironclaw_hooks::HookManifestEntry` values
+// is covered by the composition-layer loader tests.
+
+fn manifest_with_hooks(hooks_toml: &str) -> String {
+    format!(
+        r#"schema_version = "reborn.extension_manifest.v2"
+id = "hookext"
+name = "hookext"
+version = "0.1.0"
+description = "hookext extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/tool.wasm"
+
+[[capabilities]]
+id = "hookext.run"
+description = "Run hookext"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/hookext/run.input.v1.json"
+output_schema_ref = "schemas/hookext/run.output.v1.json"
+prompt_doc_ref = "prompts/hookext/run.md"
+
+{hooks_toml}
+"#
+    )
+}
+
+#[test]
+fn manifest_without_hooks_has_empty_hooks_vec() {
+    let manifest = parse_manifest(WASM_MANIFEST);
+    assert!(manifest.hooks.is_empty());
+}
+
+#[test]
+fn manifest_parses_declared_hooks_as_structural_payloads() {
+    let hooks = r#"
+[[hooks]]
+id = "deny-shell"
+kind = "before_capability"
+
+[hooks.body]
+mode = "predicate"
+
+[hooks.body.spec]
+type = "deny_capability"
+reason = "shell denied"
+
+[hooks.body.spec.when]
+type = "name_equals"
+name = "shell.exec"
+"#;
+    let manifest = parse_manifest(&manifest_with_hooks(hooks));
+    assert_eq!(manifest.hooks.len(), 1);
+    let entry = &manifest.hooks[0];
+    assert_eq!(entry.local_id, "deny-shell");
+    // The raw payload retains the full body the loader will re-parse.
+    assert!(entry.raw_toml.contains("deny-shell"));
+    assert!(entry.raw_toml.contains("shell.exec"));
+}
+
+#[test]
+fn manifest_parses_multiple_hooks_in_declaration_order() {
+    let hooks = r#"
+[[hooks]]
+id = "first"
+kind = "before_capability"
+[hooks.body]
+mode = "predicate"
+[hooks.body.spec]
+type = "deny_capability"
+reason = "x"
+[hooks.body.spec.when]
+type = "always"
+
+[[hooks]]
+id = "second"
+kind = "after_capability"
+[hooks.body]
+mode = "wasm"
+export = "observe"
+"#;
+    let manifest = parse_manifest(&manifest_with_hooks(hooks));
+    assert_eq!(manifest.hooks.len(), 2);
+    assert_eq!(manifest.hooks[0].local_id, "first");
+    assert_eq!(manifest.hooks[1].local_id, "second");
+}
+
+#[test]
+fn manifest_rejects_hook_entry_without_id() {
+    let hooks = r#"
+[[hooks]]
+kind = "before_capability"
+[hooks.body]
+mode = "predicate"
+[hooks.body.spec]
+type = "deny_capability"
+reason = "x"
+[hooks.body.spec.when]
+type = "always"
+"#;
+    let err = ExtensionManifest::parse(
+        &manifest_with_hooks(hooks),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .expect_err("hook entry without id must be rejected");
+    assert!(
+        err.to_string().contains("string `id`"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn manifest_rejects_non_table_hook_entry() {
+    // A `[[hooks]]` array element that is not a TOML table (e.g. a bare
+    // string) must be rejected before any field projection.
+    let manifest = r#"schema_version = "reborn.extension_manifest.v2"
+id = "hookext"
+name = "hookext"
+version = "0.1.0"
+description = "hookext extension"
+trust = "untrusted"
+hooks = ["not-a-table"]
+
+[runtime]
+kind = "wasm"
+module = "wasm/tool.wasm"
+
+[[capabilities]]
+id = "hookext.run"
+description = "Run hookext"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/hookext/run.input.v1.json"
+output_schema_ref = "schemas/hookext/run.output.v1.json"
+prompt_doc_ref = "prompts/hookext/run.md"
+"#;
+    let err = ExtensionManifest::parse(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .expect_err("non-table hook entry must be rejected");
+    assert!(
+        err.to_string().contains("must be a TOML table"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn manifest_rejects_whitespace_only_hook_id() {
+    let hooks = r#"
+[[hooks]]
+id = "   "
+kind = "before_capability"
+[hooks.body]
+mode = "predicate"
+[hooks.body.spec]
+type = "deny_capability"
+reason = "x"
+[hooks.body.spec.when]
+type = "always"
+"#;
+    let err = ExtensionManifest::parse(
+        &manifest_with_hooks(hooks),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .expect_err("whitespace-only hook id must be rejected");
+    assert!(
+        err.to_string().contains("`id` must not be empty"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn manifest_rejects_oversized_hook_entry() {
+    // A single hook entry whose serialized body exceeds the per-entry size
+    // bound must be rejected with `HookEntryTooLarge`. Pad the reason string
+    // past MAX_HOOK_ENTRY_BYTES so the canonical re-serialization trips the
+    // size guard.
+    let padding = "x".repeat(MAX_HOOK_ENTRY_BYTES + 1);
+    let hooks = format!(
+        r#"
+[[hooks]]
+id = "too-big"
+kind = "before_capability"
+[hooks.body]
+mode = "predicate"
+[hooks.body.spec]
+type = "deny_capability"
+reason = "{padding}"
+[hooks.body.spec.when]
+type = "always"
+"#
+    );
+    let err = ExtensionManifest::parse(
+        &manifest_with_hooks(&hooks),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .expect_err("oversized hook entry must be rejected");
+    assert!(
+        err.to_string().contains("exceeding the per-entry maximum"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn manifest_rejects_duplicate_hook_ids() {
+    let hooks = r#"
+[[hooks]]
+id = "dup"
+kind = "before_capability"
+[hooks.body]
+mode = "predicate"
+[hooks.body.spec]
+type = "deny_capability"
+reason = "x"
+[hooks.body.spec.when]
+type = "always"
+
+[[hooks]]
+id = "dup"
+kind = "after_capability"
+[hooks.body]
+mode = "wasm"
+export = "observe"
+"#;
+    let err = ExtensionManifest::parse(
+        &manifest_with_hooks(hooks),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .expect_err("duplicate hook ids must be rejected");
+    assert!(
+        err.to_string().contains("duplicate hook id"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn manifest_rejects_too_many_hooks() {
+    let mut hooks = String::new();
+    for i in 0..(MAX_MANIFEST_HOOKS + 1) {
+        hooks.push_str(&format!(
+            r#"
+[[hooks]]
+id = "h-{i}"
+kind = "before_capability"
+[hooks.body]
+mode = "predicate"
+[hooks.body.spec]
+type = "deny_capability"
+reason = "x"
+[hooks.body.spec.when]
+type = "always"
+"#
+        ));
+    }
+    let err = ExtensionManifest::parse(
+        &manifest_with_hooks(&hooks),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .expect_err("over-cap hook count must be rejected");
+    assert!(
+        err.to_string().contains("exceeding the maximum"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn manifest_with_exactly_max_hooks_is_accepted() {
+    // Boundary partner to `manifest_rejects_too_many_hooks`: exactly
+    // `MAX_MANIFEST_HOOKS` entries must be ACCEPTED. The cap is enforced with
+    // `>` (count > MAX rejects), so 32 entries is legal. An off-by-one switch
+    // to `>=` would reject 32 here while `manifest_rejects_too_many_hooks`
+    // (which tests 33) would still pass — only this test catches that flip.
+    let mut hooks = String::new();
+    for i in 0..MAX_MANIFEST_HOOKS {
+        hooks.push_str(&format!(
+            r#"
+[[hooks]]
+id = "h-{i}"
+kind = "before_capability"
+[hooks.body]
+mode = "predicate"
+[hooks.body.spec]
+type = "deny_capability"
+reason = "x"
+[hooks.body.spec.when]
+type = "always"
+"#
+        ));
+    }
+    let manifest = ExtensionManifest::parse(
+        &manifest_with_hooks(&hooks),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .expect("exactly MAX_MANIFEST_HOOKS entries must be accepted");
+    assert_eq!(manifest.hooks.len(), MAX_MANIFEST_HOOKS);
+}
+
+#[test]
+fn manifest_hooks_survive_v2_to_v1_projection() {
+    // The projected `ExtensionManifest` (consumed by the composition loader)
+    // must carry the same hook entries the v2 parser produced.
+    let hooks = r#"
+[[hooks]]
+id = "carry-through"
+kind = "before_capability"
+[hooks.body]
+mode = "predicate"
+[hooks.body.spec]
+type = "deny_capability"
+reason = "x"
+[hooks.body.spec.when]
+type = "always"
+"#;
+    let v2 = ExtensionManifestV2::parse(
+        &manifest_with_hooks(hooks),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    assert_eq!(v2.hooks.len(), 1);
+    let v1: ExtensionManifest = parse_manifest(&manifest_with_hooks(hooks));
+    assert_eq!(v1.hooks.len(), 1);
+    assert_eq!(v1.hooks[0].local_id, "carry-through");
+}

@@ -1,4 +1,4 @@
-use crate::state::{IndexedMessageKind, LoopExecutionState};
+use crate::state::{IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
 use ironclaw_turns::run_profile::LoopRunContext;
 
 /// Decides whether to replace older transcript context with a host-managed summary.
@@ -76,16 +76,14 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         if !state.compaction_state.force_compact_on_next_iteration && total_tokens < threshold {
             return CompactionDecision::Skip;
         }
+        let prompt_fingerprint = state.compaction_prompt.fingerprint();
         if state.compaction_state.force_compact_on_next_iteration {
             return state
                 .compaction_prompt
                 .message_index
                 .iter()
                 .rev()
-                .find(|entry| {
-                    entry.kind == IndexedMessageKind::User
-                        && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
-                })
+                .find(|entry| is_eligible_user_boundary(entry, state, prompt_fingerprint))
                 .map(|entry| CompactionDecision::Trigger {
                     drop_through_seq: entry.sequence,
                     preserve_tail_tokens: self.preserve_tail_tokens,
@@ -96,8 +94,7 @@ impl CompactionStrategy for DefaultCompactionStrategy {
 
         let mut tail_tokens = 0_u64;
         for entry in state.compaction_prompt.message_index.iter().rev() {
-            if entry.kind == IndexedMessageKind::User
-                && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
+            if is_eligible_user_boundary(entry, state, prompt_fingerprint)
                 && tail_tokens >= self.preserve_tail_tokens
             {
                 return CompactionDecision::Trigger {
@@ -112,11 +109,29 @@ impl CompactionStrategy for DefaultCompactionStrategy {
     }
 }
 
+fn is_eligible_user_boundary(
+    entry: &MessageIndexEntry,
+    state: &LoopExecutionState,
+    prompt_fingerprint: u64,
+) -> bool {
+    let matches_deferred_boundary = state
+        .compaction_state
+        .last_deferred
+        .is_some_and(|watermark| {
+            watermark.through_seq == entry.sequence
+                && watermark.prompt_fingerprint == prompt_fingerprint
+        });
+    entry.kind == IndexedMessageKind::User
+        && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
+        && !matches_deferred_boundary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::{
-        CompactionPromptSnapshot, CompactionStrategyState, LoopExecutionState, MessageIndexEntry,
+        CompactionPromptSnapshot, CompactionStrategyState, DeferredCompactionWatermark,
+        LoopExecutionState, MessageIndexEntry,
     };
 
     #[test]
@@ -310,6 +325,231 @@ mod tests {
         assert_eq!(
             strategy.should_compact(&state, &context),
             CompactionDecision::Skip
+        );
+    }
+
+    #[test]
+    fn evaluate_skips_previously_deferred_boundary_when_forced() {
+        let context = crate::test_support::test_run_context("compaction-strategy-deferred");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.force_compact_on_next_iteration = true;
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+        ]);
+        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+            through_seq: 3,
+            prompt_fingerprint: state.compaction_prompt.fingerprint(),
+        });
+        let strategy = DefaultCompactionStrategy {
+            context_limit_tokens: 100,
+            reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
+            preserve_tail_tokens: 1,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 1,
+                preserve_tail_tokens: 1,
+                deadline_ms: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn evaluate_skips_deferred_boundary_in_threshold_overflow_path() {
+        let context =
+            crate::test_support::test_run_context("compaction-strategy-deferred-threshold");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 50,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 50,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 50,
+            },
+            MessageIndexEntry {
+                sequence: 4,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 50,
+            },
+        ]);
+        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+            through_seq: 3,
+            prompt_fingerprint: state.compaction_prompt.fingerprint(),
+        });
+        let strategy = DefaultCompactionStrategy {
+            context_limit_tokens: 100,
+            reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
+            preserve_tail_tokens: 60,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 1,
+                preserve_tail_tokens: 60,
+                deadline_ms: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn evaluate_skips_when_only_deferred_boundary_is_eligible_in_threshold_overflow_path() {
+        let context = crate::test_support::test_run_context("compaction-strategy-deferred-skip");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 50,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 50,
+            },
+        ]);
+        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: state.compaction_prompt.fingerprint(),
+        });
+        let strategy = DefaultCompactionStrategy {
+            context_limit_tokens: 100,
+            reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
+            preserve_tail_tokens: 60,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Skip
+        );
+    }
+
+    #[test]
+    fn evaluate_retries_deferred_boundary_after_prompt_snapshot_changes() {
+        let context = crate::test_support::test_run_context("compaction-strategy-deferred-changed");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+            through_seq: 3,
+            prompt_fingerprint: 42,
+        });
+        state.compaction_state.force_compact_on_next_iteration = true;
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+        ]);
+        let strategy = DefaultCompactionStrategy {
+            context_limit_tokens: 100,
+            reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
+            preserve_tail_tokens: 1,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 3,
+                preserve_tail_tokens: 1,
+                deadline_ms: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn evaluate_retries_after_transcript_advances_past_deferred_boundary() {
+        let context = crate::test_support::test_run_context("compaction-strategy-deferred-newer");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.force_compact_on_next_iteration = true;
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 4,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 5,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+        ]);
+        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+            through_seq: 3,
+            prompt_fingerprint: state.compaction_prompt.fingerprint(),
+        });
+        let strategy = DefaultCompactionStrategy {
+            context_limit_tokens: 100,
+            reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
+            preserve_tail_tokens: 1,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 5,
+                preserve_tail_tokens: 1,
+                deadline_ms: 7,
+            }
         );
     }
 

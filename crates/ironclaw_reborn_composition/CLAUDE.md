@@ -167,6 +167,23 @@ Reborn-native product-auth surface:
 rate-limit middlewares consume so the two enforcers cannot drift on
 which request belongs to which descriptor.
 
+### Extension pairing routes
+
+When Slack host-beta personal binding is configured, `webui_v2_app`
+mounts `POST /api/webchat/v2/extensions/pairing/redeem` inside the same
+bearer-auth layer as the native WebUI v2 extension routes. The request
+body carries `{ channel, code }`; the route validates the channel server-side
+and currently resolves the supported Slack channel aliases to the Slack
+personal-binding pairing service. The browser must not call provider-specific
+pairing paths directly.
+
+When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
+`GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` inside the same bearer
+auth layer. The browser supplies only `channel_id` and `subject_user_id`;
+tenant, adapter installation, and Slack team come from host configuration. The
+route writes to Slack host state so runtime assignments are durable and are
+resolved before static TOML `channel_routes` fallback.
+
 ### Host-supplied public route mount (#4116 — SSO login surface)
 
 `WebuiServeConfig::with_public_route_mount(PublicRouteMount)`
@@ -248,6 +265,7 @@ rows are inventoried here, not implemented in the current PR.
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
 | Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup projects credential requirements and product-auth OAuth start is mounted under the extension setup surface |
+| LLM provider config | v1 settings/provider config surface | `GET /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers/{provider_id}/delete`, `POST /api/webchat/v2/llm/active`, `POST /api/webchat/v2/llm/{test-connection,list-models}` | Mapped for trusted operator-token deployments; left unmounted for multi-user authenticators until an admin role boundary exists |
 | SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row
@@ -256,6 +274,12 @@ rows are inventoried here, not implemented in the current PR.
   `auth_middleware`. The Reborn binary owns its own
   `WebuiAuthenticator` impl (env tokens, DB-backed sessions, OIDC,
   whatever the host wires) and supplies it via `WebuiServeConfig`.
+- **Operator WebUI config** — the `/api/webchat/v2/llm/*` routes and
+  Slack channel-route admin mutate operator-wide provider settings,
+  secrets, or channel ownership. `webui_v2_app` only mounts them when
+  the host authenticator opts into `allows_operator_webui_config`;
+  multi-user authenticators must leave them unmounted until a real admin
+  authorization boundary exists.
 - **`?token=` exception** — only `GET /api/webchat/v2/threads/{id}/events`;
   any other v2 route receiving a `?token=` query parameter ignores it
   and falls through to bearer-header check (so a stale referer link

@@ -19,20 +19,20 @@ use ironclaw_turns::{
         CancellationPolicy, CapabilityBatchInvocation, CapabilityBatchOutcome,
         CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
         CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilityResultMessage, CapabilitySurfaceProfileId, CapabilitySurfaceVersion,
-        CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContextProfileId,
-        FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionRequest,
-        LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata,
-        LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
-        LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
-        ParentLoopOutput, ProviderToolCallReference, RedactedRunProfileProvenance,
-        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
-        RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
-        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        CapabilityProgress, CapabilityResultMessage, CapabilitySurfaceProfileId,
+        CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
+        ConcurrencyHint, ContextProfileId, FinalizeAssistantMessage, LoopCancellationPort,
+        LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef,
+        LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest, LoopCompactionResponse,
+        LoopContextBundle, LoopContextCompactionMetadata, LoopContextRequest, LoopDriverId,
+        LoopInput, LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+        LoopInputCursorToken, LoopModelMessage, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
+        LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk, ParentLoopOutput,
+        ProviderToolCallReference, RedactedRunProfileProvenance, ResolvedRunProfile,
+        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -56,8 +56,9 @@ pub struct MockAgentLoopDriverHost {
     staged_iterations: Mutex<VecDeque<u32>>,
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
-    compaction_result: Mutex<Result<LoopCompactionResponse, LoopCompactionError>>,
+    compaction_result: Mutex<Result<LoopCompactionOutcome, LoopCompactionError>>,
     progress_events: Mutex<Vec<LoopProgressEvent>>,
+    prompt_requests: Mutex<Vec<LoopPromptBundleRequest>>,
     acked_tokens: Mutex<Vec<LoopInputAckToken>>,
     finalized_assistant_messages: Mutex<Vec<String>>,
     cancellation: Mutex<Option<LoopCancellationSignal>>,
@@ -93,6 +94,11 @@ impl MockAgentLoopDriverHost {
         clone_mutex_vec(&self.progress_events)
     }
 
+    /// Returns prompt bundle requests captured so far.
+    pub fn prompt_requests(&self) -> Vec<LoopPromptBundleRequest> {
+        clone_mutex_vec(&self.prompt_requests)
+    }
+
     /// Returns finalized assistant message contents in call order.
     pub fn finalized_assistant_messages(&self) -> Vec<String> {
         clone_mutex_vec(&self.finalized_assistant_messages)
@@ -117,7 +123,7 @@ pub struct MockAgentLoopDriverHostBuilder {
     prompt_compaction_indexes: VecDeque<Vec<LoopContextCompactionMetadata>>,
     fail_prompt_with: Option<AgentLoopHostErrorKind>,
     fail_model_with: Option<AgentLoopHostErrorKind>,
-    compaction_result: Result<LoopCompactionResponse, LoopCompactionError>,
+    compaction_result: Result<LoopCompactionOutcome, LoopCompactionError>,
     cancellation: Option<LoopCancellationSignal>,
 }
 
@@ -189,7 +195,16 @@ impl MockAgentLoopDriverHostBuilder {
         mut self,
         result: Result<LoopCompactionResponse, LoopCompactionError>,
     ) -> Self {
-        self.compaction_result = result;
+        self.compaction_result = result.map(LoopCompactionOutcome::Compacted);
+        self
+    }
+
+    /// Sets the full outcome returned by the host compaction port.
+    pub fn compaction_outcome(
+        mut self,
+        outcome: Result<LoopCompactionOutcome, LoopCompactionError>,
+    ) -> Self {
+        self.compaction_result = outcome;
         self
     }
 
@@ -215,6 +230,7 @@ impl MockAgentLoopDriverHostBuilder {
                 fail_model_with: Mutex::new(self.fail_model_with),
                 compaction_result: Mutex::new(self.compaction_result),
                 progress_events: Mutex::new(Vec::new()),
+                prompt_requests: Mutex::new(Vec::new()),
                 acked_tokens: Mutex::new(Vec::new()),
                 finalized_assistant_messages: Mutex::new(Vec::new()),
                 cancellation: Mutex::new(self.cancellation),
@@ -432,6 +448,8 @@ pub enum ScriptedCapabilityOutcome {
     Completed {
         /// Result ref.
         result_ref: String,
+        /// Whether this result advanced host evidence/state.
+        progress: CapabilityProgress,
         /// Whether this result should naturally end the loop.
         terminate_hint: bool,
     },
@@ -476,6 +494,25 @@ impl ScriptedCapabilityOutcome {
     pub fn completed(result_ref: impl Into<String>) -> Self {
         Self::Completed {
             result_ref: result_ref.into(),
+            progress: CapabilityProgress::MadeProgress,
+            terminate_hint: false,
+        }
+    }
+
+    /// Creates a completed outcome whose typed progress reports no change.
+    pub fn completed_no_change(result_ref: impl Into<String>) -> Self {
+        Self::Completed {
+            result_ref: result_ref.into(),
+            progress: CapabilityProgress::NoChange,
+            terminate_hint: false,
+        }
+    }
+
+    /// Creates a completed outcome whose typed progress reports a blocker.
+    pub fn completed_blocked(result_ref: impl Into<String>) -> Self {
+        Self::Completed {
+            result_ref: result_ref.into(),
+            progress: CapabilityProgress::Blocked,
             terminate_hint: false,
         }
     }
@@ -484,6 +521,7 @@ impl ScriptedCapabilityOutcome {
     pub fn completed_with_terminate_hint(result_ref: impl Into<String>) -> Self {
         Self::Completed {
             result_ref: result_ref.into(),
+            progress: CapabilityProgress::MadeProgress,
             terminate_hint: true,
         }
     }
@@ -612,9 +650,10 @@ impl ironclaw_turns::run_profile::LoopContextPort for MockAgentLoopDriverHost {
 impl ironclaw_turns::run_profile::LoopPromptPort for MockAgentLoopDriverHost {
     async fn build_prompt_bundle(
         &self,
-        _request: LoopPromptBundleRequest,
+        request: LoopPromptBundleRequest,
     ) -> Result<LoopPromptBundle, AgentLoopHostError> {
         self.record_call(MockHostCall::BuildPromptBundle);
+        lock_or_panic(&self.prompt_requests).push(request);
         if let Some(kind) = *lock_or_panic(&self.fail_prompt_with) {
             return Err(AgentLoopHostError::new(kind, "scripted prompt failure"));
         }
@@ -824,7 +863,7 @@ impl ironclaw_turns::run_profile::LoopCompactionPort for MockAgentLoopDriverHost
     async fn compact_loop_context(
         &self,
         _request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
         lock_or_panic(&self.compaction_result).clone()
     }
 }
@@ -996,11 +1035,13 @@ fn scripted_capability_outcome(
     match outcome {
         ScriptedCapabilityOutcome::Completed {
             result_ref,
+            progress,
             terminate_hint,
         } => Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
             result_ref: LoopResultRef::new(result_ref)
                 .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
             safe_summary: "completed".to_string(),
+            progress,
             terminate_hint,
         })),
         ScriptedCapabilityOutcome::ApprovalRequired { gate_ref } => {

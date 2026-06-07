@@ -91,6 +91,7 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
             result_ref,
             safe_summary: format!("activated {} skill(s)", activated.len()),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
         }))
     }

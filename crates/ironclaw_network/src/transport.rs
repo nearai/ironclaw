@@ -229,21 +229,42 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
             let current_len = body.len() as u64;
             let remaining = limit.saturating_sub(current_len);
             if chunk.len() as u64 > remaining {
-                let take = remaining.saturating_add(1) as usize;
+                let take = remaining as usize;
                 body.extend_from_slice(&chunk[..take.min(chunk.len())]);
                 return Err(NetworkHttpError::ResponseBodyLimit {
                     limit,
                     request_bytes,
-                    response_bytes: body.len() as u64,
+                    response_bytes: limit.saturating_add(1),
+                    partial_response: Some(NetworkHttpResponse {
+                        status,
+                        headers,
+                        body,
+                        usage: NetworkUsage {
+                            request_bytes,
+                            response_bytes: limit.saturating_add(1),
+                            resolved_ip: request.resolved_ips.first().copied(),
+                        },
+                    }),
                 });
             }
             body.extend_from_slice(&chunk);
             let response_bytes = body.len() as u64;
             if response_bytes > limit {
+                body.truncate(limit as usize);
                 return Err(NetworkHttpError::ResponseBodyLimit {
                     limit,
                     request_bytes,
                     response_bytes,
+                    partial_response: Some(NetworkHttpResponse {
+                        status,
+                        headers,
+                        body,
+                        usage: NetworkUsage {
+                            request_bytes,
+                            response_bytes,
+                            resolved_ip: request.resolved_ips.first().copied(),
+                        },
+                    }),
                 });
             }
         }

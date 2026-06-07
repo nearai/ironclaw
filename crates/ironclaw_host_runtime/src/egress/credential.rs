@@ -23,11 +23,11 @@ enum CredentialCacheKey {
 
 struct CredentialCacheEntry {
     key: CredentialCacheKey,
-    /// Leased secret material kept inside `SecretString` so the bytes are
-    /// zeroized when this entry — and its enclosing `Vec` — is dropped at
-    /// the end of the egress call. Holding plaintext as `String` here
-    /// instead would leave the leased credential on the heap for the
-    /// duration of the request, defeating `SecretMaterial::ZeroizeOnDrop`.
+    /// Resolved secret material kept inside `SecretString` so the bytes are
+    /// zeroized when this entry, and its enclosing `Vec`, are dropped at the
+    /// end of the egress call. Holding plaintext as `String` here instead
+    /// would leave the credential on the heap for the duration of the request,
+    /// defeating `SecretMaterial::ZeroizeOnDrop`.
     value: Option<SecretMaterial>,
 }
 
@@ -234,7 +234,7 @@ fn staged_secret_for_injection(
     let Some(secret_injections) = secret_injections else {
         return missing_runtime_credential(injection.required);
     };
-    match secret_injections.get(&request.scope, capability_id, &injection.handle) {
+    match secret_injections.take(&request.scope, capability_id, &injection.handle) {
         Ok(Some(material)) => Ok(Some(material)),
         Ok(None) => missing_runtime_credential(injection.required),
         Err(_) => Err(RuntimeHttpEgressError::Credential {
