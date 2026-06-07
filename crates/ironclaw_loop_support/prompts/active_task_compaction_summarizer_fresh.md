@@ -10,10 +10,12 @@ Use this exact section structure:
 
 ## Active Task
 Capture the most recent request or question that the compacted slice itself
-shows is still unfulfilled. Quote the user's wording when possible. If no active
-task is evident in the compacted slice, write "None." If the latest user message
-cancels, corrects, redirects, or supersedes earlier work, record that reversal
-explicitly and do not carry the cancelled work forward as active.
+shows is still unfulfilled. Quote the user's wording when possible. Do not mark
+the final user message in the compacted slice active merely because no answer
+appears before the slice ends; the answer may be preserved in the live tail
+outside this summary. If the latest user message cancels, corrects, redirects,
+or supersedes earlier work, record that reversal explicitly and do not carry the
+cancelled work forward as active.
 
 ## Goal
 State the user's overall goal in concrete terms.

@@ -61,6 +61,7 @@ pub use capability_surface_filter::{
 };
 pub use compaction_task::{
     HostManagedLoopCompactionPort, default_host_managed_loop_compaction_port,
+    host_managed_loop_compaction_port_with_prompt_id,
 };
 pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};

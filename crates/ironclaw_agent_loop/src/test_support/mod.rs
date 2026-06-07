@@ -36,6 +36,10 @@ use ironclaw_turns::{
     },
 };
 
+mod compaction;
+
+pub use compaction::{active_task_preserving_compaction_index, compaction_metadata};
+
 use crate::state::{
     CapabilityCallSignature, CheckpointKind, LoopExecutionState, RecoveryAttemptClass,
     RecoveryStrategyState,
