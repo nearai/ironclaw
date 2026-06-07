@@ -2072,10 +2072,10 @@ mod tests {
         ) -> Result<RecordVersion, FilesystemError> {
             if is_replace_lock_path(path) {
                 self.lock_puts.fetch_add(1, Ordering::SeqCst);
-            } else if is_channel_route_record_path(path) {
-                if let Some(delay) = self.route_write_delay {
-                    tokio::time::sleep(delay).await;
-                }
+            } else if is_channel_route_record_path(path)
+                && let Some(delay) = self.route_write_delay
+            {
+                tokio::time::sleep(delay).await;
             }
             self.inner.put(path, entry, cas).await
         }
