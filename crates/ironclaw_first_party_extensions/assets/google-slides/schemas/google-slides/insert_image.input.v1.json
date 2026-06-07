@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Slides insert_image",
+  "description": "Insert an image on a slide.",
+  "type": "object",
+  "required": [
+    "presentation_id",
+    "slide_object_id",
+    "image_url",
+    "x",
+    "y",
+    "width",
+    "height"
+  ],
+  "properties": {
+    "presentation_id": {
+      "type": "string",
+      "description": "The presentation ID."
+    },
+    "slide_object_id": {
+      "type": "string",
+      "description": "Slide object ID."
+    },
+    "image_url": {
+      "type": "string",
+      "description": "Public image URL."
+    },
+    "x": {
+      "type": "number",
+      "description": "X position in points."
+    },
+    "y": {
+      "type": "number",
+      "description": "Y position in points."
+    },
+    "width": {
+      "type": "number",
+      "description": "Width in points."
+    },
+    "height": {
+      "type": "number",
+      "description": "Height in points."
+    }
+  },
+  "additionalProperties": false
+}

@@ -104,10 +104,50 @@ pub struct RegistryProviderConfig {
     pub unsupported_params: Vec<String>,
 }
 
+impl RegistryProviderConfig {
+    /// Build a generic registry provider config with provider-specific
+    /// optional knobs left at their neutral defaults.
+    pub fn generic(
+        protocol: ProviderProtocol,
+        provider_id: impl Into<String>,
+        api_key: Option<SecretString>,
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            protocol,
+            provider_id: provider_id.into(),
+            api_key,
+            base_url: base_url.into(),
+            model: model.into(),
+            extra_headers: Vec::new(),
+            oauth_token: None,
+            is_codex_chatgpt: false,
+            refresh_token: None,
+            auth_path: None,
+            cache_retention: CacheRetention::None,
+            unsupported_params: Vec::new(),
+        }
+    }
+
+    pub fn with_extra_headers(mut self, extra_headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = extra_headers;
+        self
+    }
+
+    pub fn with_unsupported_params(mut self, unsupported_params: Vec<String>) -> Self {
+        self.unsupported_params = unsupported_params;
+        self
+    }
+}
+
 /// Configuration for OpenAI Codex (ChatGPT subscription OAuth).
 #[derive(Debug, Clone)]
 pub struct OpenAiCodexConfig {
-    /// Model to use (default: "gpt-5.3-codex").
+    /// Model to use (default: "gpt-5.5"). Must be a model the ChatGPT account
+    /// is entitled to: codex-only slugs like `gpt-5.3-codex` work with an
+    /// API-key Codex account but the subscription backend rejects them with
+    /// HTTP 400, and this provider is subscription-only.
     pub model: String,
     /// OAuth authorization server (default: "https://auth.openai.com").
     pub auth_endpoint: String,
@@ -124,7 +164,7 @@ pub struct OpenAiCodexConfig {
 impl Default for OpenAiCodexConfig {
     fn default() -> Self {
         Self {
-            model: "gpt-5.3-codex".to_string(),
+            model: "gpt-5.5".to_string(),
             auth_endpoint: "https://auth.openai.com".to_string(),
             api_base_url: "https://chatgpt.com/backend-api/codex".to_string(),
             client_id: "app_EMoamEEZ73f0CkXaXp7hrann".to_string(),
@@ -273,7 +313,48 @@ pub struct LlmConfig {
     pub response_cache_max_entries: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmBackendKind {
+    NearAi,
+    Bedrock,
+    GeminiOauth,
+    OpenAiCodex,
+    Registry(String),
+}
+
+impl LlmBackendKind {
+    pub fn from_backend_id(backend: &str) -> Self {
+        match backend {
+            "nearai" | "near_ai" | "near" => Self::NearAi,
+            "bedrock" | "aws_bedrock" | "aws" => Self::Bedrock,
+            "gemini_oauth" | "gemini-oauth" => Self::GeminiOauth,
+            "openai_codex" | "openai-codex" | "codex" => Self::OpenAiCodex,
+            other => Self::Registry(other.to_string()),
+        }
+    }
+
+    pub fn provider_id(&self, registry_provider: Option<&RegistryProviderConfig>) -> String {
+        match self {
+            Self::NearAi => "nearai".to_string(),
+            Self::Bedrock => "bedrock".to_string(),
+            Self::GeminiOauth => "gemini_oauth".to_string(),
+            Self::OpenAiCodex => "openai_codex".to_string(),
+            Self::Registry(backend) => registry_provider
+                .map(|provider| provider.provider_id.clone())
+                .unwrap_or_else(|| backend.clone()),
+        }
+    }
+}
+
 impl LlmConfig {
+    pub fn backend_kind(&self) -> LlmBackendKind {
+        LlmBackendKind::from_backend_id(&self.backend)
+    }
+
+    pub fn active_provider_id(&self) -> String {
+        self.backend_kind().provider_id(self.provider.as_ref())
+    }
+
     /// Resolve the effective cheap model name.
     ///
     /// Resolution order:
@@ -312,7 +393,7 @@ impl LlmConfig {
                 .openai_codex
                 .as_ref()
                 .map(|cfg| cfg.model.clone())
-                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
+                .unwrap_or_else(|| "gpt-5.5".to_string()),
             _ => self
                 .provider
                 .as_ref()

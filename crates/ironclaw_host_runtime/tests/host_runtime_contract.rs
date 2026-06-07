@@ -1,30 +1,52 @@
-use std::sync::{Arc, Mutex};
+mod support;
+
+use support::legacy_capability_fixture_to_v2;
+
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::{
     GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource, SharedExtensionRegistry,
+};
+use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, DefaultHostRuntime,
-    HostRuntime, HostRuntimeError, IdempotencyKey, RuntimeBackendHealth, RuntimeCapabilityRequest,
-    RuntimeStatusRequest, RuntimeWorkId, SurfaceKind, VisibleCapabilityRequest,
+    CancelReason, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
+    DefaultHostRuntime, HostRuntime, HostRuntimeError, IdempotencyKey, RuntimeBackendHealth,
+    RuntimeCapabilityRequest, RuntimeStatusRequest, RuntimeWorkId, SurfaceKind,
+    VisibleCapabilityRequest,
 };
 use ironclaw_processes::{
-    InMemoryProcessResultStore, InMemoryProcessStore, ProcessCancellationRegistry,
-    ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
+    InMemoryProcessResultStore, InMemoryProcessStore, ProcessCancellationRegistry, ProcessError,
+    ProcessRecord, ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
-    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunRecord, RunStart, RunStateError,
-    RunStateStore,
+    ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
+    RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
 use serde_json::json;
+
+fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+    ))
+    .unwrap()
+}
 
 #[test]
 fn bounded_contract_strings_share_validation_semantics() {
@@ -58,6 +80,7 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
     .with_run_state(run_state.clone())
@@ -100,6 +123,7 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone())
     .with_approval_requests(approval_requests.clone())
@@ -131,6 +155,65 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
 }
 
 #[tokio::test]
+async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(ApprovalAuthorizer);
+    let combined_store = Arc::new(RecordingCombinedRunStateApprovalStore::new());
+    let leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
+        Arc::new(InMemoryCapabilityLeaseStore::new());
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_run_state_approval_store(combined_store.clone())
+    .with_capability_leases(leases);
+
+    let context = execution_context_with_dispatch_grant();
+    let request = RuntimeCapabilityRequest::new(
+        context.clone(),
+        capability_id(),
+        ResourceEstimate::default(),
+        json!({"message": "hello"}),
+        trust_decision_with_dispatch_authority(),
+    );
+
+    let outcome = runtime.invoke_capability(request).await.unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
+            assert_eq!(gate.capability_id, capability_id());
+            assert_eq!(combined_store.combined_calls(), 1);
+            assert_eq!(combined_store.separate_save_calls(), 0);
+            let record = RunStateStore::get(
+                combined_store.as_ref(),
+                &context.resource_scope,
+                context.invocation_id,
+            )
+            .await
+            .unwrap()
+            .expect("run record persisted");
+            assert_eq!(record.approval_request_id, Some(gate.approval_request_id));
+            assert!(
+                ApprovalRequestStore::get(
+                    combined_store.as_ref(),
+                    &context.resource_scope,
+                    gate.approval_request_id,
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+        }
+        other => panic!("expected ApprovalRequired outcome, got {:?}", other),
+    }
+}
+
+#[tokio::test]
 async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_during_approval() {
     // Regression: an earlier implementation swallowed `RunStateError` from
     // the approval-request lookup via `.ok().flatten()`, which masked storage
@@ -154,6 +237,7 @@ async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_duri
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state)
     .with_approval_requests(approval_requests)
@@ -193,6 +277,7 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
 
@@ -245,6 +330,7 @@ async fn default_runtime_surfaces_authorization_failure_when_authorizer_denies()
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let context = execution_context_with_dispatch_grant();
@@ -286,6 +372,7 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()));
 
@@ -332,6 +419,7 @@ async fn default_runtime_status_returns_default_when_no_run_state_attached() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let context = execution_context_with_dispatch_grant();
@@ -361,6 +449,7 @@ async fn default_runtime_status_propagates_unavailable_on_run_state_error() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state);
 
@@ -386,6 +475,44 @@ async fn default_runtime_status_propagates_unavailable_on_run_state_error() {
 }
 
 #[tokio::test]
+async fn default_runtime_status_redacts_process_filesystem_errors() {
+    let registry = Arc::new(ExtensionRegistry::new());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let process_store: Arc<dyn ProcessStore> = Arc::new(FailingRecordsProcessStore {
+        inner: Arc::new(InMemoryProcessStore::new()),
+    });
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_process_store(process_store);
+
+    let context = execution_context_with_dispatch_grant();
+    let error = runtime
+        .runtime_status(RuntimeStatusRequest::new(
+            context.resource_scope,
+            context.correlation_id,
+        ))
+        .await
+        .expect_err("process records_for_scope outage must surface as host runtime error");
+
+    match error {
+        HostRuntimeError::Unavailable { reason } => {
+            assert!(
+                !reason.contains("/tmp"),
+                "sanitized reason must not leak filesystem paths, got {reason:?}"
+            );
+            assert_eq!(reason, "process filesystem unavailable");
+        }
+        other => panic!("expected HostRuntimeError::Unavailable, got {:?}", other),
+    }
+}
+
+#[tokio::test]
 async fn default_runtime_status_filters_to_running_records_only() {
     // Pins the filter: completed/failed/blocked records must not appear in
     // active_work. Surfacing terminal records as "active" would mislead
@@ -400,6 +527,7 @@ async fn default_runtime_status_filters_to_running_records_only() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
 
@@ -449,8 +577,8 @@ async fn default_runtime_status_filters_to_running_records_only() {
 
 #[tokio::test]
 async fn default_runtime_visible_capabilities_returns_empty_descriptors_for_empty_registry() {
-    // Pins the empty-registry path: the surface still carries the
-    // configured version so callers can cache against it.
+    // Pins the empty-registry path: the surface still carries a deterministic
+    // version derived from the configured base version and request policy.
     let registry = Arc::new(ExtensionRegistry::new());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
@@ -459,20 +587,21 @@ async fn default_runtime_visible_capabilities_returns_empty_descriptors_for_empt
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let context = execution_context_with_dispatch_grant();
     let surface = runtime
         .visible_capabilities(VisibleCapabilityRequest::new(
-            context.resource_scope,
-            context.correlation_id,
+            context,
             SurfaceKind::new("agent_loop").unwrap(),
         ))
         .await
         .unwrap();
 
-    assert_eq!(surface.version.as_str(), "surface-v1");
-    assert!(surface.descriptors.is_empty());
+    assert_ne!(surface.version.as_str(), "surface-v1");
+    assert!(surface.version.as_str().starts_with("sha256:"));
+    assert!(surface.capabilities.is_empty());
 }
 
 #[tokio::test]
@@ -485,21 +614,71 @@ async fn default_runtime_returns_versioned_visible_surface_with_registry_descrip
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    );
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()));
 
     let context = execution_context_with_dispatch_grant();
     let surface = runtime
-        .visible_capabilities(VisibleCapabilityRequest::new(
-            context.resource_scope.clone(),
-            context.correlation_id,
-            SurfaceKind::new("agent_loop").unwrap(),
-        ))
+        .visible_capabilities(visible_capability_request(context))
         .await
         .unwrap();
 
-    assert_eq!(surface.version.as_str(), "surface-v1");
-    assert_eq!(surface.descriptors.len(), 1);
-    assert_eq!(surface.descriptors[0].id, capability_id());
+    assert_ne!(surface.version.as_str(), "surface-v1");
+    assert!(surface.version.as_str().starts_with("sha256:"));
+    assert_eq!(surface.capabilities.len(), 1);
+    assert_eq!(surface.capabilities[0].descriptor.id, capability_id());
+}
+
+#[tokio::test]
+async fn default_runtime_visible_surface_tracks_shared_registry_mutations() {
+    let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let runtime = DefaultHostRuntime::from_shared_registry(
+        Arc::clone(&registry),
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()));
+    let empty_surface = runtime
+        .visible_capabilities(visible_capability_request(
+            execution_context_with_dispatch_grant(),
+        ))
+        .await
+        .unwrap();
+    assert!(empty_surface.capabilities.is_empty());
+
+    registry
+        .upsert(
+            registry_with_echo_capability()
+                .get_extension(&extension_id())
+                .unwrap()
+                .clone(),
+        )
+        .expect("insert visible extension");
+    let populated_surface = runtime
+        .visible_capabilities(visible_capability_request(
+            execution_context_with_dispatch_grant(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(populated_surface.capabilities.len(), 1);
+    assert_eq!(
+        populated_surface.capabilities[0].descriptor.id,
+        capability_id()
+    );
+
+    registry.remove(&extension_id());
+    let removed_surface = runtime
+        .visible_capabilities(visible_capability_request(
+            execution_context_with_dispatch_grant(),
+        ))
+        .await
+        .unwrap();
+    assert!(removed_surface.capabilities.is_empty());
 }
 
 #[tokio::test]
@@ -514,6 +693,7 @@ async fn default_runtime_status_reports_running_invocations_only() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
 
@@ -555,6 +735,7 @@ async fn default_runtime_cancel_reports_running_invocations_as_unsupported() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
 
@@ -597,6 +778,7 @@ async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_process_store(process_store.clone())
     .with_process_cancellation_registry(cancellation_registry.clone());
@@ -631,6 +813,31 @@ async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
 }
 
 #[tokio::test]
+async fn spawn_process_returns_unavailable_when_process_manager_is_none() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    );
+    let context = execution_context_with_dispatch_grant();
+
+    let error = runtime
+        .spawn_process(process_start(&context, ProcessId::new()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        HostRuntimeError::Unavailable { reason } if reason == "process manager unavailable"
+    ));
+}
+
+#[tokio::test]
 async fn default_runtime_status_includes_running_processes_from_process_store() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
@@ -641,6 +848,7 @@ async fn default_runtime_status_includes_running_processes_from_process_store() 
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_process_store(process_store.clone());
 
@@ -681,6 +889,7 @@ async fn default_runtime_cancel_writes_killed_process_result_record() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_process_store(process_store.clone())
     .with_process_result_store(result_store.clone())
@@ -727,6 +936,7 @@ async fn default_runtime_status_does_not_duplicate_process_backed_invocations() 
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone())
     .with_process_store(process_store.clone());
@@ -771,6 +981,7 @@ async fn default_runtime_health_reports_ready_when_registry_requires_no_backends
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let health = runtime.health().await.unwrap();
@@ -789,6 +1000,7 @@ async fn default_runtime_health_without_probe_reports_required_runtimes_missing(
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let health = runtime.health().await.unwrap();
@@ -807,6 +1019,7 @@ async fn default_runtime_health_uses_configured_backend_probe() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_runtime_health(Arc::new(HealthyRuntimeProbe));
 
@@ -914,6 +1127,65 @@ impl RunStateStore for FailingRecordsRunStateStore {
     }
 }
 
+/// Wraps an [`InMemoryProcessStore`] but fails every `records_for_scope` call
+/// so runtime-status exercises process-store error sanitization through the
+/// public host-runtime path.
+struct FailingRecordsProcessStore {
+    inner: Arc<InMemoryProcessStore>,
+}
+
+#[async_trait]
+impl ProcessStore for FailingRecordsProcessStore {
+    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+        self.inner.start(start).await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.inner.complete(scope, process_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.inner.fail(scope, process_id, error_kind).await
+    }
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.inner.kill(scope, process_id).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessRecord>, ProcessError> {
+        self.inner.get(scope, process_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<ProcessRecord>, ProcessError> {
+        Err(FilesystemError::Backend {
+            path: VirtualPath::new("/users/user1/processes").unwrap(),
+            operation: FilesystemOperation::ListDir,
+            reason: "simulated read failure: /tmp/processes.db connection refused".to_string(),
+        }
+        .into())
+    }
+}
+
 /// Wraps an [`InMemoryRunStateStore`] but fails every `get` call so we can
 /// exercise the approval-lookup error-propagation path. Writes pass through
 /// to the inner store so the capability host can complete its own
@@ -985,6 +1257,160 @@ impl RunStateStore for FailingGetRunStateStore {
     }
 }
 
+struct RecordingCombinedRunStateApprovalStore {
+    runs: InMemoryRunStateStore,
+    approvals: InMemoryApprovalRequestStore,
+    combined_calls: AtomicUsize,
+    separate_save_calls: AtomicUsize,
+}
+
+impl RecordingCombinedRunStateApprovalStore {
+    fn new() -> Self {
+        Self {
+            runs: InMemoryRunStateStore::new(),
+            approvals: InMemoryApprovalRequestStore::new(),
+            combined_calls: AtomicUsize::new(0),
+            separate_save_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn combined_calls(&self) -> usize {
+        self.combined_calls.load(Ordering::SeqCst)
+    }
+
+    fn separate_save_calls(&self) -> usize {
+        self.separate_save_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RunStateStore for RecordingCombinedRunStateApprovalStore {
+    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        self.runs.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs
+            .block_approval(scope, invocation_id, approval)
+            .await
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.block_auth(scope, invocation_id, error_kind).await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.complete(scope, invocation_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.fail(scope, invocation_id, error_kind).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        self.runs.get(scope, invocation_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        self.runs.records_for_scope(scope).await
+    }
+}
+
+#[async_trait]
+impl ApprovalRequestStore for RecordingCombinedRunStateApprovalStore {
+    async fn save_pending(
+        &self,
+        scope: ResourceScope,
+        request: ApprovalRequest,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.separate_save_calls.fetch_add(1, Ordering::SeqCst);
+        self.approvals.save_pending(scope, request).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+        self.approvals.get(scope, request_id).await
+    }
+
+    async fn approve(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.approve(scope, request_id).await
+    }
+
+    async fn deny(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.deny(scope, request_id).await
+    }
+
+    async fn discard_pending(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.discard_pending(scope, request_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        self.approvals.records_for_scope(scope).await
+    }
+}
+
+#[async_trait]
+impl RunStateApprovalStore for RecordingCombinedRunStateApprovalStore {
+    async fn save_pending_and_block_approval(
+        &self,
+        scope: ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.combined_calls.fetch_add(1, Ordering::SeqCst);
+        self.approvals
+            .save_pending(scope.clone(), approval.clone())
+            .await?;
+        self.runs
+            .block_approval(&scope, invocation_id, approval)
+            .await
+    }
+}
+
 #[derive(Default)]
 struct CountingDispatcher {
     count: Mutex<usize>,
@@ -1008,6 +1434,7 @@ impl CapabilityDispatcher for CountingDispatcher {
             provider: extension_id(),
             runtime: RuntimeKind::Wasm,
             output: json!({"ok": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),
@@ -1066,6 +1493,7 @@ impl CapabilityDispatcher for RecordingDispatcher {
             provider: extension_id(),
             runtime: RuntimeKind::Wasm,
             output: json!({"ok": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),
@@ -1107,7 +1535,7 @@ impl TrustAwareCapabilityDispatchAuthorizer for ApprovalAuthorizer {
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(ECHO_MANIFEST).unwrap();
+    let manifest = parse_manifest(ECHO_MANIFEST);
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/echo").unwrap(),
@@ -1116,6 +1544,16 @@ fn registry_with_echo_capability() -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
 }
 
 fn execution_context_with_dispatch_grant() -> ExecutionContext {
@@ -1144,6 +1582,15 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         MountView::default(),
     )
     .unwrap()
+}
+
+fn visible_capability_request(context: ExecutionContext) -> VisibleCapabilityRequest {
+    VisibleCapabilityRequest::new(context, SurfaceKind::new("agent_loop").unwrap())
+        .with_policy(CapabilitySurfacePolicy::allow_all())
+        .with_provider_trust(BTreeMap::from([(
+            extension_id(),
+            trust_decision_with_dispatch_authority(),
+        )]))
 }
 
 fn local_manifest_trust_policy() -> HostTrustPolicy {

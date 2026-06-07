@@ -8,7 +8,6 @@ mod bindings;
 mod config;
 mod error;
 mod host;
-mod limiter;
 mod runtime;
 mod store;
 mod types;
@@ -21,7 +20,7 @@ pub use host::{
     WasmHostHttp, WasmHostSecrets, WasmHostTools, WasmHostWorkspace, WasmHttpRequest,
     WasmHttpResponse, WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest,
     WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WasmStagedRuntimeCredential,
-    WasmStagedRuntimeCredentials, WitToolHost,
+    WasmStagedRuntimeCredentialScope, WasmStagedRuntimeCredentials, WitToolHost,
 };
 pub use runtime::WitToolRuntime;
 pub use types::{PreparedWitTool, WasmLogLevel, WasmLogRecord, WitToolExecution, WitToolRequest};

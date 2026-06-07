@@ -20,6 +20,7 @@ use reqwest::Client;
 use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
@@ -32,8 +33,60 @@ use super::provider::{
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
+/// Sanitize a tool name to match the Responses API pattern `^[a-zA-Z0-9_-]+$`.
+fn sanitize_tool_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn convert_tool_definition(tool: &ToolDefinition) -> Value {
+    use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
+
+    let mut description = tool.description.clone();
+    let parameters = shape_tool_schema(
+        ToolSchemaPolicy::StrictOpenAi,
+        &tool.parameters,
+        &mut description,
+    );
+
+    json!({
+        "type": "function",
+        "name": sanitize_tool_name(&tool.name),
+        "description": description,
+        "parameters": parameters,
+    })
+}
+
+fn build_sanitized_tool_name_map(
+    tools: &[ToolDefinition],
+) -> Result<std::collections::HashMap<String, String>, LlmError> {
+    let mut name_map = std::collections::HashMap::new();
+    for tool in tools {
+        let sanitized = sanitize_tool_name(&tool.name);
+        if let Some(existing) = name_map.insert(sanitized.clone(), tool.name.clone())
+            && existing != tool.name
+        {
+            return Err(LlmError::InvalidResponse {
+                provider: "codex_chatgpt".to_string(),
+                reason: format!(
+                    "tool names `{existing}` and `{}` both map to provider name `{sanitized}`",
+                    tool.name
+                ),
+            });
+        }
+    }
+    Ok(name_map)
+}
+
 /// Provider that speaks the Responses API protocol against the ChatGPT backend.
-pub struct CodexChatGptProvider {
+pub(crate) struct CodexChatGptProvider {
     client: Client,
     base_url: String,
     api_key: RwLock<SecretString>,
@@ -79,7 +132,7 @@ impl CodexChatGptProvider {
     ///    warning with available models and fall back to the top model.
     /// 2. If `configured_model` is empty (or a generic placeholder like
     ///    "default"), auto-detect the highest-priority model from the API.
-    pub fn with_lazy_model(
+    pub(crate) fn with_lazy_model(
         base_url: &str,
         api_key: SecretString,
         configured_model: &str,
@@ -222,18 +275,11 @@ impl CodexChatGptProvider {
             .flat_map(Self::message_to_input_items)
             .collect();
 
-        // Convert tool definitions
-        let api_tools: Vec<Value> = tools
-            .iter()
-            .map(|t| {
-                json!({
-                    "type": "function",
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                })
-            })
-            .collect();
+        // Convert tool definitions. Responses API function names allow only
+        // `[a-zA-Z0-9_-]`, while host capability ids can contain dots
+        // (`builtin.echo`, MCP ids, etc.). Keep provider-facing names sanitized
+        // and map them back to original names after the response is parsed.
+        let api_tools: Vec<Value> = tools.iter().map(convert_tool_definition).collect();
 
         let mut body = json!({
             "model": model,
@@ -242,6 +288,12 @@ impl CodexChatGptProvider {
             "stream": true,
             "store": false,
         });
+
+        // Only add `reasoning` for models that support it;
+        // the Responses API hard-rejects it on non-reasoning models.
+        if crate::reasoning_models::supports_openai_reasoning(model) {
+            body["reasoning"] = crate::responses_reasoning::summary_request();
+        }
 
         if !api_tools.is_empty() {
             body["tools"] = json!(api_tools);
@@ -309,7 +361,7 @@ impl CodexChatGptProvider {
                         };
                         items.push(json!({
                             "type": "function_call",
-                            "name": tc.name,
+                            "name": sanitize_tool_name(&tc.name),
                             "arguments": args,
                             "call_id": tc.id,
                         }));
@@ -507,13 +559,17 @@ impl CodexChatGptProvider {
                     if data.is_empty() {
                         continue;
                     }
+                    if data == "[DONE]" {
+                        return Ok(result);
+                    }
 
                     let parsed: Value = match serde_json::from_str(data) {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
 
-                    if Self::handle_sse_event(&mut result, event.event.as_str(), &parsed) {
+                    let event_type = Self::resolve_sse_event_type(event.event.as_str(), &parsed);
+                    if Self::handle_sse_event(&mut result, event_type.as_ref(), &parsed) {
                         return Ok(result);
                     }
                 }
@@ -554,19 +610,34 @@ impl CodexChatGptProvider {
                 if data.is_empty() {
                     continue;
                 }
+                if data == "[DONE]" {
+                    return Ok(result);
+                }
 
                 let parsed: Value = match serde_json::from_str(data) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
 
-                if Self::handle_sse_event(&mut result, current_event_type.as_str(), &parsed) {
+                let event_type = Self::resolve_sse_event_type(current_event_type.as_str(), &parsed);
+                if Self::handle_sse_event(&mut result, event_type.as_ref(), &parsed) {
                     return Ok(result);
                 }
             }
         }
 
         Ok(result)
+    }
+
+    fn resolve_sse_event_type<'a>(event_type: &'a str, parsed: &'a Value) -> Cow<'a, str> {
+        if !event_type.is_empty() && event_type != "message" {
+            return Cow::Borrowed(event_type);
+        }
+        parsed
+            .get("type")
+            .and_then(|value| value.as_str())
+            .map(Cow::Borrowed)
+            .unwrap_or_else(|| Cow::Borrowed(event_type))
     }
 
     fn handle_sse_event(result: &mut ResponsesResult, event_type: &str, parsed: &Value) -> bool {
@@ -576,6 +647,19 @@ impl CodexChatGptProvider {
                     result.text.push_str(delta);
                 }
             }
+            "response.output_text.done" => {
+                if result.text.is_empty()
+                    && let Some(text) = parsed.get("text").and_then(|d| d.as_str())
+                {
+                    result.text.push_str(text);
+                }
+            }
+            event_type
+                if crate::responses_reasoning::apply_summary_event(
+                    &mut result.reasoning,
+                    event_type,
+                    parsed,
+                ) => {}
             "response.output_item.added" => {
                 // Capture function call metadata when the item is first added.
                 // The item has: id (item_id), call_id, name, type.
@@ -616,6 +700,19 @@ impl CodexChatGptProvider {
                     entry.arguments.push_str(delta);
                 }
             }
+            "response.function_call_arguments.done" => {
+                if let Some(item_id) = parsed.get("item_id").and_then(|v| v.as_str())
+                    && let Some(entry) = result.pending_tool_calls.get_mut(item_id)
+                    && let Some(arguments) = parsed.get("arguments").and_then(|d| d.as_str())
+                {
+                    entry.arguments = arguments.to_string();
+                }
+            }
+            "response.output_item.done" => {
+                if let Some(item) = parsed.get("item").or_else(|| parsed.get("output")) {
+                    Self::merge_completed_output_item(result, item, result.text.is_empty());
+                }
+            }
             "response.completed" => {
                 if let Some(response) = parsed.get("response")
                     && let Some(usage) = response.get("usage")
@@ -629,12 +726,108 @@ impl CodexChatGptProvider {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as u32;
                 }
+                if let Some(response) = parsed.get("response") {
+                    Self::merge_completed_response_output(result, response);
+                }
+                tracing::debug!(
+                    content_bytes = result.text.len(),
+                    tool_call_count = result.pending_tool_calls.len(),
+                    input_tokens = result.input_tokens,
+                    output_tokens = result.output_tokens,
+                    "Codex ChatGPT: parsed completed response"
+                );
                 return true;
             }
             _ => {}
         }
 
         false
+    }
+
+    fn merge_completed_response_output(result: &mut ResponsesResult, response: &Value) {
+        if result.text.is_empty()
+            && let Some(output_text) = response.get("output_text").and_then(|value| value.as_str())
+        {
+            result.text.push_str(output_text);
+        }
+
+        let allow_text_fallback = result.text.is_empty();
+        if let Some(output) = response.get("output").and_then(|value| value.as_array()) {
+            for item in output {
+                Self::merge_completed_output_item(result, item, allow_text_fallback);
+            }
+        }
+    }
+
+    fn merge_completed_output_item(
+        result: &mut ResponsesResult,
+        item: &Value,
+        allow_text_fallback: bool,
+    ) {
+        match item.get("type").and_then(|value| value.as_str()) {
+            Some("message") if allow_text_fallback => {
+                Self::append_output_message_text(&mut result.text, item);
+            }
+            Some("function_call") => {
+                let item_id = item
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .or_else(|| item.get("call_id").and_then(|value| value.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                if item_id.is_empty() {
+                    return;
+                }
+                let call_id = item
+                    .get("call_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(&item_id)
+                    .to_string();
+                let name = item
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let arguments = item
+                    .get("arguments")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                result
+                    .pending_tool_calls
+                    .entry(item_id)
+                    .and_modify(|existing| {
+                        if !call_id.is_empty() {
+                            existing.call_id = call_id.clone();
+                        }
+                        if !name.is_empty() {
+                            existing.name = name.clone();
+                        }
+                        if !arguments.is_empty() {
+                            existing.arguments = arguments.clone();
+                        }
+                    })
+                    .or_insert_with(|| PendingToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                    });
+            }
+            _ => {}
+        }
+    }
+
+    fn append_output_message_text(output: &mut String, item: &Value) {
+        let Some(content) = item.get("content").and_then(|value| value.as_array()) else {
+            return;
+        };
+        for part in content {
+            if part.get("type").and_then(|value| value.as_str()) == Some("output_text")
+                && let Some(text) = part.get("text").and_then(|value| value.as_str())
+            {
+                output.push_str(text);
+            }
+        }
     }
 
     /// Remove keys with empty-string values from a JSON object.
@@ -661,6 +854,7 @@ impl CodexChatGptProvider {
 #[derive(Debug, Default)]
 struct ResponsesResult {
     text: String,
+    reasoning: String,
     /// Keyed by item_id (the SSE item identifier, e.g. "fc_...").
     pending_tool_calls: std::collections::HashMap<String, PendingToolCall>,
     input_tokens: u32,
@@ -692,7 +886,9 @@ impl LlmProvider for CodexChatGptProvider {
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let model = self.resolve_model().await;
-        let body = self.build_request_body(model, &request.messages, &[], None);
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let body = self.build_request_body(model, &messages, &[], None);
         let result = self.send_request(body).await?;
 
         Ok(CompletionResponse {
@@ -700,6 +896,7 @@ impl LlmProvider for CodexChatGptProvider {
             input_tokens: result.input_tokens,
             output_tokens: result.output_tokens,
             finish_reason: FinishReason::Stop,
+            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
@@ -709,10 +906,13 @@ impl LlmProvider for CodexChatGptProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let name_map = build_sanitized_tool_name_map(&request.tools)?;
         let model = self.resolve_model().await;
         let body = self.build_request_body(
             model,
-            &request.messages,
+            &messages,
             &request.tools,
             request.tool_choice.as_deref(),
         );
@@ -722,6 +922,11 @@ impl LlmProvider for CodexChatGptProvider {
             .pending_tool_calls
             .into_values()
             .map(|tc| {
+                let returned_name = tc.name;
+                let name = name_map
+                    .get(&returned_name)
+                    .cloned()
+                    .unwrap_or(returned_name);
                 let args: Value =
                     serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!(tc.arguments));
                 // gpt-5.2-codex fills optional parameters with empty strings (e.g.
@@ -730,7 +935,7 @@ impl LlmProvider for CodexChatGptProvider {
                 let args = Self::strip_empty_string_values(args);
                 ToolCall {
                     id: tc.call_id,
-                    name: tc.name,
+                    name,
                     arguments: args,
                     reasoning: None,
                     signature: None,
@@ -756,7 +961,7 @@ impl LlmProvider for CodexChatGptProvider {
             finish_reason,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
-            reasoning: None,
+            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
         })
     }
 }
@@ -842,6 +1047,22 @@ mod tests {
     }
 
     #[test]
+    fn test_message_conversion_sanitizes_tool_call_name() {
+        let tc = ToolCall {
+            id: "call_1".to_string(),
+            name: "builtin.echo".to_string(),
+            arguments: json!({"input": "hello"}),
+            reasoning: None,
+            signature: None,
+        };
+        let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
+        let items = CodexChatGptProvider::message_to_input_items(&msg);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "function_call");
+        assert_eq!(items[0]["name"], "builtin_echo");
+    }
+
+    #[test]
     fn test_build_request_extracts_system_as_instructions() {
         let provider = CodexChatGptProvider::new("https://example.com", "key", "gpt-4o");
         let messages = vec![
@@ -854,6 +1075,33 @@ mod tests {
         assert_eq!(body["input"].as_array().unwrap().len(), 1);
         // store must be false for ChatGPT backend
         assert_eq!(body["store"], false);
+    }
+
+    #[test]
+    fn test_build_request_sanitizes_tool_definition_names() {
+        let provider = CodexChatGptProvider::new("https://example.com", "key", "gpt-4o");
+        let messages = vec![ChatMessage::user("hello")];
+        let tools = vec![ToolDefinition {
+            name: "builtin.echo".to_string(),
+            description: "Echo input".to_string(),
+            parameters: json!({"type": "object"}),
+        }];
+        let body = provider.build_request_body("gpt-4o", &messages, &tools, None);
+        assert_eq!(body["tools"][0]["name"], "builtin_echo");
+    }
+
+    #[test]
+    fn test_build_request_flattens_ref_tool_schema() {
+        let provider = CodexChatGptProvider::new("https://example.com", "key", "gpt-4o");
+        let messages = vec![ChatMessage::user("hello")];
+        let tools = vec![ToolDefinition {
+            name: "builtin__apply_patch".to_string(),
+            description: "Apply a patch".to_string(),
+            parameters: json!({"$ref": "schemas/builtin/apply-patch.input.v1.json"}),
+        }];
+        let body = provider.build_request_body("gpt-4o", &messages, &tools, None);
+        assert_eq!(body["tools"][0]["parameters"]["type"], "object");
+        assert!(body["tools"][0]["parameters"].get("properties").is_some());
     }
 
     #[test]
@@ -876,6 +1124,83 @@ data: {"response":{"usage":{"input_tokens":10,"output_tokens":5}}}
     }
 
     #[test]
+    fn test_parse_sse_data_only_type_field_text_response() {
+        let sse = r#"data: {"type":"response.output_text.delta","delta":"Hello"}
+
+data: {"type":"response.output_text.delta","delta":" world!"}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":5}}}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert_eq!(result.text, "Hello world!");
+        assert_eq!(result.input_tokens, 10);
+        assert_eq!(result.output_tokens, 5);
+        assert!(result.pending_tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_output_text_done_without_delta() {
+        let sse = r#"data: {"type":"response.output_text.done","text":"Hello from done."}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":5}}}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert_eq!(result.text, "Hello from done.");
+        assert_eq!(result.input_tokens, 10);
+        assert_eq!(result.output_tokens, 5);
+        assert!(result.pending_tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_completed_response_output_text_without_deltas() {
+        let sse = r#"data: {"type":"response.completed","response":{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello from final output."}]}],"usage":{"input_tokens":10,"output_tokens":5}}}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert_eq!(result.text, "Hello from final output.");
+        assert_eq!(result.input_tokens, 10);
+        assert_eq!(result.output_tokens, 5);
+        assert!(result.pending_tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_completed_response_prefers_output_text_over_message_fallback() {
+        let sse = r#"data: {"type":"response.completed","response":{"output_text":"Hello from output_text.","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Duplicate fallback text."}]}],"usage":{"input_tokens":10,"output_tokens":5}}}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert_eq!(result.text, "Hello from output_text.");
+        assert_eq!(result.input_tokens, 10);
+        assert_eq!(result.output_tokens, 5);
+        assert!(result.pending_tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_reasoning_summary_response() {
+        let sse = r#"event: response.reasoning_summary_text.delta
+data: {"delta":"Thinking Steps\n"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":"[] Inspect context."}
+
+event: response.output_text.delta
+data: {"delta":"Done."}
+
+event: response.completed
+data: {"response":{"usage":{"input_tokens":10,"output_tokens":5}}}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert_eq!(result.text, "Done.");
+        assert_eq!(
+            crate::responses_reasoning::finish_summary(result.reasoning).as_deref(),
+            Some("Thinking Steps\n[] Inspect context.")
+        );
+    }
+
+    #[test]
     fn test_parse_sse_tool_call() {
         // Real API format: output_item.added has item.id (item_id) + item.call_id,
         // delta events use item_id (not call_id)
@@ -890,6 +1215,44 @@ data: {"item_id":"fc_1","delta":"\"rust\"}"}
 
 event: response.completed
 data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert!(result.text.is_empty());
+        assert_eq!(result.pending_tool_calls.len(), 1);
+        let tc = result.pending_tool_calls.get("fc_1").unwrap();
+        assert_eq!(tc.call_id, "call_1");
+        assert_eq!(tc.name, "search");
+        assert_eq!(tc.arguments, "{\"query\":\"rust\"}");
+    }
+
+    #[test]
+    fn test_parse_sse_tool_call_done_events() {
+        let sse = r#"event: response.output_item.added
+data: {"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"search"}}
+
+event: response.function_call_arguments.done
+data: {"item_id":"fc_1","arguments":"{\"query\":\"rust\"}"}
+
+event: response.output_item.done
+data: {"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"search"}}
+
+event: response.completed
+data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert!(result.text.is_empty());
+        assert_eq!(result.pending_tool_calls.len(), 1);
+        let tc = result.pending_tool_calls.get("fc_1").unwrap();
+        assert_eq!(tc.call_id, "call_1");
+        assert_eq!(tc.name, "search");
+        assert_eq!(tc.arguments, "{\"query\":\"rust\"}");
+    }
+
+    #[test]
+    fn test_parse_sse_completed_response_output_tool_call_without_deltas() {
+        let sse = r#"data: {"type":"response.completed","response":{"output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search","arguments":"{\"query\":\"rust\"}"}],"usage":{"input_tokens":20,"output_tokens":15}}}
 
 "#;
         let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
@@ -923,6 +1286,163 @@ data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
         assert_eq!(result.output_tokens, 2);
     }
 
+    #[tokio::test]
+    async fn test_parse_sse_stream_data_only_type_field_response() {
+        let stream = stream::iter(vec![
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
+            )),
+        ]);
+
+        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(result.text, "Hello world");
+        assert_eq!(result.input_tokens, 3);
+        assert_eq!(result.output_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn test_parse_sse_done_marker_stops_parsing() {
+        let sse = r#"data: {"type":"response.output_text.delta","delta":"hello"}
+
+data: [DONE]
+
+data: {"type":"response.output_text.delta","delta":" ignored"}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert_eq!(result.text, "hello");
+
+        let stream = stream::iter(vec![
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            )),
+            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\" ignored\"}\n\n",
+            )),
+        ]);
+        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(result.text, "hello");
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_remaps_sanitized_response_tool_names() {
+        let base_url = responses_api_test_server::spawn(
+            r#"event: response.output_item.added
+data: {"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"builtin_echo"}}
+
+event: response.function_call_arguments.delta
+data: {"item_id":"fc_1","delta":"{\"message\":\"hello\"}"}
+
+event: response.completed
+data: {"response":{"usage":{"input_tokens":3,"output_tokens":2}}}
+
+"#,
+        )
+        .await;
+        let provider = CodexChatGptProvider::new(&base_url, "test-key", "gpt-4o");
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("use echo")],
+            vec![ToolDefinition {
+                name: "builtin.echo".to_string(),
+                description: "Echo input".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"}
+                    }
+                }),
+            }],
+        );
+
+        let response = provider
+            .complete_with_tools(request)
+            .await
+            .expect("tool completion succeeds");
+
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "builtin.echo");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            json!({"message": "hello"})
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_accepts_data_only_text_response() {
+        let base_url = responses_api_test_server::spawn(
+            r#"data: {"type":"response.output_text.delta","delta":"Hello from data-only SSE."}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}}
+
+"#,
+        )
+        .await;
+        let provider = CodexChatGptProvider::new(&base_url, "test-key", "gpt-4o");
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("hello")],
+            vec![ToolDefinition {
+                name: "builtin.echo".to_string(),
+                description: "Echo input".to_string(),
+                parameters: json!({"type": "object"}),
+            }],
+        );
+
+        let response = provider
+            .complete_with_tools(request)
+            .await
+            .expect("tool-capable completion succeeds");
+
+        assert_eq!(
+            response.content.as_deref(),
+            Some("Hello from data-only SSE.")
+        );
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.finish_reason, FinishReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_rejects_colliding_sanitized_tool_names_before_request() {
+        let provider = CodexChatGptProvider::new("http://127.0.0.1:9", "test-key", "gpt-4o");
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("use a tool")],
+            vec![
+                ToolDefinition {
+                    name: "foo.bar".to_string(),
+                    description: "First tool".to_string(),
+                    parameters: json!({"type": "object"}),
+                },
+                ToolDefinition {
+                    name: "foo_bar".to_string(),
+                    description: "Second tool".to_string(),
+                    parameters: json!({"type": "object"}),
+                },
+            ],
+        );
+
+        let error = provider
+            .complete_with_tools(request)
+            .await
+            .expect_err("colliding provider tool names must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("both map to provider name `foo_bar`"),
+            "unexpected error: {error}"
+        );
+    }
+
     #[test]
     fn test_strip_empty_string_values() {
         let input = json!({
@@ -933,5 +1453,56 @@ data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
         });
         let cleaned = CodexChatGptProvider::strip_empty_string_values(input);
         assert_eq!(cleaned, json!({"format": "%Y-%m-%d", "operation": "now"}));
+    }
+
+    mod responses_api_test_server {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        /// Tiny in-process Responses API fixture for caller-level provider tests.
+        /// The test must exercise model resolution plus `/responses`, so a real
+        /// loopback HTTP boundary is intentional here.
+        pub(super) async fn spawn(sse_body: &'static str) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (mut socket, _) = listener.accept().await.expect("accept request");
+                    let mut request = [0u8; 4096];
+                    let bytes_read = socket.read(&mut request).await.expect("read request");
+                    let request = String::from_utf8_lossy(&request[..bytes_read]);
+                    if request.starts_with("GET /models") {
+                        write_response(
+                            &mut socket,
+                            "application/json",
+                            r#"{"models":[{"slug":"gpt-4o"}]}"#,
+                        )
+                        .await;
+                    } else if request.starts_with("POST /responses") {
+                        write_response(&mut socket, "text/event-stream", sse_body).await;
+                    } else {
+                        write_response(&mut socket, "text/plain", "not found").await;
+                    }
+                }
+            });
+            format!("http://{addr}")
+        }
+
+        async fn write_response(
+            socket: &mut tokio::net::TcpStream,
+            content_type: &str,
+            body: &str,
+        ) {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        }
     }
 }

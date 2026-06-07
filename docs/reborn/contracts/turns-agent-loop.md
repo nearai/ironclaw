@@ -2,7 +2,7 @@
 
 **Status:** Contract-freeze draft
 **Date:** 2026-04-25
-**Depends on:** [`host-api.md`](host-api.md), [`capabilities.md`](capabilities.md), [`memory.md`](memory.md), [`events-projections.md`](events-projections.md), [`processes.md`](processes.md)
+**Depends on:** [`host-api.md`](host-api.md), [`capabilities.md`](capabilities.md), [`memory.md`](memory.md), [`events-projections.md`](events-projections.md), [`processes.md`](processes.md), [`turn-persistence.md`](turn-persistence.md), [`loop-exit.md`](loop-exit.md)
 
 ---
 
@@ -91,6 +91,8 @@ Rules:
 - memory prompt context uses the same tenant/user/project/agent scope;
 - channel metadata does not grant authority by itself.
 
+Adapter-facing `TurnCoordinator` requests carry canonical scope plus durable references only: accepted-message ref, source/reply binding refs, actor metadata, requested run-profile hint, scoped idempotency key, and `received_at`. Submit responses expose redacted metadata including run status, event cursor, accepted-message ref, reply-target binding ref, and resolved run-profile id+version; scoped run-state reads additionally expose the source binding ref. Trusted runner transition APIs stay behind the explicit `ironclaw_turns::runner` surface rather than the adapter prelude.
+
 ---
 
 ## 4. Turn lifecycle
@@ -105,6 +107,7 @@ blocked_approval
 blocked_auth
 waiting_tool
 waiting_process
+recovery_required
 completed
 failed
 cancelled
@@ -117,11 +120,16 @@ accepted -> queued -> running
 running -> blocked_approval -> running
 running -> waiting_tool -> running
 running -> waiting_process -> running
+running -> recovery_required
+recovery_required -> cancelled
 running -> completed|failed|cancelled
 ```
 
 Rules:
 
+- agent-loop drivers report how an attempt stopped with `LoopExit`; validation and trusted outcome mapping follow [`loop-exit.md`](loop-exit.md);
+- runner claim, lease, heartbeat, and expired-lease recovery rules follow [`turn-runner.md`](turn-runner.md);
+- persistence records, active-lock ownership, runner lease fields, checkpoints, and idempotency outcomes follow [`turn-persistence.md`](turn-persistence.md);
 - state transitions are persisted before externally visible side effects where needed for recovery;
 - approval-blocked turns persist enough fingerprint metadata to resume without raw input leakage;
 - cancellation requests propagate to running process/capability work when possible;
@@ -145,7 +153,18 @@ admin/system run
 Kernel-mediated prompt safety rules:
 
 - identity/system-prompt files are primary-scope only;
+- `USER.md` and `context/assistant-directives.md` are personal context and are
+  excluded unless the resolved run profile explicitly allows personal context;
+- when personal context is admitted, the loop emits safe observability metadata
+  such as source count and source names, never raw file content;
+- personal-context admission metadata is best-effort and may be emitted
+  asynchronously after prompt assembly or model consumption; consumers must not
+  treat absence of that metadata as proof that no personal context was admitted
+  until the turn's terminal event stream has been inspected;
 - group chat must not receive personal memory/profile context unless explicit policy allows it;
+- `HEARTBEAT.md` is not part of the default planned or interactive loop prompt
+  prefix; routine, mission, or proactive profiles must own any volatile
+  heartbeat injection semantics;
 - writes to prompt-injected files are guarded by prompt-injection write-safety policy;
 - assembled prompts are not emitted in events/audit by default;
 - prompt read/build failures are explicit turn failures unless a contract marks a missing optional doc as ignorable;
@@ -237,8 +256,11 @@ Transport-specific auth/webhook checks happen before the turn is accepted.
 - shipped and custom loops both send privileged effects through `CapabilityHost` only;
 - trust class alone does not let a loop bypass grants, mounts, leases, obligations, or resource policy;
 - approval-blocked turn resumes with exact invocation fingerprint;
-- group chat prompt excludes personal memory/profile docs;
+- group chat prompt excludes personal memory/profile docs unless the resolved
+  run profile explicitly allows them;
 - primary identity docs are not read from secondary scopes;
+- personal-context inclusion emits safe source metadata and does not expose raw
+  `USER.md` or assistant-directive content;
 - prompt-injected file writes are scanned or fail closed regardless of loop implementation;
 - cancellation propagates to process/capability work;
 - durable event cursor can replay turn progress after reconnect;

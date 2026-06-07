@@ -11,12 +11,12 @@ use crate::theme::Theme;
 
 use super::{AppState, TuiWidget};
 
-pub struct LogsWidget {
+pub(crate) struct LogsWidget {
     theme: Theme,
 }
 
 impl LogsWidget {
-    pub fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         Self { theme }
     }
 
@@ -44,7 +44,7 @@ impl LogsWidget {
     }
 
     /// Handle scroll in logs view.
-    pub fn scroll(state: &mut AppState, delta: i16) {
+    pub(crate) fn scroll(state: &mut AppState, delta: i16) {
         if delta < 0 {
             state.log_scroll = state.log_scroll.saturating_add(delta.unsigned_abs());
         } else {

@@ -1,0 +1,85 @@
+[package]
+name = "ironclaw_reborn_cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Standalone IronClaw Reborn binary"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+# Keep disabled until #3483 resolves cargo-dist tag/versioning + Windows WiX
+# packaging for the standalone Reborn binary.
+[package.metadata.dist]
+dist = false
+
+[features]
+default = ["root-llm-provider"]
+# Wire a real LLM provider into the assembled runtime. Mirrors the same
+# `root-llm-provider` feature on `ironclaw_reborn_composition` /
+# `ironclaw_reborn`, so building without it produces a CLI binary that
+# can still boot the runtime substrate but will surface an "LLM gateway
+# not wired" error on the first `send_user_message`.
+root-llm-provider = [
+    "ironclaw_reborn_composition/root-llm-provider",
+]
+# Compile in the WebChat v2 beta HTTP gateway subcommand
+# (`ironclaw-reborn serve`). Off by default so a default binary build
+# does not link the auth/HTTP middleware stack at all — production
+# binaries that genuinely expose v2 over HTTP must opt in. Pulls in
+# `webui-v2-beta` on the composition crate plus the ingress crate
+# that owns the serve loop. Also enables the WebChat v2 SSO login
+# surface (Google / GitHub OAuth): the CLI reads provider env config
+# (`commands/serve_sso.rs`) and hands it to the ingress crate's
+# `build_signed_session_login`, which owns the stateless HMAC-signed
+# session store — so the login surface works in a normal build with no
+# dev-only feature required.
+webui-v2-beta = [
+    "ironclaw_reborn_composition/webui-v2-beta",
+    "dep:ironclaw_reborn_webui_ingress",
+    "dep:async-trait",
+]
+# Compile in the Slack Events API host-beta mount for `ironclaw-reborn serve`.
+# Still requires `[slack].enabled = true` at runtime before the route is
+# mounted; ambient Slack env vars alone do not enable it.
+slack-v2-host-beta = [
+    "webui-v2-beta",
+    "ironclaw_reborn_composition/slack-v2-host-beta",
+]
+[dependencies]
+anyhow = "1"
+async-trait = { version = "0.1", optional = true }
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4.3"
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4.5.0"
+dotenvy = "0.15"
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
+ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
+ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
+ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+[dev-dependencies]
+# Enable the composition crate's `test-support` seam for CLI unit tests so
+# `open_reborn_identity_resolver` (the test-only standalone resolver opener)
+# is available when building this crate's tests. Production code uses the
+# runtime-owned `RebornRuntime::open_reborn_identity_resolver` accessor
+# instead. Feature-unifies with the `[dependencies]` entry above.
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
+
+[[bin]]
+name = "ironclaw-reborn"
+path = "src/main.rs"

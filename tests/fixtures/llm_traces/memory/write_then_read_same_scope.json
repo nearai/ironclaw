@@ -1,0 +1,70 @@
+{
+  "model_name": "memory-isolation-round-trip",
+  "expects": {
+    "tools_used": ["memory_write", "memory_read"],
+    "all_tools_succeeded": true,
+    "min_responses": 2
+  },
+  "turns": [
+    {
+      "user_input": "Save deterministic-marker-42 to notes/round-trip.md (replace if it exists).",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "deterministic-marker-42" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_mw_1",
+                "name": "memory_write",
+                "arguments": {
+                  "target": "notes/round-trip.md",
+                  "content": "deterministic-marker-42",
+                  "append": false
+                }
+              }
+            ],
+            "input_tokens": 80,
+            "output_tokens": 25
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "Saved deterministic-marker-42 to notes/round-trip.md.",
+            "input_tokens": 95,
+            "output_tokens": 12
+          }
+        }
+      ]
+    },
+    {
+      "user_input": "Read notes/round-trip.md and tell me what is inside.",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "round-trip" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_mr_1",
+                "name": "memory_read",
+                "arguments": { "path": "notes/round-trip.md" }
+              }
+            ],
+            "input_tokens": 110,
+            "output_tokens": 18
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "The file contains: deterministic-marker-42",
+            "input_tokens": 130,
+            "output_tokens": 12
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -73,6 +73,7 @@ impl LlmProvider for MockLlmProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            reasoning: None,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
@@ -154,6 +155,7 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            reasoning: None,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })

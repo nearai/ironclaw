@@ -230,6 +230,15 @@ pub(crate) async fn extensions_tools_handler(
         "Tool registry not available".to_string(),
     ))?;
 
+    // Observability listing — shows the *registered* tool surface, not the
+    // model-facing filtered surface. Action-time authorization in the
+    // dispatcher / capability host gates whether any user-driven invocation
+    // actually executes; the visibility filter that hides profile-impossible
+    // tools from the LLM is a separate concern. Threading the resolved
+    // `EffectiveRuntimePolicy` through `GatewayState` so this endpoint could
+    // also filter is a follow-up — left unfiltered here so the admin UI can
+    // surface "tool X is registered but profile-hidden" diagnostics if needed
+    // (#3243 HIGH iteration-2 gap follow-up).
     let definitions = registry.tool_definitions().await;
     let tools = definitions
         .into_iter()

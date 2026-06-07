@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub create_branch input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository owner or organization."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository name."
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "New branch name."
+    },
+    "from_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Source branch, tag, or ref."
+    }
+  },
+  "required": [
+    "owner",
+    "repo",
+    "branch",
+    "from_ref"
+  ]
+}

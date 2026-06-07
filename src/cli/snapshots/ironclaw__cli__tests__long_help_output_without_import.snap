@@ -65,6 +65,21 @@ Options:
           
           Skips interactive approval prompts for standard tools. Destructive operations still require explicit approval. Other safeguards remain active: rate limits, hooks, authentication gates.
 
+      --deployment-mode <MODE>
+          Deployment mode: where IronClaw is running and who owns the machine boundary.
+          
+          Wire names: `local_single_user`, `hosted_multi_tenant`, `enterprise_dedicated`. Falls back to `IRONCLAW_DEPLOYMENT_MODE`, then to `local_single_user`.
+
+      --runtime-profile <PROFILE>
+          Requested runtime profile (#3045).
+          
+          Wire names: `secure_default`, `local_safe`, `local_dev`, `local_yolo`, `hosted_safe`, `hosted_dev`, `hosted_yolo_tenant_scoped`, `enterprise_safe`, `enterprise_dev`, `enterprise_yolo_dedicated`, `sandboxed`, `experiment`. Falls back to `IRONCLAW_RUNTIME_PROFILE`, then to `secure_default`.
+
+      --yolo-disclosure
+          Acknowledge the disclosure required by `*_yolo*` profiles.
+          
+          Yolo profiles intentionally reduce approvals inside their authority boundary. The CLI must capture explicit operator confirmation — without this flag (or `IRONCLAW_YOLO_DISCLOSURE=true`), any yolo profile selection fails closed.
+
   -h, --help
           Print help (see a summary with '-h')
 

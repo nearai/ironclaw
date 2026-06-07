@@ -2,12 +2,13 @@
 //!
 //! Mirrors the design tokens from `src/cli/fmt.rs` (emerald accent, dim, success,
 //! error, warning) but expressed as Ratatui `Color` / `Style` values.
+#![allow(dead_code)] // Scaffolding; some items kept for future use.
 
 use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, Serialize};
 
 /// Emerald green brand color (true-color).
-pub const EMERALD: Color = Color::Rgb(52, 211, 153);
+pub(crate) const EMERALD: Color = Color::Rgb(52, 211, 153);
 
 /// Named color palette used by the TUI.
 #[derive(Debug, Clone, Serialize, Deserialize)]

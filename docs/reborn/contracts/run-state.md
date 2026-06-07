@@ -133,13 +133,22 @@ The filesystem store is durable current-state storage. It is not a transition lo
 
 ## 6. Capability host integration
 
-`CapabilityHost` may be configured with run-state and approval stores:
+`CapabilityHost` may be configured with run-state and approval stores. Production/shared callers should prefer a combined `RunStateApprovalStore` so the pending approval record and `BlockedApproval` run-state transition commit atomically:
+
+```rust
+CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    .with_run_state_approval_store(&run_state_approvals)
+```
+
+Local or single-process callers may still attach separate stores:
 
 ```rust
 CapabilityHost::new(&registry, &dispatcher, &authorizer)
     .with_run_state(&run_state)
     .with_approval_requests(&approval_requests)
 ```
+
+`HostRuntimeServices` provides backend-selection helpers for production composition (`with_postgres_run_state_approval_store` / `with_libsql_run_state_approval_store`) that run run-state migrations and install the combined store into the runtime facade.
 
 When configured, `invoke_json` records under the caller's `ExecutionContext.resource_scope`:
 
@@ -177,8 +186,7 @@ This slice does not implement:
 
 - durable grant/lease persistence
 - append-only transition history
-- atomic transactions across run-state and approval stores
-- project/thread secondary indexes
+- project/thread secondary indexes beyond the resource-owner-scoped DB keys
 - auth/OAuth blocking semantics beyond reserving `BlockedAuth`
 - cancellation
 - retries

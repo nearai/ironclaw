@@ -134,6 +134,142 @@ async fn capability_access_returns_grant_constraints_as_runtime_obligations() {
 }
 
 #[tokio::test]
+async fn capability_access_allows_first_party_dynamic_secret_consumers_without_static_secret_grant()
+{
+    let descriptor = CapabilityDescriptor {
+        runtime: RuntimeKind::FirstParty,
+        effects: vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::UseSecret,
+        ],
+        ..wasm_descriptor()
+    };
+    let network = NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.example.com".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1024),
+    };
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::UseSecret,
+        ],
+    );
+    grant.constraints.network = network.clone();
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![grant],
+            }),
+            &descriptor,
+            &ResourceEstimate::default(),
+        )
+        .await;
+
+    let Decision::Allow { obligations } = decision else {
+        panic!(
+            "expected allow decision with dynamic first-party secret handling, got {decision:?}"
+        );
+    };
+    assert!(
+        obligations
+            .as_slice()
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::ApplyNetworkPolicy { policy } if policy == &network))
+    );
+    assert!(
+        !obligations
+            .as_slice()
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::InjectSecretOnce { .. }))
+    );
+    assert!(obligations.as_slice().iter().any(|obligation| matches!(
+        obligation,
+        Obligation::FirstPartyCredentialStagedViaHostPort { capability_id }
+            if capability_id == &descriptor.id
+    )));
+}
+
+#[tokio::test]
+async fn first_party_use_secret_with_non_empty_static_secret_still_injects_obligation() {
+    let descriptor = CapabilityDescriptor {
+        runtime: RuntimeKind::FirstParty,
+        effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+        ..wasm_descriptor()
+    };
+    let secret = SecretHandle::new("static-google-secret").unwrap();
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    );
+    grant.constraints.secrets = vec![secret.clone()];
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![grant],
+            }),
+            &descriptor,
+            &ResourceEstimate::default(),
+        )
+        .await;
+
+    let Decision::Allow { obligations } = decision else {
+        panic!("expected allow decision with injected static secret, got {decision:?}");
+    };
+    assert!(
+        obligations
+            .as_slice()
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::InjectSecretOnce { handle } if handle == &secret))
+    );
+    assert!(!obligations.as_slice().iter().any(|obligation| matches!(
+        obligation,
+        Obligation::FirstPartyCredentialStagedViaHostPort { .. }
+    )));
+}
+
+#[tokio::test]
+async fn capability_access_denies_non_first_party_secret_consumers_without_static_secret_grant() {
+    let descriptor = CapabilityDescriptor {
+        effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+        ..wasm_descriptor()
+    };
+    let grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    );
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![grant],
+            }),
+            &descriptor,
+            &ResourceEstimate::default(),
+        )
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied
+        }
+    );
+}
+
+#[tokio::test]
 async fn capability_access_denies_when_grant_is_for_different_principal_or_capability() {
     let descriptor = wasm_descriptor();
     let wrong_principal = grant_for(
@@ -728,6 +864,7 @@ fn wasm_descriptor() -> CapabilityDescriptor {
         parameters_schema: json!({"type": "object"}),
         effects: vec![EffectKind::DispatchCapability],
         default_permission: PermissionMode::Allow,
+        runtime_credentials: Vec::new(),
         resource_profile: None,
     }
 }

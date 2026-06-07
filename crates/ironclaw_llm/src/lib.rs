@@ -7,8 +7,10 @@
 //! - **Ollama**: Local model inference
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 //! - **AWS Bedrock**: Native Converse API via aws-sdk-bedrockruntime
+#![warn(unreachable_pub)]
 
 mod anthropic_oauth;
+mod anthropic_thinking;
 pub mod auth;
 #[cfg(feature = "bedrock")]
 mod bedrock;
@@ -30,7 +32,10 @@ mod provider;
 mod reasoning;
 pub mod recording;
 pub mod registry;
+#[cfg(feature = "registry-provider-factory")]
+mod resolution;
 pub mod response_cache;
+mod responses_reasoning;
 pub mod retry;
 mod rig_adapter;
 pub mod runtime;
@@ -53,8 +58,8 @@ pub mod vision_models;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use config::{
-    BedrockConfig, CacheRetention, GeminiOauthConfig, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
-    OpenAiCodexConfig, RegistryProviderConfig,
+    BedrockConfig, CacheRetention, GeminiOauthConfig, LlmBackendKind, LlmConfig, NearAiConfig,
+    OAUTH_PLACEHOLDER, OpenAiCodexConfig, RegistryProviderConfig,
 };
 pub use error::{LlmConfigError, LlmError};
 pub use failover::{CooldownConfig, FailoverProvider};
@@ -66,7 +71,7 @@ pub use host::{
 };
 pub use nearai_chat::{DEFAULT_MODEL, ModelInfo, NearAiChatProvider, default_models};
 pub use openai_codex_provider::OpenAiCodexProvider;
-pub(crate) use openai_codex_session::OpenAiCodexSessionManager;
+pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
@@ -79,17 +84,31 @@ pub use reasoning::{
     TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
     user_signals_execution_intent,
 };
-pub use reasoning::{clean_response, recover_tool_calls_from_content};
+pub use reasoning::{
+    clean_response, contains_codex_text_tool_call_syntax,
+    recover_codex_text_tool_calls_from_content, recover_codex_text_tool_calls_from_tool_names,
+    recover_tool_calls_from_content,
+};
 pub use recording::{MemorySnapshotEntry, RecordingLlm};
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
+#[cfg(feature = "registry-provider-factory")]
+pub use resolution::{
+    ProviderResolutionError, ProviderSelection, ResolvedDedicatedProviderConfig,
+    ResolvedProviderConfig, build_llm_config_from_resolved_provider,
+    build_registry_provider_config_from_resolved_provider, resolve_llm_config_from_env,
+    resolve_llm_config_from_selection, resolve_provider_config_from_env,
+    resolve_provider_config_from_selection,
+};
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
 pub use runtime::{LlmReloadHandle, SwappableLlmProvider};
-pub use session::{SessionConfig, SessionManager, create_session_manager};
+pub use session::{NearWalletSignedMessage, SessionConfig, SessionManager, create_session_manager};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
 pub use token_refreshing::TokenRefreshingProvider;
 
+#[cfg(feature = "registry-provider-factory")]
+use std::path::Path;
 use std::sync::Arc;
 
 use rig::client::CompletionClient;
@@ -147,7 +166,7 @@ pub async fn create_llm_provider(
             provider: config.backend.clone(),
         })?;
 
-    create_registry_provider(reg_config, timeout)
+    create_registry_provider_inner(reg_config, timeout)
 }
 
 /// Create an LLM provider from a `NearAiConfig` directly.
@@ -181,9 +200,33 @@ pub fn create_llm_provider_with_config(
 /// Create a provider from a registry-resolved config.
 ///
 /// Dispatches on `RegistryProviderConfig::protocol` to build the appropriate
-/// rig-core client. This single function replaces what used to be 5 separate
-/// `create_*_provider` functions.
-fn create_registry_provider(
+/// rig-core client. Exposed only for composition roots that already own
+/// provider resolution and intentionally opt into the registry factory API;
+/// normal callers should use `create_llm_provider` / `build_provider_chain`.
+#[cfg(feature = "registry-provider-factory")]
+pub fn create_registry_provider(
+    config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    create_registry_provider_inner(config, request_timeout_secs)
+}
+
+/// Resolve a registry-provider configuration from generic LLM environment.
+///
+/// This keeps provider/backend-specific environment conventions inside
+/// `ironclaw_llm` for composition roots that already bridge through
+/// [`create_registry_provider`]. Returns `Ok(None)` when no LLM environment
+/// selection is present.
+#[cfg(feature = "registry-provider-factory")]
+pub fn resolve_registry_provider_from_env(
+    user_providers_path: Option<&Path>,
+) -> Result<Option<RegistryProviderConfig>, LlmError> {
+    resolution::resolve_provider_config_from_env(user_providers_path)?
+        .map(resolution::build_registry_provider_config_from_resolved_provider)
+        .transpose()
+}
+
+fn create_registry_provider_inner(
     config: &RegistryProviderConfig,
     request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -787,7 +830,7 @@ fn create_cheap_provider_for_backend(
 
     let mut cheap_reg_config = reg_config.clone();
     cheap_reg_config.model = cheap_model.to_string();
-    let provider = create_registry_provider(&cheap_reg_config, config.request_timeout_secs)?;
+    let provider = create_registry_provider_inner(&cheap_reg_config, config.request_timeout_secs)?;
     Ok(Some(provider))
 }
 
@@ -821,6 +864,14 @@ pub(crate) struct ProviderChainComponents {
 pub(crate) async fn build_provider_chain_components(
     config: &LlmConfig,
     session: Arc<SessionManager>,
+) -> Result<ProviderChainComponents, LlmError> {
+    build_provider_chain_components_with_options(config, session, true).await
+}
+
+async fn build_provider_chain_components_with_options(
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+    include_standalone_cheap: bool,
 ) -> Result<ProviderChainComponents, LlmError> {
     let llm: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
         create_openai_codex_provider(config).await?
@@ -946,7 +997,11 @@ pub(crate) async fn build_provider_chain_components(
     };
 
     // Standalone cheap LLM for heartbeat/evaluation (not part of the chain)
-    let cheap_llm = create_cheap_llm_provider(config, session)?;
+    let cheap_llm = if include_standalone_cheap {
+        create_cheap_llm_provider(config, session)?
+    } else {
+        None
+    };
     if let Some(ref cheap) = cheap_llm {
         tracing::debug!("Cheap LLM provider initialized: {}", cheap.model_name());
     }
@@ -954,6 +1009,22 @@ pub(crate) async fn build_provider_chain_components(
     Ok(ProviderChainComponents {
         primary: llm,
         cheap: cheap_llm,
+    })
+}
+
+/// Build a primary provider chain for composition roots that do not own
+/// hot-reload or standalone cheap-provider lifecycle handles.
+pub async fn build_static_provider_chain(
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let components = build_provider_chain_components_with_options(config, session, false).await?;
+    let primary = components.primary;
+    let recording_handle = RecordingLlm::from_env(primary.clone());
+    Ok(if let Some(recorder) = recording_handle {
+        recorder as Arc<dyn LlmProvider>
+    } else {
+        primary
     })
 }
 

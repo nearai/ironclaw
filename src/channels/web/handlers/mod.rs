@@ -11,6 +11,7 @@ pub mod skills;
 pub mod system_prompt;
 pub mod tokens;
 pub mod tool_policy;
+pub mod traces;
 pub mod users;
 
 pub mod frontend;
