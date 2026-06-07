@@ -385,7 +385,7 @@ impl NativeProductAdapterRunner {
         let (envelope, _permit) = self.prepare_inbound_envelope(body, &evidence).await?;
         let workflow = Arc::clone(&self.workflow);
         let mut workflow_task =
-            tokio::spawn(async move { workflow.accept_inbound(envelope).await });
+            tokio::spawn(async move { workflow.submit_inbound(envelope).await });
         let ack = match tokio::time::timeout(self.config.workflow_timeout, &mut workflow_task).await
         {
             Ok(Ok(result)) => result?,
@@ -579,7 +579,7 @@ mod tests {
     }
 
     /// Helper for workflow stubs: `resolve_projection_subscription` is never
-    /// exercised by the runner tests (the runner only invokes `accept_inbound`),
+    /// exercised by the runner tests (the runner only invokes `submit_inbound`),
     /// but the trait requires it. Return a deterministic adapter-shape error
     /// so accidental calls fail loudly.
     fn projection_subscription_unimplemented() -> ProductAdapterError {
@@ -594,7 +594,7 @@ mod tests {
 
     #[async_trait]
     impl ProductWorkflow for AckWorkflow {
-        async fn accept_inbound(
+        async fn submit_inbound(
             &self,
             _envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {
@@ -613,7 +613,7 @@ mod tests {
 
     #[async_trait]
     impl ProductWorkflow for RetryableRejectedWorkflow {
-        async fn accept_inbound(
+        async fn submit_inbound(
             &self,
             _envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {
@@ -637,7 +637,7 @@ mod tests {
 
     #[async_trait]
     impl ProductWorkflow for RecordingWorkflow {
-        async fn accept_inbound(
+        async fn submit_inbound(
             &self,
             envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {
@@ -660,7 +660,7 @@ mod tests {
 
     #[async_trait]
     impl ProductWorkflow for PendingWorkflow {
-        async fn accept_inbound(
+        async fn submit_inbound(
             &self,
             _envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {
@@ -679,7 +679,7 @@ mod tests {
 
     #[async_trait]
     impl ProductWorkflow for PanicWorkflow {
-        async fn accept_inbound(
+        async fn submit_inbound(
             &self,
             _envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {
@@ -701,7 +701,7 @@ mod tests {
 
     #[async_trait]
     impl ProductWorkflow for BlockingWorkflow {
-        async fn accept_inbound(
+        async fn submit_inbound(
             &self,
             _envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {

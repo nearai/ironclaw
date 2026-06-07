@@ -49,8 +49,6 @@ registerPack("fr", {
 
   "chat.placeholder": "Message à IronClaw...",
   "chat.send": "Envoyer",
-  "chat.removeImage": "Retirer l’image",
-  "chat.removeAttachment": "Retirer la pièce jointe",
 
   "chat.conversations": "Conversations",
   "chat.threads": "{count} threads",
@@ -510,7 +508,6 @@ registerPack("fr", {
   "chat.suggestion3Desc": "Verifier la configuration, l'authentification, l'appairage et les capacites disponibles.",
   "chat.heroPlaceholder": "Demandez n'importe quoi a IronClaw.",
   "chat.followUpPlaceholder": "Demander des modifications de suivi",
-  "chat.attachFiles": "Joindre des fichiers",
   "chat.modeAutoReview": "Revue automatique",
   "chat.runtimeLocal": "Travailler localement",
   "chat.statusWorking": "Travail en cours",

@@ -127,6 +127,12 @@ use crate::{
 
 pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
 
+/// Output of [`build_local_dev_root_filesystem`]: the composed local-dev
+/// root filesystem and, when libSQL is the substrate, a clone of the raw
+/// libSQL handle. The handle backs both the local-dev trigger repository
+/// and the canonical Reborn identity store, so each rides the same
+/// `reborn-local-dev.db` rather than opening a second handle to the file
+/// (see `RebornRuntime::open_reborn_identity_resolver`).
 struct LocalDevRootFilesystemBundle {
     filesystem: Arc<LocalDevRootFilesystem>,
     #[cfg(feature = "libsql")]
@@ -345,6 +351,20 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
+    /// Scoped filesystem backing the canonical Reborn identity store, so it
+    /// rides the host `RootFilesystem` abstraction like every other durable
+    /// Reborn store rather than a raw DB handle. Only the WebUI v2 SSO surface
+    /// reads it today, hence `dead_code` when that feature is off.
+    #[cfg(feature = "libsql")]
+    #[allow(dead_code)]
+    pub(crate) identity_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    /// Raw libSQL substrate handle backing `reborn-local-dev.db`. Carried ONLY
+    /// for the one-time legacy WebUI `user_identities` fold (a substrate-level
+    /// read that belongs in this host layer, not the identity crate); the
+    /// steady-state identity store goes through `identity_filesystem` above.
+    #[cfg(feature = "libsql")]
+    #[allow(dead_code)]
+    pub(crate) identity_substrate_db: Arc<libsql::Database>,
     /// Resource governor handle used by the budget accountant. Kept here
     /// separately from the type-erased `dyn HostRuntime` so the runtime
     /// composer can construct a `GovernorBackedAccountant` without losing
@@ -444,6 +464,11 @@ struct RebornLocalDevStoreGraphInput {
     local_dev_storage_root: PathBuf,
     default_system_prompt_path: PathBuf,
     trigger_repository: Arc<dyn TriggerRepository>,
+    /// Raw libSQL substrate handle, carried so the canonical Reborn identity
+    /// store rides the same `reborn-local-dev.db` instead of opening a second
+    /// handle (see `RebornRuntime::open_reborn_identity_resolver`).
+    #[cfg(feature = "libsql")]
+    identity_substrate_db: Arc<libsql::Database>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -604,6 +629,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     crate::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
     let filesystem_bundle =
         build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
+    // Clone the raw libSQL handle for the canonical identity store before
+    // `filesystem` moves out of the bundle, so the resolver rides the same
+    // substrate DB the runtime owns rather than a second handle.
+    #[cfg(feature = "libsql")]
+    let identity_substrate_db = Arc::clone(&filesystem_bundle.database);
     let filesystem = filesystem_bundle.filesystem;
     #[cfg(feature = "libsql")]
     let trigger_repository =
@@ -632,6 +662,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         local_dev_storage_root: root.clone(),
         default_system_prompt_path,
         trigger_repository,
+        #[cfg(feature = "libsql")]
+        identity_substrate_db,
     })?;
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
@@ -867,6 +899,7 @@ fn build_local_dev_store_graph(
         local_dev_storage_root,
         default_system_prompt_path,
         trigger_repository,
+        identity_substrate_db,
     } = input;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
@@ -910,6 +943,8 @@ fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
+    #[cfg(feature = "slack-v2-host-beta")]
+    let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
@@ -939,8 +974,10 @@ fn build_local_dev_store_graph(
         skill_filesystem,
         workspace_filesystem,
         #[cfg(feature = "slack-v2-host-beta")]
-        host_state_filesystem: Arc::clone(&scoped_filesystem),
+        host_state_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
+        identity_filesystem: Arc::clone(&scoped_filesystem),
+        identity_substrate_db,
         extension_filesystem: Arc::clone(&filesystem),
         workspace_mounts,
         local_dev_storage_root,
@@ -1009,6 +1046,8 @@ fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
+    #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
+    let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -1040,7 +1079,7 @@ fn build_local_dev_store_graph(
         skill_filesystem,
         workspace_filesystem,
         #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
-        host_state_filesystem: Arc::clone(&subagent_goal_filesystem),
+        host_state_filesystem,
         #[cfg(feature = "postgres")]
         subagent_goal_filesystem,
         extension_filesystem: Arc::clone(&filesystem),
@@ -1583,6 +1622,19 @@ fn local_dev_scoped_filesystem(
     filesystem: Arc<LocalDevRootFilesystem>,
 ) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
     crate::wrap_scoped(filesystem)
+}
+
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    feature = "slack-v2-host-beta"
+))]
+fn local_dev_slack_host_state_filesystem(
+    filesystem: Arc<LocalDevRootFilesystem>,
+) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
+    Arc::new(ScopedFilesystem::new(
+        filesystem,
+        crate::slack_host_state_mount_view,
+    ))
 }
 
 #[cfg(feature = "libsql")]
@@ -2734,6 +2786,10 @@ mod tests {
             workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
             #[cfg(feature = "slack-v2-host-beta")]
             host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
+            #[cfg(feature = "libsql")]
+            identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
+            #[cfg(feature = "libsql")]
+            identity_substrate_db: Arc::clone(&base_runtime.identity_substrate_db),
             subagent_goal_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
                 Arc::new(failing_root),
                 MountView::new(vec![MountGrant::new(
@@ -3003,10 +3059,11 @@ mod tests {
             None,
         )
         .await
-        .expect("local-dev filesystem rebuild");
+        .expect("local-dev filesystem rebuild")
+        .filesystem;
         let rebuilt_secret_store = build_local_dev_secret_store(
             &local_dev_root,
-            local_dev_scoped_filesystem(rebuilt_filesystem.filesystem),
+            local_dev_scoped_filesystem(rebuilt_filesystem),
         )
         .expect("local-dev secret store rebuild");
         let lease = rebuilt_secret_store

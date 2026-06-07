@@ -87,6 +87,8 @@ mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_channel_routes;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_connectable_channel;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_delivery;
@@ -217,6 +219,10 @@ pub use slack_actor_identity::{
     slack_user_identity_provider_user_id,
 };
 #[cfg(feature = "slack-v2-host-beta")]
+pub use slack_channel_routes::{
+    SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+};
+#[cfg(feature = "slack-v2-host-beta")]
 pub use slack_connectable_channel::build_webui_services_with_slack_host_beta_mounts;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_delivery::{
@@ -300,13 +306,6 @@ pub use ironclaw_reborn::local_trigger_access::{
     LocalTriggerAccessSource, RebornLibSqlLocalTriggerAccessStore,
     RebornLocalTriggerAccessStoreError,
 };
-/// Reborn-owned WebChat user-identity store, re-exported so host binaries reach
-/// it through this composition facade. [`open_webui_user_store`] opens it so the
-/// libSQL substrate handle stays private to this facade.
-#[cfg(feature = "webui-v2-beta")]
-pub use ironclaw_reborn::webui_users::{
-    RebornLibSqlUserStore, RebornUserStoreError, ResolveIdentity,
-};
 
 #[cfg(feature = "webui-v2-beta")]
 #[async_trait::async_trait]
@@ -339,25 +338,58 @@ impl runtime_input::TriggerFireAccessChecker for RebornLibSqlLocalTriggerAccessS
     }
 }
 
-/// Open the reborn-owned WebChat user-identity store on the substrate DB
-/// at `path`, creating the parent directory and running its idempotent
-/// migrations. Keeps the libSQL handle private to the composition layer
-/// (composition CLAUDE.md: "keep lower substrate handles private").
+/// Canonical Reborn identity resolver vocabulary (issue #4381): the one
+/// boundary that maps every external identity — WebUI OAuth logins and
+/// external channel/product actors — to a stable `UserId` before runtime
+/// state is touched. Only the resolver trait, request, surface, and error
+/// types are re-exported so host wiring (`ironclaw-reborn serve`, the CLI
+/// `UserDirectory` adapter) depends on the facade vocabulary, never on
+/// `ironclaw_reborn_identity` directly. The concrete filesystem-backed store
+/// stays private to this composition layer (composition CLAUDE.md: "keep
+/// lower substrate handles private").
 #[cfg(feature = "webui-v2-beta")]
-pub async fn open_webui_user_store(
-    path: &std::path::Path,
-) -> Result<std::sync::Arc<RebornLibSqlUserStore>, RebornUserStoreError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| RebornUserStoreError::Backend(err.to_string()))?;
-    }
-    let db = std::sync::Arc::new(
-        libsql::Builder::new_local(path)
-            .build()
-            .await
-            .map_err(|err| RebornUserStoreError::Backend(err.to_string()))?,
-    );
-    Ok(std::sync::Arc::new(RebornLibSqlUserStore::open(db).await?))
+pub use ironclaw_reborn_identity::{
+    ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind, RebornIdentityError,
+    RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
+};
+
+/// Test-support: build a standalone canonical Reborn identity resolver on an
+/// in-memory host filesystem under `tenant_id`.
+///
+/// This mirrors the production path
+/// [`RebornRuntime::open_reborn_identity_resolver`](crate::RebornRuntime::open_reborn_identity_resolver),
+/// which builds the same filesystem-backed store on the runtime's durable
+/// scoped filesystem. Production callers must use that accessor; this free
+/// function exists only so tests (and downstream integration crates via
+/// `test-support`) can build a resolver without standing up a full runtime.
+/// Gated so it ships zero bytes in production binaries.
+#[cfg(all(feature = "webui-v2-beta", any(test, feature = "test-support")))]
+pub fn open_reborn_identity_resolver(
+    tenant_id: &ironclaw_host_api::TenantId,
+) -> std::sync::Arc<dyn RebornIdentityResolver> {
+    use ironclaw_host_api::{
+        AgentId, MountAlias, MountGrant, MountPermissions, MountView, UserId, VirtualPath,
+    };
+
+    let root = std::sync::Arc::new(ironclaw_filesystem::InMemoryBackend::default());
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/tenant-shared").expect("mount alias"),
+        VirtualPath::new("/tenants/test/shared").expect("virtual path"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let filesystem = std::sync::Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+        root, view,
+    ));
+    std::sync::Arc::new(
+        ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+            filesystem,
+            tenant_id.clone(),
+            UserId::new("test-owner").expect("user"),
+            AgentId::new("test-agent").expect("agent"),
+            None,
+        ),
+    )
 }
 
 /// Open the reborn-owned local trigger access store on the substrate DB at
@@ -658,6 +690,12 @@ fn invocation_mount_view_for_segments(
         VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
         MountPermissions::read_write(),
     ));
+    #[cfg(feature = "slack-v2-host-beta")]
+    grants.push(MountGrant::new(
+        MountAlias::new("/tenant-shared/slack-channel-routes")?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-channel-routes"))?,
+        MountPermissions::read_only(),
+    ));
     for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
         grants.push(MountGrant::new(
             MountAlias::new(system_subroot)?,
@@ -666,6 +704,30 @@ fn invocation_mount_view_for_segments(
         ));
     }
     MountView::new(grants)
+}
+
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    feature = "slack-v2-host-beta"
+))]
+pub(crate) fn slack_host_state_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::HostApiError> {
+    let tenant_id = resource_scope_path_segment(scope.tenant_id.as_str());
+    MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/slack-personal-binding")?,
+            VirtualPath::new(format!(
+                "/tenants/{tenant_id}/shared/slack-personal-binding"
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/slack-channel-routes")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-channel-routes"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])
 }
 
 /// Wrap `root` in a tenant-aware [`ScopedFilesystem`] whose resolver is
@@ -853,6 +915,61 @@ mod mount_view_tests {
         assert_eq!(
             resolved.as_str(),
             &format!("/tenants/{}/shared/foo", scope.tenant_id.as_str())
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn invocation_mount_view_exposes_slack_channel_routes_read_only() {
+        let scope = sample_scope();
+        let view = invocation_mount_view(&scope).unwrap();
+        let (resolved, grant) = view
+            .resolve_with_grant(
+                &ScopedPath::new("/tenant-shared/slack-channel-routes/install/team/route.json")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            &format!(
+                "/tenants/{}/shared/slack-channel-routes/install/team/route.json",
+                scope.tenant_id.as_str()
+            )
+        );
+        assert_eq!(grant.alias.as_str(), "/tenant-shared/slack-channel-routes");
+        assert_eq!(grant.permissions, MountPermissions::read_only());
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_state_mount_view_grants_delete_only_to_slack_state_root() {
+        let scope = sample_scope();
+        let view = slack_host_state_mount_view(&scope).unwrap();
+        let resolved = view
+            .resolve(
+                &ScopedPath::new("/tenant-shared/slack-channel-routes/install/team/route.json")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            &format!(
+                "/tenants/{}/shared/slack-channel-routes/install/team/route.json",
+                scope.tenant_id.as_str()
+            )
+        );
+        let grant = view
+            .mounts
+            .iter()
+            .find(|grant| grant.alias.as_str() == "/tenant-shared/slack-channel-routes")
+            .expect("slack host-state grant");
+        assert_eq!(
+            grant.permissions,
+            MountPermissions::read_write_list_delete()
+        );
+        assert!(
+            view.resolve(&ScopedPath::new("/tenant-shared/other.json").unwrap())
+                .is_err()
         );
     }
 

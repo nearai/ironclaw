@@ -16,24 +16,43 @@ use ironclaw_turns::{TurnRunId, run_profile::CapabilityInputRef};
 use super::capability_activity_status_wire;
 
 pub(crate) const SANITIZE_JSON_MAX_DEPTH: usize = 32;
+const COMPLETED_PREVIEW_PENDING_TIMEOUT_SECONDS: i64 = 10;
 
 #[async_trait]
 pub(super) trait CapabilityDisplayPreviewSource: Send + Sync {
+    async fn preview_resolution(
+        &self,
+        activity: &CapabilityActivityProjection,
+    ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError>;
+
+    #[cfg(test)]
     async fn preview(
         &self,
         activity: &CapabilityActivityProjection,
-    ) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError>;
+    ) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError> {
+        Ok(match self.preview_resolution(activity).await? {
+            CapabilityDisplayPreviewResolution::Ready(preview) => Some(*preview),
+            CapabilityDisplayPreviewResolution::Pending
+            | CapabilityDisplayPreviewResolution::NotApplicable => None,
+        })
+    }
 }
 
 pub(super) struct NoopCapabilityDisplayPreviewSource;
 
+pub(super) enum CapabilityDisplayPreviewResolution {
+    Ready(Box<CapabilityDisplayPreviewView>),
+    Pending,
+    NotApplicable,
+}
+
 #[async_trait]
 impl CapabilityDisplayPreviewSource for NoopCapabilityDisplayPreviewSource {
-    async fn preview(
+    async fn preview_resolution(
         &self,
         _activity: &CapabilityActivityProjection,
-    ) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError> {
-        Ok(None)
+    ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError> {
+        Ok(CapabilityDisplayPreviewResolution::NotApplicable)
     }
 }
 
@@ -208,28 +227,37 @@ impl CapabilityDisplayPreviewStore {
 
 #[async_trait]
 impl CapabilityDisplayPreviewSource for CapabilityDisplayPreviewStore {
-    async fn preview(
+    async fn preview_resolution(
         &self,
         activity: &CapabilityActivityProjection,
-    ) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError> {
-        capability_display_preview_from_store(self, activity)
+    ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError> {
+        capability_display_preview_resolution_from_store(self, activity)
     }
 }
 
-fn capability_display_preview_from_store(
+fn capability_display_preview_resolution_from_store(
     store: &CapabilityDisplayPreviewStore,
     activity: &CapabilityActivityProjection,
-) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError> {
+) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError> {
     if !matches!(
         activity.status,
         CapabilityActivityStatus::Completed
             | CapabilityActivityStatus::Failed
             | CapabilityActivityStatus::Killed
     ) {
-        return Ok(None);
+        return Ok(CapabilityDisplayPreviewResolution::NotApplicable);
     }
     let Some(record) = store.record_for_invocation(activity.invocation_id) else {
-        return failed_capability_display_preview(activity);
+        return if matches!(
+            activity.status,
+            CapabilityActivityStatus::Failed | CapabilityActivityStatus::Killed
+        ) {
+            failed_capability_display_preview(activity)
+        } else if completed_preview_may_still_arrive(activity) {
+            Ok(CapabilityDisplayPreviewResolution::Pending)
+        } else {
+            Ok(CapabilityDisplayPreviewResolution::NotApplicable)
+        };
     };
     CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
         timeline_message_id: record
@@ -251,18 +279,18 @@ fn capability_display_preview_from_store(
         truncated: record.truncated,
         updated_at: activity.updated_at,
     })
-    .map(Some)
+    .map(Box::new)
+    .map(CapabilityDisplayPreviewResolution::Ready)
+}
+
+fn completed_preview_may_still_arrive(activity: &CapabilityActivityProjection) -> bool {
+    chrono::Utc::now().signed_duration_since(activity.updated_at)
+        <= chrono::Duration::seconds(COMPLETED_PREVIEW_PENDING_TIMEOUT_SECONDS)
 }
 
 fn failed_capability_display_preview(
     activity: &CapabilityActivityProjection,
-) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError> {
-    if !matches!(
-        activity.status,
-        CapabilityActivityStatus::Failed | CapabilityActivityStatus::Killed
-    ) {
-        return Ok(None);
-    }
+) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError> {
     let summary = activity
         .error_kind
         .as_deref()
@@ -290,7 +318,8 @@ fn failed_capability_display_preview(
         truncated: false,
         updated_at: activity.updated_at,
     })
-    .map(Some)
+    .map(Box::new)
+    .map(CapabilityDisplayPreviewResolution::Ready)
 }
 
 fn turn_run_id_for_activity(activity: &CapabilityActivityProjection) -> Option<TurnRunId> {

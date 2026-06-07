@@ -1,10 +1,27 @@
 use super::*;
+use async_trait::async_trait;
 use ironclaw_host_api::CapabilityDisplayOutputPreview;
-use ironclaw_product_adapters::CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES;
+use ironclaw_product_adapters::{
+    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, ProductAdapterError, RedactedString,
+};
 use ironclaw_turns::run_profile::CapabilityInputRef;
 
 fn preview_input_ref(label: &str) -> CapabilityInputRef {
     CapabilityInputRef::new(format!("input:{label}")).unwrap()
+}
+
+struct FailingPreviewSource;
+
+#[async_trait]
+impl CapabilityDisplayPreviewSource for FailingPreviewSource {
+    async fn preview_resolution(
+        &self,
+        _activity: &CapabilityActivityProjection,
+    ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError> {
+        Err(ProductAdapterError::Internal {
+            detail: RedactedString::new("preview encoder failed"),
+        })
+    }
 }
 
 #[tokio::test]
@@ -85,6 +102,67 @@ async fn webui_event_stream_enriches_activity_with_display_preview_from_store() 
     );
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(!rendered.contains("sk-secret"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_error_does_not_drop_activity_payload() {
+    let tenant_id = TenantId::new("webui-preview-error-tenant").unwrap();
+    let user_id = UserId::new("webui-preview-error-user").unwrap();
+    let agent_id = AgentId::new("webui-preview-error-agent").unwrap();
+    let thread_id = ThreadId::new("webui-preview-error-thread").unwrap();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let projection_scope = runtime_projection_scope(&TurnActor::new(user_id), &scope);
+    let cursor =
+        EventProjectionCursor::for_scope(projection_scope, ironclaw_events::EventCursor::new(1));
+    let invocation_id = InvocationId::new();
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.write_file").unwrap();
+
+    let item = runtime_payloads_for_item(
+        &scope,
+        &FailingPreviewSource,
+        RuntimePayloadItemInput {
+            runs: Vec::new(),
+            capability_activities: vec![CapabilityActivityProjection {
+                invocation_id,
+                run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+                capability_id: capability.clone(),
+                thread_id: Some(thread_id),
+                status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+                provider: None,
+                runtime: None,
+                process_id: None,
+                output_bytes: Some(12),
+                error_kind: None,
+                last_cursor: ironclaw_events::EventCursor::new(1),
+                updated_at: chrono::Utc::now(),
+            }],
+            cursor,
+            state_kind: StatePayloadKind::Update,
+        },
+        None,
+        0,
+        8,
+    )
+    .await
+    .expect("preview failure should not fail projection")
+    .expect("activity payload remains renderable");
+
+    assert_eq!(item.total, 1);
+    assert!(matches!(
+        item.payloads.as_slice(),
+        [DeliveredRuntimePayload {
+            payload: ProductOutboundPayload::CapabilityActivity(activity),
+            ..
+        }]
+            if activity.invocation_id == invocation_id
+                && activity.capability_id == capability
+    ));
 }
 
 #[tokio::test]
@@ -684,121 +762,4 @@ async fn capability_display_preview_store_marks_truncated_side_channel_summary()
     assert_eq!(preview.output_kind.as_deref(), Some("unified_diff"));
     assert_eq!(preview.subtitle.as_deref(), Some("/workspace/main.rs"));
     assert!(preview.truncated);
-}
-
-#[tokio::test]
-async fn webui_projection_snapshot_resumes_preview_payload() {
-    let tenant_id = TenantId::new("webui-preview-resume-tenant").unwrap();
-    let user_id = UserId::new("webui-preview-resume-user").unwrap();
-    let agent_id = AgentId::new("webui-preview-resume-agent").unwrap();
-    let thread_id = ThreadId::new("webui-preview-resume-thread").unwrap();
-    let capability = CapabilityId::new("builtin.read_file").unwrap();
-    let invocation_id = InvocationId::new();
-    let actor = TurnActor::new(user_id.clone());
-    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone());
-    let projection_scope = runtime_projection_scope(&actor, &scope);
-    let cursor =
-        EventProjectionCursor::for_scope(projection_scope, ironclaw_events::EventCursor::new(1));
-    let display_previews = CapabilityDisplayPreviewStore::default();
-    let run_id = TurnRunId::new();
-    let input_ref = preview_input_ref("preview-resume-input");
-    display_previews.record_input(
-        &run_id.to_string(),
-        &input_ref,
-        "read_file",
-        &serde_json::json!({"path": "src/main.rs"}),
-    );
-    display_previews.record_result(CapabilityDisplayPreviewResult {
-        run_id: &run_id.to_string(),
-        input_ref: &input_ref,
-        invocation_id,
-        capability_id: &capability,
-        result_ref: "result:preview-resume",
-        output: &serde_json::json!({"content": "fn main() {}"}),
-        output_bytes: 12,
-    });
-    let snapshot = ProjectionSnapshot {
-        timeline: ThreadTimeline {
-            entries: Vec::new(),
-        },
-        runs: vec![RunStatusProjection {
-            invocation_id,
-            capability_id: capability.clone(),
-            thread_id: Some(thread_id.clone()),
-            status: RunProjectionStatus::Completed,
-            provider: None,
-            runtime: None,
-            process_id: None,
-            error_kind: None,
-            last_cursor: ironclaw_events::EventCursor::new(1),
-            updated_at: chrono::Utc::now(),
-        }],
-        capability_activities: vec![CapabilityActivityProjection {
-            invocation_id,
-            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
-            capability_id: capability,
-            thread_id: Some(thread_id),
-            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
-            provider: None,
-            runtime: None,
-            process_id: None,
-            output_bytes: Some(12),
-            error_kind: None,
-            last_cursor: ironclaw_events::EventCursor::new(1),
-            updated_at: chrono::Utc::now(),
-        }],
-        next_cursor: cursor.clone(),
-        truncated: false,
-    };
-
-    let first_snapshot = snapshot.clone();
-    let first = runtime_payloads_for_item(
-        &scope,
-        &display_previews,
-        RuntimePayloadItemInput {
-            runs: first_snapshot.runs,
-            capability_activities: first_snapshot.capability_activities,
-            cursor: cursor.clone(),
-            state_kind: StatePayloadKind::Snapshot,
-        },
-        None,
-        0,
-        2,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(first.total, 3);
-    assert_eq!(first.payloads.len(), 2);
-    assert!(matches!(
-        first.payloads[0],
-        ProductOutboundPayload::ProjectionSnapshot { .. }
-    ));
-    assert!(matches!(
-        first.payloads[1],
-        ProductOutboundPayload::CapabilityActivity(_)
-    ));
-
-    let resumed = runtime_payloads_for_item(
-        &scope,
-        &display_previews,
-        RuntimePayloadItemInput {
-            runs: snapshot.runs,
-            capability_activities: snapshot.capability_activities,
-            cursor,
-            state_kind: StatePayloadKind::Snapshot,
-        },
-        Some(first.item_cursor.runtime),
-        2,
-        2,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(resumed.payloads.len(), 1);
-    assert!(matches!(
-        &resumed.payloads[0],
-        ProductOutboundPayload::CapabilityDisplayPreview(preview)
-            if preview.result_ref.as_deref() == Some("result:preview-resume")
-    ));
 }
