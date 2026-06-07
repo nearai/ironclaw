@@ -11,13 +11,15 @@ use ironclaw_product_adapters::{
     ParsedProductInbound, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId,
     ProductAttachmentDescriptor, ProductAttachmentKind, ProductCapabilityFlag, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProductRejection,
-    ProductRejectionKind, ProductSurfaceKind, ProductTriggerReason, ProductWorkflow,
-    ProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthEvidence,
-    ProtocolHttpEgress, ProtocolHttpEgressError, REDACTED_PLACEHOLDER, RedactedDebug,
-    RedactedString, TrustedInboundContext, UserMessagePayload,
+    ProductOutboundTarget, ProductProjectionItem, ProductProjectionReadInput,
+    ProductProjectionState, ProductProjectionSubject, ProductProjectionSubscribeInput,
+    ProductRejection, ProductRejectionKind, ProductSurfaceKind, ProductTriggerReason,
+    ProductWorkflow, ProjectionCursor, ProjectionReadRequest, ProjectionStream,
+    ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolHttpEgress,
+    ProtocolHttpEgressError, REDACTED_PLACEHOLDER, RedactedDebug, RedactedString,
+    TrustedInboundContext, UserMessagePayload,
 };
-use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnRunId};
+use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 
 const FORBIDDEN_DEPENDENCIES: &[&str] = &[
     "ironclaw_dispatcher",
@@ -270,6 +272,69 @@ async fn workflow_returns_programmed_outcomes() {
         .await
         .expect("reject");
     assert!(matches!(reject_ack, ProductInboundAck::Rejected(_)));
+}
+
+#[tokio::test]
+async fn workflow_fake_records_submit_read_and_subscribe_doors_separately() {
+    let workflow = FakeProductWorkflow::new();
+    let actor = TurnActor::new(ironclaw_host_api::UserId::new("user:alice").expect("valid"));
+    let scope = TurnScope::new(
+        ironclaw_host_api::TenantId::new("tenant:alpha").expect("valid"),
+        None,
+        None,
+        ironclaw_host_api::ThreadId::new("thread:alpha").expect("valid"),
+    );
+    let read_cursor = ProjectionCursor::new("cursor:read").expect("valid");
+    let subscribe_cursor = ProjectionCursor::new("cursor:subscribe").expect("valid");
+    let read_request = ProjectionReadRequest {
+        actor: actor.clone(),
+        scope: scope.clone(),
+        after_cursor: Some(read_cursor.clone()),
+        limit: Some(10),
+    };
+    let subscribe_request = ProjectionSubscriptionRequest {
+        actor: actor.clone(),
+        scope: scope.clone(),
+        after_cursor: Some(subscribe_cursor.clone()),
+    };
+    workflow.program_projection_read_resolution(read_request.clone());
+    workflow.program_projection_resolution(subscribe_request.clone());
+
+    let read_input = ProductProjectionReadInput::new(
+        ProductProjectionSubject::canonical(actor.clone(), scope.clone()),
+        None,
+        Some(read_cursor),
+        Some(10),
+    );
+    let subscribe_input = ProductProjectionSubscribeInput::new(
+        ProductProjectionSubject::canonical(actor, scope),
+        None,
+        Some(subscribe_cursor),
+    );
+
+    let read = workflow
+        .read_projection(read_input.clone())
+        .await
+        .expect("read");
+    let subscription = workflow
+        .subscribe_projection(subscribe_input.clone())
+        .await
+        .expect("subscribe");
+
+    assert_eq!(read, read_request);
+    assert_eq!(subscription, subscribe_request);
+    assert_eq!(workflow.read_inputs(), vec![read_input]);
+    assert_eq!(workflow.subscribe_inputs(), vec![subscribe_input]);
+    assert_eq!(workflow.accepted_count(), 0);
+
+    let submit = workflow
+        .submit_inbound(sample_envelope("update:projection-doors"))
+        .await
+        .expect("submit");
+    assert!(matches!(submit, ProductInboundAck::Accepted { .. }));
+    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(workflow.read_inputs().len(), 1);
+    assert_eq!(workflow.subscribe_inputs().len(), 1);
 }
 
 #[tokio::test]

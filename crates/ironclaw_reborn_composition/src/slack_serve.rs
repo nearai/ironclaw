@@ -624,7 +624,7 @@ mod tests {
 
     #[async_trait]
     impl ironclaw_product_adapters::ProductWorkflow for AckWorkflow {
-        async fn accept_inbound(
+        async fn submit_inbound(
             &self,
             _envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {

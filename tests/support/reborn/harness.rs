@@ -1660,19 +1660,22 @@ impl HostRuntimeCapabilityHarness {
         network_policy: NetworkPolicy,
     ) -> HarnessResult<Self> {
         let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            br#"{"accepted":true}"#.to_vec(),
+        ));
         let runtime = local_dev_host_runtime_with_http_egress(
             storage_root.clone(),
-            Arc::new(RecordingRuntimeHttpEgress::with_body(
-                br#"{"accepted":true}"#.to_vec(),
-            )),
+            Arc::clone(&runtime_http_egress),
         )?;
-        Self::core_builtin_tools_from_runtime(
+        let mut harness = Self::core_builtin_tools_from_runtime(
             root,
             workspace_root,
             runtime,
             network_policy,
             UserId::new("reborn-e2e-core-builtins-user")?,
-        )
+        )?;
+        harness.http_egress = Some(runtime_http_egress);
+        Ok(harness)
     }
 
     async fn core_builtin_tools_with_live_http_egress(
