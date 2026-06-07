@@ -2551,6 +2551,42 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_wasm",
             ],
         },
+        // The agent-loop framework crate owns reusable loop mechanics
+        // (executor, strategies, families, state) and depends upward on neutral
+        // contracts in `ironclaw_turns`. It must not import host runtime crates,
+        // product adapters, dispatcher, capability host, filesystem, network,
+        // secrets, DB backends, or the loop-support adapter layer — those all
+        // sit above agent_loop in the stack and would create an inversion.
+        BoundaryRule {
+            crate_name: "ironclaw_agent_loop",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_host_runtime",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_network",
+                "ironclaw_processes",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_wasm",
+            ],
+        },
         BoundaryRule {
             crate_name: "ironclaw_capabilities",
             forbidden: vec![
