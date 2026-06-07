@@ -24,10 +24,11 @@ use ironclaw_product_workflow::{
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
@@ -43,6 +44,17 @@ use tower::ServiceExt;
 const TENANT: &str = "tenant-alpha";
 const USER: &str = "user-alpha";
 const VALID_TOKEN: &str = "valid-bearer-token";
+
+fn service_unavailable_error(retryable: bool) -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable,
+        field: None,
+        validation_code: None,
+    }
+}
 
 // ─── stubs ────────────────────────────────────────────────────────────
 
@@ -406,6 +418,28 @@ impl RebornServicesApi for StubServices {
         Ok(RebornListAutomationsResponse {
             automations: Vec::new(),
         })
+    }
+
+    async fn get_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Ok(RebornOutboundPreferencesResponse::default())
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(service_unavailable_error(false))
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        Err(service_unavailable_error(false))
     }
 
     async fn list_extensions(

@@ -4091,6 +4091,44 @@ fn set_outbound_preferences_empty_json_defaults_final_target_to_none() {
 }
 
 #[test]
+fn outbound_preferences_response_preserves_client_json_shape() {
+    let response = RebornOutboundPreferencesResponse {
+        final_reply_target: Some(outbound_target_summary("slack-dm-alpha")),
+        default_modality: RebornOutboundDeliveryModality::Text,
+    };
+
+    let serialized = serde_json::to_value(&response).expect("serialize preferences response");
+    assert_eq!(
+        serialized,
+        json!({
+            "final_reply_target": {
+                "target_id": "slack-dm-alpha",
+                "channel": "slack",
+                "display_name": "Slack DM",
+                "description": "Slack direct message",
+            },
+            "default_modality": "text",
+        })
+    );
+
+    let deserialized: RebornOutboundPreferencesResponse =
+        serde_json::from_value(serialized).expect("deserialize preferences response");
+    assert_eq!(deserialized, response);
+}
+
+#[test]
+fn outbound_preferences_response_empty_json_defaults_to_text_without_target() {
+    let response: RebornOutboundPreferencesResponse =
+        serde_json::from_value(json!({})).expect("deserialize empty preferences response");
+
+    assert!(response.final_reply_target.is_none());
+    assert_eq!(
+        response.default_modality,
+        RebornOutboundDeliveryModality::Text
+    );
+}
+
+#[test]
 fn outbound_target_summary_preserves_client_json_shape() {
     let summary = outbound_target_summary("slack-dm-alpha");
 
@@ -4137,6 +4175,46 @@ fn outbound_target_list_response_preserves_empty_json_shape_without_cursor() {
         serde_json::from_value(json!({ "targets": [] })).expect("deserialize empty target list");
     assert!(deserialized.targets.is_empty());
     assert!(deserialized.next_cursor.is_none());
+}
+
+#[test]
+fn outbound_target_list_response_preserves_json_shape_with_cursor() {
+    let response = RebornOutboundDeliveryTargetListResponse {
+        targets: vec![RebornOutboundDeliveryTargetOption {
+            target: outbound_target_summary("slack-dm-alpha"),
+            capabilities: RebornOutboundDeliveryTargetCapabilities {
+                final_replies: true,
+                gate_prompts: true,
+                auth_prompts: true,
+            },
+        }],
+        next_cursor: Some("opaque-page-token".to_string()),
+    };
+
+    let serialized = serde_json::to_value(&response).expect("serialize target list with cursor");
+    assert_eq!(
+        serialized,
+        json!({
+            "targets": [{
+                "target": {
+                    "target_id": "slack-dm-alpha",
+                    "channel": "slack",
+                    "display_name": "Slack DM",
+                    "description": "Slack direct message",
+                },
+                "capabilities": {
+                    "final_replies": true,
+                    "gate_prompts": true,
+                    "auth_prompts": true,
+                },
+            }],
+            "next_cursor": "opaque-page-token",
+        })
+    );
+
+    let deserialized: RebornOutboundDeliveryTargetListResponse =
+        serde_json::from_value(serialized).expect("deserialize target list with cursor");
+    assert_eq!(deserialized, response);
 }
 
 #[test]
@@ -4245,6 +4323,49 @@ fn outbound_target_id_and_display_fields_reject_unicode_line_separators() {
 
         serde_json::from_value::<RebornOutboundDeliveryTargetSummary>(payload)
             .expect_err("target summary display fields reject unicode line separators");
+    }
+}
+
+#[test]
+fn outbound_target_id_and_display_fields_reject_unsafe_unicode_formatting() {
+    for target_id in [
+        "slack-dm-alpha\u{202e}injected",
+        "slack-dm-alpha\u{2066}injected",
+        "slack-dm-alpha\u{200b}injected",
+        "slack-dm-alpha\u{feff}injected",
+    ] {
+        RebornOutboundDeliveryTargetId::new(target_id)
+            .expect_err("target id rejects unsafe unicode formatting characters");
+        serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
+            "final_reply_target_id": target_id,
+        }))
+        .expect_err("preference request rejects unsafe unicode formatting characters");
+    }
+
+    for (field, invalid_value) in [
+        ("channel", json!("slack\u{202e}injected")),
+        ("channel", json!("slack\u{2066}injected")),
+        ("channel", json!("slack\u{200b}injected")),
+        ("channel", json!("slack\u{feff}injected")),
+        ("display_name", json!("Slack DM\u{202e}injected")),
+        ("display_name", json!("Slack DM\u{2066}injected")),
+        ("display_name", json!("Slack DM\u{200b}injected")),
+        ("display_name", json!("Slack DM\u{feff}injected")),
+        ("description", json!("Slack direct\u{202e}message")),
+        ("description", json!("Slack direct\u{2066}message")),
+        ("description", json!("Slack direct\u{200b}message")),
+        ("description", json!("Slack direct\u{feff}message")),
+    ] {
+        let mut payload = json!({
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        });
+        payload[field] = invalid_value;
+
+        serde_json::from_value::<RebornOutboundDeliveryTargetSummary>(payload)
+            .expect_err("target summary display fields reject unsafe unicode formatting");
     }
 }
 

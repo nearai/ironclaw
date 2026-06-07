@@ -140,12 +140,25 @@ pub trait OutboundPreferencesProductFacade: Send + Sync {
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
 
+    /// Persist the caller's scoped outbound delivery preferences.
+    ///
+    /// Implementations must scope writes by the caller's tenant/user identity.
+    /// `RebornServices` installs `UnsupportedOutboundPreferencesProductFacade`
+    /// by default, which keeps Phase 1 mutation attempts fail-closed with a
+    /// non-retryable service-unavailable response until a real facade is wired.
     async fn set_outbound_preferences(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
 
+    /// List delivery targets available to the authenticated caller.
+    ///
+    /// Implementations must scope target inventory by the caller's tenant/user
+    /// identity. `RebornServices` installs
+    /// `UnsupportedOutboundPreferencesProductFacade` by default, which keeps
+    /// Phase 1 target discovery fail-closed with a non-retryable
+    /// service-unavailable response until a real facade is wired.
     async fn list_outbound_delivery_targets(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -167,7 +180,7 @@ impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductF
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Ok(unsupported_outbound_preferences_projection())
+        Ok(RebornOutboundPreferencesResponse::default())
     }
 
     async fn set_outbound_preferences(
@@ -413,12 +426,22 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
 
+    /// Persist the authenticated caller's outbound delivery preference.
+    ///
+    /// Implementations must scope mutations by the caller's tenant/user
+    /// identity and fail closed when no writable outbound-preferences facade is
+    /// wired.
     async fn set_outbound_preferences(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
 
+    /// List delivery targets available to the authenticated caller.
+    ///
+    /// Implementations must scope target inventory by the caller's tenant/user
+    /// identity and fail closed when no outbound target inventory facade is
+    /// wired.
     async fn list_outbound_delivery_targets(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1503,10 +1526,6 @@ fn automation_unavailable() -> RebornServicesError {
 
 fn outbound_preferences_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(false)
-}
-
-fn unsupported_outbound_preferences_projection() -> RebornOutboundPreferencesResponse {
-    RebornOutboundPreferencesResponse::default()
 }
 
 struct AcceptedWebUiMessage {

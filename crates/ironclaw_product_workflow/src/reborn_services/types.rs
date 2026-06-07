@@ -257,6 +257,7 @@ pub struct RebornListAutomationsResponse {
 pub struct RebornOutboundPreferencesResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_reply_target: Option<RebornOutboundDeliveryTargetSummary>,
+    #[serde(default)]
     pub default_modality: RebornOutboundDeliveryModality,
 }
 
@@ -492,16 +493,18 @@ pub struct RebornOutboundDeliveryTargetCapabilities {
     pub auth_prompts: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornOutboundDeliveryModality {
+    #[default]
     Text,
 }
 
 /// Client-safe opaque outbound delivery target id.
 ///
 /// Must be non-empty, at most 512 bytes, and free of leading/trailing
-/// whitespace or control characters.
+/// whitespace, control characters, and unsafe invisible Unicode formatting
+/// characters.
 ///
 /// Composition resolves this id to an adapter-owned reply target before writing
 /// outbound preferences.
@@ -525,32 +528,12 @@ impl RebornOutboundDeliveryTargetId {
     }
 
     fn validate(value: &str) -> Result<(), String> {
-        if value.is_empty() {
-            return Err("outbound delivery target id must not be empty".to_string());
-        }
-        if value.len() > OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES {
-            return Err(format!(
-                "outbound delivery target id must be at most {OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES} bytes"
-            ));
-        }
-        if value.trim() != value {
-            return Err(
-                "outbound delivery target id must not contain leading or trailing whitespace"
-                    .to_string(),
-            );
-        }
-        if value.chars().any(|c| c.is_control()) {
-            return Err(
-                "outbound delivery target id must not contain control characters".to_string(),
-            );
-        }
-        if has_line_or_paragraph_separator(value) {
-            return Err(
-                "outbound delivery target id must not contain line or paragraph separators"
-                    .to_string(),
-            );
-        }
-        Ok(())
+        validate_outbound_delivery_display_field(
+            "outbound delivery target id",
+            value,
+            OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES,
+            true,
+        )
     }
 }
 
@@ -600,12 +583,36 @@ fn validate_outbound_delivery_display_field(
     if value.chars().any(|c| c.is_control()) {
         return Err(format!("{field_name} must not contain control characters"));
     }
+    if has_unsafe_unicode_format_character(value) {
+        return Err(format!(
+            "{field_name} must not contain unsafe Unicode formatting characters"
+        ));
+    }
     if has_line_or_paragraph_separator(value) {
         return Err(format!(
             "{field_name} must not contain line or paragraph separators"
         ));
     }
     Ok(())
+}
+
+fn has_unsafe_unicode_format_character(value: &str) -> bool {
+    value.chars().any(|c| {
+        matches!(
+            c,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{00ad}'
+                | '\u{034f}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200d}'
+                | '\u{2060}'
+                | '\u{feff}'
+        )
+    })
 }
 
 fn has_line_or_paragraph_separator(value: &str) -> bool {
