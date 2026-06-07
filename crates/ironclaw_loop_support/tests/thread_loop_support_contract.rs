@@ -3343,6 +3343,7 @@ fn skill_bundle_descriptor(
         SkillBundleId::new(source_kind, name).unwrap(),
         trust,
         visibility,
+        SkillBundleDiscoveryMetadata::new(format!("{name} description")),
     )
 }
 

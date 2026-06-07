@@ -232,9 +232,13 @@ where
             let trust = self.bundle_trust(scope, root, &bundle_id).await?;
 
             descriptors.push(
-                SkillBundleDescriptor::new(bundle_id, trust, root.visibility().copied())
-                    .with_discovery_metadata(discovery_metadata)
-                    .with_provenance(SkillBundleProvenance::new(root.source_kind())),
+                SkillBundleDescriptor::new(
+                    bundle_id,
+                    trust,
+                    root.visibility().copied(),
+                    discovery_metadata,
+                )
+                .with_provenance(SkillBundleProvenance::new(root.source_kind())),
             );
         }
 
@@ -638,7 +642,7 @@ mod tests {
         assert_eq!(descriptors[0].visibility(), Some(&SkillVisibility::Visible));
         let descriptions = descriptors
             .iter()
-            .map(|descriptor| descriptor.discovery_metadata().unwrap().description())
+            .map(|descriptor| descriptor.discovery_metadata().description())
             .collect::<Vec<_>>();
         assert_eq!(
             descriptions,

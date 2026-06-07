@@ -104,9 +104,7 @@ where
                 .with_ordering_key(ordering_key));
         }
 
-        let discovery_metadata = descriptor
-            .discovery_metadata()
-            .ok_or(HostSkillContextBuildError::SourceUnavailable)?;
+        let discovery_metadata = descriptor.discovery_metadata();
 
         Ok(HostSkillContextCandidate::discoverable(
             descriptor.id().name(),
@@ -228,6 +226,7 @@ mod tests {
             crate::SkillBundleId::new(source_kind, name).unwrap(),
             trust,
             visibility,
+            SkillBundleDiscoveryMetadata::new(format!("{name} description")),
         )
     }
 
@@ -304,25 +303,6 @@ mod tests {
             .unwrap();
 
         assert!(candidates.is_empty());
-    }
-
-    #[tokio::test]
-    async fn adapter_fails_visible_descriptor_without_discovery_metadata_without_reads() {
-        let source = Arc::new(StaticSkillBundleSource::new(vec![descriptor(
-            crate::SkillSourceKind::User,
-            "alpha",
-            Some(SkillTrust::Trusted),
-            Some(SkillVisibility::Visible),
-        )]));
-        let adapter = SkillBundleContextSource::new(Arc::clone(&source));
-
-        let error = adapter
-            .load_skill_context_candidates(&run_context().await)
-            .await
-            .unwrap_err();
-
-        assert_eq!(error, HostSkillContextBuildError::SourceUnavailable);
-        assert!(source.reads().is_empty());
     }
 
     #[tokio::test]

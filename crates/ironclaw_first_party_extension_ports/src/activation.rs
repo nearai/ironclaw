@@ -1292,7 +1292,7 @@ fn content_hash(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId};
-    use ironclaw_loop_support::{SkillBundleId, SkillFilePath};
+    use ironclaw_loop_support::{SkillBundleDiscoveryMetadata, SkillBundleId, SkillFilePath};
     use ironclaw_skills::SkillTrust;
     use ironclaw_turns::{
         TurnActor, TurnId, TurnRunId,
@@ -1337,6 +1337,7 @@ mod tests {
                     id.clone(),
                     Some(SkillTrust::Trusted),
                     Some(SkillVisibility::Visible),
+                    SkillBundleDiscoveryMetadata::new(format!("{name} description")),
                 ));
                 files.insert((source, name.to_string()), skill_md.as_bytes().to_vec());
             }
@@ -1357,6 +1358,7 @@ mod tests {
                 id,
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
+                SkillBundleDiscoveryMetadata::new(format!("{name} description")),
             )
             .with_provenance(
                 ironclaw_loop_support::SkillBundleProvenance::new(SkillSourceKind::User)
@@ -1993,6 +1995,7 @@ mod tests {
                 SkillBundleId::new(SkillSourceKind::User, name).unwrap(),
                 Some(SkillTrust::Installed),
                 Some(SkillVisibility::Visible),
+                SkillBundleDiscoveryMetadata::new("Installed helper"),
             )],
             files: HashMap::from([(
                 (SkillSourceKind::User, name.to_string()),
@@ -2665,6 +2668,7 @@ mod tests {
                 SkillBundleId::new(SkillSourceKind::User, &name).unwrap(),
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
+                SkillBundleDiscoveryMetadata::new("Review code"),
             );
             selectable
                 .activation_candidate_from_skill_md(
@@ -2721,6 +2725,7 @@ mod tests {
                 SkillBundleId::new(SkillSourceKind::User, "bad-helper").unwrap(),
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
+                SkillBundleDiscoveryMetadata::new("bad helper description"),
             )],
             files: HashMap::from([(
                 (SkillSourceKind::User, "bad-helper".to_string()),
@@ -2745,6 +2750,7 @@ mod tests {
                 SkillBundleId::new(SkillSourceKind::User, "code-review").unwrap(),
                 None,
                 Some(SkillVisibility::Visible),
+                SkillBundleDiscoveryMetadata::new("code review description"),
             )],
             files: HashMap::new(),
         });
@@ -2766,6 +2772,7 @@ mod tests {
                 SkillBundleId::new(SkillSourceKind::User, "code-review").unwrap(),
                 Some(SkillTrust::Trusted),
                 None,
+                SkillBundleDiscoveryMetadata::new("code review description"),
             )],
             files: HashMap::new(),
         });

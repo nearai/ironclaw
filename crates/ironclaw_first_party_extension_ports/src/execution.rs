@@ -162,8 +162,8 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_loop_support::{
-        SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError,
-        SkillFilePath, SkillSourceKind,
+        SkillBundleDescriptor, SkillBundleDiscoveryMetadata, SkillBundleId, SkillBundleSource,
+        SkillBundleSourceError, SkillFilePath, SkillSourceKind,
     };
     use ironclaw_skills::SkillTrust;
     use ironclaw_turns::{
@@ -202,6 +202,7 @@ mod tests {
                     id,
                     Some(SkillTrust::Trusted),
                     Some(SkillVisibility::Visible),
+                    SkillBundleDiscoveryMetadata::new(format!("{name} description")),
                 ));
                 files.insert(
                     (source, name.to_string(), "SKILL.md".to_string()),
@@ -469,6 +470,7 @@ mod tests {
                 bundle_id.clone(),
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
+                SkillBundleDiscoveryMetadata::new("Manifest display name"),
             )],
             files: HashMap::from([
                 (

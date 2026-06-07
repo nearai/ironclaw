@@ -191,7 +191,7 @@ pub struct SkillBundleDescriptor {
     trust: Option<SkillTrust>,
     visibility: Option<SkillVisibility>,
     provenance: SkillBundleProvenance,
-    discovery_metadata: Option<SkillBundleDiscoveryMetadata>,
+    discovery_metadata: SkillBundleDiscoveryMetadata,
 }
 
 /// Safe manifest metadata that can be shown before a skill is loaded.
@@ -218,6 +218,7 @@ impl SkillBundleDescriptor {
         id: SkillBundleId,
         trust: Option<SkillTrust>,
         visibility: Option<SkillVisibility>,
+        discovery_metadata: SkillBundleDiscoveryMetadata,
     ) -> Self {
         Self {
             provenance: SkillBundleProvenance::new(id.source_kind()),
@@ -225,7 +226,7 @@ impl SkillBundleDescriptor {
             skill_md_path: SkillFilePath::skill_md(),
             trust,
             visibility,
-            discovery_metadata: None,
+            discovery_metadata,
         }
     }
 
@@ -250,7 +251,7 @@ impl SkillBundleDescriptor {
     /// Attaches safe manifest metadata that may be shown before prompt loading.
     #[must_use]
     pub fn with_discovery_metadata(mut self, metadata: SkillBundleDiscoveryMetadata) -> Self {
-        self.discovery_metadata = Some(metadata);
+        self.discovery_metadata = metadata;
         self
     }
 
@@ -279,9 +280,9 @@ impl SkillBundleDescriptor {
         &self.provenance
     }
 
-    /// Returns safe discovery metadata, if the source already validated it.
-    pub fn discovery_metadata(&self) -> Option<&SkillBundleDiscoveryMetadata> {
-        self.discovery_metadata.as_ref()
+    /// Returns safe discovery metadata supplied by the host source.
+    pub fn discovery_metadata(&self) -> &SkillBundleDiscoveryMetadata {
+        &self.discovery_metadata
     }
 
     /// Returns the deterministic ordering key used by [`Ord`].
@@ -358,6 +359,7 @@ mod tests {
             id(source_kind, name),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
+            SkillBundleDiscoveryMetadata::new(format!("{name} description")),
         )
     }
 
@@ -422,6 +424,7 @@ mod tests {
             id(SkillSourceKind::User, "code-review"),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
+            SkillBundleDiscoveryMetadata::new("code-review description"),
         )
         .with_skill_md_path(SkillFilePath::new("nested/SKILL.md").unwrap())
         .with_provenance(
