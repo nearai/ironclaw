@@ -322,6 +322,7 @@ pub struct RebornServices {
     pub turn_coordinator: Option<Arc<dyn ironclaw_turns::TurnCoordinator>>,
     pub product_auth: Option<Arc<RebornProductAuthServices>>,
     pub readiness: RebornReadiness,
+    pub(crate) skill_management: Option<Arc<RebornLocalSkillManagementPort>>,
     pub(crate) local_runtime: Option<Arc<RebornLocalRuntimeServices>>,
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
@@ -491,6 +492,7 @@ impl RebornServices {
             turn_coordinator: None,
             product_auth: None,
             readiness: RebornReadiness::disabled(),
+            skill_management: None,
             local_runtime: None,
             #[cfg(feature = "root-llm-provider")]
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
@@ -880,6 +882,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         // the caller does not inject one; readiness tracks the assembled facade.
         product_auth: Some(product_auth),
         readiness: readiness_for(profile, true, true, true),
+        skill_management: Some(Arc::clone(&store_graph.local_runtime.skill_management)),
         local_runtime: Some(store_graph.local_runtime),
         #[cfg(feature = "root-llm-provider")]
         secret_store,
@@ -1996,7 +1999,7 @@ async fn build_production_shaped(
 ) -> Result<RebornServices, RebornBuildError> {
     let RebornBuildInput {
         profile,
-        owner_id: _,
+        owner_id,
         storage,
         production_trust_policy,
         runtime_policy,
@@ -2061,6 +2064,7 @@ async fn build_production_shaped(
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
+                owner_id,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
@@ -2084,6 +2088,7 @@ async fn build_production_shaped(
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
+                owner_id,
             };
             build_postgres_production(context, pool, url, secret_master_key).await
         }
@@ -2115,6 +2120,7 @@ struct RebornProductionBuildContext {
     product_auth_ports: Option<RebornProductAuthServicePorts>,
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
+    owner_id: String,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -2417,8 +2423,14 @@ where
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        owner_id,
     } = context;
+    let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })?;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
+    let skill_management =
+        build_local_skill_management_port(owner_user_id, Arc::clone(&stores.filesystem))?;
     let trigger_create_hook = Arc::new(ScopedFilesystemTriggerCreatorPairingHook::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
@@ -2520,6 +2532,7 @@ where
         turn_coordinator: Some(turn_coordinator),
         readiness: readiness_for(profile, true, true, product_auth_ready),
         product_auth: Some(product_auth_services),
+        skill_management: Some(skill_management),
         local_runtime: None,
         #[cfg(feature = "root-llm-provider")]
         secret_store,

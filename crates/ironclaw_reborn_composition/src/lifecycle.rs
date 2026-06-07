@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use crate::local_dev_mounts::skill_management_mount_view;
+use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use async_trait::async_trait;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::{
@@ -210,12 +210,8 @@ pub(crate) fn build_local_skill_management_port<F>(
 where
     F: RootFilesystem + 'static,
 {
-    let skill_management_mounts =
-        skill_management_mount_view().map_err(|error| crate::RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?;
     let mount_resolver: Arc<SkillManagementMountResolver> =
-        Arc::new(move |_scope: &ResourceScope| Ok(skill_management_mounts.clone()));
+        Arc::new(scoped_skill_management_mount_view);
     let filesystem: Arc<dyn RootFilesystem> = filesystem;
     Ok(Arc::new(
         RebornLocalSkillManagementPort::new_with_mount_resolver(
@@ -690,6 +686,71 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn default_skill_management_port_isolates_user_skill_roots_by_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/skills/system-helper"))
+            .expect("system skill dir");
+        std::fs::write(
+            storage_root.join("system/skills/system-helper/SKILL.md"),
+            skill_content("system-helper"),
+        )
+        .expect("system skill");
+
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        let skill_management = build_local_skill_management_port(
+            UserId::new("runtime-owner").expect("valid user"),
+            Arc::new(filesystem),
+        )
+        .expect("skill management port");
+        let alice_scope = skill_management_test_scope("tenant-alpha", "alice");
+        let bob_scope = skill_management_test_scope("tenant-alpha", "bob");
+
+        skill_management
+            .install_for_scope(
+                alice_scope.clone(),
+                Some("shared-name"),
+                &skill_content("shared-name"),
+            )
+            .await
+            .expect("alice installs skill");
+
+        let alice_skills = skill_management
+            .list_for_scope(alice_scope)
+            .await
+            .expect("alice lists skills");
+        assert!(alice_skills.iter().any(|skill| skill.name == "shared-name"));
+        assert!(
+            alice_skills
+                .iter()
+                .any(|skill| skill.name == "system-helper")
+        );
+
+        let bob_skills = skill_management
+            .list_for_scope(bob_scope)
+            .await
+            .expect("bob lists skills");
+        assert!(!bob_skills.iter().any(|skill| skill.name == "shared-name"));
+        assert!(bob_skills.iter().any(|skill| skill.name == "system-helper"));
+        assert!(
+            storage_root
+                .join("tenants/tenant-alpha/users/alice/skills/shared-name/SKILL.md")
+                .exists()
+        );
+        assert!(
+            !storage_root
+                .join("tenants/tenant-alpha/users/bob/skills/shared-name/SKILL.md")
+                .exists()
+        );
+    }
+
     #[test]
     fn lifecycle_resource_scope_uses_surface_caller_identity() {
         let context = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
@@ -847,5 +908,17 @@ mod tests {
             agent_id: None,
             project_id: None,
         })
+    }
+
+    fn skill_management_test_scope(tenant_id: &str, user_id: &str) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new(tenant_id).expect("tenant"),
+            user_id: UserId::new(user_id).expect("user"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
     }
 }

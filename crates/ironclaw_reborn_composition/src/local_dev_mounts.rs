@@ -1,7 +1,7 @@
 use std::{collections::HashSet, path::Path};
 
 use ironclaw_host_api::{
-    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
+    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
 
 const WORKSPACE_ALIAS: &str = "/workspace";
@@ -74,6 +74,27 @@ pub(crate) fn skill_management_mount_view() -> Result<MountView, HostApiError> {
         grant(
             "/skills",
             "/projects/skills",
+            MountPermissions::read_write_list_delete(),
+        )?,
+        grant(
+            "/system/skills",
+            "/projects/system/skills",
+            MountPermissions::read_only(),
+        )?,
+    ])
+}
+
+pub(crate) fn scoped_skill_management_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
+    MountView::new(vec![
+        grant(
+            "/skills",
+            &format!(
+                "/projects/tenants/{}/users/{}/skills",
+                scope.tenant_id.as_str(),
+                scope.user_id.as_str()
+            ),
             MountPermissions::read_write_list_delete(),
         )?,
         grant(

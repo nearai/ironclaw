@@ -252,7 +252,9 @@ mod tests {
     }
 
     fn write_skill(storage_root: &std::path::Path, name: &str) {
-        let skill_dir = storage_root.join("skills").join(name);
+        let skill_dir = storage_root
+            .join("tenants/default/users/list-owner/skills")
+            .join(name);
         std::fs::create_dir_all(&skill_dir).expect("skill dir");
         std::fs::write(
             skill_dir.join("SKILL.md"),

@@ -118,9 +118,11 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
         }
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
-        api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
-            local_runtime.skill_management.clone(),
-        )));
+    }
+    if let Some(skill_management) = &services.skill_management {
+        api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(Arc::clone(
+            skill_management,
+        ))));
     }
     if let Some(product_auth) = &services.product_auth {
         api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(
