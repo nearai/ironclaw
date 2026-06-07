@@ -522,7 +522,11 @@ impl ConversationBindingService for ProductConversationBindingService {
             .resolve(&request.adapter_id, &request.installation_id)?;
         let conversation_request =
             conversation_request(&request, installation_scope.tenant_id.clone())?;
-        if request.route_kind == ProductConversationRouteKind::Shared {
+        if request.route_kind == ProductConversationRouteKind::Shared
+            && installation_scope
+                .conversation_subject_route_resolver
+                .is_some()
+        {
             match self
                 .conversations
                 .lookup_binding(conversation_request.clone())
@@ -540,8 +544,8 @@ impl ConversationBindingService for ProductConversationBindingService {
                         .conversations
                         .resolve_or_create_binding_with_trusted_scope(
                             conversation_request,
-                            None,
-                            None,
+                            installation_scope.default_agent_id.clone(),
+                            installation_scope.default_project_id.clone(),
                             owner_user_id,
                         )
                         .await
@@ -598,6 +602,10 @@ impl ConversationBindingService for ProductConversationBindingService {
             .lookup_binding(conversation_request)
             .await
             .map_err(map_conversation_error)?;
+        if request.route_kind == ProductConversationRouteKind::Shared {
+            let expected_user_id = resolve_actor_user(&installation_scope, &request).await?;
+            ensure_resolved_actor_matches_expected_user(expected_user_id.as_ref(), &resolution)?;
+        }
 
         resolved_binding_from_resolution(resolution, request.route_kind)
     }

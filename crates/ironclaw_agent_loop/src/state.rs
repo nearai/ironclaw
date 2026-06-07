@@ -12,8 +12,9 @@ pub use slots::{
     CapabilityStrategyState, CompactionPromptSnapshot, CompactionStrategyState,
     ContextStrategyState, DeferredCompactionWatermark, GateStrategyState, GoalRefreshStrategyState,
     IndexedMessageKind, MessageIndexEntry, ModelStrategyState, RecoveryAttemptClass,
-    RecoveryStrategyState, ReplyAdmissionRejection, ReplyAdmissionRejectionReason,
-    ReplyAdmissionStrategyState, StopStrategyState,
+    RecoveryStrategyState, RepeatedCallWarningPhase, RepeatedCallWarningState,
+    ReplyAdmissionRejection, ReplyAdmissionRejectionReason, ReplyAdmissionStrategyState,
+    StopStrategyState,
 };
 
 use ironclaw_turns::{

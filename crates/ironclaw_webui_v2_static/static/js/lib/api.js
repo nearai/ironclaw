@@ -124,6 +124,15 @@ export function listThreads({ limit, cursor } = {}) {
   return apiFetch(url.pathname + url.search);
 }
 
+export function deleteThread({ threadId } = {}) {
+  if (!threadId) {
+    return Promise.reject(new Error("threadId is required"));
+  }
+  return apiFetch(`${V2_BASE}/threads/${encodeURIComponent(threadId)}`, {
+    method: "DELETE",
+  });
+}
+
 // --- Automations ---
 
 export function listAutomations({ limit } = {}) {

@@ -9,14 +9,14 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use ironclaw_product_workflow::RebornServicesApi;
 
 use crate::descriptors::{
     WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_CANCEL_RUN,
     WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_PATTERN_CREATE_THREAD,
-    WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER, WEBUI_V2_PATTERN_GET_LLM_CONFIG,
-    WEBUI_V2_PATTERN_GET_SESSION, WEBUI_V2_PATTERN_GET_TIMELINE,
+    WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER, WEBUI_V2_PATTERN_DELETE_THREAD,
+    WEBUI_V2_PATTERN_GET_LLM_CONFIG, WEBUI_V2_PATTERN_GET_SESSION, WEBUI_V2_PATTERN_GET_TIMELINE,
     WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
     WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS, WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
     WEBUI_V2_PATTERN_LIST_EXTENSIONS, WEBUI_V2_PATTERN_LIST_LLM_MODELS,
@@ -141,6 +141,10 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_CREATE_THREAD,
             post(handlers::create_thread).get(handlers::list_threads),
+        )
+        .route(
+            WEBUI_V2_PATTERN_DELETE_THREAD,
+            delete(handlers::delete_thread),
         )
         .route(WEBUI_V2_PATTERN_GET_SESSION, get(handlers::get_session))
         .route(WEBUI_V2_PATTERN_SEND_MESSAGE, post(handlers::send_message))

@@ -1,6 +1,7 @@
 //! Contract tests for the product workflow facade.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
@@ -15,9 +16,11 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
     AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound,
-    ProductAdapterError, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
-    ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind, ProjectionCursor,
+    ProductAdapterError, ProductAdapterId, ProductControlActionPayload, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
+    ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
+    ProductRejectionDisposition, ProductRejectionKind, ProductTriggerReason, ProductWorkflow,
+    ProductWorkflowRejectionKind, ProjectionCursor, ProjectionReadPayload,
     ProjectionSubscriptionPayload, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
     TrustedInboundContext, UserMessagePayload,
 };
@@ -44,8 +47,8 @@ use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetRunStateRequest, LoopGateRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
-    TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
 fn sample_envelope(event_suffix: &str) -> ProductInboundEnvelope {
@@ -1601,6 +1604,33 @@ async fn noop_returns_noop_ack() {
 }
 
 #[tokio::test]
+async fn typed_cancel_control_action_uses_submit_door_without_command_text() {
+    let (workflow, inbound, ledger) = build_workflow();
+    let envelope = sample_envelope_with_payload(
+        "typed-cancel-control",
+        ProductInboundPayload::ControlAction(ProductControlActionPayload::CancelRun {
+            run_id: TurnRunId::new(),
+        }),
+    );
+
+    let ack = workflow
+        .submit_inbound(envelope)
+        .await
+        .expect("typed control action returns product-safe ack");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Rejected(ProductRejection {
+            kind: ProductRejectionKind::InvalidRequest,
+            disposition: ProductRejectionDisposition::Permanent,
+            ..
+        })
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
 async fn subscription_request_via_accept_inbound_rejects_before_mutating_ledger() {
     let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
     let envelope = sample_envelope_with_payload(
@@ -1632,6 +1662,139 @@ async fn subscription_request_via_accept_inbound_rejects_before_mutating_ledger(
 }
 
 #[tokio::test]
+async fn subscription_request_via_submit_inbound_rejects_before_mutating_ledger() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let envelope = sample_envelope_with_payload(
+        "projection-subscribe-wrong-submit-door",
+        ProductInboundPayload::SubscriptionRequest(
+            ProjectionSubscriptionPayload::new(None, None).expect("valid subscription"),
+        ),
+    );
+
+    let err = workflow.submit_inbound(envelope).await.expect_err(
+        "projection subscriptions use the subscribe projection door, not submit_inbound",
+    );
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            ..
+        }
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(binding_service.resolve_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
+async fn projection_read_via_submit_inbound_rejects_before_mutating_ledger() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let envelope = sample_envelope_with_payload(
+        "projection-read-wrong-entrypoint",
+        ProductInboundPayload::ProjectionRead(
+            ProjectionReadPayload::new(None, None, Some(25)).expect("valid read"),
+        ),
+    );
+
+    let err = workflow
+        .submit_inbound(envelope)
+        .await
+        .expect_err("projection reads use the read projection door, not submit_inbound");
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            ..
+        }
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(binding_service.resolve_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
+async fn projection_read_resolves_external_refs_through_read_door() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let binding = fake_binding();
+    let cursor = ProjectionCursor::new("cursor:projection-read-1").expect("valid cursor");
+    let envelope = sample_envelope_with_payload(
+        "projection-read-1",
+        ProductInboundPayload::ProjectionRead(
+            ProjectionReadPayload::new(
+                Some(binding.thread_id.as_str().to_string()),
+                Some(cursor.clone()),
+                Some(50),
+            )
+            .expect("valid read"),
+        ),
+    );
+    binding_service.program_binding(envelope.source_binding_key(), binding.clone());
+    let input = ProductProjectionReadInput::from_inbound_envelope(&envelope).expect("read input");
+
+    let read = workflow
+        .read_projection(input)
+        .await
+        .expect("projection read");
+
+    assert_eq!(read.actor.user_id, binding.actor_user_id);
+    assert_eq!(read.scope.tenant_id, binding.tenant_id);
+    assert_eq!(read.scope.agent_id, binding.agent_id);
+    assert_eq!(read.scope.project_id, binding.project_id);
+    assert_eq!(read.scope.thread_id, binding.thread_id);
+    assert_eq!(read.after_cursor, Some(cursor));
+    assert_eq!(read.limit, Some(50));
+    assert_eq!(binding_service.resolve_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
+async fn projection_read_accepts_canonical_subject_without_inbound_envelope() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let binding = fake_binding();
+    let actor = TurnActor::new(binding.actor_user_id.clone());
+    let scope = TurnScope::new(
+        binding.tenant_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+    );
+    let cursor = ProjectionCursor::new("cursor:canonical-read").expect("valid cursor");
+
+    let read = workflow
+        .read_projection(ProductProjectionReadInput::new(
+            ProductProjectionSubject::canonical(actor.clone(), scope.clone()),
+            Some(binding.thread_id.as_str().to_string()),
+            Some(cursor.clone()),
+            Some(10),
+        ))
+        .await
+        .expect("canonical projection read");
+
+    assert_eq!(read.actor, actor);
+    assert_eq!(read.scope, scope);
+    assert_eq!(read.after_cursor, Some(cursor));
+    assert_eq!(read.limit, Some(10));
+    assert_eq!(binding_service.resolve_count(), 0);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
 async fn projection_subscription_resolves_through_binding_service() {
     let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
     let binding = fake_binding();
@@ -1648,8 +1811,10 @@ async fn projection_subscription_resolves_through_binding_service() {
     );
     binding_service.program_binding(envelope.source_binding_key(), binding.clone());
 
+    let input =
+        ProductProjectionSubscribeInput::from_inbound_envelope(&envelope).expect("subscribe input");
     let subscription = workflow
-        .resolve_projection_subscription(envelope)
+        .subscribe_projection(input)
         .await
         .expect("projection subscription");
 
@@ -1660,6 +1825,38 @@ async fn projection_subscription_resolves_through_binding_service() {
     assert_eq!(subscription.scope.thread_id, binding.thread_id);
     assert_eq!(subscription.after_cursor, Some(cursor));
     assert_eq!(binding_service.resolve_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
+async fn projection_subscription_accepts_canonical_subject_without_inbound_envelope() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let binding = fake_binding();
+    let actor = TurnActor::new(binding.actor_user_id.clone());
+    let scope = TurnScope::new(
+        binding.tenant_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+    );
+    let cursor = ProjectionCursor::new("cursor:canonical-subscribe").expect("valid cursor");
+
+    let subscription = workflow
+        .subscribe_projection(ProductProjectionSubscribeInput::new(
+            ProductProjectionSubject::canonical(actor.clone(), scope.clone()),
+            Some(binding.thread_id.as_str().to_string()),
+            Some(cursor.clone()),
+        ))
+        .await
+        .expect("canonical projection subscription");
+
+    assert_eq!(subscription.actor, actor);
+    assert_eq!(subscription.scope, scope);
+    assert_eq!(subscription.after_cursor, Some(cursor));
+    assert_eq!(binding_service.resolve_count(), 0);
     assert_eq!(inbound.accepted_count(), 0);
     assert_eq!(ledger.settled_count(), 0);
     assert_eq!(ledger.in_flight_count(), 0);
@@ -2491,6 +2688,69 @@ async fn shared_route_uses_conversation_specific_subject_over_installation_defau
 }
 
 #[tokio::test]
+async fn static_shared_route_does_not_probe_existing_binding_before_resolve() {
+    let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
+    let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
+    let installation_id =
+        ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            tenant_id.clone(),
+            adapter_kind,
+            installation_id,
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let counted_conversations = Arc::new(CountingConversationBindingService::new(conversations));
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        counted_conversations.clone();
+    let scope = ProductInstallationScope::with_default_scope(
+        tenant_id,
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_conversation_subject_route(
+        ProductConversationRouteKey::new(Some("T-team".to_string()), "C-eng".to_string())
+            .expect("route key"),
+        UserId::new("user:eng-team").expect("route subject"),
+    );
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        scope,
+    )]);
+    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+    let envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:static-shared-no-lookup").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-1"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+
+    let resolved = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect("static shared binding should resolve");
+
+    assert_eq!(
+        resolved.subject_user_id.as_ref().map(UserId::as_str),
+        Some("user:eng-team")
+    );
+    assert_eq!(counted_conversations.lookup_count(), 0);
+    assert_eq!(counted_conversations.trusted_resolve_count(), 1);
+}
+
+#[tokio::test]
 async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_scope() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
@@ -2747,6 +3007,94 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
             .map(UserId::as_str),
         Some("user:eng-team")
     );
+}
+
+#[tokio::test]
+async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_differs() {
+    let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
+    let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
+    let installation_id =
+        ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            tenant_id.clone(),
+            adapter_kind.clone(),
+            installation_id.clone(),
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:seed-shared-lookup").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-1"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+    ConversationBindingPort::resolve_or_create_binding_with_trusted_scope(
+        conversations.as_ref(),
+        ironclaw_conversations::ResolveConversationRequest {
+            tenant_id: tenant_id.clone(),
+            adapter_kind,
+            adapter_installation_id: installation_id,
+            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+                .expect("actor"),
+            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
+                Some("T-team"),
+                "C-eng",
+                Some("thread-1"),
+                Some("msg-1"),
+            )
+            .expect("conversation"),
+            external_event_id: ironclaw_conversations::ExternalEventId::new(
+                "evt:seed-shared-lookup",
+            )
+            .expect("event"),
+            route_kind: ironclaw_conversations::ConversationRouteKind::Shared,
+            requested_agent_id: Some(AgentId::new("agent:alpha").expect("agent")),
+            requested_project_id: Some(ProjectId::new("project:alpha").expect("project")),
+        },
+        Some(AgentId::new("agent:alpha").expect("agent")),
+        Some(ProjectId::new("project:alpha").expect("project")),
+        Some(UserId::new("user:subject").expect("subject")),
+    )
+    .await
+    .expect("seed binding");
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations.clone();
+    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
+        conversations;
+    let scope = ProductInstallationScope::with_default_scope(
+        tenant_id,
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_preconfigured_actor_binding(
+        ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+        UserId::new("user:bob").expect("user"),
+        actor_pairings,
+    );
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        scope,
+    )]);
+    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+
+    let error = binding
+        .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect_err("lookup should reject mismatched resolved actor");
+
+    assert!(matches!(error, ProductWorkflowError::BindingAccessDenied));
 }
 
 #[tokio::test]
@@ -3804,6 +4152,93 @@ impl ProductActorUserResolver for RecordingProductActorUserResolver {
 struct RecordingSubjectRouteResolver {
     subject_user_id: Mutex<Option<UserId>>,
     calls: Mutex<Vec<ProductConversationSubjectRouteResolutionRequest>>,
+}
+
+struct CountingConversationBindingService {
+    inner: Arc<InMemoryConversationServices>,
+    lookup_count: AtomicUsize,
+    trusted_resolve_count: AtomicUsize,
+}
+
+impl CountingConversationBindingService {
+    fn new(inner: Arc<InMemoryConversationServices>) -> Self {
+        Self {
+            inner,
+            lookup_count: AtomicUsize::new(0),
+            trusted_resolve_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn lookup_count(&self) -> usize {
+        self.lookup_count.load(Ordering::SeqCst)
+    }
+
+    fn trusted_resolve_count(&self) -> usize {
+        self.trusted_resolve_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ironclaw_conversations::ConversationBindingService for CountingConversationBindingService {
+    async fn resolve_or_create_binding(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<
+        ironclaw_conversations::ConversationBindingResolution,
+        ironclaw_conversations::InboundTurnError,
+    > {
+        self.inner.resolve_or_create_binding(request).await
+    }
+
+    async fn resolve_or_create_binding_with_trusted_scope(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+        trusted_agent_id: Option<AgentId>,
+        trusted_project_id: Option<ProjectId>,
+        trusted_owner_user_id: Option<UserId>,
+    ) -> Result<
+        ironclaw_conversations::ConversationBindingResolution,
+        ironclaw_conversations::InboundTurnError,
+    > {
+        self.trusted_resolve_count.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .resolve_or_create_binding_with_trusted_scope(
+                request,
+                trusted_agent_id,
+                trusted_project_id,
+                trusted_owner_user_id,
+            )
+            .await
+    }
+
+    async fn lookup_binding(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<
+        ironclaw_conversations::ConversationBindingResolution,
+        ironclaw_conversations::InboundTurnError,
+    > {
+        self.lookup_count.fetch_add(1, Ordering::SeqCst);
+        self.inner.lookup_binding(request).await
+    }
+
+    async fn link_conversation_to_thread(
+        &self,
+        request: ironclaw_conversations::LinkConversationRequest,
+    ) -> Result<
+        ironclaw_conversations::LinkedConversationBinding,
+        ironclaw_conversations::InboundTurnError,
+    > {
+        self.inner.link_conversation_to_thread(request).await
+    }
+
+    async fn validate_reply_target(
+        &self,
+        request: ironclaw_conversations::ValidateReplyTargetRequest,
+    ) -> Result<ironclaw_conversations::ReplyTargetBinding, ironclaw_conversations::InboundTurnError>
+    {
+        self.inner.validate_reply_target(request).await
+    }
 }
 
 impl RecordingSubjectRouteResolver {

@@ -53,6 +53,7 @@ browser-reachable.
 | `webui.v2.get_session` | GET | `/api/webchat/v2/session` | None | `ProjectionOnly` |
 | `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | None | `ProductWorkflow` |
 | `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
+| `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | None | `ProductWorkflow` |
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | None | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | SSE | `ProjectionOnly` |
@@ -103,6 +104,15 @@ not implement enumeration surface a retryable
 silently returning an empty list. The contract is locked by
 `list_threads_unimplemented_backend_returns_service_unavailable` in
 `crates/ironclaw_product_workflow/tests/reborn_services_contract.rs`.
+
+### Delete-thread
+
+`delete_thread` removes a caller-owned thread and transcript via
+`SessionThreadService::delete_thread`. The facade constructs the same
+owner-bound `(tenant, agent, project, owner_user_id)` scope used by timeline,
+stream, cancel, and gate-resolution probes. Missing and cross-owner thread ids
+both surface as `404 not_found` so callers cannot use deletion attempts as an
+existence oracle.
 
 ### Stream-events (WebSocket)
 

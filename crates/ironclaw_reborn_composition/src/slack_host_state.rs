@@ -27,7 +27,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::slack_actor_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use crate::slack_channel_routes::{
-    SlackChannelRoute, SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteStore,
+    SlackChannelRoute, SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteListPage,
+    SlackChannelRouteStore,
 };
 use crate::slack_personal_binding::{
     RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
@@ -43,7 +44,7 @@ const SLACK_HOST_STATE_ROOT: &str = "/tenant-shared/slack-personal-binding";
 const IDENTITY_ROOT: &str = "/tenant-shared/slack-personal-binding/identities";
 const PAIRING_CODE_ROOT: &str = "/tenant-shared/slack-personal-binding/pairing/codes";
 const PAIRING_ACTOR_ROOT: &str = "/tenant-shared/slack-personal-binding/pairing/actors";
-const CHANNEL_ROUTE_ROOT: &str = "/tenant-shared/slack-personal-binding/channel-routes";
+const CHANNEL_ROUTE_ROOT: &str = "/tenant-shared/slack-channel-routes";
 const PAIRING_CODE_LEN: usize = 8;
 const PAIRING_CODE_RETRIES: usize = 16;
 const DEFAULT_PAIRING_TTL: Duration = Duration::from_secs(10 * 60);
@@ -573,18 +574,28 @@ where
         tenant_id: &TenantId,
         installation_id: &AdapterInstallationId,
         team_id: &str,
-    ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
+        cursor: usize,
+        limit: usize,
+    ) -> Result<SlackChannelRouteListPage, SlackChannelRouteError> {
         if tenant_id != &self.scope.tenant_id {
-            return Ok(Vec::new());
+            return Ok(SlackChannelRouteListPage {
+                routes: Vec::new(),
+                next_cursor: None,
+            });
         }
         let dir = Self::channel_route_team_dir_path(installation_id, team_id)
             .map_err(map_route_fs_error)?;
         let entries = match self.filesystem.list_dir(&self.scope, &dir).await {
             Ok(entries) => entries,
-            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(FilesystemError::NotFound { .. }) => {
+                return Ok(SlackChannelRouteListPage {
+                    routes: Vec::new(),
+                    next_cursor: None,
+                });
+            }
             Err(error) => return Err(map_route_fs_error(error)),
         };
-        let reads = entries
+        let mut paths = entries
             .into_iter()
             .filter_map(|entry| {
                 if entry.file_type != FileType::File {
@@ -600,7 +611,13 @@ where
             .map_err(map_route_fs_error)?
             .into_iter()
             .flatten()
-            .map(|path| async move { self.read_record::<StoredSlackChannelRoute>(&path).await });
+            .collect::<Vec<_>>();
+        paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        let start = cursor.min(paths.len());
+        let end = cursor.saturating_add(limit).min(paths.len());
+        let reads = paths[start..end]
+            .iter()
+            .map(|path| async move { self.read_record::<StoredSlackChannelRoute>(path).await });
         let records = futures::future::try_join_all(reads)
             .await
             .map_err(map_route_fs_error)?;
@@ -615,7 +632,10 @@ where
                 .cmp(&right.team_id)
                 .then(left.channel_id.cmp(&right.channel_id))
         });
-        Ok(routes)
+        Ok(SlackChannelRouteListPage {
+            routes,
+            next_cursor: if end < paths.len() { Some(end) } else { None },
+        })
     }
 
     async fn upsert_route(
@@ -1241,13 +1261,15 @@ mod tests {
                 &TenantId::new("tenant-alpha").unwrap(),
                 &installation(),
                 "T123",
+                0,
+                100,
             )
             .await
             .expect("list routes");
-        assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].team_id, "T123");
-        assert_eq!(routes[0].channel_id, "CENG");
-        assert_eq!(routes[0].subject_user_id, "user:eng-team-agent");
+        assert_eq!(routes.routes.len(), 1);
+        assert_eq!(routes.routes[0].team_id, "T123");
+        assert_eq!(routes.routes[0].channel_id, "CENG");
+        assert_eq!(routes.routes[0].subject_user_id, "user:eng-team-agent");
         assert!(second.delete_route(&key).await.expect("delete route"));
         assert_eq!(
             second
@@ -1371,12 +1393,14 @@ mod tests {
                 &TenantId::new("tenant-alpha").unwrap(),
                 &installation(),
                 "T123",
+                0,
+                100,
             )
             .await
             .expect("list routes");
 
-        assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].channel_id, "CENG");
+        assert_eq!(routes.routes.len(), 1);
+        assert_eq!(routes.routes[0].channel_id, "CENG");
     }
 
     fn state() -> FilesystemSlackHostState<InMemoryBackend> {

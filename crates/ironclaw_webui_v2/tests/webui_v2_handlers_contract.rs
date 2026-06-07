@@ -31,16 +31,17 @@ use ironclaw_product_workflow::{
     LlmProbeRequest, LlmProbeResult, LlmProviderView, RebornAutomationInfo, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
     RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
+    RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
+    RebornResumeGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -78,6 +79,7 @@ fn router_with_capabilities(
 #[derive(Default)]
 struct StubServices {
     create_thread_calls: Mutex<Vec<WebUiCreateThreadRequest>>,
+    delete_thread_calls: Mutex<Vec<RebornDeleteThreadRequest>>,
     submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
@@ -202,6 +204,21 @@ impl RebornServicesApi for StubServices {
             resolved_run_profile_id: RunProfileId::default_profile().as_str().to_string(),
             resolved_run_profile_version: RunProfileVersion::new(1).as_u64(),
             event_cursor: EventCursor(1),
+        })
+    }
+
+    async fn delete_thread(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
+        self.delete_thread_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        Ok(RebornDeleteThreadResponse {
+            thread_id: ThreadId::new(request.thread_id).expect("thread id"),
+            deleted: true,
         })
     }
 
@@ -609,6 +626,31 @@ async fn create_thread_dispatches_through_facade() {
         1,
         "facade called exactly once"
     );
+}
+
+#[tokio::test]
+async fn delete_thread_path_dispatches_through_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/threads/thread-delete")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["thread_id"], "thread-delete");
+    assert_eq!(body["deleted"], true);
+    let calls = services.delete_thread_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].thread_id, "thread-delete");
 }
 
 #[tokio::test]
@@ -1694,6 +1736,13 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _request: WebUiSendMessageRequest,
         ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn delete_thread(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: RebornDeleteThreadRequest,
+        ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
         async fn get_timeline(

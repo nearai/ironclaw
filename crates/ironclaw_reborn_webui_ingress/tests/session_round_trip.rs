@@ -35,9 +35,10 @@ use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
     RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
@@ -163,6 +164,14 @@ impl RebornServicesApi for StubServices {
             threads: Vec::new(),
             next_cursor: None,
         })
+    }
+
+    async fn delete_thread(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
+        unreachable!("test does not drive delete_thread")
     }
 
     async fn list_automations(

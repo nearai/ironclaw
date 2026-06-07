@@ -14,6 +14,7 @@ use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
 use std::num::{NonZeroU32, NonZeroU64};
 
 pub const WEBUI_V2_ROUTE_CREATE_THREAD: &str = "webui.v2.create_thread";
+pub const WEBUI_V2_ROUTE_DELETE_THREAD: &str = "webui.v2.delete_thread";
 pub const WEBUI_V2_ROUTE_GET_SESSION: &str = "webui.v2.get_session";
 pub const WEBUI_V2_ROUTE_SEND_MESSAGE: &str = "webui.v2.send_message";
 pub const WEBUI_V2_ROUTE_LIST_THREADS: &str = "webui.v2.list_threads";
@@ -43,8 +44,9 @@ pub const WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN: &str =
 pub const WEBUI_V2_ROUTE_START_CODEX_LOGIN: &str = "webui.v2.start_codex_login";
 
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
-pub const WEBUI_V2_PATTERN_GET_SESSION: &str = "/api/webchat/v2/session";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
+pub const WEBUI_V2_PATTERN_DELETE_THREAD: &str = "/api/webchat/v2/threads/{thread_id}";
+pub const WEBUI_V2_PATTERN_GET_SESSION: &str = "/api/webchat/v2/session";
 pub const WEBUI_V2_PATTERN_SEND_MESSAGE: &str = "/api/webchat/v2/threads/{thread_id}/messages";
 pub const WEBUI_V2_PATTERN_GET_TIMELINE: &str = "/api/webchat/v2/threads/{thread_id}/timeline";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS: &str = "/api/webchat/v2/threads/{thread_id}/events";
@@ -84,6 +86,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
     vec![
         get_session_descriptor(),
         create_thread_descriptor(),
+        delete_thread_descriptor(),
         send_message_descriptor(),
         list_threads_descriptor(),
         get_timeline_descriptor(),
@@ -171,6 +174,20 @@ fn send_message_descriptor() -> IngressRouteDescriptor {
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::TurnCoordinator,
+        ),
+    )
+}
+
+fn delete_thread_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_DELETE_THREAD,
+        NetworkMethod::Delete,
+        WEBUI_V2_PATTERN_DELETE_THREAD,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
         ),
     )
 }
