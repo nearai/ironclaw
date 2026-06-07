@@ -602,8 +602,10 @@ impl ConversationBindingService for ProductConversationBindingService {
             .lookup_binding(conversation_request)
             .await
             .map_err(map_conversation_error)?;
-        let expected_user_id = resolve_actor_user(&installation_scope, &request).await?;
-        ensure_resolved_actor_matches_expected_user(expected_user_id.as_ref(), &resolution)?;
+        if request.route_kind == ProductConversationRouteKind::Shared {
+            let expected_user_id = resolve_actor_user(&installation_scope, &request).await?;
+            ensure_resolved_actor_matches_expected_user(expected_user_id.as_ref(), &resolution)?;
+        }
 
         resolved_binding_from_resolution(resolution, request.route_kind)
     }

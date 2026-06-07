@@ -2814,7 +2814,7 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
 }
 
 #[tokio::test]
-async fn lookup_binding_rejects_existing_binding_when_resolved_actor_differs() {
+async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_differs() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
     let installation_id =
@@ -2829,7 +2829,19 @@ async fn lookup_binding_rejects_existing_binding_when_resolved_actor_differs() {
             UserId::new("user:alice").expect("user"),
         )
         .await;
-    ConversationBindingPort::resolve_or_create_binding(
+    let envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:seed-shared-lookup").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-1"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+    ConversationBindingPort::resolve_or_create_binding_with_trusted_scope(
         conversations.as_ref(),
         ironclaw_conversations::ResolveConversationRequest {
             tenant_id: tenant_id.clone(),
@@ -2838,15 +2850,23 @@ async fn lookup_binding_rejects_existing_binding_when_resolved_actor_differs() {
             external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
                 .expect("actor"),
             external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
-                None, "conv1", None, None,
+                Some("T-team"),
+                "C-eng",
+                Some("thread-1"),
+                Some("msg-1"),
             )
             .expect("conversation"),
-            external_event_id: ironclaw_conversations::ExternalEventId::new("evt:seed-lookup")
-                .expect("event"),
-            route_kind: ironclaw_conversations::ConversationRouteKind::Direct,
+            external_event_id: ironclaw_conversations::ExternalEventId::new(
+                "evt:seed-shared-lookup",
+            )
+            .expect("event"),
+            route_kind: ironclaw_conversations::ConversationRouteKind::Shared,
             requested_agent_id: Some(AgentId::new("agent:alpha").expect("agent")),
             requested_project_id: Some(ProjectId::new("project:alpha").expect("project")),
         },
+        Some(AgentId::new("agent:alpha").expect("agent")),
+        Some(ProjectId::new("project:alpha").expect("project")),
+        Some(UserId::new("user:subject").expect("subject")),
     )
     .await
     .expect("seed binding");
@@ -2874,9 +2894,7 @@ async fn lookup_binding_rejects_existing_binding_when_resolved_actor_differs() {
     let binding = ProductConversationBindingService::new(conversation_port, resolver);
 
     let error = binding
-        .lookup_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
-            "lookup-actor-mismatch",
-        )))
+        .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
         .await
         .expect_err("lookup should reject mismatched resolved actor");
 
