@@ -2958,6 +2958,21 @@ mod tests {
         )
     }
 
+    fn user_skill_dir(
+        storage_root: &std::path::Path,
+        tenant_id: &str,
+        user_id: &str,
+        name: &str,
+    ) -> std::path::PathBuf {
+        storage_root
+            .join("tenants")
+            .join(tenant_id)
+            .join("users")
+            .join(user_id)
+            .join("skills")
+            .join(name)
+    }
+
     fn skill_md_with_setup_marker(
         name: &str,
         description: &str,
@@ -3929,9 +3944,15 @@ mod tests {
             ),
         )
         .expect("write system skill");
-        std::fs::create_dir_all(storage_root.join("skills/local-helper")).expect("user skill dir");
+        let local_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-filesystem-skill-tenant",
+            "runtime-filesystem-skill-owner",
+            "local-helper",
+        );
+        std::fs::create_dir_all(&local_helper_dir).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/local-helper/SKILL.md"),
+            local_helper_dir.join("SKILL.md"),
             skill_md(
                 "local-helper",
                 "local helper description",
@@ -4016,10 +4037,16 @@ mod tests {
     async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/asset-helper/references"))
+        let asset_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-skill-exec-tenant",
+            "runtime-skill-exec-owner",
+            "asset-helper",
+        );
+        std::fs::create_dir_all(asset_helper_dir.join("references"))
             .expect("asset skill references dir");
         std::fs::write(
-            storage_root.join("skills/asset-helper/SKILL.md"),
+            asset_helper_dir.join("SKILL.md"),
             skill_md(
                 "asset-helper",
                 "asset helper description",
@@ -4028,7 +4055,7 @@ mod tests {
         )
         .expect("write asset helper skill");
         std::fs::write(
-            storage_root.join("skills/asset-helper/references/policy.md"),
+            asset_helper_dir.join("references/policy.md"),
             "asset helper policy",
         )
         .expect("write asset helper policy");
@@ -4130,9 +4157,15 @@ mod tests {
             ),
         )
         .expect("write system skill");
-        std::fs::create_dir_all(storage_root.join("skills/code-review")).expect("user skill dir");
+        let user_code_review_dir = user_skill_dir(
+            &storage_root,
+            "runtime-ambiguous-skill-tenant",
+            "runtime-ambiguous-skill-owner",
+            "code-review",
+        );
+        std::fs::create_dir_all(&user_code_review_dir).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/code-review/SKILL.md"),
+            user_code_review_dir.join("SKILL.md"),
             skill_md(
                 "code-review",
                 "user review description",
@@ -4187,10 +4220,16 @@ mod tests {
     async fn local_dev_runtime_suppresses_explicit_setup_skill_when_workspace_marker_exists() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/marker-helper")).expect("user skill dir");
+        let marker_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-setup-marker-tenant",
+            "runtime-setup-marker-owner",
+            "marker-helper",
+        );
+        std::fs::create_dir_all(&marker_helper_dir).expect("user skill dir");
         std::fs::create_dir_all(storage_root.join("workspace/markers")).expect("marker dir");
         std::fs::write(
-            storage_root.join("skills/marker-helper/SKILL.md"),
+            marker_helper_dir.join("SKILL.md"),
             skill_md_with_setup_marker(
                 "marker-helper",
                 "marker helper description",
@@ -4262,9 +4301,15 @@ mod tests {
     async fn local_dev_runtime_activates_setup_skill_when_workspace_marker_is_absent() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/marker-helper")).expect("user skill dir");
+        let marker_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-setup-marker-absent-tenant",
+            "runtime-setup-marker-absent-owner",
+            "marker-helper",
+        );
+        std::fs::create_dir_all(&marker_helper_dir).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/marker-helper/SKILL.md"),
+            marker_helper_dir.join("SKILL.md"),
             skill_md_with_setup_marker(
                 "marker-helper",
                 "marker helper description",
@@ -4374,9 +4419,15 @@ mod tests {
     async fn local_dev_runtime_skips_invalid_filesystem_skill_before_model_call() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/bad-helper")).expect("bad skill dir");
+        let bad_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-bad-skill-tenant",
+            "runtime-bad-skill-owner",
+            "bad-helper",
+        );
+        std::fs::create_dir_all(&bad_helper_dir).expect("bad skill dir");
         std::fs::write(
-            storage_root.join("skills/bad-helper/SKILL.md"),
+            bad_helper_dir.join("SKILL.md"),
             skill_md(
                 "different-name",
                 "bad helper description",
@@ -5431,9 +5482,15 @@ mod tests {
     async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/webui-helper")).expect("user skill dir");
+        let webui_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-webui-skill-tenant",
+            "runtime-webui-skill-user",
+            "webui-helper",
+        );
+        std::fs::create_dir_all(&webui_helper_dir).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/webui-helper/SKILL.md"),
+            webui_helper_dir.join("SKILL.md"),
             skill_md(
                 "webui-helper",
                 "webui helper description",

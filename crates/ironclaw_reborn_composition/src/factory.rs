@@ -94,7 +94,7 @@ use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::local_dev_mounts::{
-    ambient_workspace_mount_view, memory_mount_view, skill_context_mount_view,
+    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
     skill_management_mount_view, workspace_mount_view,
 };
 use crate::mcp::hosted_http_mcp_runtime;
@@ -1737,11 +1737,9 @@ fn build_workspace_filesystems(
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
-    let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+    let skill_filesystem = Arc::new(ScopedFilesystem::new(
         Arc::clone(&filesystem),
-        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?,
+        scoped_skill_context_mount_view,
     ));
     let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
         filesystem,
@@ -3567,7 +3565,7 @@ mod tests {
         assert_eq!(install_output["name"], "runtime-sentinel");
         assert!(
             storage_root
-                .join("skills/runtime-sentinel/SKILL.md")
+                .join("tenants/default/users/local-dev-test-user/skills/runtime-sentinel/SKILL.md")
                 .exists()
         );
 
@@ -3598,7 +3596,7 @@ mod tests {
         assert_eq!(remove_output["removed"], true);
         assert!(
             !storage_root
-                .join("skills/runtime-sentinel/SKILL.md")
+                .join("tenants/default/users/local-dev-test-user/skills/runtime-sentinel/SKILL.md")
                 .exists()
         );
     }
@@ -3628,7 +3626,11 @@ mod tests {
         .expect_err("workspace tool cannot write skill root");
 
         assert_eq!(failure, RuntimeFailureKind::Authorization);
-        assert!(!storage_root.join("skills/blocked/SKILL.md").exists());
+        assert!(
+            !storage_root
+                .join("tenants/default/users/local-dev-test-user/skills/blocked/SKILL.md")
+                .exists()
+        );
     }
 
     #[test]
@@ -3900,19 +3902,13 @@ mod tests {
     }
 
     fn skill_mounts() -> MountView {
-        MountView::new(vec![
-            MountGrant::new(
-                MountAlias::new("/skills").expect("valid mount alias"),
-                VirtualPath::new("/projects/skills").expect("valid virtual path"),
-                MountPermissions::read_write_list_delete(),
-            ),
-            MountGrant::new(
-                MountAlias::new("/system/skills").expect("valid mount alias"),
-                VirtualPath::new("/projects/system/skills").expect("valid virtual path"),
-                MountPermissions::read_only(),
-            ),
-        ])
-        .expect("valid mount view")
+        let scope = ironclaw_host_api::ResourceScope::local_default(
+            UserId::new("local-dev-test-user").expect("valid user id"),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .expect("valid resource scope");
+        crate::local_dev_mounts::scoped_skill_management_mount_view(&scope)
+            .expect("valid skill mounts")
     }
 
     fn workspace_mounts() -> MountView {

@@ -143,9 +143,11 @@ async fn send_user_message_with_cancellation_cancels_submitted_run() {
 async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let root = tempfile::tempdir().unwrap();
     let storage_root = root.path().join("local-dev");
-    std::fs::create_dir_all(storage_root.join("skills/filesystem-review/references")).unwrap();
+    let skill_root = storage_root
+        .join("tenants/runtime-skill-execution-tenant/users/runtime-skill-execution-owner/skills/filesystem-review");
+    std::fs::create_dir_all(skill_root.join("references")).unwrap();
     std::fs::write(
-        storage_root.join("skills/filesystem-review/SKILL.md"),
+        skill_root.join("SKILL.md"),
         skill_md(
             "filesystem-review",
             "filesystem-review",
@@ -154,7 +156,7 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     )
     .unwrap();
     std::fs::write(
-        storage_root.join("skills/filesystem-review/references/policy.md"),
+        skill_root.join("references/policy.md"),
         "filesystem policy",
     )
     .unwrap();

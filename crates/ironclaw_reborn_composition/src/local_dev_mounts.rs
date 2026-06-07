@@ -53,9 +53,19 @@ pub(crate) fn ambient_workspace_mount_view(
     MountView::new(mounts)
 }
 
-pub(crate) fn skill_context_mount_view() -> Result<MountView, HostApiError> {
+pub(crate) fn scoped_skill_context_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
     MountView::new(vec![
-        grant("/skills", "/projects/skills", MountPermissions::read_only())?,
+        grant(
+            "/skills",
+            &format!(
+                "/projects/tenants/{}/users/{}/skills",
+                scope.tenant_id.as_str(),
+                scope.user_id.as_str()
+            ),
+            MountPermissions::read_only(),
+        )?,
         grant(
             "/tenant-shared/skills",
             "/projects/tenant-shared/skills",
