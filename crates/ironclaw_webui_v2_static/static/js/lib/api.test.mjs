@@ -79,3 +79,20 @@ test("deleteThread sends DELETE to the encoded thread route", async () => {
   assert.equal(calls[0].options.credentials, "same-origin");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
 });
+
+test("deleteThread rejects before fetch when thread id is missing", async () => {
+  let fetchCalled = false;
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("fetch should not be called");
+  };
+
+  await assert.rejects(deleteThread(), /threadId is required/);
+
+  assert.equal(fetchCalled, false);
+});

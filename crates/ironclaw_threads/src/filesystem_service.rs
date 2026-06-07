@@ -1348,24 +1348,14 @@ where
             thread_id: thread_id.clone(),
         })
         .await?;
+        self.delete_idempotency_records_for_thread(scope, thread_id)
+            .await?;
         match self
             .filesystem
             .delete(&scope.to_resource_scope(), &thread_root(scope, thread_id)?)
             .await
         {
-            Ok(()) => {
-                if let Err(error) = self
-                    .delete_idempotency_records_for_thread(scope, thread_id)
-                    .await
-                {
-                    tracing::warn!(
-                        thread_id = %thread_id,
-                        error = %error,
-                        "thread delete completed but inbound idempotency cleanup failed"
-                    );
-                }
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(error) if is_not_found(&error) => Err(SessionThreadError::UnknownThread {
                 thread_id: thread_id.clone(),
             }),

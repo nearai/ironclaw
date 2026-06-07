@@ -121,6 +121,9 @@ export function listThreads({ limit, cursor } = {}) {
 }
 
 export function deleteThread({ threadId } = {}) {
+  if (!threadId) {
+    return Promise.reject(new Error("threadId is required"));
+  }
   return apiFetch(`${V2_BASE}/threads/${encodeURIComponent(threadId)}`, {
     method: "DELETE",
   });

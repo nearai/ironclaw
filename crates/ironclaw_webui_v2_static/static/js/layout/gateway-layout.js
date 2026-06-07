@@ -5,6 +5,7 @@ import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders.js";
 import { useSidebar } from "../hooks/useSidebar.js";
 import { html } from "../lib/html.js";
 import { useT } from "../lib/i18n.js";
+import { toast } from "../lib/toast.js";
 import { useThreads } from "../pages/chat/hooks/useThreads.js";
 import { Sidebar } from "../components/sidebar.js";
 import { PageHeader } from "../components/page-header.js";
@@ -50,9 +51,14 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
   const handleDeleteThread = React.useCallback(
     async (threadId) => {
       const wasActive = threadsState.activeThreadId === threadId;
-      await threadsState.deleteThread(threadId);
-      if (wasActive) {
-        navigate("/chat", { replace: true });
+      try {
+        await threadsState.deleteThread(threadId);
+        if (wasActive) {
+          navigate("/chat", { replace: true });
+        }
+      } catch (error) {
+        console.error("Failed to delete thread:", error);
+        toast(error?.message || "Unable to delete thread", { tone: "error" });
       }
     },
     [navigate, threadsState]
