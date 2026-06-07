@@ -14,6 +14,7 @@
 //! Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -833,7 +834,8 @@ impl SkillRegistry {
             });
         }
 
-        let skill_path = checked_skill_md_path(skill_dir, expected_name).await?;
+        let checked_skill_path = checked_skill_md_path(skill_dir, expected_name).await?;
+        let skill_path = checked_skill_path.path.clone();
         let normalized_content = normalize_line_endings(raw_content);
         let error_label = skill_path.display().to_string();
         let (loaded_name, loaded_skill) =
@@ -846,12 +848,7 @@ impl SkillRegistry {
             });
         }
 
-        tokio::fs::write(&skill_path, normalized_content)
-            .await
-            .map_err(|e| SkillRegistryError::WriteError {
-                path: skill_path.display().to_string(),
-                reason: e.to_string(),
-            })?;
+        write_checked_skill_md(checked_skill_path, normalized_content).await?;
 
         Ok(loaded_skill)
     }
@@ -862,14 +859,9 @@ impl SkillRegistry {
         skill_dir: &Path,
         expected_name: &str,
     ) -> Result<String, SkillRegistryError> {
-        let skill_path = checked_skill_md_path(skill_dir, expected_name).await?;
+        let checked_skill_path = checked_skill_md_path(skill_dir, expected_name).await?;
 
-        tokio::fs::read_to_string(&skill_path)
-            .await
-            .map_err(|e| SkillRegistryError::ReadError {
-                path: skill_path.display().to_string(),
-                reason: e.to_string(),
-            })
+        read_checked_skill_md(checked_skill_path).await
     }
 
     /// Remove a skill from the in-memory registry.
@@ -949,10 +941,39 @@ impl SkillRegistry {
     }
 }
 
+struct CheckedSkillMdPath {
+    path: PathBuf,
+    #[cfg(unix)]
+    identity: FileIdentity,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    FileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    }
+}
+
+#[cfg(unix)]
+fn identity_matches(file: &std::fs::File, expected: FileIdentity) -> io::Result<bool> {
+    let actual = file_identity(&file.metadata()?);
+    Ok(actual.dev == expected.dev && actual.ino == expected.ino)
+}
+
 async fn checked_skill_md_path(
     skill_dir: &Path,
     expected_name: &str,
-) -> Result<PathBuf, SkillRegistryError> {
+) -> Result<CheckedSkillMdPath, SkillRegistryError> {
     let dir_meta = tokio::fs::symlink_metadata(skill_dir).await.map_err(|e| {
         SkillRegistryError::ReadError {
             path: skill_dir.display().to_string(),
@@ -985,7 +1006,124 @@ async fn checked_skill_md_path(
         });
     }
 
-    Ok(skill_path)
+    Ok(CheckedSkillMdPath {
+        path: skill_path,
+        #[cfg(unix)]
+        identity: file_identity(&file_meta),
+    })
+}
+
+#[cfg(unix)]
+async fn write_checked_skill_md(
+    checked: CheckedSkillMdPath,
+    content: String,
+) -> Result<(), SkillRegistryError> {
+    let path = checked.path;
+    let display_path = path.display().to_string();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|error| SkillRegistryError::WriteError {
+                path: display_path.clone(),
+                reason: error.to_string(),
+            })?;
+
+        if !identity_matches(&file, checked.identity).map_err(|error| {
+            SkillRegistryError::WriteError {
+                path: display_path.clone(),
+                reason: error.to_string(),
+            }
+        })? {
+            return Err(SkillRegistryError::CannotUpdate {
+                name: display_path,
+                reason: "skill file changed during update validation".to_string(),
+            });
+        }
+
+        file.set_len(0)
+            .and_then(|()| file.write_all(content.as_bytes()))
+            .map_err(|error| SkillRegistryError::WriteError {
+                path: display_path,
+                reason: error.to_string(),
+            })
+    })
+    .await
+    .map_err(|error| SkillRegistryError::WriteError {
+        path: "<skill update task>".to_string(),
+        reason: error.to_string(),
+    })?
+}
+
+#[cfg(not(unix))]
+async fn write_checked_skill_md(
+    checked: CheckedSkillMdPath,
+    content: String,
+) -> Result<(), SkillRegistryError> {
+    tokio::fs::write(&checked.path, content)
+        .await
+        .map_err(|e| SkillRegistryError::WriteError {
+            path: checked.path.display().to_string(),
+            reason: e.to_string(),
+        })
+}
+
+#[cfg(unix)]
+async fn read_checked_skill_md(checked: CheckedSkillMdPath) -> Result<String, SkillRegistryError> {
+    let path = checked.path;
+    let display_path = path.display().to_string();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|error| SkillRegistryError::ReadError {
+                path: display_path.clone(),
+                reason: error.to_string(),
+            })?;
+
+        if !identity_matches(&file, checked.identity).map_err(|error| {
+            SkillRegistryError::ReadError {
+                path: display_path.clone(),
+                reason: error.to_string(),
+            }
+        })? {
+            return Err(SkillRegistryError::CannotUpdate {
+                name: display_path,
+                reason: "skill file changed during update validation".to_string(),
+            });
+        }
+
+        let mut content = String::new();
+        file.read_to_string(&mut content)
+            .map_err(|error| SkillRegistryError::ReadError {
+                path: display_path,
+                reason: error.to_string(),
+            })?;
+        Ok(content)
+    })
+    .await
+    .map_err(|error| SkillRegistryError::ReadError {
+        path: "<skill read task>".to_string(),
+        reason: error.to_string(),
+    })?
+}
+
+#[cfg(not(unix))]
+async fn read_checked_skill_md(checked: CheckedSkillMdPath) -> Result<String, SkillRegistryError> {
+    tokio::fs::read_to_string(&checked.path)
+        .await
+        .map_err(|e| SkillRegistryError::ReadError {
+            path: checked.path.display().to_string(),
+            reason: e.to_string(),
+        })
 }
 
 /// Load and validate a single SKILL.md file from disk.
@@ -1569,6 +1707,44 @@ mod tests {
             fs::read_to_string(skill_dir.join("SKILL.md"))
                 .unwrap()
                 .contains("Before prompt")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_update_skill_rejects_file_swap_after_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("editable-skill");
+        fs::create_dir(&skill_dir).unwrap();
+        let skill_path = skill_dir.join("SKILL.md");
+        fs::write(
+            &skill_path,
+            "---\nname: editable-skill\n---\n\nBefore prompt.\n",
+        )
+        .unwrap();
+
+        let checked = checked_skill_md_path(&skill_dir, "editable-skill")
+            .await
+            .unwrap();
+        fs::remove_file(&skill_path).unwrap();
+        fs::write(
+            &skill_path,
+            "---\nname: editable-skill\n---\n\nSwapped prompt.\n",
+        )
+        .unwrap();
+
+        let err = write_checked_skill_md(
+            checked,
+            "---\nname: editable-skill\n---\n\nAfter prompt.\n".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, SkillRegistryError::CannotUpdate { .. }));
+        assert!(
+            fs::read_to_string(skill_path)
+                .unwrap()
+                .contains("Swapped prompt")
         );
     }
 

@@ -1,14 +1,20 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, RebornServices as ProductRebornServices, RebornServicesApi,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind, SkillsProductFacade,
 };
 
 use crate::{
     RebornBuildError, RebornProductAuthServices, RebornReadiness, RebornRuntime,
-    RebornWebuiAutomationFacade, lifecycle::RebornLocalLifecycleFacade,
+    RebornWebuiAutomationFacade,
+    lifecycle::{
+        RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
+    },
     webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
 
@@ -110,6 +116,9 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
         }
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
+        api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
+            local_runtime.skill_management.clone(),
+        )));
     }
     if let Some(product_auth) = &services.product_auth {
         api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(
@@ -148,4 +157,225 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         product_auth: services.product_auth.clone(),
         readiness: services.readiness,
     })
+}
+
+struct LocalSkillsProductFacade {
+    skill_management: Arc<RebornLocalSkillManagementPort>,
+}
+
+impl LocalSkillsProductFacade {
+    fn new(skill_management: Arc<RebornLocalSkillManagementPort>) -> Self {
+        Self { skill_management }
+    }
+}
+
+#[async_trait]
+impl SkillsProductFacade for LocalSkillsProductFacade {
+    async fn list_skills(
+        &self,
+        _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        let skills = self
+            .skill_management
+            .list()
+            .await
+            .map_err(map_skill_management_error)?;
+        Ok(skill_list_response(skills))
+    }
+
+    async fn search_skills(
+        &self,
+        _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+        query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        let result = self
+            .skill_management
+            .search(&query, 50)
+            .await
+            .map_err(map_skill_management_error)?;
+        Ok(RebornSkillSearchResponse {
+            catalog: Vec::new(),
+            installed: result.skills.into_iter().map(skill_info).collect(),
+            registry_url: String::new(),
+            catalog_error: result
+                .truncated
+                .then(|| "Skill search results were truncated".to_string()),
+        })
+    }
+
+    async fn install_skill(
+        &self,
+        _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+        name: String,
+        content: Option<String>,
+        url: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        if url.is_some() && content.is_none() {
+            return Err(invalid_skill_request());
+        }
+        let content = content.ok_or_else(invalid_skill_request)?;
+        let installed = self
+            .skill_management
+            .install(Some(&name), &content)
+            .await
+            .map_err(map_skill_management_error)?;
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!("Skill '{}' installed", installed.name),
+        })
+    }
+
+    async fn read_skill_content(
+        &self,
+        _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        let content = self
+            .skill_management
+            .read_content(&name)
+            .await
+            .map_err(map_skill_management_error)?;
+        Ok(RebornSkillContentResponse {
+            name: content.name,
+            content: content.content,
+        })
+    }
+
+    async fn update_skill(
+        &self,
+        _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+        name: String,
+        content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let updated = self
+            .skill_management
+            .update(&name, &content)
+            .await
+            .map_err(map_skill_management_error)?;
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!("Skill '{}' updated", updated.name),
+        })
+    }
+
+    async fn remove_skill(
+        &self,
+        _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let removed = self
+            .skill_management
+            .remove(&name)
+            .await
+            .map_err(map_skill_management_error)?;
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!("Skill '{}' removed", removed.name),
+        })
+    }
+}
+
+fn skill_list_response(skills: Vec<ironclaw_skills::SkillSummary>) -> RebornSkillListResponse {
+    let skills: Vec<_> = skills.into_iter().map(skill_info).collect();
+    RebornSkillListResponse {
+        count: skills.len(),
+        skills,
+    }
+}
+
+fn skill_info(skill: ironclaw_skills::SkillSummary) -> RebornSkillInfo {
+    let source_kind = match skill.source {
+        ironclaw_skills::ManagedSkillSource::System => RebornSkillSourceKind::System,
+        ironclaw_skills::ManagedSkillSource::User => RebornSkillSourceKind::User,
+        ironclaw_skills::ManagedSkillSource::Installed => RebornSkillSourceKind::Installed,
+    };
+    let can_manage = source_kind != RebornSkillSourceKind::System;
+    RebornSkillInfo {
+        name: skill.name.clone(),
+        description: skill.description,
+        version: skill.version,
+        trust: if source_kind == RebornSkillSourceKind::Installed {
+            "Installed".to_string()
+        } else {
+            "Trusted".to_string()
+        },
+        source: skill.source.as_str().to_string(),
+        source_kind,
+        keywords: skill.keywords,
+        usage_hint: Some(format!(
+            "Type `/{}` in chat to force-activate this skill.",
+            skill.name
+        )),
+        setup_hint: None,
+        bundle_path: None,
+        install_source_url: None,
+        has_requirements: false,
+        has_scripts: false,
+        can_edit: can_manage,
+        can_delete: can_manage,
+    }
+}
+
+fn map_skill_management_error(error: RebornLocalSkillManagementError) -> RebornServicesError {
+    match error {
+        RebornLocalSkillManagementError::InvalidContext { .. } => internal_skill_error(),
+        RebornLocalSkillManagementError::Skill(error) => match error.kind() {
+            ironclaw_skills::SkillManagementErrorKind::NotFound => RebornServicesError {
+                code: RebornServicesErrorCode::NotFound,
+                kind: RebornServicesErrorKind::NotFound,
+                status_code: 404,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            ironclaw_skills::SkillManagementErrorKind::Conflict => RebornServicesError {
+                code: RebornServicesErrorCode::Conflict,
+                kind: RebornServicesErrorKind::Conflict,
+                status_code: 409,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            ironclaw_skills::SkillManagementErrorKind::Resource => RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            },
+            ironclaw_skills::SkillManagementErrorKind::FilesystemDenied => RebornServicesError {
+                code: RebornServicesErrorCode::Forbidden,
+                kind: RebornServicesErrorKind::ParticipantDenied,
+                status_code: 403,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            ironclaw_skills::SkillManagementErrorKind::InvalidInput
+            | ironclaw_skills::SkillManagementErrorKind::InvalidSkill => invalid_skill_request(),
+        },
+    }
+}
+
+fn invalid_skill_request() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::InvalidRequest,
+        kind: RebornServicesErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn internal_skill_error() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Internal,
+        kind: RebornServicesErrorKind::Internal,
+        status_code: 500,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
 }

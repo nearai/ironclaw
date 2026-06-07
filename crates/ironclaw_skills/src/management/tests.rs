@@ -423,7 +423,7 @@ async fn install_bundle_failure_cleans_up_partial_directory() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.kind(), SkillManagementErrorKind::FilesystemDenied);
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
 
     assert_missing(&inner, "/projects/skills/partial-helper/SKILL.md").await;
     assert_missing(
@@ -581,7 +581,7 @@ async fn install_cleanup_failure_is_reported() {
     .await
     .unwrap_err();
 
-    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
+    assert_eq!(error.kind(), SkillManagementErrorKind::FilesystemDenied);
     assert_file_contents(
         &inner,
         "/projects/skills/cleanup-helper/references/guide.md",

@@ -1,6 +1,6 @@
 //! Skills management API handlers.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     Json,
@@ -14,8 +14,9 @@ use crate::channels::web::handlers::skill_registry_scope::scoped_skill_registry;
 use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
 
-static SKILL_MUTATION_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+static SKILL_MUTATION_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
     std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
 
@@ -47,12 +48,12 @@ fn skill_setup_hint(skill: &ironclaw_skills::types::LoadedSkill) -> Option<Strin
     (!hints.is_empty()).then(|| hints.join(" · "))
 }
 
-fn skill_source_kind(source: &ironclaw_skills::types::SkillSource) -> &'static str {
+fn skill_source_kind(source: &ironclaw_skills::types::SkillSource) -> SkillSourceKind {
     match source {
-        ironclaw_skills::types::SkillSource::Workspace(_) => "workspace",
-        ironclaw_skills::types::SkillSource::User(_) => "user",
-        ironclaw_skills::types::SkillSource::Installed(_) => "installed",
-        ironclaw_skills::types::SkillSource::Bundled(_) => "system",
+        ironclaw_skills::types::SkillSource::Workspace(_) => SkillSourceKind::Workspace,
+        ironclaw_skills::types::SkillSource::User(_) => SkillSourceKind::User,
+        ironclaw_skills::types::SkillSource::Installed(_) => SkillSourceKind::Installed,
+        ironclaw_skills::types::SkillSource::Bundled(_) => SkillSourceKind::System,
     }
 }
 
@@ -100,6 +101,32 @@ fn validate_skill_content_safety(content: &str) -> Result<(), (StatusCode, Strin
     )
 }
 
+async fn skill_mutation_guard(
+    state: &GatewayState,
+    user: &crate::channels::web::auth::UserIdentity,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, (StatusCode, String)> {
+    let lock_key = if !state.multi_tenant_mode || user.user_id == state.owner_id {
+        "shared".to_string()
+    } else {
+        format!("user:{}", user.user_id)
+    };
+    let lock = {
+        let mut locks = SKILL_MUTATION_LOCKS.lock().map_err(|error| {
+            tracing::error!("Skill mutation lock map poisoned: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Can't access skills right now".to_string(),
+            )
+        })?;
+        Arc::clone(
+            locks
+                .entry(lock_key)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    };
+    Ok(lock.lock_owned().await)
+}
+
 async fn skill_info(
     skill: ironclaw_skills::types::LoadedSkill,
     can_manage_skills: bool,
@@ -128,7 +155,7 @@ async fn skill_info(
         None => false,
     };
     let bundle_path = bundle_dir.as_ref().map(|path| path.display().to_string());
-    let source_kind = skill_source_kind(&skill.source).to_string();
+    let source_kind = skill_source_kind(&skill.source);
     let can_edit = can_manage_skills && skill_is_user_managed(&skill.source);
     let can_delete = can_manage_skills && skill_can_delete(&skill.source);
 
@@ -264,6 +291,7 @@ pub async fn skills_install_handler(
 
     tracing::info!(user_id = %user.user_id, skill = %req.name, "skill install requested");
 
+    let _mutation_guard = skill_mutation_guard(&state, &user).await?;
     let mut scoped_registry = scoped_skill_registry(&state, &user).await?;
 
     let mut resolved_download_key = None;
@@ -322,8 +350,6 @@ pub async fn skills_install_handler(
         req.slug.as_deref(),
         resolved_download_key.as_deref(),
     );
-
-    let _mutation_guard = SKILL_MUTATION_LOCK.lock().await;
 
     // Parse, check duplicates, and get install_dir under a brief read lock.
     let (skill_name_from_parse, install_content) =
@@ -388,9 +414,8 @@ pub async fn skills_remove_handler(
 
     tracing::info!(user_id = %user.user_id, skill = %name, "skill remove requested");
 
+    let _mutation_guard = skill_mutation_guard(&state, &user).await?;
     let mut scoped_registry = scoped_skill_registry(&state, &user).await?;
-
-    let _mutation_guard = SKILL_MUTATION_LOCK.lock().await;
 
     // Validate removal under a brief read lock
     let skill_path = scoped_registry
@@ -421,9 +446,8 @@ pub async fn skills_get_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<SkillContentResponse>, (StatusCode, String)> {
+    let _mutation_guard = skill_mutation_guard(&state, &user).await?;
     let scoped_registry = scoped_skill_registry(&state, &user).await?;
-
-    let _mutation_guard = SKILL_MUTATION_LOCK.lock().await;
 
     let (skill_path, _, _) = scoped_registry
         .validate_update(&name)?
@@ -458,15 +482,25 @@ pub async fn skills_update_handler(
 
     tracing::info!(user_id = %user.user_id, skill = %name, "skill update requested");
 
-    let mut scoped_registry = scoped_skill_registry(&state, &user).await?;
+    if req.content.len() as u64 > ironclaw_skills::MAX_PROMPT_FILE_SIZE {
+        return Err(skill_registry_error_response(
+            StatusCode::BAD_REQUEST,
+            ironclaw_skills::SkillRegistryError::FileTooLarge {
+                name: name.clone(),
+                size: req.content.len() as u64,
+                max: ironclaw_skills::MAX_PROMPT_FILE_SIZE,
+            },
+        ));
+    }
 
-    let _mutation_guard = SKILL_MUTATION_LOCK.lock().await;
+    validate_skill_content_safety(&req.content)?;
+
+    let _mutation_guard = skill_mutation_guard(&state, &user).await?;
+    let mut scoped_registry = scoped_skill_registry(&state, &user).await?;
 
     let (skill_path, trust, source) = scoped_registry
         .validate_update(&name)?
         .map_err(|e| skill_registry_error_response(StatusCode::BAD_REQUEST, e))?;
-
-    validate_skill_content_safety(&req.content)?;
 
     let loaded_skill = ironclaw_skills::registry::SkillRegistry::prepare_update_to_disk(
         &skill_path,
@@ -502,6 +536,7 @@ mod tests {
 
     use crate::channels::web::auth::{AuthenticatedUser, UserIdentity};
     use crate::channels::web::test_helpers::test_gateway_state;
+    use crate::channels::web::types::SkillSourceKind;
 
     #[test]
     fn catalog_entry_matches_installed_slug_suffix() {
@@ -591,7 +626,7 @@ mod tests {
         let info = super::skill_info(skill, true).await;
         assert!(info.has_requirements);
         assert!(info.has_scripts);
-        assert_eq!(info.source_kind, "installed");
+        assert_eq!(info.source_kind, SkillSourceKind::Installed);
         assert!(info.can_edit);
         assert!(info.can_delete);
         assert_eq!(
@@ -620,9 +655,21 @@ mod tests {
 
         let info = super::skill_info(skill, false).await;
 
-        assert_eq!(info.source_kind, "installed");
+        assert_eq!(info.source_kind, SkillSourceKind::Installed);
         assert!(!info.can_edit);
         assert!(!info.can_delete);
+    }
+
+    #[test]
+    fn skill_source_kind_serializes_as_snake_case_wire_value() {
+        assert_eq!(
+            serde_json::to_string(&SkillSourceKind::Installed).expect("serialize"),
+            "\"installed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SkillSourceKind::System).expect("serialize"),
+            "\"system\""
+        );
     }
 
     fn regular_user(user_id: &str) -> AuthenticatedUser {
@@ -649,6 +696,72 @@ mod tests {
         std::fs::write(skill_dir.join("SKILL.md"), content).expect("skill file");
 
         let mut registry = ironclaw_skills::SkillRegistry::new(dir.path().to_path_buf());
+        registry.discover_all().await;
+
+        let mut state = test_gateway_state(None);
+        Arc::get_mut(&mut state)
+            .expect("state is not shared")
+            .skill_registry = Some(Arc::new(RwLock::new(registry)));
+        (state, dir)
+    }
+
+    async fn state_with_installed_skill(
+        content: &str,
+    ) -> (
+        Arc<crate::channels::web::platform::state::GatewayState>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user_dir = dir.path().join("skills");
+        let installed_dir = dir.path().join("installed_skills");
+        ironclaw_skills::registry::SkillRegistry::prepare_install_bundle_to_disk(
+            &installed_dir,
+            "installed-skill",
+            content,
+            &[],
+            None,
+        )
+        .await
+        .expect("install bundle");
+
+        let mut registry =
+            ironclaw_skills::SkillRegistry::new(user_dir).with_installed_dir(installed_dir);
+        registry.discover_all().await;
+
+        let mut state = test_gateway_state(None);
+        Arc::get_mut(&mut state)
+            .expect("state is not shared")
+            .skill_registry = Some(Arc::new(RwLock::new(registry)));
+        (state, dir)
+    }
+
+    async fn state_with_read_only_skills() -> (
+        Arc<crate::channels::web::platform::state::GatewayState>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user_dir = dir.path().join("skills");
+        let workspace_dir = dir.path().join("workspace");
+        let workspace_skill_dir = workspace_dir.join("workspace-skill");
+        std::fs::create_dir_all(&workspace_skill_dir).expect("workspace skill dir");
+        std::fs::write(
+            workspace_skill_dir.join("SKILL.md"),
+            "---\nname: workspace-skill\ndescription: Workspace\n---\n\nWorkspace prompt.\n",
+        )
+        .expect("workspace skill file");
+
+        let bundled: &'static [(String, String)] = Box::leak(
+            vec![(
+                "bundled-skill".to_string(),
+                "---\nname: bundled-skill\ndescription: Bundled\n---\n\nBundled prompt.\n"
+                    .to_string(),
+            )]
+            .into_boxed_slice(),
+        );
+
+        let mut registry = ironclaw_skills::SkillRegistry::new(user_dir)
+            .with_workspace_dir(workspace_dir)
+            .with_bundled_content(bundled);
         registry.discover_all().await;
 
         let mut state = test_gateway_state(None);
@@ -760,6 +873,153 @@ mod tests {
 
         assert_eq!(response.name, "editable-skill");
         assert!(response.content.contains("Before prompt"));
+    }
+
+    #[tokio::test]
+    async fn skills_remove_handler_deletes_installed_skill_and_rejects_user_skill() {
+        let (state, dir) = state_with_installed_skill(
+            "---\nname: installed-skill\ndescription: Installed\n---\n\nInstalled prompt.\n",
+        )
+        .await;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-confirm-action", "true".parse().expect("header value"));
+
+        let Json(response) = super::skills_remove_handler(
+            State(Arc::clone(&state)),
+            test_user(),
+            headers,
+            AxumPath("installed-skill".to_string()),
+        )
+        .await
+        .expect("remove installed skill");
+
+        assert!(response.success);
+        assert!(!dir.path().join("installed_skills/installed-skill").exists());
+        let registry = state.skill_registry.as_ref().expect("registry");
+        let guard = registry.read().expect("registry read");
+        assert!(guard.find_by_name("installed-skill").is_none());
+
+        let (state, dir) =
+            state_with_skill("---\nname: editable-skill\ndescription: User\n---\n\nUser prompt.\n")
+                .await;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-confirm-action", "true".parse().expect("header value"));
+
+        let err = super::skills_remove_handler(
+            State(state),
+            test_user(),
+            headers,
+            AxumPath("editable-skill".to_string()),
+        )
+        .await
+        .expect_err("user-placed skill removal should fail");
+
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(dir.path().join("editable-skill/SKILL.md").exists());
+    }
+
+    #[tokio::test]
+    async fn skills_management_mutations_are_scoped_to_authenticated_user() {
+        let (state, _dir) = multi_tenant_state_with_skill_template().await;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-confirm-action", "true".parse().expect("header value"));
+
+        let Json(response) = super::skills_install_handler(
+            State(Arc::clone(&state)),
+            regular_user("alice"),
+            headers.clone(),
+            Json(crate::channels::web::types::SkillInstallRequest {
+                name: "alice-skill".to_string(),
+                slug: None,
+                url: None,
+                content: Some(
+                    "---\nname: alice-skill\ndescription: Alice only\n---\n\nAlice prompt.\n"
+                        .to_string(),
+                ),
+            }),
+        )
+        .await
+        .expect("install alice skill");
+        assert!(response.success);
+
+        let err = super::skills_get_handler(
+            State(Arc::clone(&state)),
+            regular_user("bob"),
+            AxumPath("alice-skill".to_string()),
+        )
+        .await
+        .expect_err("bob should not read alice skill");
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+
+        let err = super::skills_update_handler(
+            State(Arc::clone(&state)),
+            regular_user("bob"),
+            headers.clone(),
+            AxumPath("alice-skill".to_string()),
+            Json(crate::channels::web::types::SkillUpdateRequest {
+                content: "---\nname: alice-skill\ndescription: Bob edit\n---\n\nBob prompt.\n"
+                    .to_string(),
+            }),
+        )
+        .await
+        .expect_err("bob should not update alice skill");
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+
+        let err = super::skills_remove_handler(
+            State(Arc::clone(&state)),
+            regular_user("bob"),
+            headers,
+            AxumPath("alice-skill".to_string()),
+        )
+        .await
+        .expect_err("bob should not delete alice skill");
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+
+        let Json(response) = super::skills_get_handler(
+            State(state),
+            regular_user("alice"),
+            AxumPath("alice-skill".to_string()),
+        )
+        .await
+        .expect("alice can still read own skill");
+        assert!(response.content.contains("Alice prompt"));
+    }
+
+    #[tokio::test]
+    async fn skills_get_and_update_reject_workspace_and_bundled_skills() {
+        let (state, dir) = state_with_read_only_skills().await;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-confirm-action", "true".parse().expect("header value"));
+
+        for name in ["workspace-skill", "bundled-skill"] {
+            let err = super::skills_get_handler(
+                State(Arc::clone(&state)),
+                test_user(),
+                AxumPath(name.to_string()),
+            )
+            .await
+            .expect_err("read-only skill content should not be editable");
+            assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+
+            let err = super::skills_update_handler(
+                State(Arc::clone(&state)),
+                test_user(),
+                headers.clone(),
+                AxumPath(name.to_string()),
+                Json(crate::channels::web::types::SkillUpdateRequest {
+                    content: format!("---\nname: {name}\ndescription: Edited\n---\n\nEdited.\n"),
+                }),
+            )
+            .await
+            .expect_err("read-only skill update should fail");
+            assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        }
+
+        assert!(
+            std::fs::read_to_string(dir.path().join("workspace/workspace-skill/SKILL.md"))
+                .expect("workspace skill")
+                .contains("Workspace prompt")
+        );
     }
 
     #[tokio::test]

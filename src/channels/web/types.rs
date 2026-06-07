@@ -829,6 +829,15 @@ pub struct PairingApproveRequest {
 
 // --- Skills ---
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillSourceKind {
+    User,
+    Installed,
+    Workspace,
+    System,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SkillInfo {
     pub name: String,
@@ -836,7 +845,7 @@ pub struct SkillInfo {
     pub version: String,
     pub trust: String,
     pub source: String,
-    pub source_kind: String,
+    pub source_kind: SkillSourceKind,
     pub keywords: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_hint: Option<String>,

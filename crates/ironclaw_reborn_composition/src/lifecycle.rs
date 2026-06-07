@@ -14,8 +14,8 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_skills::{
     SkillInstallRequest, SkillInstallSource, SkillManagementContext, SkillManagementError,
-    SkillManagementErrorKind, SkillRemoveRequest, SkillSearchRequest, install_skill, list_skills,
-    remove_skill, search_skills,
+    SkillManagementErrorKind, SkillRemoveRequest, SkillSearchRequest, SkillUpdateRequest,
+    install_skill, list_skills, read_skill_content, remove_skill, search_skills, update_skill,
 };
 
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
@@ -68,7 +68,24 @@ impl RebornLocalSkillManagementPort {
         Ok(search_skills(&context, SkillSearchRequest { query, limit }).await?)
     }
 
-    async fn install(
+    pub(crate) async fn read_content(
+        &self,
+        name: &str,
+    ) -> Result<ironclaw_skills::SkillContentResult, RebornLocalSkillManagementError> {
+        let context = self.skill_context()?;
+        Ok(read_skill_content(&context, ironclaw_skills::SkillContentRequest { name }).await?)
+    }
+
+    pub(crate) async fn update(
+        &self,
+        name: &str,
+        content: &str,
+    ) -> Result<ironclaw_skills::SkillUpdateResult, RebornLocalSkillManagementError> {
+        let context = self.skill_context()?;
+        Ok(update_skill(&context, SkillUpdateRequest { name, content }).await?)
+    }
+
+    pub(crate) async fn install(
         &self,
         name: Option<&str>,
         content: &str,
@@ -87,7 +104,7 @@ impl RebornLocalSkillManagementPort {
         .await?)
     }
 
-    async fn remove(
+    pub(crate) async fn remove(
         &self,
         name: &str,
     ) -> Result<ironclaw_skills::SkillRemoveResult, RebornLocalSkillManagementError> {

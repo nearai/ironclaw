@@ -149,8 +149,10 @@ pub use reborn_services::{
     RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
+    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, SkillsProductFacade,
     StaticConnectableChannelsProductFacade, UnsupportedAutomationProductFacade,
     UpsertLlmProviderRequest,
 };

@@ -34,6 +34,34 @@ MOCK_INSTALLED_SKILL = {
     "can_delete": True,
 }
 
+MOCK_SYSTEM_SKILL = {
+    "name": "system-helper",
+    "description": "Read-only system helper.",
+    "version": "1.0.0",
+    "trust": "Trusted",
+    "source": "System",
+    "source_kind": "system",
+    "keywords": ["system"],
+    "has_requirements": False,
+    "has_scripts": False,
+    "can_edit": False,
+    "can_delete": False,
+}
+
+MOCK_WORKSPACE_SKILL = {
+    "name": "workspace-helper",
+    "description": "Read-only workspace helper.",
+    "version": "1.0.0",
+    "trust": "Trusted",
+    "source": "Workspace",
+    "source_kind": "workspace",
+    "keywords": ["workspace"],
+    "has_requirements": False,
+    "has_scripts": False,
+    "can_edit": False,
+    "can_delete": False,
+}
+
 
 async def go_to_skills(page):
     """Navigate to Settings > Skills subtab."""
@@ -44,14 +72,14 @@ async def go_to_skills(page):
     )
 
 
-async def mock_skills_api(page):
+async def mock_skills_api(page, initial_skills=None):
     """Mock skills API endpoints used by the browser lifecycle tests.
 
     These tests validate the Settings > Skills UI contract, not live ClawHub
     availability. Keeping the API local avoids skip-on-network behavior while
     still exercising the real browser code paths.
     """
-    installed = []
+    installed = [dict(skill) for skill in (initial_skills or [])]
     install_requests = []
     update_requests = []
 
@@ -66,11 +94,11 @@ async def mock_skills_api(page):
         request = route.request
         path = urlparse(request.url).path
 
-        if path == "/api/skills" and request.method == "GET":
+        if path == "/api/webchat/v2/skills" and request.method == "GET":
             await fulfill_json(route, {"skills": installed, "count": len(installed)})
             return
 
-        if path == "/api/skills/search" and request.method == "POST":
+        if path == "/api/webchat/v2/skills/search" and request.method == "POST":
             catalog_skill = dict(MOCK_CATALOG_SKILL)
             catalog_skill["installed"] = any(
                 skill["name"] == MOCK_INSTALLED_SKILL["name"] for skill in installed
@@ -85,7 +113,7 @@ async def mock_skills_api(page):
             )
             return
 
-        if path == "/api/skills/install" and request.method == "POST":
+        if path == "/api/webchat/v2/skills/install" and request.method == "POST":
             install_requests.append(json.loads(request.post_data or "{}"))
             if not any(skill["name"] == MOCK_INSTALLED_SKILL["name"] for skill in installed):
                 installed = [dict(MOCK_INSTALLED_SKILL)]
@@ -98,8 +126,8 @@ async def mock_skills_api(page):
             )
             return
 
-        if path.startswith("/api/skills/") and request.method == "GET":
-            name = unquote(path.removeprefix("/api/skills/"))
+        if path.startswith("/api/webchat/v2/skills/") and request.method == "GET":
+            name = unquote(path.removeprefix("/api/webchat/v2/skills/"))
             await fulfill_json(
                 route,
                 {
@@ -112,8 +140,8 @@ async def mock_skills_api(page):
             )
             return
 
-        if path.startswith("/api/skills/") and request.method == "PUT":
-            name = unquote(path.removeprefix("/api/skills/"))
+        if path.startswith("/api/webchat/v2/skills/") and request.method == "PUT":
+            name = unquote(path.removeprefix("/api/webchat/v2/skills/"))
             update_requests.append(
                 {
                     "name": name,
@@ -127,8 +155,8 @@ async def mock_skills_api(page):
             )
             return
 
-        if path.startswith("/api/skills/") and request.method == "DELETE":
-            name = unquote(path.removeprefix("/api/skills/"))
+        if path.startswith("/api/webchat/v2/skills/") and request.method == "DELETE":
+            name = unquote(path.removeprefix("/api/webchat/v2/skills/"))
             installed = [skill for skill in installed if skill["name"] != name]
             await fulfill_json(
                 route,
@@ -138,7 +166,7 @@ async def mock_skills_api(page):
 
         await route.continue_()
 
-    await page.route("**/api/skills**", handle)
+    await page.route("**/api/webchat/v2/skills**", handle)
     return {"install_requests": install_requests, "update_requests": update_requests}
 
 
@@ -181,7 +209,7 @@ async def test_skills_install_and_delete(page):
 
     install_btn = results.first.locator("button", has_text="Install")
     assert await install_btn.count() == 1, "Expected mocked catalog skill to be installable"
-    async with page.expect_response(lambda r: "/api/skills/install" in r.url) as install_response:
+    async with page.expect_response(lambda r: "/api/webchat/v2/skills/install" in r.url) as install_response:
         await install_btn.click()
     response = await install_response.value
     assert response.ok
@@ -230,7 +258,7 @@ async def test_skills_edit_user_managed_skill(page):
     await installed.first.wait_for(state="visible", timeout=5000)
 
     async with page.expect_response(
-        lambda r: "/api/skills/markdown-helper" in r.url and r.request.method == "GET"
+        lambda r: "/api/webchat/v2/skills/markdown-helper" in r.url and r.request.method == "GET"
     ) as content_response:
         await installed.first.locator("button", has_text="Edit").click()
     response = await content_response.value
@@ -243,7 +271,7 @@ async def test_skills_edit_user_managed_skill(page):
     )
 
     async with page.expect_response(
-        lambda r: "/api/skills/markdown-helper" in r.url and r.request.method == "PUT"
+        lambda r: "/api/webchat/v2/skills/markdown-helper" in r.url and r.request.method == "PUT"
     ) as update_response:
         await installed.first.locator("button", has_text="Save").click()
     response = await update_response.value
@@ -253,3 +281,21 @@ async def test_skills_edit_user_managed_skill(page):
     update = mock_api["update_requests"][0]
     assert update["headers"].get("x-confirm-action") == "true"
     assert "Updated E2E skill" in update["body"]["content"]
+
+
+async def test_skills_read_only_sources_hide_edit_and_delete(page):
+    """System and workspace skills remain visible but not editable/deletable."""
+    await mock_skills_api(page, initial_skills=[MOCK_SYSTEM_SKILL, MOCK_WORKSPACE_SKILL])
+    await go_to_skills(page)
+
+    installed = page.locator(SEL["skill_installed"])
+    await installed.first.wait_for(state="visible", timeout=5000)
+
+    system_card = installed.filter(has_text="system-helper")
+    workspace_card = installed.filter(has_text="workspace-helper")
+    assert await system_card.count() == 1
+    assert await workspace_card.count() == 1
+
+    for card in [system_card, workspace_card]:
+        assert await card.locator("button", has_text="Edit").count() == 0
+        assert await card.locator("button", has_text="Delete").count() == 0
