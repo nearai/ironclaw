@@ -78,6 +78,19 @@ Set the service Dockerfile path to `Dockerfile.reborn`. Railway sets `PORT`;
 keep `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0`. The Reborn WebUI service serves
 `/api/health` for Railway's healthcheck.
 
+Minimum Railway variables:
+
+```bash
+IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
+IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
+NEARAI_API_KEY=<nearai-api-key>
+```
+
+`ironclaw-reborn serve` exits before binding the HTTP listener if the WebUI
+token/user variables are missing. The bundled config selects NearAI as the
+default LLM provider, so set `NEARAI_API_KEY` unless a custom mounted config
+selects a different provider.
+
 Do not use `IRONCLAW_REBORN_PROFILE=local-dev-yolo` for a public Railway
 listener. That profile grants trusted host access and `serve` refuses to bind it
 to a non-loopback host. Use the default `local-dev` container config until the
