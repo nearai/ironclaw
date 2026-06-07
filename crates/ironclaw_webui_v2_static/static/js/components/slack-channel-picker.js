@@ -1,6 +1,7 @@
 import { React, html } from "../lib/html.js";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "../design-system/button.js";
+import { useT } from "../lib/i18n.js";
 import {
   listSlackAllowedChannels,
   normalizeSlackChannelIds,
@@ -11,10 +12,11 @@ import {
 const QUERY_KEY = ["slack-allowed-channels"];
 
 export function SlackChannelPicker({ action }) {
+  const t = useT();
   const queryClient = useQueryClient();
   const [draftChannelId, setDraftChannelId] = React.useState("");
   const [channelIds, setChannelIds] = React.useState([]);
-  const copy = slackChannelPickerCopy(action);
+  const copy = slackChannelPickerCopy(action, t);
 
   const channelsQuery = useQuery({
     queryKey: QUERY_KEY,
@@ -90,17 +92,17 @@ export function SlackChannelPicker({ action }) {
           onClick=${addChannel}
           disabled=${!draftChannelId.trim()}
         >
-          Add
+          ${copy.addLabel}
         <//>
       </div>
 
       <div className="mb-3 rounded-lg border border-white/[0.06] bg-black/10">
         ${channelsQuery.isLoading &&
-        html`<div className="px-3 py-2 text-xs text-iron-400">Loading Slack channels...</div>`}
+        html`<div className="px-3 py-2 text-xs text-iron-400">${copy.loadingMessage}</div>`}
         ${!channelsQuery.isLoading &&
         channelIds.length === 0 &&
         html`<div className="px-3 py-2 text-xs text-iron-500">
-          No Slack channels allowed yet.
+          ${copy.emptyMessage}
         </div>`}
         ${channelIds.map(
           (channelId) => html`
@@ -114,7 +116,7 @@ export function SlackChannelPicker({ action }) {
               <input
                 type="checkbox"
                 checked=${true}
-                aria-label=${`Allow ${channelId}`}
+                aria-label=${copy.allowLabel(channelId)}
                 onChange=${() => removeChannel(channelId)}
                 className="h-4 w-4 rounded border-white/20 bg-white/[0.04] text-signal"
               />
@@ -131,11 +133,11 @@ export function SlackChannelPicker({ action }) {
           onClick=${saveChannels}
           disabled=${!channelsQuery.isSuccess || saveMutation.isPending}
         >
-          ${saveMutation.isPending ? "Saving..." : copy.submitLabel}
+          ${saveMutation.isPending ? copy.savingLabel : copy.submitLabel}
         <//>
         ${saveMutation.isSuccess &&
         html`<p className="text-xs text-emerald-300">
-          ${saveMutation.data?.message || copy.successMessage}
+          ${copy.successMessage}
         </p>`}
         ${(channelsQuery.isError || saveMutation.isError) &&
         html`<p className="text-xs text-red-300">
@@ -149,14 +151,19 @@ export function SlackChannelPicker({ action }) {
   `;
 }
 
-function slackChannelPickerCopy(action) {
+function slackChannelPickerCopy(action, t) {
   return {
-    title: action?.title || "Slack channel access",
+    title: action?.title || t("channels.slackAccessTitle"),
     instructions:
-      action?.instructions || "Choose the Slack channels this tenant app may answer in.",
+      action?.instructions || t("channels.slackAccessInstructions"),
     inputPlaceholder: action?.input_placeholder || action?.code_placeholder || "C0123456789",
-    submitLabel: action?.submit_label || "Save channels",
-    successMessage: action?.success_message || "Slack channels saved.",
-    errorMessage: action?.error_message || "Slack channel update failed.",
+    addLabel: t("channels.slackAccessAdd"),
+    loadingMessage: t("channels.slackAccessLoading"),
+    emptyMessage: t("channels.slackAccessEmpty"),
+    submitLabel: action?.submit_label || t("channels.slackAccessSave"),
+    savingLabel: t("channels.slackAccessSaving"),
+    successMessage: action?.success_message || t("channels.slackAccessSuccess"),
+    errorMessage: action?.error_message || t("channels.slackAccessError"),
+    allowLabel: (channelId) => t("channels.slackAccessAllow", { channelId }),
   };
 }

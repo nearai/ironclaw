@@ -72,7 +72,11 @@ function valuesAfter(rendered, fragment) {
 }
 
 function channelRows(rendered) {
-  return rendered.values[12];
+  return rendered.values.find(
+    (value) =>
+      Array.isArray(value) &&
+      value.every((row) => row?.strings?.some((part) => part.includes("key="))),
+  );
 }
 
 test("SlackChannelPicker edits saved channels and blocks save after load failure", () => {
@@ -109,6 +113,20 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
       };
     },
     slackChannelPickerError: () => "error",
+    useT: () => (key, params = {}) =>
+      ({
+        "channels.slackAccessTitle": "Slack channel access",
+        "channels.slackAccessInstructions":
+          "Choose the Slack channels this tenant app may answer in.",
+        "channels.slackAccessAdd": "Add",
+        "channels.slackAccessLoading": "Loading Slack channels...",
+        "channels.slackAccessEmpty": "No Slack channels allowed yet.",
+        "channels.slackAccessAllow": `Allow ${params.channelId}`,
+        "channels.slackAccessSave": "Save channels",
+        "channels.slackAccessSaving": "Saving...",
+        "channels.slackAccessSuccess": "Slack channels saved.",
+        "channels.slackAccessError": "Slack channel update failed.",
+      })[key] || key,
     useQuery: () => query,
     useQueryClient: () => ({
       invalidateQueries: (query) => invalidations.push(query.queryKey),
@@ -139,7 +157,7 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   assert.deepEqual(state.values[1], ["C0NEW", "C0OPS"]);
 
   rendered = renderPicker(context, state);
-  rendered.values[14]();
+  valuesAfter(rendered, "onClick=").at(-1)();
   assert.deepEqual(saveCalls, [["C0NEW", "C0OPS"]]);
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["slack-allowed-channels"],
