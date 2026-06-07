@@ -110,7 +110,7 @@ async fn with_run_local_trigger_fire_access_checker(
     #[cfg(not(feature = "webui-v2-beta"))]
     {
         let _ = config;
-        return Ok(runtime_input);
+        Ok(runtime_input)
     }
 
     #[cfg(feature = "webui-v2-beta")]

@@ -11,6 +11,7 @@ The `reborn-integration` branch currently exposes Reborn structure primarily thr
 | Need | Start with |
 | --- | --- |
 | Standalone Reborn binary | `docs/reborn-binary.md` |
+| Standalone Reborn onboarding | `docs/reborn/onboarding.md` |
 | Porting v1 channels to Reborn surfaces/ProductAdapters | `docs/reborn/how-to-port-channel-to-reborn.md` |
 | Proposed subagent spawn design | `docs/reborn/subagent-spawn/README.md` |
 | Host API vocabulary | `crates/ironclaw_host_api/` |

@@ -3,7 +3,7 @@ use ironclaw_reborn_config::RebornDoctorReport;
 
 use crate::context::RebornCliContext;
 
-mod init;
+pub(crate) mod init;
 
 #[derive(Debug, Args)]
 pub(crate) struct ConfigCommand {
