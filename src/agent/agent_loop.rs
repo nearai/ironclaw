@@ -989,7 +989,7 @@ impl Agent {
         registry: &Arc<std::sync::RwLock<SkillRegistry>>,
         user_id: &str,
     ) -> Option<Vec<ironclaw_skills::LoadedSkill>> {
-        if self.config.multi_tenant && user_id != self.owner_id() {
+        if self.config.multi_tenant {
             let mut scoped = match registry.read() {
                 Ok(guard) => guard.clone_config_for_tenant_user_scope(self.owner_id(), user_id),
                 Err(e) => {
