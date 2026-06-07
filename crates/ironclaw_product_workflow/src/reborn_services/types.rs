@@ -53,6 +53,17 @@ pub struct RebornCreateThreadResponse {
     pub thread: SessionThreadRecord,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornDeleteThreadRequest {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornDeleteThreadResponse {
+    pub thread_id: ThreadId,
+    pub deleted: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum RebornSubmitTurnResponse {
