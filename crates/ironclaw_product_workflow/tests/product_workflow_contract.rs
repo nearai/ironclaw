@@ -1,6 +1,7 @@
 //! Contract tests for the product workflow facade.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
@@ -2491,6 +2492,69 @@ async fn shared_route_uses_conversation_specific_subject_over_installation_defau
 }
 
 #[tokio::test]
+async fn static_shared_route_does_not_probe_existing_binding_before_resolve() {
+    let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
+    let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
+    let installation_id =
+        ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            tenant_id.clone(),
+            adapter_kind,
+            installation_id,
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let counted_conversations = Arc::new(CountingConversationBindingService::new(conversations));
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        counted_conversations.clone();
+    let scope = ProductInstallationScope::with_default_scope(
+        tenant_id,
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_conversation_subject_route(
+        ProductConversationRouteKey::new(Some("T-team".to_string()), "C-eng".to_string())
+            .expect("route key"),
+        UserId::new("user:eng-team").expect("route subject"),
+    );
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        scope,
+    )]);
+    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+    let envelope = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:static-shared-no-lookup").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-eng", Some("thread-1"), Some("msg-1"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+
+    let resolved = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect("static shared binding should resolve");
+
+    assert_eq!(
+        resolved.subject_user_id.as_ref().map(UserId::as_str),
+        Some("user:eng-team")
+    );
+    assert_eq!(counted_conversations.lookup_count(), 0);
+    assert_eq!(counted_conversations.trusted_resolve_count(), 1);
+}
+
+#[tokio::test]
 async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_scope() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
@@ -2747,6 +2811,76 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
             .map(UserId::as_str),
         Some("user:eng-team")
     );
+}
+
+#[tokio::test]
+async fn lookup_binding_rejects_existing_binding_when_resolved_actor_differs() {
+    let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
+    let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
+    let installation_id =
+        ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            tenant_id.clone(),
+            adapter_kind.clone(),
+            installation_id.clone(),
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    ConversationBindingPort::resolve_or_create_binding(
+        conversations.as_ref(),
+        ironclaw_conversations::ResolveConversationRequest {
+            tenant_id: tenant_id.clone(),
+            adapter_kind,
+            adapter_installation_id: installation_id,
+            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+                .expect("actor"),
+            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
+                None, "conv1", None, None,
+            )
+            .expect("conversation"),
+            external_event_id: ironclaw_conversations::ExternalEventId::new("evt:seed-lookup")
+                .expect("event"),
+            route_kind: ironclaw_conversations::ConversationRouteKind::Direct,
+            requested_agent_id: Some(AgentId::new("agent:alpha").expect("agent")),
+            requested_project_id: Some(ProjectId::new("project:alpha").expect("project")),
+        },
+    )
+    .await
+    .expect("seed binding");
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations.clone();
+    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
+        conversations;
+    let scope = ProductInstallationScope::with_default_scope(
+        tenant_id,
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_preconfigured_actor_binding(
+        ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+        UserId::new("user:bob").expect("user"),
+        actor_pairings,
+    );
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        scope,
+    )]);
+    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+
+    let error = binding
+        .lookup_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
+            "lookup-actor-mismatch",
+        )))
+        .await
+        .expect_err("lookup should reject mismatched resolved actor");
+
+    assert!(matches!(error, ProductWorkflowError::BindingAccessDenied));
 }
 
 #[tokio::test]
@@ -3804,6 +3938,93 @@ impl ProductActorUserResolver for RecordingProductActorUserResolver {
 struct RecordingSubjectRouteResolver {
     subject_user_id: Mutex<Option<UserId>>,
     calls: Mutex<Vec<ProductConversationSubjectRouteResolutionRequest>>,
+}
+
+struct CountingConversationBindingService {
+    inner: Arc<InMemoryConversationServices>,
+    lookup_count: AtomicUsize,
+    trusted_resolve_count: AtomicUsize,
+}
+
+impl CountingConversationBindingService {
+    fn new(inner: Arc<InMemoryConversationServices>) -> Self {
+        Self {
+            inner,
+            lookup_count: AtomicUsize::new(0),
+            trusted_resolve_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn lookup_count(&self) -> usize {
+        self.lookup_count.load(Ordering::SeqCst)
+    }
+
+    fn trusted_resolve_count(&self) -> usize {
+        self.trusted_resolve_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ironclaw_conversations::ConversationBindingService for CountingConversationBindingService {
+    async fn resolve_or_create_binding(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<
+        ironclaw_conversations::ConversationBindingResolution,
+        ironclaw_conversations::InboundTurnError,
+    > {
+        self.inner.resolve_or_create_binding(request).await
+    }
+
+    async fn resolve_or_create_binding_with_trusted_scope(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+        trusted_agent_id: Option<AgentId>,
+        trusted_project_id: Option<ProjectId>,
+        trusted_owner_user_id: Option<UserId>,
+    ) -> Result<
+        ironclaw_conversations::ConversationBindingResolution,
+        ironclaw_conversations::InboundTurnError,
+    > {
+        self.trusted_resolve_count.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .resolve_or_create_binding_with_trusted_scope(
+                request,
+                trusted_agent_id,
+                trusted_project_id,
+                trusted_owner_user_id,
+            )
+            .await
+    }
+
+    async fn lookup_binding(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<
+        ironclaw_conversations::ConversationBindingResolution,
+        ironclaw_conversations::InboundTurnError,
+    > {
+        self.lookup_count.fetch_add(1, Ordering::SeqCst);
+        self.inner.lookup_binding(request).await
+    }
+
+    async fn link_conversation_to_thread(
+        &self,
+        request: ironclaw_conversations::LinkConversationRequest,
+    ) -> Result<
+        ironclaw_conversations::LinkedConversationBinding,
+        ironclaw_conversations::InboundTurnError,
+    > {
+        self.inner.link_conversation_to_thread(request).await
+    }
+
+    async fn validate_reply_target(
+        &self,
+        request: ironclaw_conversations::ValidateReplyTargetRequest,
+    ) -> Result<ironclaw_conversations::ReplyTargetBinding, ironclaw_conversations::InboundTurnError>
+    {
+        self.inner.validate_reply_target(request).await
+    }
 }
 
 impl RecordingSubjectRouteResolver {

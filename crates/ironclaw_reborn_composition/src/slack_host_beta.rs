@@ -285,13 +285,22 @@ pub fn build_slack_host_beta_mounts(
         actor_user_resolver,
         Some(subject_route_resolver),
     )?;
+    let allowed_route_subjects = std::iter::once(config.user_id.clone())
+        .chain(config.shared_subject_user_id.clone())
+        .chain(
+            config
+                .channel_routes
+                .iter()
+                .map(|route| route.subject_user_id.clone()),
+        );
     let channel_routes = SlackChannelRouteAdminRouteConfig::new(
         config.tenant_id.clone(),
         config.installation_id.clone(),
         config.team_id.as_str().to_string(),
         config.user_id.clone(),
         channel_route_store,
-    );
+    )
+    .with_allowed_subject_user_ids(allowed_route_subjects);
 
     Ok(SlackHostBetaMounts {
         events,
@@ -1444,7 +1453,7 @@ mod tests {
             api_app_id: Some(API_APP.to_string()),
             slack_user_id: Some(SLACK_USER.to_string()),
             user_id: UserId::new(USER).expect("user"),
-            shared_subject_user_id: None,
+            shared_subject_user_id: Some(UserId::new(SHARED_SUBJECT).expect("shared subject")),
             channel_routes: Vec::new(),
             signing_secret: SecretString::from(SECRET),
             bot_token: SecretString::from("xoxb-host-token"),
