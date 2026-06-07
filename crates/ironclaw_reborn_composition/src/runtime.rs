@@ -4034,6 +4034,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_runtime_backfills_legacy_owner_skill_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("skills/legacy-helper"))
+            .expect("legacy skill dir");
+        std::fs::write(
+            storage_root.join("skills/legacy-helper/SKILL.md"),
+            skill_md(
+                "legacy-helper",
+                "legacy helper description",
+                "LEGACY_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write legacy helper skill");
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-legacy-skill-owner", storage_root.clone())
+                .with_runtime_policy(local_dev_runtime_policy()),
+        );
+        let runtime = build_reborn_runtime(input).await.expect("runtime");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+
+        let result = runtime
+            .execute_skill_message(&conversation, "$legacy-helper")
+            .await
+            .expect("execute skill message");
+
+        assert_eq!(result.plan.activations().len(), 1);
+        assert_eq!(result.plan.activations()[0].name, "legacy-helper");
+        assert!(
+            storage_root
+                .join(
+                    "tenants/reborn-cli/users/runtime-legacy-skill-owner/skills/legacy-helper/SKILL.md"
+                )
+                .exists()
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
     async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");

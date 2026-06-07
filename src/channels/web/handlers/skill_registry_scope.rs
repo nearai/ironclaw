@@ -22,6 +22,7 @@ static SCOPED_SKILL_REGISTRIES: std::sync::LazyLock<
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ScopedSkillRegistryCacheKey {
     template_ptr: usize,
+    tenant_segment: String,
     user_segment: String,
 }
 
@@ -48,19 +49,23 @@ pub(super) async fn scoped_skill_registry(
         return Ok(ScopedSkillRegistry::Shared(registry));
     }
 
+    let tenant_segment = state.owner_id.clone();
     Ok(ScopedSkillRegistry::User(
-        cached_scoped_registry(&registry, user).await?,
+        cached_scoped_registry(&registry, &tenant_segment, user).await?,
     ))
 }
 
 async fn cached_scoped_registry(
     template: &SharedSkillRegistry,
+    tenant_segment: &str,
     user: &UserIdentity,
 ) -> HandlerResult<SharedSkillRegistry> {
-    let segment = ironclaw_skills::SkillRegistry::user_scope_segment(&user.user_id);
+    let user_segment =
+        ironclaw_skills::SkillRegistry::tenant_user_scope_segment(tenant_segment, &user.user_id);
     let key = ScopedSkillRegistryCacheKey {
         template_ptr: Arc::as_ptr(template) as usize,
-        user_segment: segment.clone(),
+        tenant_segment: tenant_segment.to_string(),
+        user_segment,
     };
     let now = Instant::now();
     if let Some(registry) = cached_registry(&key, now)? {
@@ -69,7 +74,7 @@ async fn cached_scoped_registry(
 
     let mut scoped = {
         let guard = template.read().map_err(lock_error_response)?;
-        scoped_registry_from_template(&guard, &user.user_id)
+        scoped_registry_from_template(&guard, tenant_segment, &user.user_id)
     };
     scoped.discover_all().await;
     let scoped = Arc::new(RwLock::new(scoped));
@@ -223,9 +228,10 @@ impl ScopedSkillRegistry {
 
 fn scoped_registry_from_template(
     template: &ironclaw_skills::SkillRegistry,
+    tenant_id: &str,
     user_id: &str,
 ) -> ironclaw_skills::SkillRegistry {
-    template.clone_config_for_user_scope(user_id)
+    template.clone_config_for_tenant_user_scope(tenant_id, user_id)
 }
 
 fn lock_error_response(e: std::sync::PoisonError<impl Sized>) -> (StatusCode, String) {

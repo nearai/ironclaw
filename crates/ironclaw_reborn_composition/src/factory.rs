@@ -622,6 +622,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         (false, None) => None,
     };
     validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
+    let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })?;
+    backfill_local_dev_legacy_user_skills(&root, &owner_user_id)?;
     let default_system_prompt_path = local_dev_default_system_prompt_path(&root);
     seed_default_system_prompt(&root, &default_system_prompt_path).map_err(|error| {
         RebornBuildError::InvalidConfig {
@@ -652,9 +656,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::clone(&filesystem),
         runtime_workspace_mounts.clone(),
     ));
-    let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
-        reason: error.to_string(),
-    })?;
     let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
@@ -887,6 +888,94 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         #[cfg(feature = "root-llm-provider")]
         secret_store,
     })
+}
+
+fn backfill_local_dev_legacy_user_skills(
+    storage_root: &Path,
+    owner_user_id: &UserId,
+) -> Result<(), RebornBuildError> {
+    let legacy_root = storage_root.join("skills");
+    if !legacy_root.is_dir() {
+        return Ok(());
+    }
+
+    for tenant_id in ["default", "reborn-cli"] {
+        backfill_local_dev_legacy_user_skills_for_tenant(
+            &legacy_root,
+            storage_root,
+            tenant_id,
+            owner_user_id,
+        )?;
+    }
+    Ok(())
+}
+
+fn backfill_local_dev_legacy_user_skills_for_tenant(
+    legacy_root: &Path,
+    storage_root: &Path,
+    tenant_id: &str,
+    owner_user_id: &UserId,
+) -> Result<(), RebornBuildError> {
+    let scoped_root = storage_root
+        .join("tenants")
+        .join(tenant_id)
+        .join("users")
+        .join(owner_user_id.as_str())
+        .join("skills");
+    for entry in std::fs::read_dir(legacy_root).map_err(|_| RebornBuildError::InvalidConfig {
+        reason: "local-dev legacy skills root could not be inspected".to_string(),
+    })? {
+        let entry = entry.map_err(|_| RebornBuildError::InvalidConfig {
+            reason: "local-dev legacy skills root could not be inspected".to_string(),
+        })?;
+        let source = entry.path();
+        let destination = scoped_root.join(entry.file_name());
+        if destination.exists() {
+            continue;
+        }
+        copy_local_dev_legacy_skill_entry(&source, &destination)?;
+    }
+    Ok(())
+}
+
+fn copy_local_dev_legacy_skill_entry(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), RebornBuildError> {
+    let metadata = std::fs::symlink_metadata(source).map_err(|_| {
+        RebornBuildError::InvalidConfig {
+            reason: "local-dev legacy skill entry could not be inspected".to_string(),
+        }
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "local-dev legacy skill symlinks cannot be migrated".to_string(),
+        });
+    }
+    if metadata.is_dir() {
+        std::fs::create_dir_all(destination).map_err(|_| RebornBuildError::InvalidConfig {
+            reason: "local-dev scoped skill root could not be initialized".to_string(),
+        })?;
+        for entry in std::fs::read_dir(source).map_err(|_| RebornBuildError::InvalidConfig {
+            reason: "local-dev legacy skill directory could not be inspected".to_string(),
+        })? {
+            let entry = entry.map_err(|_| RebornBuildError::InvalidConfig {
+                reason: "local-dev legacy skill directory could not be inspected".to_string(),
+            })?;
+            copy_local_dev_legacy_skill_entry(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| RebornBuildError::InvalidConfig {
+            reason: "local-dev scoped skill root could not be initialized".to_string(),
+        })?;
+    }
+    std::fs::copy(source, destination).map_err(|_| RebornBuildError::InvalidConfig {
+        reason: "local-dev legacy skill file could not be migrated".to_string(),
+    })?;
+    Ok(())
 }
 
 #[cfg(feature = "libsql")]
@@ -2024,6 +2113,7 @@ async fn build_production_shaped(
         runtime_policy,
         turn_run_wake_notifier,
         runtime_process_binding,
+        owner_id,
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,

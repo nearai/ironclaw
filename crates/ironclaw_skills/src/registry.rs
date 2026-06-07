@@ -309,10 +309,15 @@ impl SkillRegistry {
     /// `.users/<hash>` directory. Shared discovery skips hidden directories, so
     /// private user skills do not leak into the owner/shared registry scan.
     pub fn clone_config_for_user_scope(&self, user_id: &str) -> Self {
+        self.clone_config_for_tenant_user_scope("default", user_id)
+    }
+
+    /// Build a fresh registry for a hosted user's private skill mount within a tenant.
+    pub fn clone_config_for_tenant_user_scope(&self, tenant_id: &str, user_id: &str) -> Self {
         let user_root = self
             .user_dir
             .join(".users")
-            .join(Self::user_scope_segment(user_id));
+            .join(Self::tenant_user_scope_segment(tenant_id, user_id));
         self.clone_config_for_user_dirs(
             user_root.join("skills"),
             Some(user_root.join("installed_skills")),
@@ -321,7 +326,14 @@ impl SkillRegistry {
 
     /// Stable filesystem segment for hosted per-user skill roots.
     pub fn user_scope_segment(user_id: &str) -> String {
+        Self::tenant_user_scope_segment("default", user_id)
+    }
+
+    /// Stable filesystem segment for hosted per-tenant, per-user skill roots.
+    pub fn tenant_user_scope_segment(tenant_id: &str, user_id: &str) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(tenant_id.as_bytes());
+        hasher.update([0]);
         hasher.update(user_id.as_bytes());
         format!("{:x}", hasher.finalize())
     }

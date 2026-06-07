@@ -282,6 +282,18 @@ async fn multi_tenant_state_with_skill_template() -> (
     (state, dir)
 }
 
+fn multi_tenant_state_with_shared_registry(
+    owner_id: &str,
+    registry: Arc<RwLock<ironclaw_skills::SkillRegistry>>,
+) -> Arc<crate::channels::web::platform::state::GatewayState> {
+    let mut state = test_gateway_state(None);
+    let state_mut = Arc::get_mut(&mut state).expect("state is not shared");
+    state_mut.owner_id = owner_id.to_string();
+    state_mut.multi_tenant_mode = true;
+    state_mut.skill_registry = Some(registry);
+    state
+}
+
 #[tokio::test]
 async fn skills_install_and_list_are_scoped_to_authenticated_user() {
     let (state, _dir) = multi_tenant_state_with_skill_template().await;
@@ -344,6 +356,59 @@ async fn skills_install_and_list_are_scoped_to_authenticated_user() {
     assert!(
         guard.find_by_name("alice-skill").is_none(),
         "self-service install must not mutate the shared registry"
+    );
+}
+
+#[tokio::test]
+async fn skills_install_and_list_are_scoped_by_tenant_and_user() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(RwLock::new(
+        ironclaw_skills::SkillRegistry::new(dir.path().join("skills"))
+            .with_installed_dir(dir.path().join("installed_skills")),
+    ));
+    let tenant_a = multi_tenant_state_with_shared_registry("tenant-a-owner", Arc::clone(&registry));
+    let tenant_b = multi_tenant_state_with_shared_registry("tenant-b-owner", Arc::clone(&registry));
+    let mut headers = HeaderMap::new();
+    headers.insert("x-confirm-action", "true".parse().expect("header value"));
+
+    let Json(response) = super::skills_install_handler(
+        State(Arc::clone(&tenant_a)),
+        regular_user("same-user"),
+        headers,
+        Json(crate::channels::web::types::SkillInstallRequest {
+            name: "tenant-a-skill".to_string(),
+            slug: None,
+            url: None,
+            content: Some(
+                "---\nname: tenant-a-skill\ndescription: Tenant A\n---\n\nTenant A prompt.\n"
+                    .to_string(),
+            ),
+        }),
+    )
+    .await
+    .expect("install tenant A skill");
+    assert!(response.success);
+
+    let Json(tenant_a_list) =
+        super::skills_list_handler(State(tenant_a), regular_user("same-user"))
+            .await
+            .expect("list tenant A skills");
+    assert!(
+        tenant_a_list
+            .skills
+            .iter()
+            .any(|skill| skill.name == "tenant-a-skill")
+    );
+
+    let Json(tenant_b_list) =
+        super::skills_list_handler(State(tenant_b), regular_user("same-user"))
+            .await
+            .expect("list tenant B skills");
+    assert!(
+        !tenant_b_list
+            .skills
+            .iter()
+            .any(|skill| skill.name == "tenant-a-skill")
     );
 }
 
