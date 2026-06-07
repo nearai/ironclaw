@@ -1,9 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
@@ -15,9 +12,10 @@ use ironclaw_loop_support::{
     HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     IdentityApplicability, IdentityBudget, IdentityFileName, SkillBundleContextSource,
-    SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath,
-    SkillSourceKind, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
-    ThreadBackedLoopTranscriptPort, build_skill_run_snapshot, identity_message_ref,
+    SkillBundleDescriptor, SkillBundleDiscoveryMetadata, SkillBundleId, SkillBundleSource,
+    SkillBundleSourceError, SkillFilePath, SkillSourceKind, ThreadBackedLoopContextPort,
+    ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, build_skill_run_snapshot,
+    identity_message_ref,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
@@ -286,42 +284,22 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_real_skill_m
 #[tokio::test]
 async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle_context_source() {
     let fixture = ThreadFixture::new().await;
-    let bundle_source = Arc::new(
-        StaticSkillBundleSource::new(vec![
-            skill_bundle_descriptor(
-                SkillSourceKind::System,
-                "alpha",
-                Some(SkillTrust::Trusted),
-                Some(SkillVisibility::Visible),
-            ),
-            skill_bundle_descriptor(
-                SkillSourceKind::User,
-                "bravo",
-                Some(SkillTrust::Installed),
-                Some(SkillVisibility::Visible),
-            ),
-        ])
-        .with_skill_md(
+    let bundle_source = Arc::new(StaticSkillBundleSource::new(vec![
+        skill_bundle_descriptor(
             SkillSourceKind::System,
             "alpha",
-            skill_md(
-                "alpha",
-                "safe alpha description",
-                "Use trusted alpha prompt content.",
-            )
-            .into_bytes(),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
         )
-        .with_skill_md(
+        .with_discovery_metadata(SkillBundleDiscoveryMetadata::new("safe alpha description")),
+        skill_bundle_descriptor(
             SkillSourceKind::User,
             "bravo",
-            skill_md(
-                "bravo",
-                "safe bravo description",
-                "RAW_INSTALLED_PROMPT_SENTINEL",
-            )
-            .into_bytes(),
-        ),
-    );
+            Some(SkillTrust::Installed),
+            Some(SkillVisibility::Visible),
+        )
+        .with_discovery_metadata(SkillBundleDiscoveryMetadata::new("safe bravo description")),
+    ]));
     let source = Arc::new(SkillBundleContextSource::new(Arc::clone(&bundle_source)));
     let adapter = ThreadBackedLoopContextPort::new(
         Arc::clone(&fixture.thread_service),
@@ -383,13 +361,7 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle
             .model_content
             .contains("RAW_INSTALLED_PROMPT_SENTINEL")
     );
-    assert_eq!(
-        bundle_source.reads(),
-        vec![
-            "system:alpha:SKILL.md".to_string(),
-            "user:bravo:SKILL.md".to_string()
-        ]
-    );
+    assert!(bundle_source.reads().is_empty());
 }
 
 #[tokio::test]
@@ -3183,7 +3155,6 @@ impl HostSkillContextSource for StaticSkillContextSource {
 
 struct StaticSkillBundleSource {
     descriptors: Vec<SkillBundleDescriptor>,
-    files: Mutex<HashMap<String, Vec<u8>>>,
     reads: Mutex<Vec<String>>,
 }
 
@@ -3191,27 +3162,8 @@ impl StaticSkillBundleSource {
     fn new(descriptors: Vec<SkillBundleDescriptor>) -> Self {
         Self {
             descriptors,
-            files: Mutex::new(HashMap::new()),
             reads: Mutex::new(Vec::new()),
         }
-    }
-
-    fn with_skill_md(self, source_kind: SkillSourceKind, name: &str, body: Vec<u8>) -> Self {
-        self.with_file(source_kind, name, "SKILL.md", body)
-    }
-
-    fn with_file(
-        self,
-        source_kind: SkillSourceKind,
-        name: &str,
-        path: &str,
-        body: Vec<u8>,
-    ) -> Self {
-        self.files
-            .lock()
-            .unwrap()
-            .insert(format!("{source_kind}:{name}:{path}"), body);
-        self
     }
 
     fn reads(&self) -> Vec<String> {
@@ -3235,13 +3187,8 @@ impl SkillBundleSource for StaticSkillBundleSource {
         path: &SkillFilePath,
     ) -> Result<Vec<u8>, SkillBundleSourceError> {
         let key = format!("{bundle_id}:{path}");
-        self.reads.lock().unwrap().push(key.clone());
-        self.files
-            .lock()
-            .unwrap()
-            .get(&key)
-            .cloned()
-            .ok_or(SkillBundleSourceError::FileNotFound)
+        self.reads.lock().unwrap().push(key);
+        Err(SkillBundleSourceError::FileNotFound)
     }
 }
 

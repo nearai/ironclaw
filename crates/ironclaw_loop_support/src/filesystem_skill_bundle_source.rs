@@ -258,7 +258,6 @@ where
             return Err(SkillBundleSourceError::InvalidSkillBundle);
         }
         Ok(SkillBundleDiscoveryMetadata::new(
-            parsed.manifest.name,
             parsed.manifest.description,
         ))
     }
@@ -637,6 +636,14 @@ mod tests {
         assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Trusted));
         assert_eq!(descriptors[1].trust(), Some(&SkillTrust::Trusted));
         assert_eq!(descriptors[0].visibility(), Some(&SkillVisibility::Visible));
+        let descriptions = descriptors
+            .iter()
+            .map(|descriptor| descriptor.discovery_metadata().unwrap().description())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            descriptions,
+            vec!["System review", "User review", "Local review"]
+        );
     }
 
     #[tokio::test]

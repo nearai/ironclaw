@@ -8,6 +8,7 @@ use ironclaw_turns::run_profile::{
     SkillContextError, SkillContextService, SkillContextSource, SkillRunSnapshot, SkillTrustLevel,
     SkillVisibility,
 };
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -87,6 +88,46 @@ fn denied_skill(name: &str) -> InstalledSkillSnapshot {
         safe_description: "denied description".to_string(),
         ordering_key: name.to_string(),
     }
+}
+
+fn legacy_snapshot_version(entries: &[InstalledSkillSnapshot]) -> String {
+    let mut digest = Sha256::new();
+
+    for entry in entries {
+        feed_legacy_digest_field(&mut digest, entry.name.as_bytes());
+        feed_legacy_digest_field(
+            &mut digest,
+            match entry.trust {
+                SkillTrustLevel::Installed => b"installed",
+                SkillTrustLevel::Trusted => b"trusted",
+            },
+        );
+        feed_legacy_digest_field(
+            &mut digest,
+            match entry.visibility {
+                SkillVisibility::Visible => b"visible",
+                SkillVisibility::Hidden => b"hidden",
+                SkillVisibility::Denied => b"denied",
+            },
+        );
+        match entry.prompt_content {
+            Some(ref content) => {
+                digest.update([1]);
+                feed_legacy_digest_field(&mut digest, content.as_bytes());
+            }
+            None => digest.update([0]),
+        }
+        feed_legacy_digest_field(&mut digest, entry.safe_description.as_bytes());
+        feed_legacy_digest_field(&mut digest, entry.ordering_key.as_bytes());
+        digest.update([0xFE]);
+    }
+
+    format!("sha256:{}", hex::encode(digest.finalize()))
+}
+
+fn feed_legacy_digest_field(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update((bytes.len() as u64).to_le_bytes());
+    digest.update(bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +226,35 @@ async fn discoverable_trusted_skill_excludes_prompt_content() {
         !snippets[0].model_content.contains("the prompt content"),
         "discoverable skills must not expose prompt content before activation"
     );
+}
+
+#[tokio::test]
+async fn legacy_skill_snapshot_defaults_missing_activation_state_to_loaded() {
+    let entry = visible_trusted("alpha", "legacy description", "legacy prompt");
+    let legacy_version = legacy_snapshot_version(std::slice::from_ref(&entry));
+    let legacy_wire = serde_json::json!({
+        "entries": [{
+            "name": entry.name,
+            "trust": "trusted",
+            "visibility": "visible",
+            "prompt_content": "legacy prompt",
+            "safe_description": "legacy description",
+            "ordering_key": "alpha"
+        }],
+        "snapshot_version": legacy_version
+    });
+    let snapshot: SkillRunSnapshot = serde_json::from_value(legacy_wire).unwrap();
+
+    assert_eq!(
+        snapshot.entries[0].activation_state,
+        SkillActivationState::Loaded
+    );
+    let service = SkillContextService::new(snapshot.clone());
+    let snippets = service.skill_snippets(&snapshot).await.unwrap();
+
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].safe_summary, "legacy description");
+    assert!(snippets[0].model_content.contains("legacy prompt"));
 }
 
 #[tokio::test]

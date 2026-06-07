@@ -197,20 +197,14 @@ pub struct SkillBundleDescriptor {
 /// Safe manifest metadata that can be shown before a skill is loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillBundleDiscoveryMetadata {
-    name: String,
     description: String,
 }
 
 impl SkillBundleDiscoveryMetadata {
-    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn new(description: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
             description: description.into(),
         }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
     }
 
     pub fn description(&self) -> &str {

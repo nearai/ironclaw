@@ -150,6 +150,10 @@ impl SkillActivationState {
     }
 }
 
+fn default_skill_activation_state() -> SkillActivationState {
+    SkillActivationState::Loaded
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot types and context budgets
 // ---------------------------------------------------------------------------
@@ -206,6 +210,7 @@ pub struct InstalledSkillSnapshot {
     /// Visibility — determines whether the model sees this skill at all.
     pub visibility: SkillVisibility,
     /// Activation state — determines whether prompt content may be disclosed.
+    #[serde(default = "default_skill_activation_state")]
     pub activation_state: SkillActivationState,
     /// Full prompt content. Only included in model context when
     /// `trust == Trusted`, `visibility == Visible`, and
@@ -505,14 +510,9 @@ fn validate_snapshot(snapshot: &SkillRunSnapshot) -> Result<(), SkillContextErro
         return Err(SkillContextError::InvalidSnapshotVersion);
     }
 
-    let expected_version = if entries_are_sorted_by_key(&snapshot.entries) {
-        compute_snapshot_version(&snapshot.entries)
-    } else {
-        let mut sorted_entries = snapshot.entries.clone();
-        sorted_entries.sort_by(compare_skill_entries);
-        compute_snapshot_version(&sorted_entries)
-    };
-    if snapshot.snapshot_version != expected_version {
+    if snapshot.snapshot_version != expected_snapshot_version(snapshot, compute_snapshot_version)
+        && !legacy_snapshot_version_matches(snapshot)
+    {
         return Err(SkillContextError::InvalidSnapshotVersion);
     }
 
@@ -531,6 +531,32 @@ fn entries_are_sorted_by_key(entries: &[InstalledSkillSnapshot]) -> bool {
     entries
         .windows(2)
         .all(|pair| compare_skill_entries(&pair[0], &pair[1]) != Ordering::Greater)
+}
+
+fn expected_snapshot_version(
+    snapshot: &SkillRunSnapshot,
+    compute_version: fn(&[InstalledSkillSnapshot]) -> String,
+) -> String {
+    if entries_are_sorted_by_key(&snapshot.entries) {
+        compute_version(&snapshot.entries)
+    } else {
+        let mut sorted_entries = snapshot.entries.clone();
+        sorted_entries.sort_by(compare_skill_entries);
+        compute_version(&sorted_entries)
+    }
+}
+
+fn legacy_snapshot_version_matches(snapshot: &SkillRunSnapshot) -> bool {
+    if !snapshot
+        .entries
+        .iter()
+        .all(|entry| entry.activation_state == SkillActivationState::Loaded)
+    {
+        return false;
+    }
+
+    snapshot.snapshot_version
+        == expected_snapshot_version(snapshot, compute_legacy_snapshot_version)
 }
 
 fn compare_visible_skill_entries(
@@ -708,6 +734,43 @@ fn compute_snapshot_version(sorted_entries: &[InstalledSkillSnapshot]) -> String
             },
         );
         feed_digest_field(&mut digest, entry.activation_state.as_str().as_bytes());
+        match entry.prompt_content {
+            Some(ref content) => {
+                digest.update([1]);
+                feed_digest_field(&mut digest, content.as_bytes());
+            }
+            None => digest.update([0]),
+        }
+        feed_digest_field(&mut digest, entry.safe_description.as_bytes());
+        feed_digest_field(&mut digest, entry.ordering_key.as_bytes());
+        digest.update([0xFE]);
+    }
+
+    format!("sha256:{}", hex::encode(digest.finalize()))
+}
+
+/// Compute the pre-activation-state snapshot version for persisted snapshots
+/// serialized before progressive skill disclosure was introduced.
+fn compute_legacy_snapshot_version(sorted_entries: &[InstalledSkillSnapshot]) -> String {
+    let mut digest = Sha256::new();
+
+    for entry in sorted_entries {
+        feed_digest_field(&mut digest, entry.name.as_bytes());
+        feed_digest_field(
+            &mut digest,
+            match entry.trust {
+                SkillTrustLevel::Installed => b"installed",
+                SkillTrustLevel::Trusted => b"trusted",
+            },
+        );
+        feed_digest_field(
+            &mut digest,
+            match entry.visibility {
+                SkillVisibility::Visible => b"visible",
+                SkillVisibility::Hidden => b"hidden",
+                SkillVisibility::Denied => b"denied",
+            },
+        );
         match entry.prompt_content {
             Some(ref content) => {
                 digest.update([1]);
