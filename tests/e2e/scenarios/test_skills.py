@@ -1,23 +1,10 @@
-"""Scenario 3: Skills search, install, edit, and delete lifecycle."""
+"""Scenario 3: Skills add, edit, delete, and read-only source lifecycle."""
 
 import json
 from urllib.parse import unquote, urlparse
 
 from helpers import SEL
 
-
-MOCK_CATALOG_SKILL = {
-    "slug": "e2e/markdown-helper",
-    "name": "Markdown Helper",
-    "description": "Deterministic E2E skill for markdown workflows.",
-    "version": "1.0.0",
-    "score": 1.0,
-    "updatedAt": 1778000000000,
-    "stars": 12,
-    "downloads": 3456,
-    "owner": "e2e",
-    "installed": False,
-}
 
 MOCK_INSTALLED_SKILL = {
     "name": "markdown-helper",
@@ -62,6 +49,14 @@ MOCK_WORKSPACE_SKILL = {
     "can_delete": False,
 }
 
+MOCK_SKILL_CONTENT = (
+    "---\n"
+    "name: markdown-helper\n"
+    "description: Deterministic E2E skill for markdown workflows.\n"
+    "---\n\n"
+    "# Markdown Helper\n"
+)
+
 
 async def go_to_skills(page):
     """Navigate to Settings > Skills subtab."""
@@ -73,21 +68,13 @@ async def go_to_skills(page):
 
 
 async def mock_skills_api(page, initial_skills=None):
-    """Mock skills API endpoints used by the browser lifecycle tests.
-
-    These tests validate the Settings > Skills UI contract, not live ClawHub
-    availability. Keeping the API local avoids skip-on-network behavior while
-    still exercising the real browser code paths.
-    """
+    """Mock skills API endpoints used by the browser lifecycle tests."""
     installed = [dict(skill) for skill in (initial_skills or [])]
     install_requests = []
     update_requests = []
 
     async def fulfill_json(route, payload):
-        await route.fulfill(
-            json=payload,
-            headers={"Cache-Control": "no-store"},
-        )
+        await route.fulfill(json=payload, headers={"Cache-Control": "no-store"})
 
     async def handle(route):
         nonlocal installed
@@ -98,46 +85,22 @@ async def mock_skills_api(page, initial_skills=None):
             await fulfill_json(route, {"skills": installed, "count": len(installed)})
             return
 
-        if path == "/api/webchat/v2/skills/search" and request.method == "POST":
-            catalog_skill = dict(MOCK_CATALOG_SKILL)
-            catalog_skill["installed"] = any(
-                skill["name"] == MOCK_INSTALLED_SKILL["name"] for skill in installed
-            )
-            await fulfill_json(
-                route,
-                {
-                    "catalog": [catalog_skill],
-                    "installed": installed,
-                    "registry_url": "https://clawhub.example.test",
-                },
-            )
-            return
-
         if path == "/api/webchat/v2/skills/install" and request.method == "POST":
-            install_requests.append(json.loads(request.post_data or "{}"))
-            if not any(skill["name"] == MOCK_INSTALLED_SKILL["name"] for skill in installed):
-                installed = [dict(MOCK_INSTALLED_SKILL)]
+            payload = json.loads(request.post_data or "{}")
+            install_requests.append(payload)
+            if not any(skill["name"] == payload.get("name") for skill in installed):
+                skill = dict(MOCK_INSTALLED_SKILL)
+                skill["name"] = payload.get("name", skill["name"])
+                installed = [skill]
             await fulfill_json(
                 route,
-                {
-                    "success": True,
-                    "message": "Skill 'markdown-helper' installed",
-                },
+                {"success": True, "message": f"Skill '{payload.get('name')}' installed"},
             )
             return
 
         if path.startswith("/api/webchat/v2/skills/") and request.method == "GET":
             name = unquote(path.removeprefix("/api/webchat/v2/skills/"))
-            await fulfill_json(
-                route,
-                {
-                    "name": name,
-                    "content": (
-                        f"---\nname: {name}\ndescription: Deterministic E2E skill for "
-                        "markdown workflows.\n---\n\n# Markdown Helper\n"
-                    ),
-                },
-            )
+            await fulfill_json(route, {"name": name, "content": MOCK_SKILL_CONTENT})
             return
 
         if path.startswith("/api/webchat/v2/skills/") and request.method == "PUT":
@@ -170,69 +133,48 @@ async def mock_skills_api(page, initial_skills=None):
     return {"install_requests": install_requests, "update_requests": update_requests}
 
 
+async def add_mock_skill(page):
+    await page.get_by_label("Skill name").fill("markdown-helper")
+    await page.get_by_label("SKILL.md content").fill(MOCK_SKILL_CONTENT)
+    async with page.expect_response(
+        lambda r: "/api/webchat/v2/skills/install" in r.url
+    ) as install_response:
+        await page.get_by_role("button", name="Add").click()
+    response = await install_response.value
+    assert response.ok
+
+
 async def test_skills_tab_visible(page):
-    """Skills subtab shows the search interface."""
+    """Skills subtab shows the mounted-skill add form."""
     await go_to_skills(page)
 
-    search_input = page.locator(SEL["skill_search_input"])
-    assert await search_input.is_visible(), "Skills search input not visible"
+    assert await page.get_by_text("Add skill").is_visible()
+    assert await page.get_by_label("Skill name").is_visible()
+    assert await page.get_by_label("SKILL.md content").is_visible()
 
 
-async def test_skills_search(page):
-    """Search renders deterministic catalog results without live ClawHub."""
-    await mock_skills_api(page)
-    await go_to_skills(page)
-
-    search_input = page.locator(SEL["skill_search_input"])
-    await search_input.fill("markdown")
-    await search_input.press("Enter")
-
-    results = page.locator(SEL["skill_search_result"])
-    await results.first.wait_for(state="visible", timeout=5000)
-
-    count = await results.count()
-    assert count >= 1, "Expected at least 1 search result"
-    assert "Markdown Helper" in await results.first.inner_text()
-
-
-async def test_skills_install_and_delete(page):
-    """Install a mocked catalog skill from search results, then delete it."""
+async def test_skills_add_and_delete(page):
+    """Add a user-mounted skill through the form, then delete it."""
     mock_api = await mock_skills_api(page)
     await go_to_skills(page)
 
-    search_input = page.locator(SEL["skill_search_input"])
-    await search_input.fill("markdown")
-    await search_input.press("Enter")
-
-    results = page.locator(SEL["skill_search_result"])
-    await results.first.wait_for(state="visible", timeout=5000)
-
-    install_btn = results.first.locator("button", has_text="Install")
-    assert await install_btn.count() == 1, "Expected mocked catalog skill to be installable"
-    async with page.expect_response(lambda r: "/api/webchat/v2/skills/install" in r.url) as install_response:
-        await install_btn.click()
-    response = await install_response.value
-    assert response.ok
+    await add_mock_skill(page)
     assert mock_api["install_requests"] == [
-        {"name": MOCK_CATALOG_SKILL["name"], "slug": MOCK_CATALOG_SKILL["slug"]}
-    ], "Install request should use the catalog skill name and slug"
+        {"name": "markdown-helper", "content": MOCK_SKILL_CONTENT}
+    ]
 
-    # The app refreshes the installed-skills list after a successful install;
-    # waiting on the DOM keeps this as a black-box UI contract.
     installed = page.locator(SEL["skill_installed"])
     await installed.first.wait_for(state="visible", timeout=5000)
-
-    installed_count = await installed.count()
-    assert installed_count >= 1, "Skill should appear in installed list after install"
     assert "markdown-helper" in await installed.first.inner_text()
 
-    delete_btn = installed.first.locator("button", has_text="Delete")
-    assert await delete_btn.count() == 1, "Installed mocked skill should be deletable"
-    await delete_btn.click()
-
-    confirm_btn = page.locator(SEL["confirm_modal_btn"])
-    await confirm_btn.wait_for(state="visible", timeout=5000)
-    await confirm_btn.click()
+    page.on("dialog", lambda dialog: dialog.accept())
+    async with page.expect_response(
+        lambda r: "/api/webchat/v2/skills/markdown-helper" in r.url
+        and r.request.method == "DELETE"
+    ) as delete_response:
+        await installed.first.locator("button", has_text="Delete").click()
+    response = await delete_response.value
+    assert response.ok
 
     await page.wait_for_function(
         """(selector) => document.querySelectorAll(selector).length === 0""",
@@ -245,20 +187,14 @@ async def test_skills_edit_user_managed_skill(page):
     """Edit a mocked user-managed skill through the real Settings UI flow."""
     mock_api = await mock_skills_api(page)
     await go_to_skills(page)
-
-    search_input = page.locator(SEL["skill_search_input"])
-    await search_input.fill("markdown")
-    await search_input.press("Enter")
-
-    results = page.locator(SEL["skill_search_result"])
-    await results.first.wait_for(state="visible", timeout=5000)
-    await results.first.locator("button", has_text="Install").click()
+    await add_mock_skill(page)
 
     installed = page.locator(SEL["skill_installed"])
     await installed.first.wait_for(state="visible", timeout=5000)
 
     async with page.expect_response(
-        lambda r: "/api/webchat/v2/skills/markdown-helper" in r.url and r.request.method == "GET"
+        lambda r: "/api/webchat/v2/skills/markdown-helper" in r.url
+        and r.request.method == "GET"
     ) as content_response:
         await installed.first.locator("button", has_text="Edit").click()
     response = await content_response.value
@@ -271,7 +207,8 @@ async def test_skills_edit_user_managed_skill(page):
     )
 
     async with page.expect_response(
-        lambda r: "/api/webchat/v2/skills/markdown-helper" in r.url and r.request.method == "PUT"
+        lambda r: "/api/webchat/v2/skills/markdown-helper" in r.url
+        and r.request.method == "PUT"
     ) as update_response:
         await installed.first.locator("button", has_text="Save").click()
     response = await update_response.value

@@ -51,7 +51,7 @@ export function SkillCard({
   }, [draft, name, onUpdate]);
 
   return html`
-    <div className="border-t border-[var(--v2-panel-border)] py-4 first:border-0 first:pt-0">
+    <div className="ext-card border-t border-[var(--v2-panel-border)] py-4 first:border-0 first:pt-0">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">

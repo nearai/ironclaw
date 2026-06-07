@@ -142,9 +142,8 @@ pub trait SkillsProductFacade: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         name: String,
         content: Option<String>,
-        url: Option<String>,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name, content, url);
+        let _ = (caller, name, content);
         Err(RebornServicesError::service_unavailable(false))
     }
 
@@ -181,57 +180,7 @@ pub trait SkillsProductFacade: Send + Sync {
 pub struct UnsupportedSkillsProductFacade;
 
 #[async_trait]
-impl SkillsProductFacade for UnsupportedSkillsProductFacade {
-    async fn list_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn search_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn install_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: Option<String>,
-        _url: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn read_skill_content(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn update_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn remove_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(RebornServicesError::service_unavailable(false))
-    }
-}
+impl SkillsProductFacade for UnsupportedSkillsProductFacade {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionCredentialStatusRequest {
@@ -471,9 +420,8 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         name: String,
         content: Option<String>,
-        url: Option<String>,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name, content, url);
+        let _ = (caller, name, content);
         Err(RebornServicesError::service_unavailable(false))
     }
 
@@ -1294,10 +1242,9 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         name: String,
         content: Option<String>,
-        url: Option<String>,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         self.skills_facade
-            .install_skill(caller, name, content, url)
+            .install_skill(caller, name, content)
             .await
     }
 

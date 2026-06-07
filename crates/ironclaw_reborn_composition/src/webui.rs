@@ -208,11 +208,7 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
         name: String,
         content: Option<String>,
-        url: Option<String>,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        if url.is_some() && content.is_none() {
-            return Err(invalid_skill_request());
-        }
         let content = content.ok_or_else(invalid_skill_request)?;
         let installed = self
             .skill_management

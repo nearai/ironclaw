@@ -464,7 +464,7 @@ pub async fn install_skill(
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
     let response = state
         .services()
-        .install_skill(caller, body.name, body.content, body.url)
+        .install_skill(caller, body.name, body.content)
         .await?;
     Ok(Json(response))
 }
@@ -735,7 +735,6 @@ pub struct SearchSkillsBody {
 pub struct InstallSkillBody {
     pub name: String,
     pub content: Option<String>,
-    pub url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
