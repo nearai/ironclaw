@@ -1,3 +1,5 @@
+#[cfg(feature = "webui-v2-beta")]
+use std::io::BufRead;
 use std::{
     io::Write,
     path::Path,
@@ -1023,6 +1025,80 @@ fn serve_fails_closed_when_env_user_id_var_is_unset() {
     assert!(
         stderr.contains("IRONCLAW_REBORN_WEBUI_USER_ID must be set"),
         "stderr should name the missing user-id env var: {stderr}"
+    );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_with_env_auth_seeds_reborn_config_before_binding() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let mut child = Command::new(reborn_bin())
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            if stderr_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut stderr_text = String::new();
+    loop {
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            panic!("serve exited before binding with {status}; stderr: {stderr_text}");
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not reach listener banner; stderr: {stderr_text}");
+        }
+        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                stderr_text.push_str(&line);
+                stderr_text.push('\n');
+                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                    break;
+                }
+            }
+            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("serve stderr closed before banner; stderr: {stderr_text}");
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let config = std::fs::read_to_string(reborn_home.join("config.toml"))
+        .expect("successful serve startup should seed config");
+    assert!(
+        config.contains("api_version = \"ironclaw.runtime/v1\""),
+        "seeded config should stamp api_version: {config}"
+    );
+    assert!(
+        config.contains("profile = \"local-dev\""),
+        "seeded config should preserve the safe default profile: {config}"
+    );
+    assert!(
+        !config.contains("[llm.default]"),
+        "serve seed must preserve no-LLM behavior: {config}"
     );
 }
 
@@ -2067,6 +2143,12 @@ fn run_confirm_host_access_flag_gates_local_dev_yolo() {
         !confirmed_stderr.contains("requires explicit disclosure acknowledgement")
             && !confirmed_stderr.contains("requires --confirm-host-access"),
         "confirmed run should pass the host-access gate; got: {confirmed_stderr}"
+    );
+    let config = std::fs::read_to_string(reborn_home.join("config.toml"))
+        .expect("confirmed first runtime start should seed config");
+    assert!(
+        config.contains("profile = \"local-dev\""),
+        "env-selected local-dev-yolo must not become the persistent default: {config}"
     );
 }
 

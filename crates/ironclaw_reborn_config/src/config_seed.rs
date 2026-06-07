@@ -49,20 +49,19 @@ pub enum RebornConfigSeedOutcome {
 /// Atomically seed a sparse first-run `config.toml` if the file is missing.
 ///
 /// The first-run seed is intentionally smaller than `ironclaw-reborn config
-/// init`: it records only the API version and selected boot profile without
+/// init`: it records only the API version and safe default boot profile without
 /// installing an active LLM slot or pinning compiled runtime defaults. That
 /// preserves the existing "missing config" behavior for env-driven provider
 /// selection while giving operators an editable TOML on first real runtime
 /// start.
 pub fn seed_default_config_file_if_missing(
     path: &Path,
-    profile: RebornProfile,
 ) -> Result<RebornConfigSeedOutcome, RebornConfigSeedError> {
     if path.exists() {
         return Ok(RebornConfigSeedOutcome::AlreadyPresent);
     }
 
-    let text = first_run_config_toml(profile);
+    let text = first_run_config_toml();
     RebornConfigFile::parse_text(&text, path).map_err(|source| {
         RebornConfigSeedError::Validate {
             path: path.to_path_buf(),
@@ -107,14 +106,16 @@ pub fn seed_default_config_file_if_missing(
     )
 }
 
-fn first_run_config_toml(profile: RebornProfile) -> String {
+fn first_run_config_toml() -> String {
+    let profile = RebornProfile::default();
     format!(
         r#"# IronClaw Reborn first-run configuration.
 #
 # This sparse file is created automatically the first time an
-# `ironclaw-reborn` command starts the runtime. It records stable,
-# non-secret boot choices only; other omitted fields continue to use
-# compiled defaults unless you set them here.
+# `ironclaw-reborn` command starts the runtime. It records the stable,
+# safe default boot choice only; other omitted fields continue to use
+# compiled defaults unless you set them here. One-off env/CLI choices
+# are not persisted into this file.
 #
 # Precedence on each field:
 #   compiled defaults < this file < env vars < CLI flags.
@@ -144,8 +145,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("reborn").join("config.toml");
 
-        let outcome = seed_default_config_file_if_missing(&path, RebornProfile::LocalDev)
-            .expect("seed should succeed");
+        let outcome = seed_default_config_file_if_missing(&path).expect("seed should succeed");
 
         assert_eq!(outcome, RebornConfigSeedOutcome::Seeded);
         let text = std::fs::read_to_string(&path).expect("seeded config readable");
@@ -179,11 +179,72 @@ mod tests {
         let path = temp.path().join("config.toml");
         std::fs::write(&path, "api_version = \"ironclaw.runtime/v1\"\n").expect("write config");
 
-        let outcome = seed_default_config_file_if_missing(&path, RebornProfile::Production)
+        let outcome = seed_default_config_file_if_missing(&path)
             .expect("seed should treat existing config as ok");
 
         assert_eq!(outcome, RebornConfigSeedOutcome::AlreadyPresent);
         let text = std::fs::read_to_string(&path).expect("config readable");
         assert_eq!(text, "api_version = \"ironclaw.runtime/v1\"\n");
+    }
+
+    #[test]
+    fn seed_default_config_file_handles_concurrent_first_run_race() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+
+        let handles = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    seed_default_config_file_if_missing(&path)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("seed thread should not panic"))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("concurrent seeds should not fail");
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == RebornConfigSeedOutcome::Seeded)
+                .count(),
+            1,
+            "exactly one concurrent first-run seed should create the file: {outcomes:?}"
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == RebornConfigSeedOutcome::AlreadyPresent)
+                .count(),
+            outcomes.len() - 1,
+            "losing concurrent seeds should observe the existing file: {outcomes:?}"
+        );
+        let parsed = RebornConfigFile::load(&path)
+            .expect("load seeded config")
+            .expect("seeded config present");
+        assert!(parsed.default_llm_slot().is_none());
+    }
+
+    #[test]
+    fn seed_default_config_file_reports_parent_creation_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blocking_file = temp.path().join("not-a-directory");
+        std::fs::write(&blocking_file, "file").expect("write blocking file");
+        let path = blocking_file.join("config.toml");
+
+        let error = seed_default_config_file_if_missing(&path)
+            .expect_err("regular file in parent path should fail parent creation");
+
+        assert!(
+            matches!(error, RebornConfigSeedError::CreateParent { .. }),
+            "expected CreateParent error, got {error:?}"
+        );
     }
 }
