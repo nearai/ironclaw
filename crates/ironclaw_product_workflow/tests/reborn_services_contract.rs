@@ -3645,7 +3645,7 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
             action: RebornChannelConnectAction {
                 title: "Slack account connection".to_string(),
                 instructions: "Message the Slack app, then enter the code here.".to_string(),
-                code_placeholder: "Enter Slack pairing code...".to_string(),
+                input_placeholder: "Enter Slack pairing code...".to_string(),
                 submit_label: "Connect".to_string(),
                 success_message: "Slack account connected.".to_string(),
                 error_message: "Invalid or expired Slack pairing code.".to_string(),
@@ -3674,6 +3674,34 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
         channel.command_aliases,
         vec!["slack".to_string(), "slack account".to_string()]
     );
+}
+
+#[test]
+fn channel_connect_action_serializes_neutral_input_placeholder_and_accepts_legacy_code_placeholder()
+{
+    let action = RebornChannelConnectAction {
+        title: "Slack channel access".to_string(),
+        instructions: "Choose allowed channels.".to_string(),
+        input_placeholder: "C0123456789".to_string(),
+        submit_label: "Save channels".to_string(),
+        success_message: "Slack channels saved.".to_string(),
+        error_message: "Slack channel update failed.".to_string(),
+    };
+
+    let serialized = serde_json::to_value(&action).expect("action serializes");
+    assert_eq!(serialized["input_placeholder"], "C0123456789");
+    assert!(serialized.get("code_placeholder").is_none());
+
+    let legacy: RebornChannelConnectAction = serde_json::from_value(serde_json::json!({
+        "title": "Slack account connection",
+        "instructions": "Message the Slack app, then enter the code here.",
+        "code_placeholder": "Enter Slack pairing code...",
+        "submit_label": "Connect",
+        "success_message": "Slack account connected.",
+        "error_message": "Invalid or expired Slack pairing code."
+    }))
+    .expect("legacy action deserializes");
+    assert_eq!(legacy.input_placeholder, "Enter Slack pairing code...");
 }
 
 #[tokio::test]

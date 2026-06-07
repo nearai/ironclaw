@@ -15,28 +15,34 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     slack_mounts: Option<&SlackHostBetaMounts>,
+    mount_operator_routes: bool,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     build_webui_services_with_slack_connectable_channel(
         runtime,
         event_stream,
         slack_mounts.is_some(),
+        slack_mounts.is_some() && mount_operator_routes,
     )
 }
 
 fn build_webui_services_with_slack_connectable_channel(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
-    slack_pairing_mounted: bool,
+    slack_host_mounted: bool,
+    slack_channel_admin_mounted: bool,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    let connectable_channels = slack_pairing_mounted.then(|| {
-        Arc::new(StaticConnectableChannelsProductFacade::new(vec![
-            slack_personal_binding_pairing_connectable_channel(),
-        ])) as Arc<dyn ConnectableChannelsProductFacade>
+    let connectable_channels = slack_host_mounted.then(|| {
+        let mut channels = vec![slack_inbound_proof_code_connectable_channel()];
+        if slack_channel_admin_mounted {
+            channels.push(slack_admin_managed_channel_connectable_channel());
+        }
+        Arc::new(StaticConnectableChannelsProductFacade::new(channels))
+            as Arc<dyn ConnectableChannelsProductFacade>
     });
     build_webui_services_with_connectable_channels(runtime, event_stream, connectable_channels)
 }
 
-fn slack_personal_binding_pairing_connectable_channel() -> RebornConnectableChannelInfo {
+fn slack_inbound_proof_code_connectable_channel() -> RebornConnectableChannelInfo {
     RebornConnectableChannelInfo {
         channel: "slack".to_string(),
         display_name: "Slack".to_string(),
@@ -44,12 +50,34 @@ fn slack_personal_binding_pairing_connectable_channel() -> RebornConnectableChan
         action: RebornChannelConnectAction {
             title: "Slack account connection".to_string(),
             instructions: "Message the Slack app, then enter the code here.".to_string(),
-            code_placeholder: "Enter Slack pairing code...".to_string(),
+            input_placeholder: "Enter Slack pairing code...".to_string(),
             submit_label: "Connect".to_string(),
             success_message: "Slack account connected.".to_string(),
             error_message: "Invalid or expired Slack pairing code.".to_string(),
         },
-        command_aliases: vec!["slack".to_string(), "slack account".to_string()],
+        command_aliases: vec![
+            "slack".to_string(),
+            "slack account".to_string(),
+            "slack pairing".to_string(),
+        ],
+    }
+}
+
+fn slack_admin_managed_channel_connectable_channel() -> RebornConnectableChannelInfo {
+    RebornConnectableChannelInfo {
+        channel: "slack".to_string(),
+        display_name: "Slack".to_string(),
+        strategy: RebornChannelConnectStrategy::AdminManagedChannels,
+        action: RebornChannelConnectAction {
+            title: "Slack channel access".to_string(),
+            instructions: "Choose the Slack channels this tenant app is allowed to answer in."
+                .to_string(),
+            input_placeholder: "C0123456789".to_string(),
+            submit_label: "Save channels".to_string(),
+            success_message: "Slack channels saved.".to_string(),
+            error_message: "Slack channel update failed.".to_string(),
+        },
+        command_aliases: vec![],
     }
 }
 
@@ -70,8 +98,24 @@ mod tests {
     };
 
     #[test]
-    fn slack_pairing_connectable_channel_matches_pairing_flow_copy() {
-        let channel = slack_personal_binding_pairing_connectable_channel();
+    fn slack_admin_managed_connectable_channel_matches_allowed_channel_copy() {
+        let channel = slack_admin_managed_channel_connectable_channel();
+
+        assert_eq!(channel.channel, "slack");
+        assert_eq!(
+            channel.strategy,
+            RebornChannelConnectStrategy::AdminManagedChannels
+        );
+        assert_eq!(
+            channel.action.instructions,
+            "Choose the Slack channels this tenant app is allowed to answer in."
+        );
+        assert!(channel.command_aliases.is_empty());
+    }
+
+    #[test]
+    fn slack_inbound_proof_code_connectable_channel_matches_pairing_copy() {
+        let channel = slack_inbound_proof_code_connectable_channel();
 
         assert_eq!(channel.channel, "slack");
         assert_eq!(
@@ -79,17 +123,21 @@ mod tests {
             RebornChannelConnectStrategy::InboundProofCode
         );
         assert_eq!(
-            channel.action.instructions,
-            "Message the Slack app, then enter the code here."
+            channel.action.input_placeholder,
+            "Enter Slack pairing code..."
         );
         assert_eq!(
             channel.command_aliases,
-            vec!["slack".to_string(), "slack account".to_string()]
+            vec![
+                "slack".to_string(),
+                "slack account".to_string(),
+                "slack pairing".to_string()
+            ]
         );
     }
 
     #[tokio::test]
-    async fn slack_mounts_inject_pairing_channel_into_webui_facade() {
+    async fn slack_mounts_inject_channel_admin_action_into_webui_facade() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
             RebornRuntimeInput::from_services(
@@ -106,8 +154,9 @@ mod tests {
         )
         .await
         .expect("runtime builds");
-        let bundle = build_webui_services_with_slack_connectable_channel(&runtime, None, true)
-            .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_connectable_channel(&runtime, None, true, true)
+                .expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
             TenantId::new("slack-webui-tenant").expect("tenant"),
             UserId::new("slack-webui-owner").expect("user"),
@@ -121,10 +170,60 @@ mod tests {
             .await
             .expect("connectable channels");
 
-        let channel = response.channels.first().expect("slack channel");
-        assert_eq!(channel.channel, "slack");
+        assert_eq!(response.channels.len(), 2);
+        let personal = &response.channels[0];
+        assert_eq!(personal.channel, "slack");
         assert_eq!(
-            channel.strategy,
+            personal.strategy,
+            RebornChannelConnectStrategy::InboundProofCode
+        );
+        let channel_admin = &response.channels[1];
+        assert_eq!(channel_admin.channel, "slack");
+        assert_eq!(
+            channel_admin.strategy,
+            RebornChannelConnectStrategy::AdminManagedChannels
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn slack_mounts_without_operator_routes_advertise_personal_pairing_only() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime = build_reborn_runtime(
+            RebornRuntimeInput::from_services(
+                RebornBuildInput::local_dev("slack-webui-owner", root.path().join("local-dev"))
+                    .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
+            )
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: "slack-webui-tenant".to_string(),
+                agent_id: "slack-webui-agent".to_string(),
+                source_binding_id: "slack-webui-source".to_string(),
+                reply_target_binding_id: "slack-webui-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(StaticGateway)),
+        )
+        .await
+        .expect("runtime builds");
+        let bundle =
+            build_webui_services_with_slack_connectable_channel(&runtime, None, true, false)
+                .expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("slack-webui-tenant").expect("tenant"),
+            UserId::new("slack-webui-owner").expect("user"),
+            Some(AgentId::new("slack-webui-agent").expect("agent")),
+            None,
+        );
+
+        let response = bundle
+            .api
+            .list_connectable_channels(caller)
+            .await
+            .expect("connectable channels");
+
+        assert_eq!(response.channels.len(), 1);
+        assert_eq!(
+            response.channels[0].strategy,
             RebornChannelConnectStrategy::InboundProofCode
         );
 

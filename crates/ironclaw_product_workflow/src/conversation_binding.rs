@@ -194,6 +194,7 @@ pub struct ProductInstallationScope {
     pub default_agent_id: Option<AgentId>,
     pub default_project_id: Option<ProjectId>,
     pub default_subject_user_id: Option<UserId>,
+    pub use_default_subject_for_unrouted_shared_conversations: bool,
     pub conversation_subject_routes: HashMap<ProductConversationRouteKey, UserId>,
     pub conversation_subject_route_resolver:
         Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
@@ -207,6 +208,7 @@ impl ProductInstallationScope {
             default_agent_id: None,
             default_project_id: None,
             default_subject_user_id: None,
+            use_default_subject_for_unrouted_shared_conversations: true,
             conversation_subject_routes: HashMap::new(),
             conversation_subject_route_resolver: None,
             actor_binding_policy: ProductActorBindingPolicy::default(),
@@ -223,6 +225,7 @@ impl ProductInstallationScope {
             default_agent_id: Some(default_agent_id),
             default_project_id,
             default_subject_user_id: None,
+            use_default_subject_for_unrouted_shared_conversations: true,
             conversation_subject_routes: HashMap::new(),
             conversation_subject_route_resolver: None,
             actor_binding_policy: ProductActorBindingPolicy::default(),
@@ -231,6 +234,11 @@ impl ProductInstallationScope {
 
     pub fn with_default_subject_user_id(mut self, subject_user_id: UserId) -> Self {
         self.default_subject_user_id = Some(subject_user_id);
+        self
+    }
+
+    pub fn without_default_subject_for_unrouted_shared_conversations(mut self) -> Self {
+        self.use_default_subject_for_unrouted_shared_conversations = false;
         self
     }
 
@@ -309,11 +317,13 @@ impl ProductInstallationScope {
                 "conversation ref has no space_id; channel route lookup will not match configured routes"
             );
         }
-        Ok(self
-            .conversation_subject_routes
-            .get(&route_key)
-            .or(self.default_subject_user_id.as_ref())
-            .cloned())
+        if let Some(subject_user_id) = self.conversation_subject_routes.get(&route_key) {
+            return Ok(Some(subject_user_id.clone()));
+        }
+        if self.use_default_subject_for_unrouted_shared_conversations {
+            return Ok(self.default_subject_user_id.clone());
+        }
+        Ok(None)
     }
 
     async fn configured_subject_user_id_for_route(
@@ -324,6 +334,28 @@ impl ProductInstallationScope {
             ProductConversationRouteKind::Direct => Ok(None),
             ProductConversationRouteKind::Shared => self.shared_subject_user_id_for(request).await,
         }
+    }
+
+    fn requires_current_subject_route_for_existing_shared_binding(&self) -> bool {
+        self.conversation_subject_route_resolver.is_some()
+            && !self.use_default_subject_for_unrouted_shared_conversations
+    }
+
+    async fn current_subject_for_existing_shared_binding(
+        &self,
+        request: &ResolveBindingRequest,
+    ) -> Result<Option<UserId>, ProductWorkflowError> {
+        if request.route_kind != ProductConversationRouteKind::Shared
+            || !self.requires_current_subject_route_for_existing_shared_binding()
+        {
+            return Ok(None);
+        }
+        let configured_subject_user_id = self.configured_subject_user_id_for_route(request).await?;
+        ensure_shared_route_has_configured_subject(
+            request.route_kind,
+            configured_subject_user_id.as_ref(),
+        )?;
+        Ok(configured_subject_user_id)
     }
 }
 
@@ -533,6 +565,13 @@ impl ConversationBindingService for ProductConversationBindingService {
                 .await
             {
                 Ok(resolution) if resolution.turn_scope.explicit_owner_user_id().is_some() => {
+                    let current_subject_user_id = installation_scope
+                        .current_subject_for_existing_shared_binding(&request)
+                        .await?;
+                    ensure_existing_shared_binding_matches_current_subject(
+                        current_subject_user_id.as_ref(),
+                        &resolution,
+                    )?;
                     let owner_user_id = resolution.turn_scope.explicit_owner_user_id().cloned();
                     let expected_user_id =
                         resolve_actor_user(&installation_scope, &request).await?;
@@ -564,15 +603,15 @@ impl ConversationBindingService for ProductConversationBindingService {
         let configured_subject_user_id = installation_scope
             .configured_subject_user_id_for_route(&request)
             .await?;
+        ensure_shared_route_has_configured_subject(
+            request.route_kind,
+            configured_subject_user_id.as_ref(),
+        )?;
         let expected_user_id = resolve_actor_user(&installation_scope, &request).await?;
         if let Some(user_id) = expected_user_id.as_ref() {
             self.apply_resolved_actor_binding(&installation_scope, &request, user_id)
                 .await?;
         }
-        ensure_shared_route_has_configured_subject(
-            request.route_kind,
-            configured_subject_user_id.as_ref(),
-        )?;
         let resolution = self
             .conversations
             .resolve_or_create_binding_with_trusted_scope(
@@ -603,12 +642,32 @@ impl ConversationBindingService for ProductConversationBindingService {
             .await
             .map_err(map_conversation_error)?;
         if request.route_kind == ProductConversationRouteKind::Shared {
+            let current_subject_user_id = installation_scope
+                .current_subject_for_existing_shared_binding(&request)
+                .await?;
+            ensure_existing_shared_binding_matches_current_subject(
+                current_subject_user_id.as_ref(),
+                &resolution,
+            )?;
             let expected_user_id = resolve_actor_user(&installation_scope, &request).await?;
             ensure_resolved_actor_matches_expected_user(expected_user_id.as_ref(), &resolution)?;
         }
 
         resolved_binding_from_resolution(resolution, request.route_kind)
     }
+}
+
+fn ensure_existing_shared_binding_matches_current_subject(
+    current_subject_user_id: Option<&UserId>,
+    resolution: &ironclaw_conversations::ConversationBindingResolution,
+) -> Result<(), ProductWorkflowError> {
+    let Some(current_subject_user_id) = current_subject_user_id else {
+        return Ok(());
+    };
+    if resolution.turn_scope.explicit_owner_user_id() != Some(current_subject_user_id) {
+        return Err(ProductWorkflowError::BindingAccessDenied);
+    }
+    Ok(())
 }
 
 fn resolved_binding_from_resolution(

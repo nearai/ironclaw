@@ -69,7 +69,8 @@ function slackPairingCopy(action, t) {
   return {
     title: action?.title || t("pairing.slackTitle"),
     instructions: action?.instructions || t("pairing.slackInstructions"),
-    codePlaceholder: action?.code_placeholder || t("pairing.slackPlaceholder"),
+    codePlaceholder:
+      action?.input_placeholder || action?.code_placeholder || t("pairing.slackPlaceholder"),
     submitLabel: action?.submit_label || t("pairing.connect"),
     successMessage: action?.success_message || t("pairing.slackSuccess"),
     errorMessage: action?.error_message || t("pairing.slackError"),

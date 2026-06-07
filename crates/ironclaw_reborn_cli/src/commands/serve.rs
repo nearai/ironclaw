@@ -362,10 +362,13 @@ impl ServeCommand {
                 None
             };
             #[cfg(feature = "slack-v2-host-beta")]
+            let mount_operator_webui_config = sso_startup.is_none();
+            #[cfg(feature = "slack-v2-host-beta")]
             let bundle: RebornWebuiBundle = build_webui_services_with_slack_host_beta_mounts(
                 &runtime,
                 None,
                 slack_mounts.as_ref(),
+                mount_operator_webui_config,
             )?;
             #[cfg(not(feature = "slack-v2-host-beta"))]
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;

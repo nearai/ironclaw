@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::slack_actor_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use crate::slack_channel_routes::{
-    SlackChannelRoute, SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteListPage,
-    SlackChannelRouteStore,
+    SlackChannelRoute, SlackChannelRouteAssignment, SlackChannelRouteError, SlackChannelRouteKey,
+    SlackChannelRouteListPage, SlackChannelRouteStore, SlackChannelRouteSubjectOwner,
 };
 use crate::slack_personal_binding::{
     RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
@@ -50,6 +50,7 @@ const PAIRING_CODE_RETRIES: usize = 16;
 const DEFAULT_PAIRING_TTL: Duration = Duration::from_secs(10 * 60);
 const CHANNEL_ROUTE_CACHE_TTL: Duration = Duration::from_secs(60);
 const CHANNEL_ROUTE_CACHE_CAPACITY: usize = 4096;
+const CHANNEL_ROUTE_REPLACE_LIST_LIMIT: usize = 500;
 
 #[derive(Clone)]
 struct CachedSlackChannelRoute {
@@ -299,6 +300,75 @@ where
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .pop(key);
+    }
+
+    fn channel_route_team_lock_key(
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+    ) -> String {
+        format!(
+            "channel-route-team:{}:{}",
+            installation_id.as_str(),
+            team_id
+        )
+    }
+
+    fn channel_route_lock_key(key: &SlackChannelRouteKey) -> String {
+        format!(
+            "channel-route:{}:{}:{}",
+            key.installation_id.as_str(),
+            key.team_id,
+            key.channel_id
+        )
+    }
+
+    async fn upsert_route_record(
+        &self,
+        key: SlackChannelRouteKey,
+        subject_user_id: UserId,
+    ) -> Result<SlackChannelRoute, SlackChannelRouteError> {
+        let path = Self::channel_route_path(&key).map_err(map_route_fs_error)?;
+        let lock = self.lock_for(Self::channel_route_lock_key(&key));
+        let _guard = lock.lock().await;
+        let record = StoredSlackChannelRoute::new(&key, &subject_user_id);
+        self.write_record(&path, &record, CasExpectation::Any)
+            .await
+            .map_err(map_route_fs_error)?;
+        self.invalidate_route_cache(&key);
+        Ok(SlackChannelRoute::new(key, subject_user_id))
+    }
+
+    async fn delete_route_record(
+        &self,
+        key: &SlackChannelRouteKey,
+    ) -> Result<bool, SlackChannelRouteError> {
+        let path = Self::channel_route_path(key).map_err(map_route_fs_error)?;
+        let lock = self.lock_for(Self::channel_route_lock_key(key));
+        let _guard = lock.lock().await;
+        match self.delete_record(&path).await {
+            Ok(()) => {
+                self.invalidate_route_cache(key);
+                Ok(true)
+            }
+            Err(FilesystemError::NotFound { .. }) => Ok(false),
+            Err(error) if is_unsupported_delete_error(&error) => {
+                let Some((mut record, _)) = self
+                    .read_record::<StoredSlackChannelRoute>(&path)
+                    .await
+                    .map_err(map_route_fs_error)?
+                else {
+                    return Ok(false);
+                };
+                record.deleted_at = Some(Utc::now());
+                record.updated_at = Utc::now();
+                self.write_record(&path, &record, CasExpectation::Any)
+                    .await
+                    .map_err(map_route_fs_error)?;
+                self.invalidate_route_cache(key);
+                Ok(true)
+            }
+            Err(error) => Err(map_route_fs_error(error)),
+        }
     }
 }
 
@@ -646,20 +716,12 @@ where
         if key.tenant_id != self.scope.tenant_id {
             return Err(SlackChannelRouteError::InvalidRoute);
         }
-        let path = Self::channel_route_path(&key).map_err(map_route_fs_error)?;
-        let lock = self.lock_for(format!(
-            "channel-route:{}:{}:{}",
-            key.installation_id.as_str(),
-            key.team_id,
-            key.channel_id
+        let lock = self.lock_for(Self::channel_route_team_lock_key(
+            &key.installation_id,
+            &key.team_id,
         ));
         let _guard = lock.lock().await;
-        let record = StoredSlackChannelRoute::new(&key, &subject_user_id);
-        self.write_record(&path, &record, CasExpectation::Any)
-            .await
-            .map_err(map_route_fs_error)?;
-        self.invalidate_route_cache(&key);
-        Ok(SlackChannelRoute::new(key, subject_user_id))
+        self.upsert_route_record(key, subject_user_id).await
     }
 
     async fn delete_route(
@@ -669,38 +731,78 @@ where
         if key.tenant_id != self.scope.tenant_id {
             return Ok(false);
         }
-        let path = Self::channel_route_path(key).map_err(map_route_fs_error)?;
-        let lock = self.lock_for(format!(
-            "channel-route:{}:{}:{}",
-            key.installation_id.as_str(),
-            key.team_id,
-            key.channel_id
+        let lock = self.lock_for(Self::channel_route_team_lock_key(
+            &key.installation_id,
+            &key.team_id,
         ));
         let _guard = lock.lock().await;
-        match self.delete_record(&path).await {
-            Ok(()) => {
-                self.invalidate_route_cache(key);
-                Ok(true)
-            }
-            Err(FilesystemError::NotFound { .. }) => Ok(false),
-            Err(error) if is_unsupported_delete_error(&error) => {
-                let Some((mut record, _)) = self
-                    .read_record::<StoredSlackChannelRoute>(&path)
-                    .await
-                    .map_err(map_route_fs_error)?
-                else {
-                    return Ok(false);
-                };
-                record.deleted_at = Some(Utc::now());
-                record.updated_at = Utc::now();
-                self.write_record(&path, &record, CasExpectation::Any)
-                    .await
-                    .map_err(map_route_fs_error)?;
-                self.invalidate_route_cache(key);
-                Ok(true)
-            }
-            Err(error) => Err(map_route_fs_error(error)),
+        self.delete_route_record(key).await
+    }
+
+    async fn replace_managed_routes(
+        &self,
+        tenant_id: &TenantId,
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+        owner: SlackChannelRouteSubjectOwner,
+        assignments: Vec<SlackChannelRouteAssignment>,
+    ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
+        if tenant_id != &self.scope.tenant_id {
+            return Err(SlackChannelRouteError::InvalidRoute);
         }
+        let lock = self.lock_for(Self::channel_route_team_lock_key(installation_id, team_id));
+        let _guard = lock.lock().await;
+        let requested = assignments
+            .iter()
+            .map(|assignment| &assignment.channel_id)
+            .collect::<std::collections::HashSet<_>>();
+        let mut existing_routes = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let page = self
+                .list_routes(
+                    tenant_id,
+                    installation_id,
+                    team_id,
+                    cursor,
+                    CHANNEL_ROUTE_REPLACE_LIST_LIMIT,
+                )
+                .await?;
+            existing_routes.extend(page.routes);
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            if next_cursor <= cursor {
+                return Err(SlackChannelRouteError::StoreUnavailable);
+            }
+            cursor = next_cursor;
+        }
+        for route in existing_routes {
+            if owner.owns(&route.subject_user_id) && !requested.contains(&route.channel_id) {
+                let key = SlackChannelRouteKey::new(
+                    tenant_id.clone(),
+                    installation_id.clone(),
+                    team_id.to_string(),
+                    route.channel_id,
+                )?;
+                self.delete_route_record(&key).await?;
+            }
+        }
+        let mut replaced = Vec::with_capacity(assignments.len());
+        for assignment in assignments {
+            let key = SlackChannelRouteKey::new(
+                tenant_id.clone(),
+                installation_id.clone(),
+                team_id.to_string(),
+                assignment.channel_id,
+            )?;
+            replaced.push(
+                self.upsert_route_record(key, assignment.subject_user_id)
+                    .await?,
+            );
+        }
+        replaced.sort_by(|left, right| left.channel_id.cmp(&right.channel_id));
+        Ok(replaced)
     }
 
     async fn resolve_subject_user_id(
@@ -1278,6 +1380,142 @@ mod tests {
                 .expect("resolve deleted route"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_replaces_managed_channel_routes() {
+        let state = state();
+        let tenant_id = TenantId::new("tenant-alpha").unwrap();
+        let installation_id = installation();
+        let assigner = crate::slack_channel_routes::SlackChannelSubjectAssigner::new(
+            tenant_id.clone(),
+            installation_id.clone(),
+            "T123".to_string(),
+        );
+        let ceng = assigner
+            .assignment_for("CENG".to_string())
+            .expect("CENG assignment");
+        let cops = assigner
+            .assignment_for("COPS".to_string())
+            .expect("COPS assignment");
+        state
+            .replace_managed_routes(
+                &tenant_id,
+                &installation_id,
+                "T123",
+                assigner.owner().clone(),
+                vec![cops.clone(), ceng.clone()],
+            )
+            .await
+            .expect("initial replace succeeds");
+
+        let manual_ops_subject = user("user:ops-agent");
+        state
+            .upsert_route(
+                SlackChannelRouteKey::new(
+                    tenant_id.clone(),
+                    installation_id.clone(),
+                    "T123".to_string(),
+                    "COPS".to_string(),
+                )
+                .unwrap(),
+                manual_ops_subject.clone(),
+            )
+            .await
+            .expect("manual route succeeds");
+
+        let replaced = state
+            .replace_managed_routes(
+                &tenant_id,
+                &installation_id,
+                "T123",
+                assigner.owner().clone(),
+                vec![ceng.clone()],
+            )
+            .await
+            .expect("second replace succeeds");
+
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(replaced[0].channel_id, "CENG");
+        assert_eq!(replaced[0].subject_user_id, ceng.subject_user_id.as_str());
+        assert_eq!(
+            state
+                .resolve_subject_user_id(
+                    &SlackChannelRouteKey::new(
+                        tenant_id.clone(),
+                        installation_id.clone(),
+                        "T123".to_string(),
+                        "CENG".to_string(),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .expect("resolve retained other-subject route"),
+            Some(ceng.subject_user_id)
+        );
+        assert_eq!(
+            state
+                .resolve_subject_user_id(
+                    &SlackChannelRouteKey::new(
+                        tenant_id,
+                        installation_id,
+                        "T123".to_string(),
+                        "COPS".to_string(),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .expect("resolve retained route"),
+            Some(manual_ops_subject)
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_concurrent_managed_replace_serializes_team_updates() {
+        let state = state();
+        let tenant_id = TenantId::new("tenant-alpha").unwrap();
+        let installation_id = installation();
+        let assigner = crate::slack_channel_routes::SlackChannelSubjectAssigner::new(
+            tenant_id.clone(),
+            installation_id.clone(),
+            "T123".to_string(),
+        );
+
+        let first = state.replace_managed_routes(
+            &tenant_id,
+            &installation_id,
+            "T123",
+            assigner.owner().clone(),
+            vec![
+                assigner.assignment_for("CONE".to_string()).unwrap(),
+                assigner.assignment_for("CTWO".to_string()).unwrap(),
+            ],
+        );
+        let second = state.replace_managed_routes(
+            &tenant_id,
+            &installation_id,
+            "T123",
+            assigner.owner().clone(),
+            vec![assigner.assignment_for("CTHREE".to_string()).unwrap()],
+        );
+        let (first, second) = tokio::join!(first, second);
+        first.expect("first replace succeeds");
+        second.expect("second replace succeeds");
+
+        let routes = state
+            .list_routes(&tenant_id, &installation_id, "T123", 0, 100)
+            .await
+            .expect("list routes")
+            .routes;
+        let route_ids = routes
+            .iter()
+            .map(|route| route.channel_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            route_ids == ["CONE", "CTWO"] || route_ids == ["CTHREE"],
+            "final replacement must be one complete update, got {route_ids:?}"
+        );
+        assert!(routes.iter().all(|route| assigner.owns_route(route)));
     }
 
     #[tokio::test]
