@@ -112,8 +112,8 @@ impl HookRegistrar {
     pub fn install(
         &self,
         extension: ironclaw_host_api::ExtensionId,
-        extension_version: String,
-        entries: Vec<HookManifestEntry>,
+        extension_version: &str,
+        entries: &[HookManifestEntry],
         mut builder: HookDispatcherBuilder,
     ) -> Result<(HookDispatcherBuilder, Vec<HookId>), HookError> {
         // Mirror the host-validated `ExtensionId` into the content-addressed
@@ -121,14 +121,21 @@ impl HookRegistrar {
         // `ironclaw_host_api::ExtensionId` is the authority-bearing identifier
         // (validated, comparable across the host); `crate::identity::ExtensionId`
         // is a transparent string newtype the hash derivation consumes.
+        //
+        // Entries are borrowed, not owned: the per-run rebuild path
+        // (`ironclaw_reborn_composition`) replays the same validated install
+        // set on every host spawn, so taking `&[HookManifestEntry]` lets the
+        // caller lend its already-validated entries instead of cloning the
+        // whole `Vec` per rebuild. `install_one` clones only the inner body
+        // data it must move into the constructed hook.
         let identity_extension: ExtensionId = (&extension).into();
-        Self::enforce_registration_caps(&extension, &entries, builder.dispatcher_mut())?;
+        Self::enforce_registration_caps(&extension, entries, builder.dispatcher_mut())?;
         let mut installed = Vec::with_capacity(entries.len());
         for entry in entries {
             let hook_id = self.install_one(
                 &extension,
                 &identity_extension,
-                &extension_version,
+                extension_version,
                 entry,
                 &mut builder,
             )?;
@@ -194,7 +201,7 @@ impl HookRegistrar {
         owning_extension: &ironclaw_host_api::ExtensionId,
         identity_extension: &ExtensionId,
         extension_version: &str,
-        entry: HookManifestEntry,
+        entry: &HookManifestEntry,
         builder: &mut HookDispatcherBuilder,
     ) -> Result<HookId, HookError> {
         entry.validate().map_err(|e| {
@@ -224,7 +231,7 @@ impl HookRegistrar {
         let hook_version = HookVersion::ONE;
         let binding_scope = manifest_scope_to_binding_scope(entry.scope);
 
-        match entry.body {
+        match &entry.body {
             HookManifestBody::Predicate { spec } => match entry.kind {
                 HookManifestKind::BeforeCapability => {
                     let hook_id = HookId::derive(
@@ -235,7 +242,7 @@ impl HookRegistrar {
                     );
                     let hook = PredicateBackedBeforeCapabilityHook::new(
                         hook_id,
-                        spec,
+                        spec.clone(),
                         Arc::clone(&self.evaluator),
                     );
                     let dispatcher = builder.dispatcher_mut();
@@ -271,9 +278,9 @@ impl HookRegistrar {
                     extension_version,
                     hook_local_id: &entry.id,
                     kind: entry.kind,
-                    export: &export,
+                    export: export.as_str(),
                 };
-                let prepared = runtime.prepare(&request, budget).map_err(|error| {
+                let prepared = runtime.prepare(&request, budget.clone()).map_err(|error| {
                     HookError::RegistryConstruction(format!(
                         "WASM hook `{}` failed to prepare: {error}",
                         entry.id
@@ -431,13 +438,9 @@ mod tests {
     async fn install_predicate_entry_builds_binding_and_installs_hook() {
         let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
         let builder = HookDispatcherBuilder::new(HookRegistry::new());
+        let entries = vec![predicate_entry("deny-shell")];
         let (builder, ids) = registrar
-            .install(
-                extension(),
-                "0.4.2".to_string(),
-                vec![predicate_entry("deny-shell")],
-                builder,
-            )
+            .install(extension(), "0.4.2", &entries, builder)
             .expect("install ok");
         assert_eq!(ids.len(), 1);
         let dispatcher = builder.build_arc();
@@ -512,7 +515,7 @@ mod tests {
         };
         let builder = HookDispatcherBuilder::new(HookRegistry::new());
         let (builder, ids) = registrar
-            .install(extension(), "0.1.0".to_string(), vec![entry], builder)
+            .install(extension(), "0.1.0", &[entry], builder)
             .expect("wasm install ok");
         assert_eq!(ids.len(), 1, "exactly one binding produced");
         let dispatcher = builder.build_arc();
@@ -556,7 +559,7 @@ mod tests {
             },
         };
         let err = registrar
-            .install(extension(), "0.1.0".to_string(), vec![entry], builder)
+            .install(extension(), "0.1.0", &[entry], builder)
             .expect_err("wasm body needs a configured runtime");
         match err {
             HookError::RegistryConstruction(msg) => {
@@ -578,7 +581,7 @@ mod tests {
         // before the registry would.
         entry.phase = HookPhase::Validation;
         let err = registrar
-            .install(extension(), "0.1.0".to_string(), vec![entry], builder)
+            .install(extension(), "0.1.0", &[entry], builder)
             .expect_err("validation phase must be rejected");
         assert!(matches!(err, HookError::RegistryConstruction(_)));
     }
@@ -620,7 +623,7 @@ mod tests {
             },
         };
         let (builder, ids) = registrar
-            .install(extension(), "0.4.2".to_string(), vec![entry], builder)
+            .install(extension(), "0.4.2", &[entry], builder)
             .expect("install ok");
         assert_eq!(ids.len(), 1);
         let dispatcher = builder.build_arc();
@@ -662,7 +665,7 @@ mod tests {
             .collect();
 
         let (_builder, actual) = registrar
-            .install(extension(), "0.4.2".to_string(), entries, builder)
+            .install(extension(), "0.4.2", &entries, builder)
             .expect("install ok");
         assert_eq!(actual, expected);
     }
@@ -680,7 +683,7 @@ mod tests {
             .map(|i| predicate_entry(&format!("h-{i}")))
             .collect();
         let err = registrar
-            .install(extension(), "0.1.0".to_string(), entries, builder)
+            .install(extension(), "0.1.0", &entries, builder)
             .expect_err("over-cap install must be rejected");
         match err {
             HookError::RegistryConstruction(msg) => {
@@ -711,7 +714,7 @@ mod tests {
             .collect();
         assert!(entries.len() <= MAX_HOOKS_PER_EXTENSION);
         let err = registrar
-            .install(extension(), "0.1.0".to_string(), entries, builder)
+            .install(extension(), "0.1.0", &entries, builder)
             .expect_err("over-kind install must be rejected");
         match err {
             HookError::RegistryConstruction(msg) => {
@@ -739,7 +742,7 @@ mod tests {
             .map(|i| predicate_entry(&format!("h-{i}")))
             .collect();
         let (_builder, ids) = registrar
-            .install(extension(), "0.1.0".to_string(), entries, builder)
+            .install(extension(), "0.1.0", &entries, builder)
             .expect("at-cap install must succeed");
         assert_eq!(ids.len(), MAX_HOOKS_PER_EXTENSION_PER_KIND);
     }
@@ -759,7 +762,7 @@ mod tests {
             .map(|i| predicate_entry(&format!("first-{i}")))
             .collect();
         let (b, ids) = registrar
-            .install(extension(), "0.1.0".to_string(), first_batch, builder)
+            .install(extension(), "0.1.0", &first_batch, builder)
             .expect("first at-cap install must succeed");
         assert_eq!(ids.len(), MAX_HOOKS_PER_EXTENSION_PER_KIND);
         builder = b;
@@ -768,7 +771,7 @@ mod tests {
         // by itself is small (just 1 entry).
         let second_batch = vec![predicate_entry("overflow")];
         let err = registrar
-            .install(extension(), "0.1.0".to_string(), second_batch, builder)
+            .install(extension(), "0.1.0", &second_batch, builder)
             .expect_err("cumulative over-cap install must be rejected");
         match err {
             HookError::RegistryConstruction(msg) => {
@@ -802,13 +805,9 @@ mod tests {
 
         let host_extension =
             ironclaw_host_api::ExtensionId::new("polymarket-trader").expect("valid ext id");
+        let entries = vec![own.clone(), tenant_scope.clone()];
         let (builder, ids) = registrar
-            .install(
-                host_extension.clone(),
-                "0.4.2".to_string(),
-                vec![own.clone(), tenant_scope.clone()],
-                builder,
-            )
+            .install(host_extension.clone(), "0.4.2", &entries, builder)
             .expect("install ok");
         assert_eq!(ids.len(), 2);
 
@@ -863,14 +862,10 @@ mod tests {
         let mut tenant_scope = predicate_entry("tenant-scope-no-grant");
         tenant_scope.scope = HookManifestScope::SameTenant;
         tenant_scope.requires_grant = Some("cross_extension_observation".to_string());
+        let entries = vec![tenant_scope];
 
         let err = registrar
-            .install(
-                extension(),
-                "0.1.0".to_string(),
-                vec![tenant_scope],
-                builder,
-            )
+            .install(extension(), "0.1.0", &entries, builder)
             .expect_err("install must reject when the host has not verified the requested grant");
         match err {
             HookError::RegistryConstruction(msg) => {
@@ -898,14 +893,10 @@ mod tests {
         let mut tenant_scope = predicate_entry("tenant-scope-wrong-grant");
         tenant_scope.scope = HookManifestScope::SameTenant;
         tenant_scope.requires_grant = Some("cross_extension_observation".to_string());
+        let entries = vec![tenant_scope];
 
         let err = registrar
-            .install(
-                extension(),
-                "0.1.0".to_string(),
-                vec![tenant_scope],
-                builder,
-            )
+            .install(extension(), "0.1.0", &entries, builder)
             .expect_err("install must reject when the requested grant is not in the verified set");
         assert!(matches!(err, HookError::RegistryConstruction(_)));
     }

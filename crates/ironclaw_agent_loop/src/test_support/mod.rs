@@ -58,6 +58,7 @@ pub struct MockAgentLoopDriverHost {
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
     compaction_result: Mutex<Result<LoopCompactionOutcome, LoopCompactionError>>,
     progress_events: Mutex<Vec<LoopProgressEvent>>,
+    prompt_requests: Mutex<Vec<LoopPromptBundleRequest>>,
     acked_tokens: Mutex<Vec<LoopInputAckToken>>,
     finalized_assistant_messages: Mutex<Vec<String>>,
     cancellation: Mutex<Option<LoopCancellationSignal>>,
@@ -91,6 +92,11 @@ impl MockAgentLoopDriverHost {
     /// Returns loop progress events emitted through the host progress port.
     pub fn progress_events(&self) -> Vec<LoopProgressEvent> {
         clone_mutex_vec(&self.progress_events)
+    }
+
+    /// Returns prompt bundle requests captured so far.
+    pub fn prompt_requests(&self) -> Vec<LoopPromptBundleRequest> {
+        clone_mutex_vec(&self.prompt_requests)
     }
 
     /// Returns finalized assistant message contents in call order.
@@ -224,6 +230,7 @@ impl MockAgentLoopDriverHostBuilder {
                 fail_model_with: Mutex::new(self.fail_model_with),
                 compaction_result: Mutex::new(self.compaction_result),
                 progress_events: Mutex::new(Vec::new()),
+                prompt_requests: Mutex::new(Vec::new()),
                 acked_tokens: Mutex::new(Vec::new()),
                 finalized_assistant_messages: Mutex::new(Vec::new()),
                 cancellation: Mutex::new(self.cancellation),
@@ -643,9 +650,10 @@ impl ironclaw_turns::run_profile::LoopContextPort for MockAgentLoopDriverHost {
 impl ironclaw_turns::run_profile::LoopPromptPort for MockAgentLoopDriverHost {
     async fn build_prompt_bundle(
         &self,
-        _request: LoopPromptBundleRequest,
+        request: LoopPromptBundleRequest,
     ) -> Result<LoopPromptBundle, AgentLoopHostError> {
         self.record_call(MockHostCall::BuildPromptBundle);
+        lock_or_panic(&self.prompt_requests).push(request);
         if let Some(kind) = *lock_or_panic(&self.fail_prompt_with) {
             return Err(AgentLoopHostError::new(kind, "scripted prompt failure"));
         }

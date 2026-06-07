@@ -40,6 +40,8 @@
 
 use ironclaw_filesystem::FilesystemError;
 
+use crate::chunking::{MemoryChunkWrite, content_sha256};
+use crate::indexer::{MemoryChunkReplaceOutcome, MemoryDocumentIndexRepository};
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope};
 use crate::repo::MemoryDocumentRepository;
 use crate::search::MemorySearchRequest;
@@ -48,7 +50,7 @@ use crate::search::MemorySearchRequest;
 ///
 /// Must return a fresh, empty repository — contracts assume nothing
 /// leaks between calls.
-pub type RepoFactory<R> = fn() -> R;
+pub type RepoFactory<R> = fn() -> R; // pub-api-exempt: contract-test consumers name this factory type from downstream crates.
 
 #[cfg(any(test, feature = "contract-tests"))]
 fn scope_a() -> MemoryDocumentScope {
@@ -163,65 +165,200 @@ where
     );
 }
 
-/// Contract: search_documents must not leak across tenant scopes.
+/// Contract: an impl that opts out of search must do so via the
+/// documented unsupported error, not a panic-shaped one.
 ///
-/// This is the *exact* class of bug surfaced in #3890. The trait
-/// allows impls to opt out of search by returning
-/// `memory_backend_unsupported` (the default impl does this); the
-/// contract asserts the **stronger of**: either search is unsupported,
-/// or it is scope-isolated. Either is acceptable; a search that
-/// returns cross-tenant hits is a bug.
+/// The trait lets impls opt out of search; the default
+/// [`MemoryDocumentRepository::search_documents`] returns
+/// `memory_backend_unsupported`. That helper emits
+/// [`FilesystemError::Backend`] carrying a sanitized
+/// `"...does not support search"` reason — **not**
+/// [`FilesystemError::Unsupported`]. The two are distinct by design:
+/// `Unsupported` is reserved for mount-time capability mismatches and
+/// carries only `{ path, operation }` (no `reason` field), so it cannot
+/// carry the human-readable opt-out message. Asserting on `Backend` here
+/// reflects the real contract; the earlier `Unsupported`-shaped
+/// assertion never fired and was caught only by the string fallback.
+///
+/// Impls that *do* support search are exercised by
+/// [`search_documents_isolated_across_scopes`] instead, which seeds
+/// chunk records so the FTS query returns real hits.
 #[cfg(any(test, feature = "contract-tests"))]
-pub async fn search_documents_isolated_across_scopes<R, F>(factory: F)
+pub async fn search_documents_unsupported_is_documented<R, F>(factory: F)
 where
     R: MemoryDocumentRepository,
     F: Fn() -> R,
 {
     let repo = factory();
     let scope_a = scope_a();
-    let scope_b = scope_b();
-
-    // Same query token in both tenants.
-    repo.write_document(
-        &path_in(&scope_a, "notes/needle.md"),
-        b"the quick brown needle",
-    )
-    .await
-    .unwrap();
-    repo.write_document(
-        &path_in(&scope_b, "notes/needle.md"),
-        b"the quick brown needle",
-    )
-    .await
-    .unwrap();
+    repo.write_document(&path_in(&scope_a, "notes/needle.md"), b"needle")
+        .await
+        .unwrap();
 
     let request = MemorySearchRequest::new("needle").expect("valid search request");
 
     match repo.search_documents(&scope_a, &request).await {
-        Ok(hits) => {
-            // If the impl supports search, every hit MUST be in scope A.
-            for hit in &hits {
-                assert_eq!(
-                    hit.path.scope(),
-                    &scope_a,
-                    "search_documents leaked a cross-tenant hit: {:?}",
-                    hit.path
-                );
-            }
+        Ok(_) => {
+            // Indexed impls that support search land here and this
+            // contract is a no-op for them — correct by design for the
+            // opt-out path. WARNING: if an impl that implements
+            // `MemoryDocumentIndexRepository` is accidentally wired with
+            // `contract_test!` instead of `contract_test_indexed!`, this
+            // arm fires, the test passes vacuously, and the real
+            // search-isolation contract never runs. Wire such impls with
+            // `contract_test_indexed!` so
+            // `search_documents_isolated_across_scopes` actually executes.
         }
         Err(err) => {
-            // Opting out of search is acceptable; the trait permits it.
-            // We only enforce that the failure is the documented one
-            // ("backend does not support search") and not a generic
-            // panic-shaped error.
             assert!(
-                matches!(err, FilesystemError::Unsupported { .. })
-                    || err.to_string().to_lowercase().contains("not support"),
-                "search_documents error must be the documented unsupported \
-                 variant, got: {err:?}"
+                matches!(err, FilesystemError::Backend { ref reason, .. } if reason.to_lowercase().contains("not support")),
+                "search_documents opt-out must surface the documented \
+                 FilesystemError::Backend(\"...does not support search\") \
+                 error, got: {err:?}"
             );
         }
     }
+}
+
+/// Contract: search_documents must not leak across tenant scopes.
+///
+/// This is the *exact* class of bug surfaced in #3890. Wired only for
+/// impls that also implement [`MemoryDocumentIndexRepository`] (i.e.
+/// impls that actually serve search). The contract **seeds chunk
+/// records** in both tenants so the FTS search returns real hits — an
+/// earlier version wrote only documents and no chunks, so
+/// `search_documents` (which queries the `.chunks/` subtree) returned
+/// `Ok([])` and the isolation assertion passed vacuously. With chunks
+/// seeded, scope A's search must return its own hit and must NOT return
+/// scope B's identical-content hit; if the impl ignored scope, this test
+/// fails on the cross-tenant leak assertion.
+#[cfg(any(test, feature = "contract-tests"))]
+pub async fn search_documents_isolated_across_scopes<R, F>(factory: F)
+where
+    R: MemoryDocumentRepository + MemoryDocumentIndexRepository,
+    F: Fn() -> R,
+{
+    let repo = factory();
+    let scope_a = scope_a();
+    let scope_b = scope_b();
+
+    // Both tenants share the query token ("needle") but carry a
+    // tenant-unique marker word in their chunk content. The marker is
+    // what makes the leak observable: an impl that re-anchors result
+    // *paths* to the requested scope (so a per-hit `path.scope()` check
+    // cannot catch a prefix leak) still returns the leaked chunk's
+    // *content*, so a stray "bravo" snippet in scope A's results exposes
+    // the cross-tenant read.
+    //
+    // The two documents use *distinct* relative paths. They previously
+    // shared `notes/needle.md`, but `fuse_memory_search_results` keys its
+    // accumulator solely on `relative_path` (scope is not part of the
+    // key). With identical paths a leaked scope-B hit would collapse into
+    // the scope-A accumulator, and because fusion keeps the first-inserted
+    // snippet (and_modify never replaces it), the "bravo" marker could be
+    // discarded before the assertions run — masking the very leak this
+    // test exists to catch. Distinct paths keep the leaked hit as its own
+    // result so the marker survives fusion.
+    let body_a = "alpha quick brown needle";
+    let body_b = "bravo quick brown needle";
+    let path_a = path_in(&scope_a, "notes/needle-a.md");
+    let path_b = path_in(&scope_b, "notes/needle-b.md");
+    repo.write_document(&path_a, body_a.as_bytes())
+        .await
+        .unwrap();
+    repo.write_document(&path_b, body_b.as_bytes())
+        .await
+        .unwrap();
+
+    // Seed chunk records for both documents — without these the FTS
+    // search over the `.chunks/` subtree returns nothing and the
+    // isolation assertion below would be vacuously satisfied.
+    let chunk = |content: &str| {
+        vec![MemoryChunkWrite {
+            content: content.to_string(),
+            embedding: None,
+        }]
+    };
+    assert_eq!(
+        repo.replace_document_chunks_if_current(&path_a, &content_sha256(body_a), &chunk(body_a))
+            .await
+            .unwrap(),
+        MemoryChunkReplaceOutcome::Replaced,
+        "seeding scope-A chunks must succeed for the search to have hits"
+    );
+    assert_eq!(
+        repo.replace_document_chunks_if_current(&path_b, &content_sha256(body_b), &chunk(body_b))
+            .await
+            .unwrap(),
+        MemoryChunkReplaceOutcome::Replaced,
+        "seeding scope-B chunks must succeed"
+    );
+
+    let request = MemorySearchRequest::new("needle").expect("valid search request");
+
+    let hits = repo
+        .search_documents(&scope_a, &request)
+        .await
+        .expect("indexed impls must support search");
+
+    // The search must actually return hits — proves we are exercising
+    // the contract, not passing vacuously on an empty result set.
+    assert!(
+        !hits.is_empty(),
+        "scope-A search returned no hits; the test is not exercising \
+         search isolation (chunk seeding may have failed)"
+    );
+    // Every hit must belong to scope A by path...
+    for hit in &hits {
+        assert_eq!(
+            hit.path.scope(),
+            &scope_a,
+            "search_documents leaked a cross-tenant hit: {:?}",
+            hit.path
+        );
+    }
+    // ...and no returned snippet may carry scope B's unique marker. This
+    // is the leak-catching assertion: an impl that queries a
+    // cross-tenant prefix surfaces scope B's "bravo" chunk content even
+    // if it re-stamps the result path to scope A.
+    assert!(
+        hits.iter().all(|hit| !hit.snippet.contains("bravo")),
+        "search_documents leaked scope-B chunk content into scope A: {hits:?}"
+    );
+}
+
+/// Internal: emit the base (search-agnostic) contract arms shared by
+/// [`contract_test!`] and [`contract_test_indexed!`].
+///
+/// This macro is the single source of truth for the round-trip / write
+/// / list contracts. Both public macros invoke it **inside their own
+/// `mod $label` block**, so the base arms are defined exactly once and
+/// cannot drift between the two suites. Each public macro then adds its
+/// own search arm (opt-out vs. real isolation) after this invocation.
+///
+/// Not part of the public API — callers wire suites via
+/// [`contract_test!`] / [`contract_test_indexed!`]. It must be exported
+/// (`#[macro_export]`) so those macros can reach it via `$crate::` when
+/// expanded in downstream test crates.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! contract_test_base {
+    ($factory:expr) => {
+        #[tokio::test]
+        async fn round_trip_returns_written_bytes() {
+            $crate::contract_tests::round_trip_returns_written_bytes($factory).await;
+        }
+
+        #[tokio::test]
+        async fn writes_isolated_across_scopes() {
+            $crate::contract_tests::writes_isolated_across_scopes($factory).await;
+        }
+
+        #[tokio::test]
+        async fn list_documents_honors_scope() {
+            $crate::contract_tests::list_documents_honors_scope($factory).await;
+        }
+    };
 }
 
 /// Wire the standard [`MemoryDocumentRepository`] contract suite for a
@@ -246,6 +383,17 @@ where
 /// or an `Arc<RootFilesystem>` constructed inside the closure) but
 /// must not share writable state across invocations — each contract
 /// gets its own repository instance.
+///
+/// Use [`contract_test!`] for impls that opt out of search (only
+/// implement [`MemoryDocumentRepository`]); use
+/// [`contract_test_indexed!`] for impls that also implement
+/// [`MemoryDocumentIndexRepository`] and therefore serve search — the
+/// latter additionally wires the real (chunk-seeded) search-isolation
+/// contract.
+///
+/// The shared base contracts (round-trip / write / list) come from
+/// [`contract_test_base!`], so adding a base contract there
+/// automatically flows into both suites — no manual sync required.
 #[macro_export]
 macro_rules! contract_test {
     ($label:ident, $factory:expr) => {
@@ -254,21 +402,41 @@ macro_rules! contract_test {
             // contract function name.
             use super::*;
 
-            #[tokio::test]
-            async fn round_trip_returns_written_bytes() {
-                $crate::contract_tests::round_trip_returns_written_bytes($factory).await;
-            }
+            // Shared base contracts (single source of truth).
+            $crate::contract_test_base!($factory);
 
+            // Search arm: this impl opts out of search.
             #[tokio::test]
-            async fn writes_isolated_across_scopes() {
-                $crate::contract_tests::writes_isolated_across_scopes($factory).await;
+            async fn search_documents_unsupported_is_documented() {
+                $crate::contract_tests::search_documents_unsupported_is_documented($factory).await;
             }
+        }
+    };
+}
 
-            #[tokio::test]
-            async fn list_documents_honors_scope() {
-                $crate::contract_tests::list_documents_honors_scope($factory).await;
-            }
+/// Wire the contract suite for an impl that implements both
+/// [`MemoryDocumentRepository`] and [`MemoryDocumentIndexRepository`]
+/// (i.e. an impl that actually serves search).
+///
+/// Expands to the same write/list/round-trip base contracts as
+/// [`contract_test!`] (both share [`contract_test_base!`]), replacing
+/// the opt-out search contract with the real isolation contract
+/// `search_documents_isolated_across_scopes`, which seeds chunk records
+/// in two tenants and asserts a scope-A search returns only scope-A
+/// hits. See the function docs for why chunk seeding is load-bearing
+/// (without it the search returns `Ok([])` and the isolation assertion
+/// is vacuous).
+#[macro_export]
+macro_rules! contract_test_indexed {
+    ($label:ident, $factory:expr) => {
+        mod $label {
+            use super::*;
 
+            // Shared base contracts (single source of truth).
+            $crate::contract_test_base!($factory);
+
+            // Search arm: this impl serves search, so run the real
+            // chunk-seeded cross-scope isolation contract.
             #[tokio::test]
             async fn search_documents_isolated_across_scopes() {
                 $crate::contract_tests::search_documents_isolated_across_scopes($factory).await;

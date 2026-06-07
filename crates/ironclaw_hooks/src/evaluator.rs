@@ -80,10 +80,21 @@ impl PredicateEvaluator {
 
     /// Construct an evaluator over an explicit backend. Crate-internal:
     /// used by tests that need to pre-seed backend state (e.g. saturate a
-    /// per-key window to drive the fail-closed overflow path) and by
-    /// future host wiring that swaps in a durable backend.
+    /// per-key window to drive the fail-closed overflow path).
     #[cfg(test)]
     pub(crate) fn with_backend(backend: Arc<dyn PredicateStateBackend>) -> Self {
+        // Same construction as the production `with_state_backend` seam;
+        // delegate so the two stay in lockstep if construction ever grows.
+        Self::with_state_backend(backend)
+    }
+
+    /// Construct an evaluator over an explicit [`PredicateStateBackend`].
+    ///
+    /// This is the production seam for swapping the default in-memory backend
+    /// for a durable one (Postgres / libSQL, #3933 + follow-ups) without
+    /// changing the evaluator's predicate semantics. The composition layer
+    /// passes the per-tenant backend here when activating the hook framework.
+    pub fn with_state_backend(backend: Arc<dyn PredicateStateBackend>) -> Self {
         Self { backend }
     }
 
@@ -94,27 +105,32 @@ impl PredicateEvaluator {
     }
 
     /// Emit a startup `warn!` flagging that the active backend is the
-    /// in-memory implementation, which has two production limitations
-    /// (henrypark133 HIGH + MED on PR #3635 5-19 review):
+    /// in-memory implementation, whose production limitation is
+    /// process-local replay dedup (henrypark133 HIGH on PR #3635 5-19
+    /// review):
     ///
-    /// 1. Replay dedup is **process-local**: an `event_id` recorded on
-    ///    host A is unknown to host B. A multi-host deployment will
-    ///    double-count and let rate caps drift past `max`.
-    /// 2. The `MAX_HISTORY_KEYS = 8192` LRU is **shared across
-    ///    tenants**: a noisy tenant can evict a quiet tenant's bucket,
-    ///    resetting the quiet tenant's counter.
+    /// Replay dedup is **process-local**: an `event_id` recorded on host
+    /// A is unknown to host B. A multi-host deployment will double-count
+    /// and let rate caps drift past `max`.
     ///
-    /// Hosts that intend to run in multi-host or multi-tenant
-    /// production MUST swap the backend for the durable equivalent
-    /// (Postgres / libSQL, tracked in successor doc
-    /// `03-persistent-counter.md`). Call this at host startup when the
-    /// in-memory backend is active so the limitation is visible in
-    /// operator logs rather than silently in effect.
+    /// Note the in-memory LRU cap is *not* shared across tenants in the
+    /// Reborn composition: that wiring constructs a fresh
+    /// `InMemoryPredicateStateBackend` per tenant, so the cross-tenant
+    /// eviction concern does not apply there. The remaining limitation is
+    /// the multi-host replay-dedup gap above.
+    ///
+    /// Hosts that intend to run in multi-host production MUST swap the
+    /// backend for the durable equivalent (Postgres / libSQL, tracked in
+    /// successor doc `03-persistent-counter.md`). Call this at host
+    /// startup when the in-memory backend is active so the limitation is
+    /// visible in operator logs rather than silently in effect.
     pub fn warn_in_memory_backend_active_in_production(&self) {
         tracing::warn!(
             "predicate evaluator is using the in-memory backend: replay dedup is \
-             process-local and the LRU cap is shared across tenants. \
-             Multi-host or multi-tenant production deployments MUST swap to the \
+             process-local (an event_id recorded on one host is unknown to another, \
+             so multi-host deployments double-count and let rate caps drift past max). \
+             The backend is per-tenant in this composition, so the LRU cap is not \
+             shared across tenants. Multi-host production deployments MUST swap to the \
              durable backend (see crates/ironclaw_hooks/docs/successors/03-persistent-counter.md)."
         );
     }
@@ -197,6 +213,14 @@ impl PredicateEvaluator {
                                 return restrictive_action(on_exceeded);
                             }
                         };
+                        // `max` is the inclusive ceiling on invocations within
+                        // the window: `record_invocation` returns the count
+                        // *including* this invocation, so `count > max` denies
+                        // only the first invocation that would push past the
+                        // cap. With `max = 2` the 1st and 2nd invocations are
+                        // allowed (count 1, 2) and the 3rd is denied (count 3).
+                        // This inclusive-allow / deny-on-overflow semantics is
+                        // pinned by the InvocationCount cap test.
                         if count > *max {
                             restrictive_action(on_exceeded)
                         } else {
