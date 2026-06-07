@@ -633,6 +633,16 @@ where
                     "tool result reference summary is not safe",
                 )
             })?;
+        let model_observation = request
+            .model_observation
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "tool result model observation could not be serialized",
+                )
+            })?;
         let record = self
             .thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
@@ -641,6 +651,7 @@ where
                 turn_run_id: self.run_context.run_id.to_string(),
                 result_ref: request.result_ref.as_str().to_string(),
                 safe_summary,
+                model_observation,
                 provider_call: request
                     .provider_call
                     .map(provider_call_reference_to_envelope),
@@ -1703,8 +1714,8 @@ fn tool_result_content_for_context_message(
     if message.kind != MessageKind::ToolResultReference {
         return Ok(None);
     }
-    let envelope: ToolResultReferenceEnvelope =
-        serde_json::from_str(&message.content).map_err(|error| {
+    let envelope =
+        ToolResultReferenceEnvelope::from_json_str(&message.content).map_err(|error| {
             raw_agent_loop_host_error(
                 "model_context",
                 "decode_tool_result_reference",

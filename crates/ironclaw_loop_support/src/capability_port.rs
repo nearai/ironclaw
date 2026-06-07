@@ -35,7 +35,8 @@ mod provider_validation;
 mod surface_snapshot;
 
 use self::provider_input::{
-    normalize_provider_arguments, prepare_provider_arguments, schema_contains_external_ref,
+    normalize_provider_arguments, prepare_provider_arguments,
+    prepare_provider_arguments_with_detail, schema_contains_external_ref,
 };
 use self::provider_validation::{
     PROVIDER_TOOL_NAME_MAX_BYTES, validate_provider_arguments, validate_provider_tool_call,
@@ -916,6 +917,7 @@ impl HostRuntimeLoopCapabilityPort {
                 return Ok(CapabilityOutcome::Failed(CapabilityFailure {
                     error_kind: CapabilityFailureKind::InvalidInput,
                     safe_summary: error.safe_summary,
+                    detail: None,
                 }));
             }
             Err(error) => return Err(error),
@@ -1214,25 +1216,26 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
             .await?;
-        let input = match prepare_provider_arguments(
+        let input = match prepare_provider_arguments_with_detail(
             &input,
             &capability.parameters_schema,
             "capability input",
         ) {
             Ok(input) => input,
             Err(error)
-                if error.kind == AgentLoopHostErrorKind::InvalidInvocation
+                if error.error.kind == AgentLoopHostErrorKind::InvalidInvocation
                     && is_provider_tool_call_input_ref(&request.input_ref) =>
             {
                 let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
                     error_kind: CapabilityFailureKind::InvalidInput,
-                    safe_summary: error.safe_summary,
+                    safe_summary: error.error.safe_summary,
+                    detail: error.detail,
                 }));
                 guard.commit();
                 self.record_loop_completed(&idempotency_key, result.clone())?;
                 return result;
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.error),
         };
         let input = host_runtime_input_for_capability(&request.capability_id, input)?;
         let invocation_context = invocation_context_from_visible(
@@ -1794,6 +1797,7 @@ async fn runtime_outcome_to_loop(
                     unknown.message,
                     "capability invocation returned an unknown outcome",
                 ),
+                detail: None,
             })
         }
     })
@@ -1854,6 +1858,7 @@ fn runtime_failure_to_loop(
                     &failure,
                     "capability invocation failed",
                 ),
+                detail: None,
             }))
         }
     }
@@ -1875,6 +1880,7 @@ fn runtime_model_visible_failure_to_loop(
     Ok(CapabilityOutcome::Failed(CapabilityFailure {
         error_kind: model_visible_runtime_failure_kind_to_loop(failure.kind)?,
         safe_summary: runtime_failure_safe_summary(&failure, "capability invocation failed"),
+        detail: None,
     }))
 }
 
@@ -3752,7 +3758,8 @@ mod tests {
                 outcome,
                 CapabilityOutcome::Failed(CapabilityFailure {
                     error_kind: CapabilityFailureKind::InvalidInput,
-                    safe_summary
+                    safe_summary,
+                    ..
                 }) if safe_summary == expected_summary
             ));
         }
@@ -3910,7 +3917,8 @@ mod tests {
             outcome,
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary
+                safe_summary,
+                ..
             }) if safe_summary == "capability_info target is not on the visible surface"
         ));
         assert!(
@@ -3972,7 +3980,8 @@ mod tests {
             outcome,
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary
+                safe_summary,
+                ..
             }) if safe_summary == "capability_info target is not on the visible surface"
         ));
         assert!(
@@ -4049,7 +4058,8 @@ mod tests {
             outcome,
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary
+                safe_summary,
+                ..
             }) if safe_summary == "capability_info target is not on the visible surface"
         ));
         assert!(
@@ -4604,13 +4614,28 @@ mod tests {
             .await
             .expect("schema-invalid provider calls should produce a capability failure");
 
-        assert!(matches!(
-            outcome,
-            CapabilityOutcome::Failed(CapabilityFailure {
-                error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary
-            }) if safe_summary.contains("schema validation")
-        ));
+        let CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind,
+            safe_summary,
+            detail,
+        }) = outcome
+        else {
+            panic!("expected schema-invalid provider call to fail");
+        };
+        assert_eq!(error_kind, CapabilityFailureKind::InvalidInput);
+        assert!(safe_summary.contains("schema validation"));
+        let Some(ironclaw_turns::run_profile::CapabilityFailureDetail::InvalidInput { issues }) =
+            detail
+        else {
+            panic!("schema-invalid provider call should include invalid input detail");
+        };
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].path, "message");
+        assert_eq!(
+            issues[0].code,
+            ironclaw_turns::run_profile::CapabilityInputIssueCode::MissingRequired
+        );
+        assert_eq!(issues[0].expected.as_deref(), Some("required field"));
         assert!(
             runtime.take_requests().is_empty(),
             "schema-invalid provider input must not reach the runtime"

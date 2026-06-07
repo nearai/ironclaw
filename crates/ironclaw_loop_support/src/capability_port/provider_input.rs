@@ -1,15 +1,41 @@
-use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind};
+use ironclaw_turns::run_profile::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputIssue,
+    CapabilityInputIssueCode,
+};
 
 pub(super) const MAX_PROVIDER_NORMALIZATION_DEPTH: usize = 32;
+const MAX_PROVIDER_SCHEMA_ISSUES: usize = 3;
 
 pub(super) fn prepare_provider_arguments(
     arguments: &serde_json::Value,
     schema: &serde_json::Value,
     label: &'static str,
 ) -> Result<serde_json::Value, AgentLoopHostError> {
+    prepare_provider_arguments_with_detail(arguments, schema, label).map_err(|error| error.error)
+}
+
+pub(super) fn prepare_provider_arguments_with_detail(
+    arguments: &serde_json::Value,
+    schema: &serde_json::Value,
+    label: &'static str,
+) -> Result<serde_json::Value, ProviderArgumentError> {
     let normalized = normalize_provider_arguments(arguments, schema, label)?;
     validate_provider_arguments_schema(&normalized, schema, label)?;
     Ok(normalized)
+}
+
+pub(super) struct ProviderArgumentError {
+    pub(super) error: AgentLoopHostError,
+    pub(super) detail: Option<CapabilityFailureDetail>,
+}
+
+impl From<AgentLoopHostError> for ProviderArgumentError {
+    fn from(error: AgentLoopHostError) -> Self {
+        Self {
+            error,
+            detail: None,
+        }
+    }
 }
 
 pub(super) fn normalize_provider_arguments(
@@ -106,12 +132,13 @@ fn validate_provider_arguments_schema(
     arguments: &serde_json::Value,
     schema: &serde_json::Value,
     label: &'static str,
-) -> Result<(), AgentLoopHostError> {
+) -> Result<(), ProviderArgumentError> {
     if schema_contains_external_ref(schema, 0) {
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::StaleSurface,
             format!("{label} schema contains an unresolved $ref"),
-        ));
+        )
+        .into());
     }
     let validator = jsonschema::validator_for(schema).map_err(|error| {
         AgentLoopHostError::new(
@@ -119,17 +146,258 @@ fn validate_provider_arguments_schema(
             format!("{label} schema is invalid: {error}"),
         )
     })?;
-    if let Some(error) = validator.iter_errors(arguments).next() {
+    let mut errors = validator
+        .iter_errors(arguments)
+        .take(MAX_PROVIDER_SCHEMA_ISSUES);
+    if let Some(error) = errors.next() {
         let instance_path = safe_schema_path_summary(error.instance_path().as_str());
         let schema_path = safe_schema_path_summary(error.schema_path().as_str());
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!(
-                "{label} failed schema validation at instance path {instance_path} against schema path {schema_path}"
+        let mut issues = validation_error_input_issues(arguments, schema, &error);
+        for error in errors {
+            issues.extend(validation_error_input_issues(arguments, schema, &error));
+            if issues.len() >= MAX_PROVIDER_SCHEMA_ISSUES {
+                issues.truncate(MAX_PROVIDER_SCHEMA_ISSUES);
+                break;
+            }
+        }
+        return Err(ProviderArgumentError {
+            error: AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                format!(
+                    "{label} failed schema validation at instance path {instance_path} against schema path {schema_path}"
+                ),
             ),
-        ));
+            detail: Some(CapabilityFailureDetail::InvalidInput { issues }),
+        });
     }
     Ok(())
+}
+
+fn validation_error_input_issues(
+    arguments: &serde_json::Value,
+    schema: &serde_json::Value,
+    error: &jsonschema::ValidationError<'_>,
+) -> Vec<CapabilityInputIssue> {
+    let schema_path = safe_schema_path_summary(error.schema_path().as_str());
+    let (path, code, expected, received) = match error.kind().keyword() {
+        "required" => return missing_required_issues(arguments, schema, error),
+        "additionalProperties" => return unexpected_field_issues(arguments, schema, error),
+        "type" => (
+            safe_schema_path_summary(error.instance_path().as_str()),
+            CapabilityInputIssueCode::TypeMismatch,
+            expected_type_at_schema_path(schema, error.schema_path().as_str()),
+            Some(json_value_kind(error.instance()).to_string()),
+        ),
+        _ => (
+            safe_schema_path_summary(error.instance_path().as_str()),
+            CapabilityInputIssueCode::InvalidValue,
+            None,
+            None,
+        ),
+    };
+
+    vec![CapabilityInputIssue {
+        path,
+        code,
+        expected,
+        received,
+        schema_path: Some(schema_path),
+    }]
+}
+
+fn missing_required_issues(
+    arguments: &serde_json::Value,
+    schema: &serde_json::Value,
+    error: &jsonschema::ValidationError<'_>,
+) -> Vec<CapabilityInputIssue> {
+    let instance_path = error.instance_path().as_str();
+    let parent_path = safe_schema_path_summary(instance_path);
+    let missing = missing_required_properties(arguments, schema, error);
+    if missing.is_empty() {
+        return vec![missing_required_issue(parent_path)];
+    }
+    missing
+        .into_iter()
+        .take(MAX_PROVIDER_SCHEMA_ISSUES)
+        .map(|property| missing_required_issue(child_schema_path(&parent_path, &property)))
+        .collect()
+}
+
+fn missing_required_issue(path: String) -> CapabilityInputIssue {
+    CapabilityInputIssue {
+        path,
+        code: CapabilityInputIssueCode::MissingRequired,
+        expected: Some("required field".to_string()),
+        received: None,
+        schema_path: Some("required".to_string()),
+    }
+}
+
+fn unexpected_field_issues(
+    arguments: &serde_json::Value,
+    schema: &serde_json::Value,
+    error: &jsonschema::ValidationError<'_>,
+) -> Vec<CapabilityInputIssue> {
+    let instance_path = error.instance_path().as_str();
+    let parent_path = safe_schema_path_summary(instance_path);
+    let schema_path = safe_schema_path_summary(error.schema_path().as_str());
+    let Some(object) = value_at_json_pointer(arguments, instance_path).and_then(|v| v.as_object())
+    else {
+        return vec![invalid_value_issue(parent_path, schema_path)];
+    };
+    let Some(schema_object) =
+        concrete_unexpected_field_parent_schema(schema, error.schema_path().as_str())
+    else {
+        return vec![invalid_value_issue(parent_path, schema_path)];
+    };
+    let properties = schema_object
+        .get("properties")
+        .and_then(serde_json::Value::as_object);
+    let mut issues = object
+        .keys()
+        .filter(|property| !properties.is_some_and(|properties| properties.contains_key(*property)))
+        .take(MAX_PROVIDER_SCHEMA_ISSUES)
+        .map(|property| {
+            unexpected_field_issue(
+                child_schema_path(&parent_path, property),
+                schema_path.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if issues.is_empty() {
+        issues.push(invalid_value_issue(parent_path, schema_path));
+    }
+    issues
+}
+
+fn unexpected_field_issue(path: String, schema_path: String) -> CapabilityInputIssue {
+    CapabilityInputIssue {
+        path,
+        code: CapabilityInputIssueCode::UnexpectedField,
+        expected: Some("declared field".to_string()),
+        received: Some("unexpected field".to_string()),
+        schema_path: Some(schema_path),
+    }
+}
+
+fn invalid_value_issue(path: String, schema_path: String) -> CapabilityInputIssue {
+    CapabilityInputIssue {
+        path,
+        code: CapabilityInputIssueCode::InvalidValue,
+        expected: None,
+        received: None,
+        schema_path: Some(schema_path),
+    }
+}
+
+fn concrete_unexpected_field_parent_schema<'a>(
+    schema: &'a serde_json::Value,
+    schema_path: &str,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    let schema_object = schema_at_keyword_parent(schema, schema_path, "additionalProperties")?;
+    if schema_object.get("additionalProperties") != Some(&serde_json::Value::Bool(false)) {
+        return None;
+    }
+    if schema_object.contains_key("patternProperties")
+        || schema_object.contains_key("propertyNames")
+        || schema_object.contains_key("unevaluatedProperties")
+        || schema_object.contains_key("allOf")
+        || schema_object.contains_key("anyOf")
+        || schema_object.contains_key("oneOf")
+    {
+        return None;
+    }
+    Some(schema_object)
+}
+
+fn missing_required_properties(
+    arguments: &serde_json::Value,
+    schema: &serde_json::Value,
+    error: &jsonschema::ValidationError<'_>,
+) -> Vec<String> {
+    let Some(object) = value_at_json_pointer(arguments, error.instance_path().as_str())
+        .and_then(|v| v.as_object())
+    else {
+        return Vec::new();
+    };
+    let Some(schema_object) =
+        schema_at_keyword_parent(schema, error.schema_path().as_str(), "required")
+    else {
+        return Vec::new();
+    };
+    let Some(required) = schema_object
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    required
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|property| !object.contains_key(*property))
+        .map(scrub_sensitive_schema_path_markers)
+        .collect()
+}
+
+fn schema_at_keyword_parent<'a>(
+    schema: &'a serde_json::Value,
+    schema_path: &str,
+    keyword: &str,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    let suffix = format!("/{keyword}");
+    let parent_path = schema_path.strip_suffix(&suffix).unwrap_or(schema_path);
+    value_at_json_pointer(schema, parent_path)?.as_object()
+}
+
+fn child_schema_path(parent_path: &str, child: &str) -> String {
+    let child = safe_schema_path_summary(child);
+    if parent_path == "root" {
+        child
+    } else {
+        format!("{parent_path}.{child}")
+    }
+}
+
+fn expected_type_at_schema_path(schema: &serde_json::Value, schema_path: &str) -> Option<String> {
+    let type_path = if schema_path.ends_with("/type") {
+        schema_path.to_string()
+    } else {
+        format!("{schema_path}/type")
+    };
+    let schema_type = value_at_json_pointer(schema, &type_path)?;
+    if let Some(expected) = schema_type.as_str() {
+        return Some(expected.to_string());
+    }
+    let expected = schema_type
+        .as_array()?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" or ");
+    (!expected.is_empty()).then_some(expected)
+}
+
+fn value_at_json_pointer<'a>(
+    value: &'a serde_json::Value,
+    pointer: &str,
+) -> Option<&'a serde_json::Value> {
+    if pointer.is_empty() || pointer == "/" {
+        Some(value)
+    } else {
+        value.pointer(pointer)
+    }
+}
+
+fn json_value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 fn safe_schema_path_summary(path: &str) -> String {
@@ -152,7 +420,12 @@ fn scrub_sensitive_schema_path_markers(path: &str) -> String {
         "apikey",
         "password",
         "passwd",
+        "private_key",
+        "private-key",
+        "client_secret",
+        "client-secret",
         "secret",
+        "token",
         "bearer",
         "access_token",
         "access token",

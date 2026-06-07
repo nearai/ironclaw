@@ -5,8 +5,12 @@ use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
         AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityInvocation, CapabilityResultMessage,
-        CapabilitySurfaceVersion, ProviderToolCallReference, VisibleCapabilitySurface,
+        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureDetail, CapabilityInputIssue,
+        CapabilityInputIssueCode, CapabilityInputRepair, CapabilityInvocation,
+        CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion,
+        ModelVisibleToolObservation, ObservationTrust, ProviderToolCallReference,
+        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
+        ToolRecoveryObservation, VisibleCapabilitySurface,
     },
 };
 
@@ -116,6 +120,7 @@ pub(super) async fn append_capability_result_ref(
         result_ref: result.result_ref.clone(),
         safe_summary: result.safe_summary.clone(),
         provider_call: provider_tool_call_reference(call),
+        model_observation: None,
     })
     .await
     .map_err(capability_host_error)?;
@@ -145,9 +150,16 @@ pub(super) async fn append_capability_error_ref(
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
     summary: &CapabilityErrorSummary,
+    model_observation: Option<ModelVisibleToolObservation>,
 ) -> Result<(), AgentLoopExecutorError> {
-    append_capability_safe_summary_ref(host, state, call, summary.safe_summary.as_str().to_string())
-        .await
+    append_capability_safe_summary_ref_with_observation(
+        host,
+        state,
+        call,
+        summary.safe_summary.as_str().to_string(),
+        model_observation,
+    )
+    .await
 }
 
 pub(super) async fn append_capability_safe_summary_ref(
@@ -155,6 +167,16 @@ pub(super) async fn append_capability_safe_summary_ref(
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
     safe_summary: String,
+) -> Result<(), AgentLoopExecutorError> {
+    append_capability_safe_summary_ref_with_observation(host, state, call, safe_summary, None).await
+}
+
+async fn append_capability_safe_summary_ref_with_observation(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+    safe_summary: String,
+    model_observation: Option<ModelVisibleToolObservation>,
 ) -> Result<(), AgentLoopExecutorError> {
     if call.provider_replay.is_none() {
         return Ok(());
@@ -164,11 +186,66 @@ pub(super) async fn append_capability_safe_summary_ref(
         result_ref: result_ref.clone(),
         safe_summary,
         provider_call: provider_tool_call_reference(call),
+        model_observation,
     })
     .await
     .map_err(capability_host_error)?;
     state.result_refs.push(result_ref);
     Ok(())
+}
+
+pub(super) fn model_visible_capability_failure_observation(
+    failure: &CapabilityFailure,
+) -> ModelVisibleToolObservation {
+    match &failure.detail {
+        Some(CapabilityFailureDetail::InvalidInput { issues }) => {
+            invalid_input_observation(issues.clone())
+        }
+        _ => ModelVisibleToolObservation {
+            status: ToolObservationStatus::Error,
+            summary: format!("Capability failed with {}.", failure.error_kind.as_str()),
+            detail: ToolObservationDetail::GenericFailure {
+                failure_kind: failure.error_kind.clone(),
+            },
+            artifacts: Vec::new(),
+            recovery: None,
+            trust: ObservationTrust::UntrustedToolOutput,
+        },
+    }
+}
+
+fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleToolObservation {
+    let repairs = issues.iter().map(input_issue_repair).collect();
+    ModelVisibleToolObservation {
+        status: ToolObservationStatus::Error,
+        summary: "Tool input failed schema validation.".to_string(),
+        detail: ToolObservationDetail::InvalidInput { issues },
+        artifacts: Vec::new(),
+        recovery: Some(ToolRecoveryObservation {
+            same_call_retry: SameCallRetryConstraint::RequiresChangedInput,
+            repairs,
+            recovery_hint: CapabilityRecoveryHint::CorrectArgumentsBeforeRetry,
+        }),
+        trust: ObservationTrust::UntrustedToolOutput,
+    }
+}
+
+fn input_issue_repair(issue: &CapabilityInputIssue) -> CapabilityInputRepair {
+    match issue.code {
+        CapabilityInputIssueCode::MissingRequired => CapabilityInputRepair::ProvideRequiredField {
+            path: issue.path.clone(),
+        },
+        CapabilityInputIssueCode::UnexpectedField => CapabilityInputRepair::RemoveUnexpectedField {
+            path: issue.path.clone(),
+        },
+        CapabilityInputIssueCode::TypeMismatch => CapabilityInputRepair::ChangeType {
+            path: issue.path.clone(),
+            expected: issue.expected.clone(),
+        },
+        CapabilityInputIssueCode::InvalidValue => CapabilityInputRepair::UseAllowedValue {
+            path: issue.path.clone(),
+        },
+    }
 }
 
 pub(super) fn synthetic_provider_error_result_ref(

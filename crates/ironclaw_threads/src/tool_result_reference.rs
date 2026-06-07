@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 // ASCII letters, digits, `_`, `-`, or `.`.
 const MAX_TOOL_RESULT_REF_BYTES: usize = 256;
 const MAX_TOOL_RESULT_SUMMARY_BYTES: usize = 512;
+const MAX_MODEL_OBSERVATION_BYTES: usize = 4096;
 const RAW_PAYLOAD_OR_PATH_DELIMITERS: [char; 9] = ['{', '}', '[', ']', '`', '<', '>', '/', '\\'];
 const SENSITIVE_SUMMARY_MARKERS: [&str; 18] = [
     "access token",
@@ -30,6 +31,35 @@ const SENSITIVE_SUMMARY_MARKERS: [&str; 18] = [
     "tool input",
     "tool_input",
     "traceback",
+];
+const SENSITIVE_OBSERVATION_MARKERS: [&str; 20] = [
+    "access token",
+    "api key",
+    "api_key",
+    "apikey",
+    "authorization:",
+    "bearer ",
+    "client_secret",
+    "host path",
+    "invalid api key",
+    "invalid_api_key",
+    "password",
+    "passwd",
+    "private key",
+    "private_key",
+    "raw credential",
+    "raw runtime",
+    "secret",
+    "stack trace",
+    "traceback",
+    "tool_input",
+];
+const PROMPT_INJECTION_OBSERVATION_MARKERS: [&str; 5] = [
+    "ignore previous instructions",
+    "ignore all previous instructions",
+    "disregard previous instructions",
+    "system prompt",
+    "developer message",
 ];
 
 /// Safe summary text for tool-result transcript references.
@@ -67,6 +97,8 @@ pub struct ToolResultReferenceEnvelope {
     pub version: u32,
     pub result_ref: String,
     pub safe_summary: ToolResultSafeSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,7 +152,41 @@ impl ToolResultReferenceEnvelope {
             version: 1,
             result_ref,
             safe_summary,
+            model_observation: None,
         })
+    }
+
+    pub fn with_model_observation(
+        result_ref: impl Into<String>,
+        safe_summary: ToolResultSafeSummary,
+        model_observation: serde_json::Value,
+    ) -> Result<Self, String> {
+        let mut envelope = Self::new(result_ref, safe_summary)?;
+        validate_model_observation(&model_observation)?;
+        envelope.model_observation = Some(model_observation);
+        Ok(envelope)
+    }
+
+    pub fn from_json_str(value: &str) -> Result<Self, String> {
+        let envelope: Self = serde_json::from_str(value).map_err(|error| error.to_string())?;
+        envelope.validate()?;
+        Ok(envelope)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != 1 {
+            return Err("tool result reference envelope version is unsupported".to_string());
+        }
+        validate_tool_result_ref(&self.result_ref)?;
+        if let Some(model_observation) = self.model_observation.as_ref() {
+            validate_model_observation(model_observation)?;
+        }
+        Ok(())
+    }
+
+    pub fn with_safe_summary(mut self, safe_summary: ToolResultSafeSummary) -> Self {
+        self.safe_summary = safe_summary;
+        self
     }
 }
 
@@ -198,6 +264,69 @@ fn validate_tool_result_safe_summary(value: String) -> Result<String, String> {
         return Err("tool result summary must not contain API-key-like tokens".to_string());
     }
     Ok(value)
+}
+
+fn validate_model_observation(value: &serde_json::Value) -> Result<(), String> {
+    let encoded = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    if encoded.len() > MAX_MODEL_OBSERVATION_BYTES {
+        return Err(format!(
+            "model observation exceeds {MAX_MODEL_OBSERVATION_BYTES} bytes"
+        ));
+    }
+    validate_model_observation_value(value)
+}
+
+fn validate_model_observation_value(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(text) => validate_model_observation_text(text),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                validate_model_observation_value(item)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                validate_model_observation_text(key)?;
+                validate_model_observation_value(value)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Ok(())
+        }
+    }
+}
+
+fn validate_model_observation_text(value: &str) -> Result<(), String> {
+    if value
+        .chars()
+        .any(|character| character == '\0' || character.is_control())
+    {
+        return Err("model observation must not contain NUL/control characters".to_string());
+    }
+    let lower = value.to_ascii_lowercase();
+    for forbidden in SENSITIVE_OBSERVATION_MARKERS {
+        if lower.contains(forbidden) {
+            return Err(format!(
+                "model observation must not contain sensitive marker `{forbidden}`"
+            ));
+        }
+    }
+    for forbidden in PROMPT_INJECTION_OBSERVATION_MARKERS {
+        if lower.contains(forbidden) {
+            return Err(format!(
+                "model observation must not contain instruction marker `{forbidden}`"
+            ));
+        }
+    }
+    if lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .any(|token| token.starts_with("sk-"))
+    {
+        return Err("model observation must not contain API-key-like tokens".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

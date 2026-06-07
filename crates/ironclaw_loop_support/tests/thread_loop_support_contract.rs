@@ -2039,6 +2039,7 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
                 reasoning: Some("provider reasoning".to_string()),
                 signature: Some("sig-1".to_string()),
             }),
+            model_observation: None,
         })
         .await
         .unwrap();
@@ -2047,6 +2048,7 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
             result_ref: result_ref.clone(),
             safe_summary: "retry summary ignored".to_string(),
             provider_call: None,
+            model_observation: None,
         })
         .await
         .unwrap();
@@ -2128,6 +2130,7 @@ async fn transcript_port_rejects_unsafe_tool_result_summary() {
             result_ref: LoopResultRef::new("result:unsafe-tool").unwrap(),
             safe_summary: "raw tool input includes secret".to_string(),
             provider_call: None,
+            model_observation: None,
         })
         .await
         .unwrap_err();
@@ -2598,6 +2601,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
                 reasoning: Some("provider call reasoning".to_string()),
                 signature: Some("sig-1".to_string()),
             }),
+            model_observation: None,
         })
         .await
         .unwrap();
@@ -2700,6 +2704,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
         version: 1,
         result_ref: "result:round-trip".to_string(),
         safe_summary: ToolResultSafeSummary::new("tool result content").unwrap(),
+        model_observation: None,
     };
     let envelope_content = serde_json::to_string(&envelope).unwrap();
     let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {

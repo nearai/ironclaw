@@ -908,8 +908,15 @@ where
         request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let provider_call = request.provider_call;
-        let envelope = ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary)
-            .map_err(SessionThreadError::Serialization)?;
+        let envelope = match request.model_observation {
+            Some(model_observation) => ToolResultReferenceEnvelope::with_model_observation(
+                request.result_ref,
+                request.safe_summary,
+                model_observation,
+            ),
+            None => ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary),
+        }
+        .map_err(SessionThreadError::Serialization)?;
         let existing = self
             .list_thread_messages(&request.scope, &request.thread_id)
             .await?;
@@ -1070,11 +1077,6 @@ where
         &self,
         request: UpdateToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        let envelope =
-            ToolResultReferenceEnvelope::new(request.result_ref.clone(), request.safe_summary)
-                .map_err(SessionThreadError::Serialization)?;
-        let content = serde_json::to_string(&envelope)
-            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
         let existing = self
             .list_thread_messages(&request.scope, &request.thread_id)
             .await?;
@@ -1098,6 +1100,7 @@ where
         let turn_run_id = request.turn_run_id.clone();
         let result_ref = request.result_ref.clone();
         let thread_id_for_error = request.thread_id.clone();
+        let safe_summary = request.safe_summary;
         self.apply_message_update(
             &request.scope,
             &request.thread_id,
@@ -1108,6 +1111,16 @@ where
                         "tool result reference {result_ref} was not found in thread {thread_id_for_error}",
                     )));
                 }
+                let content = message.content.as_deref().ok_or_else(|| {
+                    SessionThreadError::Serialization(
+                        "tool result reference content is missing".to_string(),
+                    )
+                })?;
+                let envelope = ToolResultReferenceEnvelope::from_json_str(content)
+                    .map_err(SessionThreadError::Serialization)?
+                    .with_safe_summary(safe_summary.clone());
+                let content = serde_json::to_string(&envelope)
+                    .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
                 message.content = Some(content.clone());
                 Ok(())
             },
