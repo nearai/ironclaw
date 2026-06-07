@@ -1,4 +1,4 @@
-"""Scenario 3: Skills search, install, and remove lifecycle."""
+"""Scenario 3: Skills search, install, edit, and delete lifecycle."""
 
 import json
 from urllib.parse import unquote, urlparse
@@ -25,10 +25,13 @@ MOCK_INSTALLED_SKILL = {
     "version": "1.0.0",
     "trust": "Installed",
     "source": "Installed",
+    "source_kind": "installed",
     "keywords": ["markdown", "e2e"],
     "usage_hint": "Type `/markdown-helper` in chat to force-activate this skill.",
     "has_requirements": False,
     "has_scripts": False,
+    "can_edit": True,
+    "can_delete": True,
 }
 
 
@@ -50,6 +53,7 @@ async def mock_skills_api(page):
     """
     installed = []
     install_requests = []
+    update_requests = []
 
     async def fulfill_json(route, payload):
         await route.fulfill(
@@ -94,6 +98,35 @@ async def mock_skills_api(page):
             )
             return
 
+        if path.startswith("/api/skills/") and request.method == "GET":
+            name = unquote(path.removeprefix("/api/skills/"))
+            await fulfill_json(
+                route,
+                {
+                    "name": name,
+                    "content": (
+                        f"---\nname: {name}\ndescription: Deterministic E2E skill for "
+                        "markdown workflows.\n---\n\n# Markdown Helper\n"
+                    ),
+                },
+            )
+            return
+
+        if path.startswith("/api/skills/") and request.method == "PUT":
+            name = unquote(path.removeprefix("/api/skills/"))
+            update_requests.append(
+                {
+                    "name": name,
+                    "headers": request.headers,
+                    "body": json.loads(request.post_data or "{}"),
+                }
+            )
+            await fulfill_json(
+                route,
+                {"success": True, "message": f"Skill '{name}' updated"},
+            )
+            return
+
         if path.startswith("/api/skills/") and request.method == "DELETE":
             name = unquote(path.removeprefix("/api/skills/"))
             installed = [skill for skill in installed if skill["name"] != name]
@@ -106,7 +139,7 @@ async def mock_skills_api(page):
         await route.continue_()
 
     await page.route("**/api/skills**", handle)
-    return {"install_requests": install_requests}
+    return {"install_requests": install_requests, "update_requests": update_requests}
 
 
 async def test_skills_tab_visible(page):
@@ -134,8 +167,8 @@ async def test_skills_search(page):
     assert "Markdown Helper" in await results.first.inner_text()
 
 
-async def test_skills_install_and_remove(page):
-    """Install a mocked catalog skill from search results, then remove it."""
+async def test_skills_install_and_delete(page):
+    """Install a mocked catalog skill from search results, then delete it."""
     mock_api = await mock_skills_api(page)
     await go_to_skills(page)
 
@@ -165,9 +198,9 @@ async def test_skills_install_and_remove(page):
     assert installed_count >= 1, "Skill should appear in installed list after install"
     assert "markdown-helper" in await installed.first.inner_text()
 
-    remove_btn = installed.first.locator("button", has_text="Remove")
-    assert await remove_btn.count() == 1, "Installed mocked skill should be removable"
-    await remove_btn.click()
+    delete_btn = installed.first.locator("button", has_text="Delete")
+    assert await delete_btn.count() == 1, "Installed mocked skill should be deletable"
+    await delete_btn.click()
 
     confirm_btn = page.locator(SEL["confirm_modal_btn"])
     await confirm_btn.wait_for(state="visible", timeout=5000)
@@ -178,3 +211,45 @@ async def test_skills_install_and_remove(page):
         arg=SEL["skill_installed"],
         timeout=5000,
     )
+
+
+async def test_skills_edit_user_managed_skill(page):
+    """Edit a mocked user-managed skill through the real Settings UI flow."""
+    mock_api = await mock_skills_api(page)
+    await go_to_skills(page)
+
+    search_input = page.locator(SEL["skill_search_input"])
+    await search_input.fill("markdown")
+    await search_input.press("Enter")
+
+    results = page.locator(SEL["skill_search_result"])
+    await results.first.wait_for(state="visible", timeout=5000)
+    await results.first.locator("button", has_text="Install").click()
+
+    installed = page.locator(SEL["skill_installed"])
+    await installed.first.wait_for(state="visible", timeout=5000)
+
+    async with page.expect_response(
+        lambda r: "/api/skills/markdown-helper" in r.url and r.request.method == "GET"
+    ) as content_response:
+        await installed.first.locator("button", has_text="Edit").click()
+    response = await content_response.value
+    assert response.ok
+
+    editor = installed.first.locator("textarea")
+    await editor.wait_for(state="visible", timeout=5000)
+    await editor.fill(
+        "---\nname: markdown-helper\ndescription: Updated E2E skill\n---\n\n# Updated\n"
+    )
+
+    async with page.expect_response(
+        lambda r: "/api/skills/markdown-helper" in r.url and r.request.method == "PUT"
+    ) as update_response:
+        await installed.first.locator("button", has_text="Save").click()
+    response = await update_response.value
+    assert response.ok
+
+    assert len(mock_api["update_requests"]) == 1
+    update = mock_api["update_requests"][0]
+    assert update["headers"].get("x-confirm-action") == "true"
+    assert "Updated E2E skill" in update["body"]["content"]

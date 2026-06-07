@@ -12,16 +12,19 @@ export function SkillsTab({ searchQuery = "" }) {
   const {
     skills,
     query,
+    fetchSkillContent,
     installSkill,
     removeSkill,
+    updateSkill,
     isInstalling,
     isRemoving,
+    isUpdating,
   } = useSkills();
   const [actionError, setActionError] = React.useState("");
   const [actionResult, setActionResult] = React.useState("");
 
   const handleRemove = React.useCallback(async (name) => {
-    if (!window.confirm(t("skills.confirmRemove", { name }))) return;
+    if (!window.confirm(t("skills.confirmDelete", { name }))) return;
     setActionError("");
     setActionResult("");
     try {
@@ -35,6 +38,29 @@ export function SkillsTab({ searchQuery = "" }) {
       setActionError(err.message || t("skills.removeFailed"));
     }
   }, [removeSkill, t]);
+
+  const handleUpdate = React.useCallback(async (name, content) => {
+    if (!content.trim()) {
+      setActionError(t("skills.contentRequired"));
+      setActionResult("");
+      return { success: false, message: t("skills.contentRequired") };
+    }
+    setActionError("");
+    setActionResult("");
+    try {
+      const response = await updateSkill({ name, content });
+      if (!response?.success) {
+        setActionError(response?.message || t("skills.updateFailed"));
+        return response;
+      }
+      setActionResult(response.message || t("skills.updated", { name }));
+      return response;
+    } catch (err) {
+      const message = err.message || t("skills.updateFailed");
+      setActionError(message);
+      return { success: false, message };
+    }
+  }, [t, updateSkill]);
 
   if (query.isLoading) {
     return html`
@@ -74,9 +100,12 @@ export function SkillsTab({ searchQuery = "" }) {
       skill.description,
       skill.keywords,
       skill.trust_level,
+      skill.source_kind,
       skill.version,
     ])
   );
+
+  const skillGroups = groupSkills(filteredSkills);
 
   if (skills.length === 0) {
     return html`
@@ -105,23 +134,68 @@ export function SkillsTab({ searchQuery = "" }) {
     <div className="space-y-4">
       <${SkillInstallPanel} onInstall=${installSkill} isInstalling=${isInstalling} />
       <${SkillActionResult} error=${actionError} result=${actionResult} />
-      <${Card} padding="md">
-        <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
-          ${t("skills.installed")}
-        </h3>
-        ${filteredSkills.map(
-          (skill) => html`
-            <${SkillCard}
-              key=${skill.name || skill.id}
-              skill=${skill}
-              onRemove=${handleRemove}
-              isRemoving=${isRemoving}
-            />
-          `
-        )}
-      <//>
+      ${skillGroups.map(
+        (group) => html`
+          <${SkillGroup}
+            key=${group.id}
+            title=${t(group.labelKey)}
+            skills=${group.skills}
+            onEdit=${fetchSkillContent}
+            onRemove=${handleRemove}
+            onUpdate=${handleUpdate}
+            isRemoving=${isRemoving}
+            isUpdating=${isUpdating}
+          />
+        `
+      )}
     </div>
   `;
+}
+
+function SkillGroup({ title, skills, onEdit, onRemove, onUpdate, isRemoving, isUpdating }) {
+  if (skills.length === 0) return null;
+  return html`
+    <${Card} padding="md">
+      <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
+        ${title}
+      </h3>
+      ${skills.map(
+        (skill) => html`
+          <${SkillCard}
+            key=${`${skill.source_kind || "skill"}:${skill.name || skill.id}`}
+            skill=${skill}
+            onEdit=${onEdit}
+            onRemove=${onRemove}
+            onUpdate=${onUpdate}
+            isRemoving=${isRemoving}
+            isUpdating=${isUpdating}
+          />
+        `
+      )}
+    <//>
+  `;
+}
+
+function groupSkills(skills) {
+  const groups = [
+    { id: "user", labelKey: "skills.group.user", skills: [] },
+    { id: "system", labelKey: "skills.group.system", skills: [] },
+    { id: "workspace", labelKey: "skills.group.workspace", skills: [] },
+  ];
+  const fallback = groups[0];
+
+  for (const skill of skills) {
+    const sourceKind = skill.source_kind || "";
+    const group =
+      sourceKind === "system"
+        ? groups[1]
+        : sourceKind === "workspace"
+          ? groups[2]
+          : fallback;
+    group.skills.push(skill);
+  }
+
+  return groups.filter((group) => group.skills.length > 0);
 }
 
 function SkillActionResult({ error, result }) {
