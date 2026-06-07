@@ -829,6 +829,16 @@ impl RebornRuntime {
         self.projection_services.webui_event_stream()
     }
 
+    pub(crate) fn webui_skill_management_owner(&self) -> (TenantId, UserId) {
+        (
+            self.thread_scope.tenant_id.clone(),
+            self.thread_scope
+                .owner_user_id
+                .clone()
+                .unwrap_or_else(|| self.actor_user_id.clone()),
+        )
+    }
+
     pub(crate) fn webui_approval_interaction_service(&self) -> Arc<dyn ApprovalInteractionService> {
         self.approval_interaction_service.clone()
     }

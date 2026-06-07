@@ -4,7 +4,8 @@ use crate::local_dev_mounts::skill_management_mount_view;
 use async_trait::async_trait;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::{
-    HostPath, InvocationId, MountView, ResourceScope, RuntimeHttpEgress, UserId, VirtualPath,
+    HostApiError, HostPath, InvocationId, MountView, ResourceScope, RuntimeHttpEgress, UserId,
+    VirtualPath,
 };
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
@@ -22,32 +23,58 @@ use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 
+type SkillManagementMountResolver =
+    dyn Fn(&ResourceScope) -> Result<MountView, HostApiError> + Send + Sync;
+
 #[derive(Clone)]
 pub(crate) struct RebornLocalSkillManagementPort {
     owner_user_id: UserId,
     filesystem: Arc<dyn RootFilesystem>,
-    skill_management_mounts: MountView,
+    skill_management_mount_resolver: Arc<SkillManagementMountResolver>,
 }
 
 impl RebornLocalSkillManagementPort {
+    #[cfg(test)]
     pub(crate) fn new(
         owner_user_id: UserId,
         filesystem: Arc<dyn RootFilesystem>,
         skill_management_mounts: MountView,
     ) -> Self {
+        let resolver = Arc::new(move |_scope: &ResourceScope| Ok(skill_management_mounts.clone()));
+        Self::new_with_mount_resolver(owner_user_id, filesystem, resolver)
+    }
+
+    pub(crate) fn new_with_mount_resolver(
+        owner_user_id: UserId,
+        filesystem: Arc<dyn RootFilesystem>,
+        skill_management_mount_resolver: Arc<SkillManagementMountResolver>,
+    ) -> Self {
         Self {
             owner_user_id,
             filesystem,
-            skill_management_mounts,
+            skill_management_mount_resolver,
         }
     }
 
+    pub(crate) fn owner_scope(&self) -> Result<ResourceScope, RebornLocalSkillManagementError> {
+        ResourceScope::local_default(self.owner_user_id.clone(), InvocationId::new())
+            .map_err(invalid_skill_context)
+    }
+
     fn skill_context(&self) -> Result<SkillManagementContext, RebornLocalSkillManagementError> {
-        let scope = ResourceScope::local_default(self.owner_user_id.clone(), InvocationId::new())
-            .map_err(invalid_skill_context)?;
+        let scope = self.owner_scope()?;
+        self.skill_context_for_scope(scope)
+    }
+
+    fn skill_context_for_scope(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<SkillManagementContext, RebornLocalSkillManagementError> {
+        let mounts =
+            (self.skill_management_mount_resolver)(&scope).map_err(invalid_skill_context)?;
         Ok(SkillManagementContext::new(
             self.filesystem.clone(),
-            self.skill_management_mounts.clone(),
+            mounts,
             scope,
         ))
     }
@@ -56,6 +83,14 @@ impl RebornLocalSkillManagementPort {
         &self,
     ) -> Result<Vec<ironclaw_skills::SkillSummary>, RebornLocalSkillManagementError> {
         let context = self.skill_context()?;
+        Ok(list_skills(&context).await?)
+    }
+
+    pub(crate) async fn list_for_scope(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<Vec<ironclaw_skills::SkillSummary>, RebornLocalSkillManagementError> {
+        let context = self.skill_context_for_scope(scope)?;
         Ok(list_skills(&context).await?)
     }
 
@@ -68,20 +103,32 @@ impl RebornLocalSkillManagementPort {
         Ok(search_skills(&context, SkillSearchRequest { query, limit }).await?)
     }
 
-    pub(crate) async fn read_content(
+    pub(crate) async fn search_for_scope(
         &self,
+        scope: ResourceScope,
+        query: &str,
+        limit: usize,
+    ) -> Result<ironclaw_skills::SkillSearchResult, RebornLocalSkillManagementError> {
+        let context = self.skill_context_for_scope(scope)?;
+        Ok(search_skills(&context, SkillSearchRequest { query, limit }).await?)
+    }
+
+    pub(crate) async fn read_content_for_scope(
+        &self,
+        scope: ResourceScope,
         name: &str,
     ) -> Result<ironclaw_skills::SkillContentResult, RebornLocalSkillManagementError> {
-        let context = self.skill_context()?;
+        let context = self.skill_context_for_scope(scope)?;
         Ok(read_skill_content(&context, ironclaw_skills::SkillContentRequest { name }).await?)
     }
 
-    pub(crate) async fn update(
+    pub(crate) async fn update_for_scope(
         &self,
+        scope: ResourceScope,
         name: &str,
         content: &str,
     ) -> Result<ironclaw_skills::SkillUpdateResult, RebornLocalSkillManagementError> {
-        let context = self.skill_context()?;
+        let context = self.skill_context_for_scope(scope)?;
         Ok(update_skill(&context, SkillUpdateRequest { name, content }).await?)
     }
 
@@ -104,11 +151,40 @@ impl RebornLocalSkillManagementPort {
         .await?)
     }
 
+    pub(crate) async fn install_for_scope(
+        &self,
+        scope: ResourceScope,
+        name: Option<&str>,
+        content: &str,
+    ) -> Result<ironclaw_skills::SkillInstallResult, RebornLocalSkillManagementError> {
+        let context = self.skill_context_for_scope(scope)?;
+        Ok(install_skill(
+            &context,
+            SkillInstallRequest {
+                name,
+                content,
+                files: &[],
+                source: SkillInstallSource::User,
+                source_url: None,
+            },
+        )
+        .await?)
+    }
+
     pub(crate) async fn remove(
         &self,
         name: &str,
     ) -> Result<ironclaw_skills::SkillRemoveResult, RebornLocalSkillManagementError> {
         let context = self.skill_context()?;
+        Ok(remove_skill(&context, SkillRemoveRequest { name }).await?)
+    }
+
+    pub(crate) async fn remove_for_scope(
+        &self,
+        scope: ResourceScope,
+        name: &str,
+    ) -> Result<ironclaw_skills::SkillRemoveResult, RebornLocalSkillManagementError> {
+        let context = self.skill_context_for_scope(scope)?;
         Ok(remove_skill(&context, SkillRemoveRequest { name }).await?)
     }
 }
@@ -138,12 +214,16 @@ where
         skill_management_mount_view().map_err(|error| crate::RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
+    let mount_resolver: Arc<SkillManagementMountResolver> =
+        Arc::new(move |_scope: &ResourceScope| Ok(skill_management_mounts.clone()));
     let filesystem: Arc<dyn RootFilesystem> = filesystem;
-    Ok(Arc::new(RebornLocalSkillManagementPort::new(
-        owner_user_id,
-        filesystem,
-        skill_management_mounts,
-    )))
+    Ok(Arc::new(
+        RebornLocalSkillManagementPort::new_with_mount_resolver(
+            owner_user_id,
+            filesystem,
+            mount_resolver,
+        ),
+    ))
 }
 
 pub(crate) fn build_existing_local_dev_skill_management_port(

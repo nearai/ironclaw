@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, RebornServices as ProductRebornServices, RebornServicesApi,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind, SkillsProductFacade,
+    WebUiAuthenticatedCaller,
 };
 
 use crate::{
@@ -116,8 +118,11 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
         }
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
+        let (owner_tenant_id, owner_user_id) = runtime.webui_skill_management_owner();
         api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
             local_runtime.skill_management.clone(),
+            owner_tenant_id,
+            owner_user_id,
         )));
     }
     if let Some(product_auth) = &services.product_auth {
@@ -161,11 +166,36 @@ pub(crate) fn build_webui_services_with_connectable_channels(
 
 struct LocalSkillsProductFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
+    owner_tenant_id: TenantId,
+    owner_user_id: UserId,
 }
 
 impl LocalSkillsProductFacade {
-    fn new(skill_management: Arc<RebornLocalSkillManagementPort>) -> Self {
-        Self { skill_management }
+    fn new(
+        skill_management: Arc<RebornLocalSkillManagementPort>,
+        owner_tenant_id: TenantId,
+        owner_user_id: UserId,
+    ) -> Self {
+        Self {
+            skill_management,
+            owner_tenant_id,
+            owner_user_id,
+        }
+    }
+
+    fn can_manage_user_skills(&self, caller: &WebUiAuthenticatedCaller) -> bool {
+        caller.tenant_id == self.owner_tenant_id && caller.user_id == self.owner_user_id
+    }
+
+    fn ensure_can_manage_user_skills(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<(), RebornServicesError> {
+        if self.can_manage_user_skills(caller) {
+            Ok(())
+        } else {
+            Err(skill_management_access_denied())
+        }
     }
 }
 
@@ -173,29 +203,40 @@ impl LocalSkillsProductFacade {
 impl SkillsProductFacade for LocalSkillsProductFacade {
     async fn list_skills(
         &self,
-        _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        let skills = self
+        let can_manage_user_skills = self.can_manage_user_skills(&caller);
+        let scope = caller_skill_scope(caller);
+        let mut skills = self
             .skill_management
-            .list()
+            .list_for_scope(scope)
             .await
             .map_err(map_skill_management_error)?;
+        if !can_manage_user_skills {
+            skills.retain(|skill| skill.source == ironclaw_skills::ManagedSkillSource::System);
+        }
         Ok(skill_list_response(skills))
     }
 
     async fn search_skills(
         &self,
-        _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
         query: String,
     ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        let can_manage_user_skills = self.can_manage_user_skills(&caller);
+        let scope = caller_skill_scope(caller);
         let result = self
             .skill_management
-            .search(&query, 50)
+            .search_for_scope(scope, &query, 50)
             .await
             .map_err(map_skill_management_error)?;
+        let mut installed = result.skills;
+        if !can_manage_user_skills {
+            installed.retain(|skill| skill.source == ironclaw_skills::ManagedSkillSource::System);
+        }
         Ok(RebornSkillSearchResponse {
             catalog: Vec::new(),
-            installed: result.skills.into_iter().map(skill_info).collect(),
+            installed: installed.into_iter().map(skill_info).collect(),
             registry_url: String::new(),
             catalog_error: result
                 .truncated
@@ -205,14 +246,16 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
 
     async fn install_skill(
         &self,
-        _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
         name: String,
         content: Option<String>,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.ensure_can_manage_user_skills(&caller)?;
+        let scope = caller_skill_scope(caller);
         let content = content.ok_or_else(invalid_skill_request)?;
         let installed = self
             .skill_management
-            .install(Some(&name), &content)
+            .install_for_scope(scope, Some(&name), &content)
             .await
             .map_err(map_skill_management_error)?;
         Ok(RebornSkillActionResponse {
@@ -223,12 +266,14 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
 
     async fn read_skill_content(
         &self,
-        _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
         name: String,
     ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        self.ensure_can_manage_user_skills(&caller)?;
+        let scope = caller_skill_scope(caller);
         let content = self
             .skill_management
-            .read_content(&name)
+            .read_content_for_scope(scope, &name)
             .await
             .map_err(map_skill_management_error)?;
         Ok(RebornSkillContentResponse {
@@ -239,13 +284,15 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
 
     async fn update_skill(
         &self,
-        _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
         name: String,
         content: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.ensure_can_manage_user_skills(&caller)?;
+        let scope = caller_skill_scope(caller);
         let updated = self
             .skill_management
-            .update(&name, &content)
+            .update_for_scope(scope, &name, &content)
             .await
             .map_err(map_skill_management_error)?;
         Ok(RebornSkillActionResponse {
@@ -256,18 +303,32 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
 
     async fn remove_skill(
         &self,
-        _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
         name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.ensure_can_manage_user_skills(&caller)?;
+        let scope = caller_skill_scope(caller);
         let removed = self
             .skill_management
-            .remove(&name)
+            .remove_for_scope(scope, &name)
             .await
             .map_err(map_skill_management_error)?;
         Ok(RebornSkillActionResponse {
             success: true,
             message: format!("Skill '{}' removed", removed.name),
         })
+    }
+}
+
+fn caller_skill_scope(caller: WebUiAuthenticatedCaller) -> ResourceScope {
+    ResourceScope {
+        tenant_id: caller.tenant_id,
+        user_id: caller.user_id,
+        agent_id: caller.agent_id,
+        project_id: caller.project_id,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
     }
 }
 
@@ -373,5 +434,141 @@ fn internal_skill_error() -> RebornServicesError {
         retryable: false,
         field: None,
         validation_code: None,
+    }
+}
+
+fn skill_management_access_denied() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_host_api::{
+        HostPath, MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId,
+        VirtualPath,
+    };
+
+    #[tokio::test]
+    async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(&storage_root).expect("storage root");
+        std::fs::create_dir_all(storage_root.join("system/skills/system-helper"))
+            .expect("system skill dir");
+        std::fs::write(
+            storage_root.join("system/skills/system-helper/SKILL.md"),
+            skill_content("system-helper", "system skill"),
+        )
+        .expect("system skill");
+
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
+        let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
+            UserId::new("runtime-owner").expect("user"),
+            filesystem,
+            Arc::new(fixed_skill_mounts),
+        ));
+        let facade = LocalSkillsProductFacade::new(
+            skill_management,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            UserId::new("runtime-owner").expect("user"),
+        );
+        let owner = caller("runtime-owner");
+        let bob = caller("bob");
+        let other_tenant_owner = caller_in_tenant("tenant-beta", "runtime-owner");
+
+        facade
+            .install_skill(
+                owner.clone(),
+                "shared-name".to_string(),
+                Some(skill_content("shared-name", "alice skill")),
+            )
+            .await
+            .expect("owner installs skill");
+
+        let owner_skills = facade
+            .list_skills(owner)
+            .await
+            .expect("owner lists skills")
+            .skills;
+        assert!(owner_skills.iter().any(|skill| skill.name == "shared-name"));
+        let bob_skills = facade
+            .list_skills(bob.clone())
+            .await
+            .expect("bob lists skills")
+            .skills;
+        assert!(!bob_skills.iter().any(|skill| skill.name == "shared-name"));
+        assert!(bob_skills.iter().any(|skill| skill.name == "system-helper"));
+        let other_tenant_skills = facade
+            .list_skills(other_tenant_owner.clone())
+            .await
+            .expect("same user id in another tenant lists skills")
+            .skills;
+        assert!(
+            !other_tenant_skills
+                .iter()
+                .any(|skill| skill.name == "shared-name")
+        );
+
+        let bob_read = facade
+            .read_skill_content(bob, "shared-name".to_string())
+            .await
+            .expect_err("bob must not read the owner skill root");
+        assert_eq!(bob_read.status_code, 403);
+        let other_tenant_read = facade
+            .read_skill_content(other_tenant_owner, "shared-name".to_string())
+            .await
+            .expect_err("same user id in another tenant must not read the owner skill root");
+        assert_eq!(other_tenant_read.status_code, 403);
+        assert!(storage_root.join("skills/shared-name/SKILL.md").exists());
+    }
+
+    fn caller(user_id: &str) -> WebUiAuthenticatedCaller {
+        caller_in_tenant("tenant-alpha", user_id)
+    }
+
+    fn caller_in_tenant(tenant_id: &str, user_id: &str) -> WebUiAuthenticatedCaller {
+        WebUiAuthenticatedCaller::new(
+            TenantId::new(tenant_id).expect("tenant"),
+            UserId::new(user_id).expect("user"),
+            None,
+            None,
+        )
+    }
+
+    fn fixed_skill_mounts(
+        _scope: &ResourceScope,
+    ) -> Result<MountView, ironclaw_host_api::HostApiError> {
+        MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/skills")?,
+                VirtualPath::new("/projects/skills")?,
+                MountPermissions::read_write_list_delete(),
+            ),
+            MountGrant::new(
+                MountAlias::new("/system/skills")?,
+                VirtualPath::new("/projects/system/skills")?,
+                MountPermissions::read_only(),
+            ),
+        ])
+    }
+
+    fn skill_content(name: &str, description: &str) -> String {
+        format!("---\nname: {name}\ndescription: {description}\n---\nUse this skill.\n")
     }
 }

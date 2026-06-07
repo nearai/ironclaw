@@ -66,7 +66,11 @@ fn skill_is_user_managed(source: &ironclaw_skills::types::SkillSource) -> bool {
 }
 
 fn skill_can_delete(source: &ironclaw_skills::types::SkillSource) -> bool {
-    matches!(source, ironclaw_skills::types::SkillSource::Installed(_))
+    matches!(
+        source,
+        ironclaw_skills::types::SkillSource::User(_)
+            | ironclaw_skills::types::SkillSource::Installed(_)
+    )
 }
 
 fn skill_registry_error_response(
@@ -446,7 +450,6 @@ pub async fn skills_get_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<SkillContentResponse>, (StatusCode, String)> {
-    let _mutation_guard = skill_mutation_guard(&state, &user).await?;
     let scoped_registry = scoped_skill_registry(&state, &user).await?;
 
     let (skill_path, _, _) = scoped_registry

@@ -131,6 +131,28 @@ async fn skill_info_hides_management_controls_when_skill_is_not_manageable() {
     assert!(!info.can_delete);
 }
 
+#[tokio::test]
+async fn skill_info_allows_delete_for_user_managed_skill() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let skill_dir = dir.path().join("user-skill");
+    std::fs::create_dir(&skill_dir).expect("skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: user-skill\ndescription: User\n---\n\nUser prompt.\n",
+    )
+    .expect("skill file");
+
+    let mut registry = ironclaw_skills::SkillRegistry::new(dir.path().to_path_buf());
+    registry.discover_all().await;
+    let skill = registry.find_by_name("user-skill").expect("skill").clone();
+
+    let info = super::skill_info(skill, true).await;
+
+    assert_eq!(info.source_kind, SkillSourceKind::User);
+    assert!(info.can_edit);
+    assert!(info.can_delete);
+}
+
 #[test]
 fn skill_source_kind_serializes_as_snake_case_wire_value() {
     assert_eq!(
@@ -344,7 +366,7 @@ async fn skills_get_handler_reads_editable_skill_content() {
 }
 
 #[tokio::test]
-async fn skills_remove_handler_deletes_installed_skill_and_rejects_user_skill() {
+async fn skills_remove_handler_deletes_user_managed_skills() {
     let (state, dir) = state_with_installed_skill(
         "---\nname: installed-skill\ndescription: Installed\n---\n\nInstalled prompt.\n",
     )
@@ -373,17 +395,20 @@ async fn skills_remove_handler_deletes_installed_skill_and_rejects_user_skill() 
     let mut headers = HeaderMap::new();
     headers.insert("x-confirm-action", "true".parse().expect("header value"));
 
-    let err = super::skills_remove_handler(
-        State(state),
+    let Json(response) = super::skills_remove_handler(
+        State(Arc::clone(&state)),
         test_user(),
         headers,
         AxumPath("editable-skill".to_string()),
     )
     .await
-    .expect_err("user-placed skill removal should fail");
+    .expect("remove user skill");
 
-    assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
-    assert!(dir.path().join("editable-skill/SKILL.md").exists());
+    assert!(response.success);
+    assert!(!dir.path().join("editable-skill").exists());
+    let registry = state.skill_registry.as_ref().expect("registry");
+    let guard = registry.read().expect("registry read");
+    assert!(guard.find_by_name("editable-skill").is_none());
 }
 
 #[tokio::test]

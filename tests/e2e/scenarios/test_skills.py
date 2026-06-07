@@ -183,6 +183,35 @@ async def test_skills_add_and_delete(page):
     )
 
 
+async def test_reborn_skills_delete_uses_native_confirm_dialog(page):
+    """Reborn Skills settings delete confirms before calling the v2 endpoint."""
+    await mock_skills_api(page, initial_skills=[MOCK_INSTALLED_SKILL])
+    await go_to_skills(page)
+
+    installed = page.locator(SEL["skill_installed"]).filter(has_text="markdown-helper")
+    await installed.first.wait_for(state="visible", timeout=5000)
+
+    async with page.expect_dialog() as dialog_info:
+        await installed.first.locator("button", has_text="Delete").click()
+    dialog = await dialog_info.value
+    assert dialog.type == "confirm"
+    assert "markdown-helper" in dialog.message
+
+    async with page.expect_response(
+        lambda r: "/api/webchat/v2/skills/markdown-helper" in r.url
+        and r.request.method == "DELETE"
+    ) as delete_response:
+        await dialog.accept()
+    response = await delete_response.value
+    assert response.ok
+
+    await page.wait_for_function(
+        """(selector) => document.querySelectorAll(selector).length === 0""",
+        arg=SEL["skill_installed"],
+        timeout=5000,
+    )
+
+
 async def test_skills_edit_user_managed_skill(page):
     """Edit a mocked user-managed skill through the real Settings UI flow."""
     mock_api = await mock_skills_api(page)

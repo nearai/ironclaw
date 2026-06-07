@@ -1,4 +1,9 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
 
 use axum::http::StatusCode;
 use sha2::{Digest, Sha256};
@@ -8,10 +13,28 @@ use crate::channels::web::platform::state::GatewayState;
 
 type HandlerResult<T> = Result<T, (StatusCode, String)>;
 type RegistryResult<T> = Result<T, ironclaw_skills::SkillRegistryError>;
+type SharedSkillRegistry = Arc<RwLock<ironclaw_skills::SkillRegistry>>;
+
+const SCOPED_REGISTRY_CACHE_TTL: Duration = Duration::from_secs(30);
+
+static SCOPED_SKILL_REGISTRIES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<ScopedSkillRegistryCacheKey, CachedScopedSkillRegistry>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ScopedSkillRegistryCacheKey {
+    template_ptr: usize,
+    user_segment: String,
+}
+
+struct CachedScopedSkillRegistry {
+    registry: SharedSkillRegistry,
+    discovered_at: Instant,
+}
 
 pub(super) enum ScopedSkillRegistry {
-    Shared(Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>),
-    User(ironclaw_skills::SkillRegistry),
+    Shared(SharedSkillRegistry),
+    User(SharedSkillRegistry),
 }
 
 pub(super) async fn scoped_skill_registry(
@@ -27,12 +50,76 @@ pub(super) async fn scoped_skill_registry(
         return Ok(ScopedSkillRegistry::Shared(registry));
     }
 
+    Ok(ScopedSkillRegistry::User(
+        cached_scoped_registry(&registry, user).await?,
+    ))
+}
+
+async fn cached_scoped_registry(
+    template: &SharedSkillRegistry,
+    user: &UserIdentity,
+) -> HandlerResult<SharedSkillRegistry> {
+    let segment = scoped_user_skills_segment(&user.user_id);
+    let key = ScopedSkillRegistryCacheKey {
+        template_ptr: Arc::as_ptr(template) as usize,
+        user_segment: segment.clone(),
+    };
+    let now = Instant::now();
+    if let Some(registry) = cached_registry(&key, now)? {
+        return Ok(registry);
+    }
+
     let mut scoped = {
-        let guard = registry.read().map_err(lock_error_response)?;
-        scoped_registry_from_template(&guard, user)
+        let guard = template.read().map_err(lock_error_response)?;
+        scoped_registry_from_template(&guard, &segment)
     };
     scoped.discover_all().await;
-    Ok(ScopedSkillRegistry::User(scoped))
+    let scoped = Arc::new(RwLock::new(scoped));
+    cache_registry(key, Arc::clone(&scoped), now)?;
+    Ok(scoped)
+}
+
+fn cached_registry(
+    key: &ScopedSkillRegistryCacheKey,
+    now: Instant,
+) -> HandlerResult<Option<SharedSkillRegistry>> {
+    let mut cache = SCOPED_SKILL_REGISTRIES.lock().map_err(|error| {
+        tracing::error!("Scoped skill registry cache lock poisoned: {error}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Can't access skills right now".to_string(),
+        )
+    })?;
+    if let Some(cached) = cache.get(key)
+        && now.duration_since(cached.discovered_at) < SCOPED_REGISTRY_CACHE_TTL
+    {
+        return Ok(Some(Arc::clone(&cached.registry)));
+    }
+    cache.remove(key);
+    Ok(None)
+}
+
+fn cache_registry(
+    key: ScopedSkillRegistryCacheKey,
+    registry: SharedSkillRegistry,
+    now: Instant,
+) -> HandlerResult<()> {
+    let mut cache = SCOPED_SKILL_REGISTRIES.lock().map_err(|error| {
+        tracing::error!("Scoped skill registry cache lock poisoned: {error}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Can't access skills right now".to_string(),
+        )
+    })?;
+    cache.retain(|_, cached| now.duration_since(cached.discovered_at) < SCOPED_REGISTRY_CACHE_TTL);
+    cache.insert(
+        key,
+        CachedScopedSkillRegistry {
+            registry,
+            discovered_at: now,
+        },
+    );
+    Ok(())
 }
 
 impl ScopedSkillRegistry {
@@ -96,7 +183,10 @@ impl ScopedSkillRegistry {
                 let guard = registry.read().map_err(lock_error_response)?;
                 Ok(operation(&guard))
             }
-            Self::User(registry) => Ok(operation(registry)),
+            Self::User(registry) => {
+                let guard = registry.read().map_err(lock_error_response)?;
+                Ok(operation(&guard))
+            }
         }
     }
 
@@ -109,7 +199,10 @@ impl ScopedSkillRegistry {
                 let guard = registry.read().map_err(lock_error_response)?;
                 Ok(operation(&guard))
             }
-            Self::User(registry) => Ok(operation(registry)),
+            Self::User(registry) => {
+                let guard = registry.read().map_err(lock_error_response)?;
+                Ok(operation(&guard))
+            }
         }
     }
 
@@ -122,22 +215,19 @@ impl ScopedSkillRegistry {
                 let mut guard = registry.write().map_err(lock_error_response)?;
                 Ok(operation(&mut guard))
             }
-            Self::User(registry) => Ok(operation(registry)),
+            Self::User(registry) => {
+                let mut guard = registry.write().map_err(lock_error_response)?;
+                Ok(operation(&mut guard))
+            }
         }
     }
 }
 
 fn scoped_registry_from_template(
     template: &ironclaw_skills::SkillRegistry,
-    user: &UserIdentity,
+    user_segment: &str,
 ) -> ironclaw_skills::SkillRegistry {
-    let segment = scoped_user_skills_segment(&user.user_id);
-    let user_root = template
-        .user_dir()
-        .parent()
-        .unwrap_or_else(|| template.user_dir())
-        .join("users")
-        .join(&segment);
+    let user_root = template.user_dir().join(".users").join(user_segment);
     let user_dir = user_root.join("skills");
     let installed_dir = Some(user_root.join("installed_skills"));
     template.clone_config_for_user_dirs(user_dir, installed_dir)

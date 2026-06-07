@@ -480,6 +480,13 @@ impl SkillRegistry {
 
             // Case 1: Subdirectory containing SKILL.md
             if meta.is_dir() {
+                if is_hidden_dir_entry(&path) {
+                    tracing::debug!(
+                        "Skipping hidden skills directory entry: {:?}",
+                        path.file_name().unwrap_or_default()
+                    );
+                    continue;
+                }
                 let skill_md = path.join("SKILL.md");
                 if tokio::fs::try_exists(&skill_md).await.unwrap_or(false) {
                     count += 1;
@@ -756,11 +763,7 @@ impl SkillRegistry {
         let skill = &self.skills[idx];
 
         match &skill.source {
-            SkillSource::Installed(path) => Ok(path.clone()),
-            SkillSource::User(_) => Err(SkillRegistryError::CannotRemove {
-                name: name.to_string(),
-                reason: "user-placed skills cannot be removed via this interface".to_string(),
-            }),
+            SkillSource::User(path) | SkillSource::Installed(path) => Ok(path.clone()),
             SkillSource::Workspace(_) => Err(SkillRegistryError::CannotRemove {
                 name: name.to_string(),
                 reason: "workspace skills cannot be removed via this interface".to_string(),
@@ -939,6 +942,12 @@ impl SkillRegistry {
         let bytes = tokio::fs::read(&meta_path).await.ok()?;
         serde_json::from_slice(&bytes).ok()
     }
+}
+
+fn is_hidden_dir_entry(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.'))
 }
 
 struct CheckedSkillMdPath {
@@ -1885,7 +1894,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_flat_user_skill_rejected() {
+    async fn test_remove_flat_user_skill_deletes_file() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("SKILL.md"),
@@ -1897,15 +1906,9 @@ mod tests {
         registry.discover_all().await;
 
         let result = registry.remove_skill("flat-user-skill").await;
-        assert!(matches!(
-            result,
-            Err(SkillRegistryError::CannotRemove { .. })
-        ));
-        assert!(
-            fs::read_to_string(dir.path().join("SKILL.md"))
-                .unwrap()
-                .contains("Trusted prompt")
-        );
+        assert!(result.is_ok());
+        assert!(!dir.path().join("SKILL.md").exists());
+        assert_eq!(registry.count(), 0);
     }
 
     #[tokio::test]
@@ -2198,6 +2201,33 @@ mod tests {
             result,
             Err(SkillRegistryError::CannotRemove { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn test_discover_skips_hidden_bundle_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let visible_skill = dir.path().join("visible-skill");
+        fs::create_dir(&visible_skill).unwrap();
+        fs::write(
+            visible_skill.join("SKILL.md"),
+            "---\nname: visible-skill\n---\n\nVisible prompt.\n",
+        )
+        .unwrap();
+
+        let hidden_skill = dir.path().join(".users/alice/skills/private-skill");
+        fs::create_dir_all(&hidden_skill).unwrap();
+        fs::write(
+            hidden_skill.join("SKILL.md"),
+            "---\nname: private-skill\n---\n\nPrivate prompt.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        let loaded = registry.discover_all().await;
+
+        assert!(loaded.iter().any(|name| name == "visible-skill"));
+        assert!(!loaded.iter().any(|name| name == "private-skill"));
+        assert!(registry.find_by_name("private-skill").is_none());
     }
 
     #[tokio::test]
