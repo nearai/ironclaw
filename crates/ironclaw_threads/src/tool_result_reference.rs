@@ -173,15 +173,37 @@ impl ToolResultReferenceEnvelope {
         model_observation: Option<serde_json::Value>,
     ) -> Result<Self, String> {
         let mut envelope = Self::new(result_ref, safe_summary)?;
-        if let Some(model_observation) = model_observation {
-            match validate_model_observation(&model_observation) {
-                Ok(()) => envelope.model_observation = Some(model_observation),
-                Err(error) => {
-                    tracing::warn!(
-                        reason = %error,
-                        "dropping invalid model-visible tool observation and preserving safe summary"
-                    );
-                }
+        let Some(model_observation) = model_observation else {
+            tracing::debug!(
+                result_ref = %envelope.result_ref,
+                "tool result has no model-visible observation; preserving safe summary only"
+            );
+            return Ok(envelope);
+        };
+
+        match validate_model_observation(&model_observation) {
+            Ok(()) => {
+                let model_observation_bytes = serde_json::to_vec(&model_observation)
+                    .map(|encoded| encoded.len())
+                    .unwrap_or(0);
+                tracing::debug!(
+                    result_ref = %envelope.result_ref,
+                    model_observation_bytes,
+                    "accepted model-visible tool observation"
+                );
+                envelope.model_observation = Some(model_observation);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    reason = %error,
+                    result_ref = %envelope.result_ref,
+                    "model-visible tool observation validation failed; preserving safe summary"
+                );
+                tracing::warn!(
+                    reason = %error,
+                    result_ref = %envelope.result_ref,
+                    "dropping invalid model-visible tool observation and preserving safe summary"
+                );
             }
         }
         Ok(envelope)
@@ -195,11 +217,27 @@ impl ToolResultReferenceEnvelope {
 
     pub fn model_visible_content_or_safe_summary(&self) -> String {
         let Some(model_observation) = self.model_observation.as_ref() else {
+            tracing::debug!(
+                result_ref = %self.result_ref,
+                "model-visible tool observation absent during replay; using safe summary"
+            );
             return self.safe_summary.as_str().to_string();
         };
         match model_observation_content(model_observation) {
-            Ok(content) => content,
+            Ok(content) => {
+                tracing::debug!(
+                    result_ref = %self.result_ref,
+                    model_observation_bytes = content.len(),
+                    "replaying model-visible tool observation"
+                );
+                content
+            }
             Err(error) => {
+                tracing::debug!(
+                    reason = %error,
+                    result_ref = %self.result_ref,
+                    "model-visible tool observation replay validation failed; using safe summary"
+                );
                 tracing::warn!(
                     reason = %error,
                     result_ref = %self.result_ref,

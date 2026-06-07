@@ -1311,12 +1311,6 @@ fn tool_result_replay_message(
         match message.tool_result_content.as_ref() {
             Some(HostManagedToolResultContent::Reference { envelope }) => {
                 let safe_summary = envelope.safe_summary.as_str().to_string();
-                if envelope.model_observation.is_none() {
-                    debug!(
-                        result_ref = %envelope.result_ref,
-                        "tool result resolved content unavailable; replaying safe summary fallback"
-                    );
-                }
                 let model_content = envelope.model_visible_content_or_safe_summary();
                 (safe_summary, model_content, true)
             }
