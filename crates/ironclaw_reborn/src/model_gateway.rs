@@ -27,7 +27,10 @@ use ironclaw_loop_support::{
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedToolResultContent,
     ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
 };
-use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
+use ironclaw_threads::{
+    ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope,
+    ToolResultReferenceEnvelope,
+};
 use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
     TurnId, TurnRunId,
@@ -40,7 +43,7 @@ use ironclaw_turns::{
         LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall, ProviderToolDefinition,
     },
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{
     failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
@@ -1312,13 +1315,27 @@ fn tool_result_replay_message(
             Some(HostManagedToolResultContent::Reference { envelope }) => {
                 let safe_summary = envelope.safe_summary.as_str().to_string();
                 if let Some(model_observation) = envelope.model_observation.as_ref() {
-                    let model_content = serde_json::to_string(model_observation).map_err(|_| {
-                        HostManagedModelError::safe(
-                            HostManagedModelErrorKind::InvalidRequest,
-                            "tool result model observation is invalid",
-                        )
-                    })?;
-                    (safe_summary, model_content, true)
+                    if let Err(error) = ToolResultReferenceEnvelope::with_model_observation(
+                        envelope.result_ref.clone(),
+                        envelope.safe_summary.clone(),
+                        model_observation.clone(),
+                    ) {
+                        warn!(
+                            reason = %error,
+                            result_ref = %envelope.result_ref,
+                            "dropping invalid model-visible tool observation during replay"
+                        );
+                        (safe_summary.clone(), safe_summary, true)
+                    } else {
+                        let model_content =
+                            serde_json::to_string(model_observation).map_err(|_| {
+                                HostManagedModelError::safe(
+                                    HostManagedModelErrorKind::InvalidRequest,
+                                    "tool result model observation is invalid",
+                                )
+                            })?;
+                        (safe_summary, model_content, true)
+                    }
                 } else {
                     debug!(
                         result_ref = %envelope.result_ref,

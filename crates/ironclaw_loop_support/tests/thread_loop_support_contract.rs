@@ -2127,6 +2127,7 @@ async fn transcript_port_appends_model_observation_in_tool_result_reference_enve
     );
     let result_ref = LoopResultRef::new("result:model-observation-tool").unwrap();
     let observation = ModelVisibleToolObservation {
+        schema_version: 1,
         status: ToolObservationStatus::Error,
         summary: "Tool input failed schema validation.".to_string(),
         detail: ToolObservationDetail::InvalidInput {
@@ -2174,6 +2175,55 @@ async fn transcript_port_appends_model_observation_in_tool_result_reference_enve
         envelope.model_observation,
         Some(serde_json::to_value(observation).unwrap())
     );
+}
+
+#[tokio::test]
+async fn transcript_port_drops_invalid_model_observation_without_failing_append() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+    let result_ref = LoopResultRef::new("result:invalid-model-observation-tool").unwrap();
+    let observation = ModelVisibleToolObservation {
+        schema_version: 999,
+        status: ToolObservationStatus::Error,
+        summary: "Tool input failed schema validation.".to_string(),
+        detail: ToolObservationDetail::InvalidInput { issues: Vec::new() },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: result_ref.clone(),
+            safe_summary: "tool failed".to_string(),
+            provider_call: None,
+            model_observation: Some(observation),
+        })
+        .await
+        .expect("invalid model observation should not fail append");
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let record = history
+        .messages
+        .iter()
+        .find(|message| message.tool_result_ref.as_deref() == Some(result_ref.as_str()))
+        .expect("tool result reference message");
+    let envelope = ToolResultReferenceEnvelope::from_json_str(record.content.as_deref().unwrap())
+        .expect("valid tool result reference envelope");
+
+    assert_eq!(envelope.safe_summary.as_str(), "tool failed");
+    assert!(envelope.model_observation.is_none());
 }
 
 #[tokio::test]

@@ -635,21 +635,25 @@ where
             })?;
         let model_observation = request
             .model_observation
-            .map(|observation| {
-                observation.validate().map_err(|_| {
-                    AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::InvalidInvocation,
-                        "tool result model observation is not safe",
-                    )
-                })?;
-                serde_json::to_value(observation).map_err(|_| {
-                    AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::InvalidInvocation,
-                        "tool result model observation could not be serialized",
-                    )
-                })
-            })
-            .transpose()?;
+            .and_then(|observation| match observation.validate() {
+                Ok(()) => match serde_json::to_value(observation) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        tracing::warn!(
+                            reason = %error,
+                            "dropping unserializable model-visible tool observation and preserving safe summary"
+                        );
+                        None
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        reason = %error,
+                        "dropping invalid model-visible tool observation and preserving safe summary"
+                    );
+                    None
+                }
+            });
         let record = self
             .thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {

@@ -5,12 +5,13 @@ use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
         AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureDetail, CapabilityInputIssue,
-        CapabilityInputIssueCode, CapabilityInputRepair, CapabilityInvocation,
-        CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion,
-        ModelVisibleToolObservation, ObservationTrust, ProviderToolCallReference,
-        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
-        ToolRecoveryObservation, VisibleCapabilitySurface,
+        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureDetail,
+        CapabilityFailureKind, CapabilityInputIssue, CapabilityInputIssueCode,
+        CapabilityInputRepair, CapabilityInvocation, CapabilityRecoveryHint,
+        CapabilityResultMessage, CapabilitySurfaceVersion, ModelVisibleToolObservation,
+        ObservationTrust, ProviderToolCallReference, SameCallRetryConstraint,
+        ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -205,13 +206,15 @@ pub(super) fn model_visible_capability_failure_observation(
             invalid_input_observation(bounded_input_issues(issues))
         }
         _ => ModelVisibleToolObservation {
+            schema_version:
+                ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
             status: ToolObservationStatus::Error,
             summary: format!("Capability failed with {}.", failure.error_kind.as_str()),
             detail: ToolObservationDetail::GenericFailure {
                 failure_kind: failure.error_kind.clone(),
             },
             artifacts: Vec::new(),
-            recovery: None,
+            recovery: Some(generic_failure_recovery(&failure.error_kind)),
             trust: ObservationTrust::UntrustedToolOutput,
         },
     }
@@ -254,6 +257,7 @@ fn truncate_model_observation_text(value: &str) -> String {
 fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleToolObservation {
     let repairs = issues.iter().map(input_issue_repair).collect();
     ModelVisibleToolObservation {
+        schema_version: ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
         status: ToolObservationStatus::Error,
         summary: "Tool input failed schema validation.".to_string(),
         detail: ToolObservationDetail::InvalidInput { issues },
@@ -264,6 +268,36 @@ fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleT
             recovery_hint: CapabilityRecoveryHint::CorrectArgumentsBeforeRetry,
         }),
         trust: ObservationTrust::UntrustedToolOutput,
+    }
+}
+
+fn generic_failure_recovery(error_kind: &CapabilityFailureKind) -> ToolRecoveryObservation {
+    let same_call_retry = match error_kind {
+        CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
+            SameCallRetryConstraint::Forbidden
+        }
+        CapabilityFailureKind::InvalidInput
+        | CapabilityFailureKind::InvalidOutput
+        | CapabilityFailureKind::OutputTooLarge => SameCallRetryConstraint::RequiresChangedInput,
+        CapabilityFailureKind::Backend
+        | CapabilityFailureKind::Network
+        | CapabilityFailureKind::Transient
+        | CapabilityFailureKind::Unavailable => SameCallRetryConstraint::AllowedAfterDelay,
+        CapabilityFailureKind::Cancelled
+        | CapabilityFailureKind::MissingRuntime
+        | CapabilityFailureKind::Permanent => SameCallRetryConstraint::NotUseful,
+        CapabilityFailureKind::Dispatcher
+        | CapabilityFailureKind::OperationFailed
+        | CapabilityFailureKind::Process
+        | CapabilityFailureKind::Resource
+        | CapabilityFailureKind::Internal
+        | CapabilityFailureKind::Unknown(_) => SameCallRetryConstraint::Allowed,
+        _ => SameCallRetryConstraint::Allowed,
+    };
+    ToolRecoveryObservation {
+        same_call_retry,
+        repairs: Vec::new(),
+        recovery_hint: CapabilityRecoveryHint::RespectFailureConstraint,
     }
 }
 

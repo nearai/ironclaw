@@ -1384,6 +1384,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
         .await
         .unwrap();
     let observation = serde_json::json!({
+        "schema_version": 1,
         "status": "error",
         "summary": "Tool input failed schema validation.",
         "detail": {
@@ -1438,7 +1439,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
 
     assert_eq!(updated_envelope.model_observation, Some(observation));
 
-    let error = service
+    let unsafe_record = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope,
             thread_id: thread.thread_id,
@@ -1451,14 +1452,17 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
             })),
         })
         .await
-        .expect_err("prompt-injection-like observation text should be rejected");
+        .expect("unsafe observation should fall back to safe summary");
+    let unsafe_envelope =
+        ToolResultReferenceEnvelope::from_json_str(unsafe_record.content.as_deref().unwrap())
+            .unwrap();
 
-    assert!(matches!(error, SessionThreadError::Serialization(_)));
+    assert_eq!(unsafe_envelope.safe_summary.as_str(), "tool failed");
+    assert!(unsafe_envelope.model_observation.is_none());
 }
 
 #[tokio::test]
-async fn append_tool_result_reference_backfills_and_rejects_conflicting_model_observation_on_retry()
-{
+async fn append_tool_result_reference_backfills_and_preserves_first_model_observation_on_retry() {
     let service = InMemorySessionThreadService::default();
     let scope = scope("model-observation-retry");
     let thread = service
@@ -1472,6 +1476,7 @@ async fn append_tool_result_reference_backfills_and_rejects_conflicting_model_ob
         .await
         .unwrap();
     let observation = serde_json::json!({
+        "schema_version": 1,
         "status": "error",
         "summary": "Tool input failed schema validation.",
         "detail": {
@@ -1520,10 +1525,31 @@ async fn append_tool_result_reference_backfills_and_rejects_conflicting_model_ob
             result_ref: "result:model-observation-retry".into(),
             safe_summary: ToolResultSafeSummary::new("retry summary ignored").unwrap(),
             provider_call: None,
-            model_observation: Some(observation),
+            model_observation: Some(observation.clone()),
         })
         .await
         .unwrap();
+
+    let without_observation_retry = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:model-observation-retry".into(),
+            safe_summary: ToolResultSafeSummary::new("retry summary ignored").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let without_observation_envelope = ToolResultReferenceEnvelope::from_json_str(
+        without_observation_retry.content.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        without_observation_envelope.model_observation,
+        Some(observation.clone())
+    );
 
     let conflict = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
@@ -1534,6 +1560,7 @@ async fn append_tool_result_reference_backfills_and_rejects_conflicting_model_ob
             safe_summary: ToolResultSafeSummary::new("retry summary ignored").unwrap(),
             provider_call: None,
             model_observation: Some(serde_json::json!({
+                "schema_version": 1,
                 "status": "error",
                 "summary": "Different model observation.",
                 "detail": {"kind": "generic_failure", "failure_kind": "invalid_input"},
@@ -1541,13 +1568,15 @@ async fn append_tool_result_reference_backfills_and_rejects_conflicting_model_ob
             })),
         })
         .await
-        .expect_err("conflicting model observation should be rejected");
+        .expect("conflicting model observation retry should preserve first observation");
+    let conflict_envelope =
+        ToolResultReferenceEnvelope::from_json_str(conflict.content.as_deref().unwrap()).unwrap();
 
-    assert!(matches!(conflict, SessionThreadError::Serialization(_)));
+    assert_eq!(conflict_envelope.model_observation, Some(observation));
 }
 
 #[tokio::test]
-async fn append_tool_result_reference_rejects_oversized_model_observation() {
+async fn append_tool_result_reference_drops_oversized_model_observation() {
     let service = InMemorySessionThreadService::default();
     let scope = scope("oversized-model-observation");
     let thread = service
@@ -1561,7 +1590,7 @@ async fn append_tool_result_reference_rejects_oversized_model_observation() {
         .await
         .unwrap();
 
-    let error = service
+    let record = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope,
             thread_id: thread.thread_id,
@@ -1574,9 +1603,12 @@ async fn append_tool_result_reference_rejects_oversized_model_observation() {
             })),
         })
         .await
-        .expect_err("oversized observation should be rejected");
+        .expect("oversized observation should fall back to safe summary");
+    let envelope =
+        ToolResultReferenceEnvelope::from_json_str(record.content.as_deref().unwrap()).unwrap();
 
-    assert!(matches!(error, SessionThreadError::Serialization(_)));
+    assert_eq!(envelope.safe_summary.as_str(), "tool failed");
+    assert!(envelope.model_observation.is_none());
 }
 
 #[tokio::test]

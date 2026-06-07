@@ -290,14 +290,11 @@ impl SessionThreadService for InMemorySessionThreadService {
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
         let provider_call = request.provider_call;
-        let envelope = match request.model_observation {
-            Some(model_observation) => ToolResultReferenceEnvelope::with_model_observation(
-                request.result_ref,
-                request.safe_summary,
-                model_observation,
-            ),
-            None => ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary),
-        }
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            request.result_ref,
+            request.safe_summary,
+            request.model_observation,
+        )
         .map_err(SessionThreadError::Serialization)?;
         if let Some(existing) = thread.messages.iter_mut().find(|message| {
             message.kind == MessageKind::ToolResultReference

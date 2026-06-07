@@ -167,6 +167,26 @@ impl ToolResultReferenceEnvelope {
         Ok(envelope)
     }
 
+    pub fn new_best_effort_model_observation(
+        result_ref: impl Into<String>,
+        safe_summary: ToolResultSafeSummary,
+        model_observation: Option<serde_json::Value>,
+    ) -> Result<Self, String> {
+        let mut envelope = Self::new(result_ref, safe_summary)?;
+        if let Some(model_observation) = model_observation {
+            match validate_model_observation(&model_observation) {
+                Ok(()) => envelope.model_observation = Some(model_observation),
+                Err(error) => {
+                    tracing::warn!(
+                        reason = %error,
+                        "dropping invalid model-visible tool observation and preserving safe summary"
+                    );
+                }
+            }
+        }
+        Ok(envelope)
+    }
+
     pub fn from_json_str(value: &str) -> Result<Self, String> {
         let envelope: Self = serde_json::from_str(value).map_err(|error| error.to_string())?;
         envelope.validate()?;
@@ -200,9 +220,7 @@ impl ToolResultReferenceEnvelope {
                 Ok(self)
             }
             Some(existing) if existing == &model_observation => Ok(self),
-            Some(_) => {
-                Err("tool result model observation conflicts with existing record".to_string())
-            }
+            Some(_) => Ok(self),
         }
     }
 
@@ -267,7 +285,7 @@ fn validate_tool_result_safe_summary(value: String) -> Result<String, String> {
     }
     if value
         .chars()
-        .any(|character| character == '\0' || character.is_control())
+        .any(|character| is_disallowed_control_character(character))
     {
         return Err("tool result summary must not contain NUL/control characters".to_string());
     }
@@ -334,7 +352,7 @@ fn validate_model_observation_value(value: &serde_json::Value) -> Result<(), Str
 fn validate_model_observation_text(value: &str) -> Result<(), String> {
     if value
         .chars()
-        .any(|character| character == '\0' || character.is_control())
+        .any(|character| is_disallowed_control_character(character))
     {
         return Err("model observation must not contain NUL/control characters".to_string());
     }
@@ -362,6 +380,10 @@ fn validate_model_observation_text(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn is_disallowed_control_character(character: char) -> bool {
+    character == '\0' || character.is_control() && !matches!(character, '\n' | '\r' | '\t')
+}
+
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::CapabilityId;
@@ -373,7 +395,13 @@ mod tests {
     #[test]
     fn safe_summary_rejects_control_characters() {
         assert!(ToolResultSafeSummary::new("line\u{0}break").is_err());
-        assert!(ToolResultSafeSummary::new("line\nbreak").is_err());
+        assert!(ToolResultSafeSummary::new("line\u{1}break").is_err());
+    }
+
+    #[test]
+    fn safe_summary_allows_common_formatting_whitespace() {
+        ToolResultSafeSummary::new("line one\nline two\tindented\rline three")
+            .expect("formatting whitespace is safe");
     }
 
     #[test]
@@ -439,6 +467,31 @@ mod tests {
         envelope.arguments = serde_json::json!({"content":"line one\u{0001}line two"});
 
         assert!(envelope.validate().is_err());
+    }
+
+    #[test]
+    fn model_observation_allows_nested_formatting_whitespace() {
+        let envelope = ToolResultReferenceEnvelope::with_model_observation(
+            "result:nested-formatting",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            serde_json::json!({
+                "schema_version": 1,
+                "status": "error",
+                "summary": "line one\nline two",
+                "detail": {
+                    "kind": "invalid_input",
+                    "issues": [{
+                        "path": "body",
+                        "code": "invalid_value",
+                        "received": "line one\n\tline two"
+                    }]
+                },
+                "trust": "untrusted_tool_output"
+            }),
+        )
+        .expect("nested formatting whitespace is valid");
+
+        assert!(envelope.model_observation.is_some());
     }
 
     #[test]

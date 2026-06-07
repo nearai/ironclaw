@@ -7,6 +7,7 @@ const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
 const MODEL_OBSERVATION_REPAIRS_MAX: usize = 16;
 const MODEL_OBSERVATION_INPUT_ISSUES_MAX: usize = 16;
 const MODEL_OBSERVATION_TEXT_MAX_BYTES: usize = 512;
+pub const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u32 = 1;
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +18,8 @@ pub enum CapabilityFailureDetail {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelVisibleToolObservation {
+    #[serde(default = "current_model_visible_tool_observation_schema_version")]
+    pub schema_version: u32,
     pub status: ToolObservationStatus,
     pub summary: String,
     pub detail: ToolObservationDetail,
@@ -29,6 +32,12 @@ pub struct ModelVisibleToolObservation {
 
 impl ModelVisibleToolObservation {
     pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION {
+            return Err(format!(
+                "model observation schema version {} is unsupported",
+                self.schema_version
+            ));
+        }
         validate_non_empty_text(&self.summary, "model observation summary")?;
         validate_text_len(
             &self.summary,
@@ -49,6 +58,10 @@ impl ModelVisibleToolObservation {
         }
         Ok(())
     }
+}
+
+fn current_model_visible_tool_observation_schema_version() -> u32 {
+    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,6 +202,7 @@ pub enum SameCallRetryConstraint {
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityRecoveryHint {
     CorrectArgumentsBeforeRetry,
+    RespectFailureConstraint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,11 +276,15 @@ fn validate_text_len(value: &str, label: &'static str, max: usize) -> Result<(),
     }
     if value
         .chars()
-        .any(|character| character == '\0' || character.is_control())
+        .any(|character| is_disallowed_control_character(character))
     {
         return Err(format!("{label} must not contain NUL/control characters"));
     }
     Ok(())
+}
+
+fn is_disallowed_control_character(character: char) -> bool {
+    character == '\0' || character.is_control() && !matches!(character, '\n' | '\r' | '\t')
 }
 
 #[cfg(test)]
@@ -276,6 +294,7 @@ mod tests {
     #[test]
     fn model_visible_tool_observation_serializes_typed_recovery() {
         let observation = ModelVisibleToolObservation {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
             status: ToolObservationStatus::Error,
             summary: "Tool input failed schema validation.".to_string(),
             detail: ToolObservationDetail::InvalidInput {
@@ -301,6 +320,7 @@ mod tests {
         let value = serde_json::to_value(&observation).expect("serialize");
 
         assert_eq!(value["status"], "error");
+        assert_eq!(value["schema_version"], serde_json::json!(1));
         assert_eq!(value["detail"]["kind"], "invalid_input");
         assert_eq!(
             value["detail"]["issues"][0]["code"],

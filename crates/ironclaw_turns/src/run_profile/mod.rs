@@ -86,8 +86,9 @@ pub use model::{
 };
 pub use model_observation::{
     CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputIssueCode, CapabilityInputRepair,
-    CapabilityRecoveryHint, ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust,
-    SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
+    CapabilityRecoveryHint, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+    ModelVisibleToolObservation, ObservationTrust, SameCallRetryConstraint, ToolObservationDetail,
+    ToolObservationStatus, ToolRecoveryObservation,
 };
 pub use model_work::{ModelWorkKind, ModelWorkOutcome, ModelWorkRequest, ModelWorkUsage};
 pub use policy::{

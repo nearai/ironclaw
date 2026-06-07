@@ -908,14 +908,11 @@ where
         request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let provider_call = request.provider_call;
-        let envelope = match request.model_observation {
-            Some(model_observation) => ToolResultReferenceEnvelope::with_model_observation(
-                request.result_ref,
-                request.safe_summary,
-                model_observation,
-            ),
-            None => ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary),
-        }
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            request.result_ref,
+            request.safe_summary,
+            request.model_observation,
+        )
         .map_err(SessionThreadError::Serialization)?;
         let existing = self
             .list_thread_messages(&request.scope, &request.thread_id)
