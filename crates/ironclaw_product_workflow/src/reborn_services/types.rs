@@ -31,6 +31,7 @@ pub struct RebornConnectableChannelInfo {
 #[serde(rename_all = "snake_case")]
 pub enum RebornChannelConnectStrategy {
     InboundProofCode,
+    AdminManagedChannels,
     WebGeneratedCode,
     QrCode,
     OAuth,
@@ -40,7 +41,8 @@ pub enum RebornChannelConnectStrategy {
 pub struct RebornChannelConnectAction {
     pub title: String,
     pub instructions: String,
-    pub code_placeholder: String,
+    #[serde(rename = "input_placeholder", alias = "code_placeholder")]
+    pub input_placeholder: String,
     pub submit_label: String,
     pub success_message: String,
     pub error_message: String,

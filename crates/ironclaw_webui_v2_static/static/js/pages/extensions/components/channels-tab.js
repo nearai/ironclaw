@@ -1,24 +1,9 @@
 import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
+import { SlackChannelPicker } from "../../../components/slack-channel-picker.js";
+import { SlackPairingSection } from "../../../components/slack-pairing-section.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 import { PairingSection } from "./pairing-section.js";
-import { redeemPairingCode } from "../lib/pairing-api.js";
-
-const SLACK_PAIRING_I18N_KEYS = {
-  title: "pairing.slackTitle",
-  instructions: "pairing.slackInstructions",
-  placeholder: "pairing.slackPlaceholder",
-  action: "pairing.connect",
-  success: "pairing.slackSuccess",
-  error: "pairing.slackError",
-  empty: "pairing.none",
-};
-
-const SLACK_PAIRING_QUERY_KEYS = [
-  ["extensions"],
-  ["pairing", "slack"],
-  ["connectable-channels"],
-];
 
 function packageId(item) {
   return item.package_ref?.id || "";
@@ -28,6 +13,45 @@ export function isSlackChannelEnabled(enabledChannels) {
   return ["slack", "slack_v2", "slack-v2"].some((channel) =>
     enabledChannels.includes(channel)
   );
+}
+
+export function slackBuiltinStatus(slackEnabled, connectAction) {
+  if (slackEnabled) {
+    return { label: "on", tone: "success" };
+  }
+  if (connectAction?.strategy === "admin_managed_channels") {
+    return { label: "manage", tone: "info" };
+  }
+  return connectAction
+    ? { label: "connect", tone: "info" }
+    : { label: "off", tone: "muted" };
+}
+
+export function isSlackAdminManagedAction(connectAction) {
+  return connectAction?.channel === "slack" && connectAction.strategy === "admin_managed_channels";
+}
+
+export function isSlackInboundProofCodeAction(connectAction) {
+  return connectAction?.channel === "slack" && connectAction.strategy === "inbound_proof_code";
+}
+
+export function findSlackConnectAction(connectableChannels) {
+  const channels = connectableChannels || [];
+  return (
+    channels.find(isSlackAdminManagedAction) ||
+    channels.find(isSlackInboundProofCodeAction) ||
+    channels.find((channel) => channel.channel === "slack")
+  );
+}
+
+export function SlackBuiltInConnectAction({ slackConnectAction }) {
+  if (isSlackAdminManagedAction(slackConnectAction)) {
+    return html`<${SlackChannelPicker} action=${slackConnectAction.action} />`;
+  }
+  if (isSlackInboundProofCodeAction(slackConnectAction)) {
+    return html`<${SlackPairingSection} action=${slackConnectAction.action} />`;
+  }
+  return null;
 }
 
 export function ChannelsTab({
@@ -43,9 +67,8 @@ export function ChannelsTab({
 }) {
   const enabledChannels = status.enabled_channels || [];
   const slackEnabled = isSlackChannelEnabled(enabledChannels);
-  const slackConnectAction = connectableChannels?.find((channel) => channel.channel === "slack");
-  const slackStatusLabel = slackEnabled ? "on" : slackConnectAction ? "connect" : "off";
-  const slackStatusTone = slackEnabled ? "success" : slackConnectAction ? "info" : "muted";
+  const slackConnectAction = findSlackConnectAction(connectableChannels);
+  const slackStatus = slackBuiltinStatus(slackEnabled, slackConnectAction);
 
   return html`
     <div className="space-y-5">
@@ -74,19 +97,11 @@ export function ChannelsTab({
           name="Slack"
           description="Tenant app channel for DMs and app mentions"
           enabled=${slackEnabled}
-          statusLabel=${slackStatusLabel}
-          statusTone=${slackStatusTone}
+          statusLabel=${slackStatus.label}
+          statusTone=${slackStatus.tone}
           detail="Tenant Slack app install"
         >
-          ${slackConnectAction &&
-          html`<${PairingSection}
-            channel="slack"
-            redeemFn=${redeemPairingCode}
-            i18nKeys=${SLACK_PAIRING_I18N_KEYS}
-            copy=${slackConnectAction.action}
-            queryKeys=${SLACK_PAIRING_QUERY_KEYS}
-            showPendingRequests=${false}
-          />`}
+          <${SlackBuiltInConnectAction} slackConnectAction=${slackConnectAction} />
         <//>
         <${BuiltinRow}
           name="CLI"

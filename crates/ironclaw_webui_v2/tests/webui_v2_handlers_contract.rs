@@ -368,7 +368,7 @@ impl RebornServicesApi for StubServices {
                 action: RebornChannelConnectAction {
                     title: "Slack account connection".to_string(),
                     instructions: "Message the Slack app, then enter the code here.".to_string(),
-                    code_placeholder: "Enter Slack pairing code...".to_string(),
+                    input_placeholder: "Enter Slack pairing code...".to_string(),
                     submit_label: "Connect".to_string(),
                     success_message: "Slack account connected.".to_string(),
                     error_message: "Invalid or expired Slack pairing code.".to_string(),
