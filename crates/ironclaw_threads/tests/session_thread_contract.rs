@@ -1457,6 +1457,129 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
 }
 
 #[tokio::test]
+async fn append_tool_result_reference_backfills_and_rejects_conflicting_model_observation_on_retry()
+{
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("model-observation-retry");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-model-observation-retry").unwrap()),
+            created_by_actor_id: "actor".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let observation = serde_json::json!({
+        "status": "error",
+        "summary": "Tool input failed schema validation.",
+        "detail": {
+            "kind": "invalid_input",
+            "issues": [{
+                "path": "file_path",
+                "code": "missing_required"
+            }]
+        },
+        "trust": "untrusted_tool_output"
+    });
+
+    service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:model-observation-retry".into(),
+            safe_summary: ToolResultSafeSummary::new("tool failed").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let backfilled = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:model-observation-retry".into(),
+            safe_summary: ToolResultSafeSummary::new("retry summary ignored").unwrap(),
+            provider_call: None,
+            model_observation: Some(observation.clone()),
+        })
+        .await
+        .unwrap();
+    let envelope =
+        ToolResultReferenceEnvelope::from_json_str(backfilled.content.as_deref().unwrap()).unwrap();
+    assert_eq!(envelope.model_observation, Some(observation.clone()));
+
+    service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:model-observation-retry".into(),
+            safe_summary: ToolResultSafeSummary::new("retry summary ignored").unwrap(),
+            provider_call: None,
+            model_observation: Some(observation),
+        })
+        .await
+        .unwrap();
+
+    let conflict = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-1".into(),
+            result_ref: "result:model-observation-retry".into(),
+            safe_summary: ToolResultSafeSummary::new("retry summary ignored").unwrap(),
+            provider_call: None,
+            model_observation: Some(serde_json::json!({
+                "status": "error",
+                "summary": "Different model observation.",
+                "detail": {"kind": "generic_failure", "failure_kind": "invalid_input"},
+                "trust": "untrusted_tool_output"
+            })),
+        })
+        .await
+        .expect_err("conflicting model observation should be rejected");
+
+    assert!(matches!(conflict, SessionThreadError::Serialization(_)));
+}
+
+#[tokio::test]
+async fn append_tool_result_reference_rejects_oversized_model_observation() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("oversized-model-observation");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-oversized-model-observation").unwrap()),
+            created_by_actor_id: "actor".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let error = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-1".into(),
+            result_ref: "result:oversized-model-observation".into(),
+            safe_summary: ToolResultSafeSummary::new("tool failed").unwrap(),
+            provider_call: None,
+            model_observation: Some(serde_json::json!({
+                "summary": "x".repeat(5000)
+            })),
+        })
+        .await
+        .expect_err("oversized observation should be rejected");
+
+    assert!(matches!(error, SessionThreadError::Serialization(_)));
+}
+
+#[tokio::test]
 async fn summary_covering_draft_message_is_not_loaded_into_model_context() {
     let service = InMemorySessionThreadService::default();
     let thread = service

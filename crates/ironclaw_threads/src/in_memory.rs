@@ -320,6 +320,22 @@ impl SessionThreadService for InMemorySessionThreadService {
                     }
                 }
             }
+            if let Some(model_observation) = envelope.model_observation.as_ref() {
+                let content = existing.content.as_deref().ok_or_else(|| {
+                    SessionThreadError::Serialization(
+                        "tool result reference content is missing".to_string(),
+                    )
+                })?;
+                if let Some(content) =
+                    ToolResultReferenceEnvelope::merge_model_observation_content_if_absent(
+                        content,
+                        model_observation.clone(),
+                    )
+                    .map_err(SessionThreadError::Serialization)?
+                {
+                    existing.content = Some(content);
+                }
+            }
             return Ok(existing.clone());
         }
         if let Some(provider_call) = &provider_call {

@@ -335,6 +335,7 @@ fn missing_required_properties(
         .iter()
         .filter_map(serde_json::Value::as_str)
         .filter(|property| !object.contains_key(*property))
+        .take(MAX_PROVIDER_SCHEMA_ISSUES)
         .map(scrub_sensitive_schema_path_markers)
         .collect()
 }

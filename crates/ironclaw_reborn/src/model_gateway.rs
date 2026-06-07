@@ -1176,13 +1176,17 @@ fn convert_messages(
             }
             HostManagedModelMessageRole::ToolResult => {
                 let replay = tool_result_replay_message(message)?;
-                let Some(provider_call) = replay.provider_call else {
-                    converted.push(ChatMessage::user(tool_summary_message(replay.safe_summary)));
+                let Some(provider_call) = replay.provider_call.clone() else {
+                    converted.push(ChatMessage::user(tool_summary_message(
+                        replay.plain_fallback_content(),
+                    )));
                     index += 1;
                     continue;
                 };
                 if !provider_replay_matches_identity(&provider_call, replay_identity) {
-                    converted.push(ChatMessage::user(tool_summary_message(replay.safe_summary)));
+                    converted.push(ChatMessage::user(tool_summary_message(
+                        replay.plain_fallback_content(),
+                    )));
                     index += 1;
                     continue;
                 }
@@ -1195,13 +1199,13 @@ fn convert_messages(
                     && messages[index].role == HostManagedModelMessageRole::ToolResult
                 {
                     let next = tool_result_replay_message(&messages[index])?;
-                    let Some(next_provider_call) = next.provider_call else {
-                        plain_tool_results.push(next.safe_summary);
+                    let Some(next_provider_call) = next.provider_call.clone() else {
+                        plain_tool_results.push(next.plain_fallback_content());
                         index += 1;
                         continue;
                     };
                     if !provider_replay_matches_identity(&next_provider_call, replay_identity) {
-                        plain_tool_results.push(next.safe_summary);
+                        plain_tool_results.push(next.plain_fallback_content());
                         index += 1;
                         continue;
                     }
@@ -1287,44 +1291,59 @@ struct ToolResultReplayMessage {
     provider_call: Option<ProviderToolCallReferenceEnvelope>,
     safe_summary: String,
     model_content: String,
+    model_content_is_plain_fallback_safe: bool,
+}
+
+impl ToolResultReplayMessage {
+    fn plain_fallback_content(self) -> String {
+        if self.model_content_is_plain_fallback_safe {
+            self.model_content
+        } else {
+            self.safe_summary
+        }
+    }
 }
 
 fn tool_result_replay_message(
     message: &HostManagedModelMessage,
 ) -> Result<ToolResultReplayMessage, HostManagedModelError> {
-    let (safe_summary, model_content) = match message.tool_result_content.as_ref() {
-        Some(HostManagedToolResultContent::Reference { envelope }) => {
-            let safe_summary = envelope.safe_summary.as_str().to_string();
-            if let Some(model_observation) = envelope.model_observation.as_ref() {
-                let model_content = serde_json::to_string(model_observation).map_err(|_| {
-                    HostManagedModelError::safe(
-                        HostManagedModelErrorKind::InvalidRequest,
-                        "tool result model observation is invalid",
-                    )
-                })?;
-                (safe_summary, model_content)
-            } else {
-                debug!(
-                    result_ref = %envelope.result_ref,
-                    "tool result resolved content unavailable; replaying safe summary fallback"
-                );
-                (safe_summary.clone(), safe_summary)
+    let (safe_summary, model_content, model_content_is_plain_fallback_safe) =
+        match message.tool_result_content.as_ref() {
+            Some(HostManagedToolResultContent::Reference { envelope }) => {
+                let safe_summary = envelope.safe_summary.as_str().to_string();
+                if let Some(model_observation) = envelope.model_observation.as_ref() {
+                    let model_content = serde_json::to_string(model_observation).map_err(|_| {
+                        HostManagedModelError::safe(
+                            HostManagedModelErrorKind::InvalidRequest,
+                            "tool result model observation is invalid",
+                        )
+                    })?;
+                    (safe_summary, model_content, true)
+                } else {
+                    debug!(
+                        result_ref = %envelope.result_ref,
+                        "tool result resolved content unavailable; replaying safe summary fallback"
+                    );
+                    (safe_summary.clone(), safe_summary, true)
+                }
             }
-        }
-        Some(HostManagedToolResultContent::Resolved { safe_summary }) => {
-            (safe_summary.as_str().to_string(), message.content.clone())
-        }
-        None => {
-            return Err(HostManagedModelError::safe(
-                HostManagedModelErrorKind::InvalidRequest,
-                "tool result replay content is missing",
-            ));
-        }
-    };
+            Some(HostManagedToolResultContent::Resolved { safe_summary }) => (
+                safe_summary.as_str().to_string(),
+                message.content.clone(),
+                false,
+            ),
+            None => {
+                return Err(HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    "tool result replay content is missing",
+                ));
+            }
+        };
     Ok(ToolResultReplayMessage {
         provider_call: message.tool_result_provider_call.clone(),
         safe_summary,
         model_content,
+        model_content_is_plain_fallback_safe,
     })
 }
 

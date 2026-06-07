@@ -21,6 +21,9 @@ use crate::{
 
 use super::{AgentLoopExecutorError, capability_host_error};
 
+const MAX_MODEL_OBSERVATION_INPUT_ISSUES: usize = 3;
+const MAX_MODEL_OBSERVATION_TEXT_BYTES: usize = 256;
+
 pub(super) fn capability_invocation_from_candidate(
     call: CapabilityCallCandidate,
 ) -> CapabilityInvocation {
@@ -199,7 +202,7 @@ pub(super) fn model_visible_capability_failure_observation(
 ) -> ModelVisibleToolObservation {
     match &failure.detail {
         Some(CapabilityFailureDetail::InvalidInput { issues }) => {
-            invalid_input_observation(issues.clone())
+            invalid_input_observation(bounded_input_issues(issues))
         }
         _ => ModelVisibleToolObservation {
             status: ToolObservationStatus::Error,
@@ -212,6 +215,40 @@ pub(super) fn model_visible_capability_failure_observation(
             trust: ObservationTrust::UntrustedToolOutput,
         },
     }
+}
+
+fn bounded_input_issues(issues: &[CapabilityInputIssue]) -> Vec<CapabilityInputIssue> {
+    issues
+        .iter()
+        .take(MAX_MODEL_OBSERVATION_INPUT_ISSUES)
+        .map(|issue| CapabilityInputIssue {
+            path: truncate_model_observation_text(&issue.path),
+            code: issue.code,
+            expected: issue
+                .expected
+                .as_deref()
+                .map(truncate_model_observation_text),
+            received: issue
+                .received
+                .as_deref()
+                .map(truncate_model_observation_text),
+            schema_path: issue
+                .schema_path
+                .as_deref()
+                .map(truncate_model_observation_text),
+        })
+        .collect()
+}
+
+fn truncate_model_observation_text(value: &str) -> String {
+    if value.len() <= MAX_MODEL_OBSERVATION_TEXT_BYTES {
+        return value.to_string();
+    }
+    let mut end = MAX_MODEL_OBSERVATION_TEXT_BYTES;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleToolObservation {

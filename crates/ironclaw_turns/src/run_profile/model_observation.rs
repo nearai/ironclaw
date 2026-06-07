@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use super::host::CapabilityFailureKind;
 
+const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
+const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
+const MODEL_OBSERVATION_REPAIRS_MAX: usize = 16;
+const MODEL_OBSERVATION_INPUT_ISSUES_MAX: usize = 16;
+const MODEL_OBSERVATION_TEXT_MAX_BYTES: usize = 512;
+
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -21,6 +27,30 @@ pub struct ModelVisibleToolObservation {
     pub trust: ObservationTrust,
 }
 
+impl ModelVisibleToolObservation {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_non_empty_text(&self.summary, "model observation summary")?;
+        validate_text_len(
+            &self.summary,
+            "model observation summary",
+            MODEL_OBSERVATION_SUMMARY_MAX_BYTES,
+        )?;
+        self.detail.validate()?;
+        validate_len(
+            self.artifacts.len(),
+            MODEL_OBSERVATION_ARTIFACTS_MAX,
+            "model observation artifacts",
+        )?;
+        for artifact in &self.artifacts {
+            artifact.validate()?;
+        }
+        if let Some(recovery) = &self.recovery {
+            recovery.validate()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolObservationStatus {
@@ -36,10 +66,46 @@ pub enum ToolObservationDetail {
     GenericFailure { failure_kind: CapabilityFailureKind },
 }
 
+impl ToolObservationDetail {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::InvalidInput { issues } => {
+                validate_len(
+                    issues.len(),
+                    MODEL_OBSERVATION_INPUT_ISSUES_MAX,
+                    "model observation input issues",
+                )?;
+                for issue in issues {
+                    issue.validate()?;
+                }
+                Ok(())
+            }
+            Self::GenericFailure { .. } => Ok(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelVisibleArtifact {
     pub artifact_ref: String,
     pub summary: String,
+}
+
+impl ModelVisibleArtifact {
+    fn validate(&self) -> Result<(), String> {
+        validate_non_empty_text(&self.artifact_ref, "model observation artifact ref")?;
+        validate_text_len(
+            &self.artifact_ref,
+            "model observation artifact ref",
+            MODEL_OBSERVATION_TEXT_MAX_BYTES,
+        )?;
+        validate_non_empty_text(&self.summary, "model observation artifact summary")?;
+        validate_text_len(
+            &self.summary,
+            "model observation artifact summary",
+            MODEL_OBSERVATION_TEXT_MAX_BYTES,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +114,20 @@ pub struct ToolRecoveryObservation {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repairs: Vec<CapabilityInputRepair>,
     pub recovery_hint: CapabilityRecoveryHint,
+}
+
+impl ToolRecoveryObservation {
+    fn validate(&self) -> Result<(), String> {
+        validate_len(
+            self.repairs.len(),
+            MODEL_OBSERVATION_REPAIRS_MAX,
+            "model observation repairs",
+        )?;
+        for repair in &self.repairs {
+            repair.validate()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +147,32 @@ pub enum CapabilityInputRepair {
     UseAllowedValue {
         path: String,
     },
+}
+
+impl CapabilityInputRepair {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::ProvideRequiredField { path }
+            | Self::RemoveUnexpectedField { path }
+            | Self::UseAllowedValue { path } => {
+                validate_non_empty_text(path, "model observation repair path")?;
+                validate_text_len(
+                    path,
+                    "model observation repair path",
+                    MODEL_OBSERVATION_TEXT_MAX_BYTES,
+                )
+            }
+            Self::ChangeType { path, expected } => {
+                validate_non_empty_text(path, "model observation repair path")?;
+                validate_text_len(
+                    path,
+                    "model observation repair path",
+                    MODEL_OBSERVATION_TEXT_MAX_BYTES,
+                )?;
+                validate_optional_text(expected.as_deref(), "model observation repair expected")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +209,23 @@ pub struct CapabilityInputIssue {
     pub schema_path: Option<String>,
 }
 
+impl CapabilityInputIssue {
+    fn validate(&self) -> Result<(), String> {
+        validate_non_empty_text(&self.path, "model observation issue path")?;
+        validate_text_len(
+            &self.path,
+            "model observation issue path",
+            MODEL_OBSERVATION_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_text(self.expected.as_deref(), "model observation issue expected")?;
+        validate_optional_text(self.received.as_deref(), "model observation issue received")?;
+        validate_optional_text(
+            self.schema_path.as_deref(),
+            "model observation issue schema path",
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityInputIssueCode {
@@ -110,6 +233,40 @@ pub enum CapabilityInputIssueCode {
     UnexpectedField,
     TypeMismatch,
     InvalidValue,
+}
+
+fn validate_len(len: usize, max: usize, label: &'static str) -> Result<(), String> {
+    if len > max {
+        return Err(format!("{label} exceeds maximum item count {max}"));
+    }
+    Ok(())
+}
+
+fn validate_optional_text(value: Option<&str>, label: &'static str) -> Result<(), String> {
+    if let Some(value) = value {
+        validate_text_len(value, label, MODEL_OBSERVATION_TEXT_MAX_BYTES)?;
+    }
+    Ok(())
+}
+
+fn validate_non_empty_text(value: &str, label: &'static str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    Ok(())
+}
+
+fn validate_text_len(value: &str, label: &'static str, max: usize) -> Result<(), String> {
+    if value.len() > max {
+        return Err(format!("{label} exceeds {max} bytes"));
+    }
+    if value
+        .chars()
+        .any(|character| character == '\0' || character.is_control())
+    {
+        return Err(format!("{label} must not contain NUL/control characters"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

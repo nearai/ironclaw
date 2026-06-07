@@ -188,6 +188,39 @@ impl ToolResultReferenceEnvelope {
         self.safe_summary = safe_summary;
         self
     }
+
+    pub fn with_model_observation_if_absent(
+        mut self,
+        model_observation: serde_json::Value,
+    ) -> Result<Self, String> {
+        validate_model_observation(&model_observation)?;
+        match self.model_observation.as_ref() {
+            None => {
+                self.model_observation = Some(model_observation);
+                Ok(self)
+            }
+            Some(existing) if existing == &model_observation => Ok(self),
+            Some(_) => {
+                Err("tool result model observation conflicts with existing record".to_string())
+            }
+        }
+    }
+
+    pub fn merge_model_observation_content_if_absent(
+        content: &str,
+        model_observation: serde_json::Value,
+    ) -> Result<Option<String>, String> {
+        let existing = Self::from_json_str(content)?;
+        let merged = existing
+            .clone()
+            .with_model_observation_if_absent(model_observation)?;
+        if merged == existing {
+            return Ok(None);
+        }
+        serde_json::to_string(&merged)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
 }
 
 fn validate_tool_result_ref(value: &str) -> Result<(), String> {

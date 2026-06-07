@@ -38,9 +38,9 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
         AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, HostManagedLoopPromptPort,
+        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInputIssue,
+        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
@@ -48,9 +48,10 @@ use ironclaw_turns::{
         LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView, LoopModelMessage,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
         LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptPort, LoopRunContext,
-        LoopTranscriptPort, ParentLoopOutput, PersonalContextPolicy, PromptMode,
-        PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolDefinition,
-        SkillVisibility, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput,
+        PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
+        ProviderToolDefinition, SkillVisibility, ToolObservationDetail, ToolObservationStatus,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tracing_test::traced_test;
@@ -2114,6 +2115,65 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
         Some("provider reasoning")
     );
     assert_eq!(provider_call.signature.as_deref(), Some("sig-1"));
+}
+
+#[tokio::test]
+async fn transcript_port_appends_model_observation_in_tool_result_reference_envelope() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+    let result_ref = LoopResultRef::new("result:model-observation-tool").unwrap();
+    let observation = ModelVisibleToolObservation {
+        status: ToolObservationStatus::Error,
+        summary: "Tool input failed schema validation.".to_string(),
+        detail: ToolObservationDetail::InvalidInput {
+            issues: vec![CapabilityInputIssue {
+                path: "file_path".to_string(),
+                code: CapabilityInputIssueCode::MissingRequired,
+                expected: Some("required field".to_string()),
+                received: None,
+                schema_path: Some("required".to_string()),
+            }],
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: result_ref.clone(),
+            safe_summary: "tool failed".to_string(),
+            provider_call: None,
+            model_observation: Some(observation.clone()),
+        })
+        .await
+        .unwrap();
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let record = history
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::ToolResultReference)
+        .expect("tool result reference");
+    let envelope = ToolResultReferenceEnvelope::from_json_str(record.content.as_deref().unwrap())
+        .expect("valid tool result reference envelope");
+
+    assert_eq!(envelope.result_ref, result_ref.as_str());
+    assert_eq!(
+        envelope.model_observation,
+        Some(serde_json::to_value(observation).unwrap())
+    );
 }
 
 #[tokio::test]
