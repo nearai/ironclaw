@@ -403,27 +403,26 @@ pub trait RebornServicesApi: Send + Sync {
         })
     }
 
+    /// Return the authenticated caller's scoped outbound preferences.
+    ///
+    /// Implementations must scope stored preferences by the caller's
+    /// tenant/user identity. Unsupported behavior belongs in
+    /// `UnsupportedOutboundPreferencesProductFacade`, not in trait defaults.
     async fn get_outbound_preferences(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Ok(unsupported_outbound_preferences_projection())
-    }
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
 
     async fn set_outbound_preferences(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Err(outbound_preferences_unavailable())
-    }
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
 
     async fn list_outbound_delivery_targets(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        Err(outbound_preferences_unavailable())
-    }
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError>;
 
     async fn list_extensions(
         &self,
