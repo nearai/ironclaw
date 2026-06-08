@@ -399,6 +399,7 @@ I18n.register('en', {
 
   // Tool Permissions Tab
   'settings.tools': 'Tools',
+  'settings.traceCommons': 'Trace Commons',
   'tools.alwaysAllow': 'Always Allow',
   'tools.askEachTime': 'Ask Each Time',
   'tools.disabled': 'Disabled',

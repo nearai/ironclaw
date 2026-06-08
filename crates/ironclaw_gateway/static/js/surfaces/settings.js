@@ -34,6 +34,7 @@ function loadSettingsSubtab(subtab) {
   else if (subtab === 'skills') loadSkills();
   else if (subtab === 'users') loadUsers();
   else if (subtab === 'tools') loadToolsPermissions();
+  else if (subtab === 'trace-commons') loadTraceCommonsCredits();
   if (subtab !== 'extensions' && subtab !== 'channels') stopPairingPoll();
 }
 
@@ -725,6 +726,126 @@ function loadNetworkingSettings() {
   }).catch(function(err) {
     container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
       + escapeHtml(err.message) + '</div>';
+  });
+}
+
+// --- Trace Commons Credits ---
+
+function loadTraceCommonsCredits() {
+  var container = document.getElementById('settings-trace-commons-content');
+  if (!container) return;
+  container.innerHTML = '<div class="empty-state">' + I18n.t('common.loading') + '</div>';
+
+  apiFetch('/api/traces/credit').then(function(data) {
+    var report = data.report || {};
+    var summary = data.summary || {};
+
+    container.innerHTML = '';
+
+    // Empty state: no contributions yet
+    if (!report.submissions_total) {
+      container.innerHTML = '<div class="empty-state">No Trace Commons contributions yet. Once you opt in and contribute redacted traces, your credits will appear here.</div>';
+      return;
+    }
+
+    var group = document.createElement('div');
+    group.className = 'settings-group';
+
+    var title = document.createElement('div');
+    title.className = 'settings-group-title';
+    title.textContent = 'Trace Commons Credits';
+    group.appendChild(title);
+
+    // Helper: append a display row
+    function appendRow(labelText, valueText, descText) {
+      var row = document.createElement('div');
+      row.className = 'settings-row';
+      var labelWrap = document.createElement('div');
+      labelWrap.className = 'settings-label-wrap';
+      var label = document.createElement('div');
+      label.className = 'settings-label';
+      label.textContent = labelText;
+      labelWrap.appendChild(label);
+      if (descText) {
+        var desc = document.createElement('div');
+        desc.className = 'settings-description';
+        desc.textContent = descText;
+        labelWrap.appendChild(desc);
+      }
+      row.appendChild(labelWrap);
+      var val = document.createElement('div');
+      val.className = 'settings-display-value';
+      val.textContent = valueText;
+      row.appendChild(val);
+      group.appendChild(row);
+    }
+
+    appendRow(
+      'Pending credit',
+      (report.pending_credit || 0).toFixed(2),
+      'Earned but not yet finalized'
+    );
+
+    appendRow(
+      'Final credit',
+      (report.final_credit || 0).toFixed(2),
+      'Confirmed credit'
+    );
+
+    var delta = report.delayed_credit_delta || 0;
+    appendRow(
+      'Delayed ledger',
+      (delta >= 0 ? '+' : '') + delta.toFixed(2),
+      'Can still change after review'
+    );
+
+    var submittedStr = String(report.submissions_submitted || 0) + ' submitted of ' + String(report.submissions_total || 0) + ' total';
+    if (report.submissions_accepted !== undefined && report.submissions_accepted !== null) {
+      submittedStr += ', ' + String(report.submissions_accepted) + ' accepted';
+    }
+    appendRow('Submissions', submittedStr, null);
+
+    var syncAt = report.last_credit_sync_at || null;
+    appendRow(
+      'Last synced',
+      syncAt ? new Date(syncAt).toLocaleString() : 'never',
+      'Local view as of last sync'
+    );
+
+    container.appendChild(group);
+
+    // Recent explanations list
+    var explanations = (report.explanation_lines && report.explanation_lines.length)
+      ? report.explanation_lines
+      : (summary.recent_explanations || []);
+    if (explanations.length) {
+      var exGroup = document.createElement('div');
+      exGroup.className = 'settings-group';
+      var exTitle = document.createElement('div');
+      exTitle.className = 'settings-group-title';
+      exTitle.textContent = 'Recent Credit Explanations';
+      exGroup.appendChild(exTitle);
+      var exList = document.createElement('ul');
+      exList.style.margin = '4px 0 0 16px';
+      exList.style.padding = '0';
+      for (var i = 0; i < explanations.length; i++) {
+        var li = document.createElement('li');
+        li.className = 'settings-description';
+        li.textContent = escapeHtml(explanations[i]);
+        exList.appendChild(li);
+      }
+      exGroup.appendChild(exList);
+      container.appendChild(exGroup);
+    }
+
+    // Caveat note
+    var caveat = document.createElement('div');
+    caveat.className = 'settings-description';
+    caveat.style.marginTop = '12px';
+    caveat.textContent = 'Local view as of last sync — the authoritative credit ledger is server-side. Final credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.';
+    container.appendChild(caveat);
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': ' + escapeHtml(err.message) + '</div>';
   });
 }
 
