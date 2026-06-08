@@ -128,6 +128,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     config::WaitConfig,
+    extension_surface::{
+        BUNDLED_EXTENSION_CAPABILITY_IDS, BUNDLED_EXTENSION_IDS, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
+    },
     filesystem::local_filesystem,
     github as github_support,
     model_replay::RebornTraceReplayModelGateway,
@@ -512,6 +515,35 @@ impl RebornBinaryE2EHarness {
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
         let host_runtime = Arc::new(HostRuntimeCapabilityHarness::process_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_qa_smoke_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::qa_smoke_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_extension_lifecycle_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime =
+            Arc::new(HostRuntimeCapabilityHarness::extension_lifecycle_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -1476,6 +1508,7 @@ struct HostRuntimeCapabilityHarness {
     network_policy: NetworkPolicy,
     secrets: Vec<SecretHandle>,
     provider_id: ExtensionId,
+    additional_provider_trust: Vec<(ExtensionId, Vec<EffectKind>)>,
     user_id: UserId,
     invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
@@ -1549,6 +1582,101 @@ impl HostRuntimeCapabilityHarness {
             MountView::default(),
         )
         .await
+    }
+
+    async fn qa_smoke_tools() -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        std::fs::create_dir_all(storage_root.join("skills"))?;
+        std::fs::create_dir_all(storage_root.join("system/skills"))?;
+        let runtime = local_dev_host_runtime_with_http_egress(
+            storage_root,
+            Arc::new(RecordingRuntimeHttpEgress::with_body(
+                br#"{"accepted":true,"source":"qa-smoke"}"#.to_vec(),
+            )),
+        )?;
+        let mounts = qa_smoke_mounts()?;
+        let memory_mounts = memory_mounts(MountPermissions::read_write_list_delete())?;
+        let memory_capability_ids = [
+            CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+        ];
+        Ok(Self {
+            runtime,
+            io: Arc::new(ProductLiveCapabilityIo::default()),
+            root,
+            workspace_root,
+            mounts,
+            capability_mount_overrides: memory_capability_ids
+                .iter()
+                .cloned()
+                .map(|capability_id| (capability_id, memory_mounts.clone()))
+                .collect(),
+            capability_ids: vec![
+                CapabilityId::new(ECHO_CAPABILITY_ID)?,
+                CapabilityId::new(TIME_CAPABILITY_ID)?,
+                CapabilityId::new(JSON_CAPABILITY_ID)?,
+                CapabilityId::new(HTTP_CAPABILITY_ID)?,
+                CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+                CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+                CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
+                CapabilityId::new(LIST_DIR_CAPABILITY_ID)?,
+                CapabilityId::new(GLOB_CAPABILITY_ID)?,
+                CapabilityId::new(GREP_CAPABILITY_ID)?,
+                CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
+                CapabilityId::new(SHELL_CAPABILITY_ID)?,
+                CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
+            ],
+            runtime_kind: RuntimeKind::FirstParty,
+            effect_kinds: vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
+                EffectKind::Network,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::ExternalWrite,
+            ],
+            network_policy: http_test_policy(),
+            secrets: Vec::new(),
+            provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            additional_provider_trust: Vec::new(),
+            user_id: UserId::new("reborn-e2e-qa-smoke-user")?,
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: None,
+            network_egress: None,
+        })
+    }
+
+    async fn extension_lifecycle_tools() -> HarnessResult<Self> {
+        let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
+        capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
+        let mut harness = Self::new_with_mounts(
+            "reborn-e2e-extension-lifecycle-tools",
+            capability_ids,
+            local_dev_all_effects(),
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-extension-lifecycle-user")?,
+            MountView::default(),
+        )
+        .await?;
+        harness.network_policy = wildcard_test_policy();
+        harness.additional_provider_trust = bundled_extension_provider_trust()?;
+        Ok(harness)
     }
 
     async fn skill_management_tools() -> HarnessResult<Self> {
@@ -1644,6 +1772,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy: NetworkPolicy::default(),
             secrets,
             provider_id,
+            additional_provider_trust: Vec::new(),
             user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -1740,6 +1869,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy,
             secrets: Vec::new(),
             provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            additional_provider_trust: Vec::new(),
             user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -1781,6 +1911,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy: github_support::api_policy(),
             secrets: github_support::secret_handles()?,
             provider_id: github_support::provider_id()?,
+            additional_provider_trust: Vec::new(),
             user_id: UserId::new("reborn-e2e-github-user")?,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -1844,7 +1975,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let authority = ProductLiveVisibleCapabilityRequestConfig::new(
+        let mut authority = ProductLiveVisibleCapabilityRequestConfig::new(
             self.harness.user_id.clone(),
             self.harness.runtime_kind,
             TrustClass::FirstParty,
@@ -1866,6 +1997,13 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             EffectiveTrustClass::user_trusted(),
             self.harness.effect_kinds.clone(),
         );
+        for (provider, effects) in &self.harness.additional_provider_trust {
+            authority = authority.with_provider_trust_for_effects(
+                provider.clone(),
+                EffectiveTrustClass::user_trusted(),
+                effects.clone(),
+            );
+        }
         let execution_mounts = self.harness.mounts.clone();
         let visible_request = visible_capability_request_for_run(run_context, authority)
             .map_err(host_runtime_harness_error)?;
@@ -2172,7 +2310,11 @@ fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
                 EffectKind::Network,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::ExternalWrite,
             ],
             None,
         )]),
@@ -2207,6 +2349,45 @@ fn http_test_policy() -> NetworkPolicy {
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(10_000),
     }
+}
+
+fn wildcard_test_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1_000_000),
+    }
+}
+
+fn capability_ids_from_strs(ids: &[&str]) -> HarnessResult<Vec<CapabilityId>> {
+    ids.iter()
+        .map(|id| CapabilityId::new(*id).map_err(Into::into))
+        .collect()
+}
+
+fn bundled_extension_provider_trust() -> HarnessResult<Vec<(ExtensionId, Vec<EffectKind>)>> {
+    BUNDLED_EXTENSION_IDS
+        .iter()
+        .map(|id| Ok((ExtensionId::new(*id)?, local_dev_all_effects())))
+        .collect()
+}
+
+fn local_dev_all_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::DeleteFilesystem,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+        EffectKind::SpawnProcess,
+        EffectKind::ExecuteCode,
+        EffectKind::ExternalWrite,
+    ]
 }
 
 #[derive(Debug)]
@@ -2535,6 +2716,26 @@ fn memory_mounts(permissions: MountPermissions) -> HarnessResult<MountView> {
 
 fn skill_mounts() -> HarnessResult<MountView> {
     Ok(MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/skills")?,
+            VirtualPath::new("/projects/skills")?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/system/skills")?,
+            VirtualPath::new("/projects/system/skills")?,
+            MountPermissions::read_only(),
+        ),
+    ])?)
+}
+
+fn qa_smoke_mounts() -> HarnessResult<MountView> {
+    Ok(MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/workspace")?,
+            VirtualPath::new("/projects/workspace")?,
+            MountPermissions::read_write_list_delete(),
+        ),
         MountGrant::new(
             MountAlias::new("/skills")?,
             VirtualPath::new("/projects/skills")?,
