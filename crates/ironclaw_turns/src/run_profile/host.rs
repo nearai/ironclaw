@@ -719,6 +719,7 @@ pub const LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES: usize = 256 * 1024;
 pub struct LoopContextBundle {
     pub identity_messages: Vec<LoopContextMessage>,
     pub messages: Vec<LoopContextMessage>,
+    pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     pub instruction_snippets: Vec<LoopContextSnippet>,
     pub memory_snippets: Vec<LoopContextSnippet>,
 }

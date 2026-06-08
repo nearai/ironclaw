@@ -60,7 +60,7 @@ impl NearAiLoginStateStore {
         state
     }
 
-    #[cfg(feature = "webui-v2-beta")]
+    #[cfg(any(test, feature = "webui-v2-beta"))]
     pub(crate) async fn consume(&self, state: &str) -> bool {
         let mut states = self.states.lock().await;
         let now = Instant::now();

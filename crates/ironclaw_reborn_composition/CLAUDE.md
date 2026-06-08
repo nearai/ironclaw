@@ -386,7 +386,16 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
   rate-limit 429 after descriptor budget exhausted, per-caller
   rate-limit independence, descriptor-driven body-limit 413 on
   oversized mutation payload, in-budget mutation reaches facade, and
-  NoBody policy rejecting a non-empty body on a read route.
+  NoBody policy rejecting a non-empty body on a read route. The
+  `static_*` cases additionally serve the embedded SPA bundle through
+  the same composed router and assert asset content shape — including
+  `static_i18n_module_guards_locale_race_and_clears_failed_pack_cache`
+  (the `setLang` latest-request guard plus `pending[lang]` clear on
+  both settle paths) and `static_typing_dot_animation_respects_reduced_motion`
+  (typing dots animate by default, suppressed under
+  `prefers-reduced-motion`). These lock source shape only; behavioral
+  JS/`getComputedStyle` coverage needs a browser harness this workspace
+  does not own and is deferred to the JS/e2e scaffold.
 - `src/webui_serve.rs::tests` — unit tests for `is_v2_sse_event_request`
   matcher and query-token extraction.
 - `src/webui_route_match.rs::tests` — unit tests for the pattern

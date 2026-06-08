@@ -12,18 +12,9 @@ export function TypingIndicator() {
         className="rounded-[18px] border border-white/10 bg-iron-800/60 px-4 py-3"
       >
         <div className="flex gap-1">
-          <span
-            className="h-2 w-2 animate-bounce rounded-full bg-iron-200"
-            style=${{ animationDelay: "0ms" }}
-          />
-          <span
-            className="h-2 w-2 animate-bounce rounded-full bg-iron-200"
-            style=${{ animationDelay: "150ms" }}
-          />
-          <span
-            className="h-2 w-2 animate-bounce rounded-full bg-iron-200"
-            style=${{ animationDelay: "300ms" }}
-          />
+          <span className="v2-typing-dot h-2 w-2 rounded-full bg-iron-200" />
+          <span className="v2-typing-dot h-2 w-2 rounded-full bg-iron-200" />
+          <span className="v2-typing-dot h-2 w-2 rounded-full bg-iron-200" />
         </div>
       </div>
     </div>

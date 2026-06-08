@@ -15,7 +15,7 @@ const DEFAULT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "identity=component_identity_v1;",
     "planner=DefaultPlanner;",
     "strategies=",
-    "context:DefaultContextStrategy(max_messages=16),",
+    "context:DefaultContextStrategy(max_messages=128),",
     "compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000),",
     "capability:DefaultCapabilityStrategy(all),",
     "model:DefaultModelStrategy(primary_or_fallback_index),",
@@ -34,8 +34,8 @@ const DEFAULT_FAMILY_FINGERPRINT: &[u8] = concat!(
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x0c, 0x94, 0xa4, 0xe7, 0x55, 0xfa, 0x75, 0xea, 0xd4, 0xb6, 0x09, 0xe5, 0x4c, 0xba, 0xff, 0xb5,
-    0x7f, 0x40, 0x9d, 0xbe, 0xdb, 0x90, 0xc8, 0x19, 0x52, 0x03, 0x7b, 0x96, 0x71, 0x7f, 0x60, 0xcd,
+    0xdd, 0x1f, 0x20, 0xe1, 0x17, 0xde, 0xcb, 0xe2, 0x2d, 0x48, 0x15, 0x8b, 0x05, 0x19, 0x27, 0xc4,
+    0x2f, 0xf6, 0x85, 0xd9, 0x43, 0x27, 0x25, 0x37, 0xe8, 0x38, 0x7c, 0xe6, 0xd1, 0xe5, 0xe7, 0x25,
 ]);
 
 /// The default loop family: the text-tool-use baseline.

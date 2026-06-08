@@ -12,6 +12,26 @@ fn reborn_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ironclaw-reborn")
 }
 
+fn assert_stdout_file_action(stdout: &str, file_name: &str, action: &str) {
+    let prefix = format!("{action}: ");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with(&prefix) && line.ends_with(file_name)),
+        "stdout should contain {action}: <path> ending in {file_name}: {stdout}"
+    );
+}
+
+fn assert_stdout_labeled_action(stdout: &str, label: &str, action: &str) {
+    let suffix = format!(" ({action})");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with(label) && line.ends_with(&suffix)),
+        "stdout should contain {label} with action {action}: {stdout}"
+    );
+}
+
 fn isolated_no_llm_command(workspace: &Path, reborn_home: &Path) -> Command {
     let mut command = Command::new(reborn_bin());
     command
@@ -55,6 +75,7 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("hooks"), "stdout: {stdout}");
     assert!(stdout.contains("logs"), "stdout: {stdout}");
     assert!(stdout.contains("models"), "stdout: {stdout}");
+    assert!(stdout.contains("onboard"), "stdout: {stdout}");
     assert!(stdout.contains("profile"), "stdout: {stdout}");
     assert!(stdout.contains("repl"), "stdout: {stdout}");
     assert!(stdout.contains("run"), "stdout: {stdout}");
@@ -1962,6 +1983,9 @@ fn config_init_writes_both_files() {
         reborn_home.join("providers.json").exists(),
         "providers.json missing"
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_stdout_file_action(&stdout, "config.toml", "wrote");
+    assert_stdout_file_action(&stdout, "providers.json", "wrote");
     let config_text =
         std::fs::read_to_string(reborn_home.join("config.toml")).expect("config.toml readable");
     assert!(
@@ -2054,6 +2078,228 @@ fn config_init_with_force_overwrites() {
     assert!(!providers_text.contains("partial providers"));
     assert!(config_text.contains("api_version = \"ironclaw.runtime/v1\""));
     assert!(providers_text.contains("\"id\": \"acme-openrouter\""));
+}
+
+#[test]
+fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let v1_home = temp.path().join("v1-home");
+
+    let output = Command::new(reborn_bin())
+        .arg("onboard")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_BASE_DIR", &v1_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("IronClaw Reborn onboarding"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
+    assert!(
+        reborn_home.join("config.toml").exists(),
+        "config.toml missing"
+    );
+    assert!(
+        reborn_home.join("providers.json").exists(),
+        "providers.json missing"
+    );
+    let marker_path = reborn_home.join(".onboard-completed.json");
+    assert!(marker_path.exists(), "onboarding marker missing");
+    let marker_text = std::fs::read_to_string(marker_path).expect("read marker");
+    let marker: serde_json::Value = serde_json::from_str(&marker_text).expect("valid marker JSON");
+    assert_eq!(marker["schema_version"], "ironclaw.reborn.onboarding/v1");
+    assert_eq!(marker["v1_state"], "not-used");
+    assert!(
+        !v1_home.exists(),
+        "onboard must not create or read explicit v1 state"
+    );
+}
+
+#[test]
+fn onboard_dry_run_is_read_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .args(["onboard", "--dry-run", "--import-history"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard --dry-run should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("IronClaw Reborn onboarding dry run"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("import_history_requested: true"),
+        "stdout: {stdout}"
+    );
+    assert!(!reborn_home.exists(), "dry-run must not create Reborn home");
+}
+
+#[test]
+fn onboard_dry_run_reports_existing_marker_as_preserved() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("mkdir");
+    let marker_path = reborn_home.join(".onboard-completed.json");
+    std::fs::write(&marker_path, "custom marker\n").expect("write marker");
+
+    let output = Command::new(reborn_bin())
+        .args(["onboard", "--dry-run"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard --dry-run should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("would_preserve: {}", marker_path.display())),
+        "stdout: {stdout}"
+    );
+    let marker_text = std::fs::read_to_string(marker_path).expect("read marker");
+    assert_eq!(marker_text, "custom marker\n");
+}
+
+#[test]
+fn onboard_import_history_records_pending_step() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .args(["onboard", "--import-history"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard --import-history should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let marker_text =
+        std::fs::read_to_string(reborn_home.join(".onboard-completed.json")).expect("read marker");
+    let marker: serde_json::Value = serde_json::from_str(&marker_text).expect("valid marker JSON");
+    let pending = marker["steps_pending"]
+        .as_array()
+        .expect("pending steps array");
+    assert!(
+        pending.iter().any(|step| step == "history_import"),
+        "marker should record history import as pending: {marker_text}"
+    );
+}
+
+#[test]
+fn onboard_preserves_existing_config_without_force() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("mkdir");
+    std::fs::write(reborn_home.join("config.toml"), "custom config\n").expect("write config");
+    std::fs::write(
+        reborn_home.join(".onboard-completed.json"),
+        "custom marker\n",
+    )
+    .expect("write marker");
+
+    let output = Command::new(reborn_bin())
+        .arg("onboard")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_stdout_file_action(&stdout, "config.toml", "preserved");
+    assert_stdout_file_action(&stdout, "providers.json", "wrote");
+    assert_stdout_labeled_action(&stdout, "onboarding_marker:", "preserved");
+    let config_text =
+        std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
+    assert_eq!(config_text, "custom config\n");
+    let marker_text =
+        std::fs::read_to_string(reborn_home.join(".onboard-completed.json")).expect("read marker");
+    assert_eq!(marker_text, "custom marker\n");
+    assert!(
+        reborn_home.join("providers.json").exists(),
+        "missing providers file"
+    );
+    assert!(
+        reborn_home.join(".onboard-completed.json").exists(),
+        "missing marker"
+    );
+}
+
+#[test]
+fn onboard_with_force_overwrites_existing_files_and_marker() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("mkdir");
+    std::fs::write(reborn_home.join("config.toml"), "custom config\n").expect("write config");
+    std::fs::write(reborn_home.join("providers.json"), "custom providers\n")
+        .expect("write providers");
+    std::fs::write(
+        reborn_home.join(".onboard-completed.json"),
+        "custom marker\n",
+    )
+    .expect("write marker");
+
+    let output = Command::new(reborn_bin())
+        .args(["onboard", "--force"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard --force should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_stdout_file_action(&stdout, "config.toml", "overwrote");
+    assert_stdout_file_action(&stdout, "providers.json", "overwrote");
+    assert_stdout_labeled_action(&stdout, "onboarding_marker:", "overwrote");
+
+    let config_text =
+        std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
+    let providers_text =
+        std::fs::read_to_string(reborn_home.join("providers.json")).expect("read providers");
+    let marker_text =
+        std::fs::read_to_string(reborn_home.join(".onboard-completed.json")).expect("read marker");
+    assert!(!config_text.contains("custom config"));
+    assert!(!providers_text.contains("custom providers"));
+    assert!(!marker_text.contains("custom marker"));
+    assert!(config_text.contains("api_version = \"ironclaw.runtime/v1\""));
+    assert!(providers_text.contains("\"id\": \"acme-openrouter\""));
+    let marker: serde_json::Value = serde_json::from_str(&marker_text).expect("valid marker JSON");
+    assert_eq!(marker["schema_version"], "ironclaw.reborn.onboarding/v1");
 }
 
 #[test]
