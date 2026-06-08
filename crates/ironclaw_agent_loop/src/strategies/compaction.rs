@@ -31,35 +31,20 @@ pub(crate) enum CompactionDecision {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DefaultCompactionStrategy {
-    pub context_limit_tokens: u64,
-    pub reserve_tokens: u64,
-    pub main_loop_max_output_tokens: u64,
+    pub prompt_context_budget: PromptContextTokenBudget,
     pub preserve_tail_tokens: u64,
     pub deadline_ms: u64,
 }
 
 impl DefaultCompactionStrategy {
-    pub const DEFAULT_CONTEXT_LIMIT_TOKENS: u64 =
-        PromptContextTokenBudget::DEFAULT_CONTEXT_LIMIT_TOKENS;
-    pub const DEFAULT_RESERVE_TOKENS: u64 = PromptContextTokenBudget::DEFAULT_RESERVE_TOKENS;
-    pub const DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS: u64 =
-        PromptContextTokenBudget::DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS;
     pub const DEFAULT_PRESERVE_TAIL_TOKENS: u64 = 8_000;
     pub const DEFAULT_DEADLINE_MS: u64 = 30_000;
-
-    fn prompt_context_budget(&self) -> PromptContextTokenBudget {
-        PromptContextTokenBudget::new(
-            self.context_limit_tokens,
-            self.reserve_tokens,
-            self.main_loop_max_output_tokens,
-        )
-    }
 
     pub(super) fn can_evaluate(&self, state: &LoopExecutionState) -> bool {
         if state.compaction_prompt.message_index.is_empty() {
             return false;
         }
-        let threshold = self.prompt_context_budget().visible_transcript_tokens();
+        let threshold = self.prompt_context_budget.visible_transcript_tokens();
         if threshold <= self.preserve_tail_tokens {
             return false;
         }
@@ -79,9 +64,7 @@ impl DefaultCompactionStrategy {
 impl Default for DefaultCompactionStrategy {
     fn default() -> Self {
         Self {
-            context_limit_tokens: Self::DEFAULT_CONTEXT_LIMIT_TOKENS,
-            reserve_tokens: Self::DEFAULT_RESERVE_TOKENS,
-            main_loop_max_output_tokens: Self::DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS,
+            prompt_context_budget: PromptContextTokenBudget::default(),
             preserve_tail_tokens: Self::DEFAULT_PRESERVE_TAIL_TOKENS,
             deadline_ms: Self::DEFAULT_DEADLINE_MS,
         }
@@ -176,6 +159,7 @@ mod tests {
         CompactionPromptSnapshot, CompactionStrategyState, DeferredCompactionWatermark,
         LoopExecutionState, MessageIndexEntry,
     };
+    use ironclaw_turns::run_profile::PromptContextTokenBudget;
 
     #[test]
     fn evaluate_skips_when_message_index_is_empty() {
@@ -183,9 +167,7 @@ mod tests {
         let mut state = LoopExecutionState::initial_for_run(&context);
         state.compaction_state.force_compact_on_next_iteration = true;
         let strategy = DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 0,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
             preserve_tail_tokens: 1,
             deadline_ms: 1,
         };
@@ -207,9 +189,7 @@ mod tests {
                 estimated_tokens: 100,
             }]);
         let strategy = DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 0,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
             preserve_tail_tokens: 1,
             deadline_ms: 1,
         };
@@ -236,9 +216,7 @@ mod tests {
             },
         ]);
         let strategy = DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 0,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
             preserve_tail_tokens: 60,
             deadline_ms: 1,
         };
@@ -277,9 +255,7 @@ mod tests {
             },
         ]);
         let strategy = DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 0,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
             preserve_tail_tokens: 60,
             deadline_ms: 7,
         };
@@ -312,9 +288,7 @@ mod tests {
             },
         ]);
         let strategy = DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 0,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
             preserve_tail_tokens: 60,
             deadline_ms: 7,
         };
@@ -358,9 +332,7 @@ mod tests {
             },
         ]);
         let strategy = DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 0,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
             preserve_tail_tokens: 60,
             deadline_ms: 7,
         };
@@ -398,9 +370,7 @@ mod tests {
             prompt_fingerprint: state.compaction_prompt.fingerprint(),
         });
         let strategy = DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 0,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
             preserve_tail_tokens: 1,
             deadline_ms: 7,
         };
@@ -447,9 +417,7 @@ mod tests {
             prompt_fingerprint: state.compaction_prompt.fingerprint(),
         });
         let strategy = DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 0,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
             preserve_tail_tokens: 60,
             deadline_ms: 7,
         };
@@ -485,9 +453,7 @@ mod tests {
             prompt_fingerprint: state.compaction_prompt.fingerprint(),
         });
         let strategy = DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 0,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
             preserve_tail_tokens: 60,
             deadline_ms: 7,
         };
@@ -525,9 +491,7 @@ mod tests {
             },
         ]);
         let strategy = DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 0,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
             preserve_tail_tokens: 1,
             deadline_ms: 7,
         };
@@ -579,9 +543,7 @@ mod tests {
             prompt_fingerprint: state.compaction_prompt.fingerprint(),
         });
         let strategy = DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 0,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
             preserve_tail_tokens: 1,
             deadline_ms: 7,
         };
@@ -613,9 +575,7 @@ mod tests {
             },
         ]);
         let strategy = DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 30,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 30),
             preserve_tail_tokens: 1,
             deadline_ms: 7,
         };
