@@ -287,7 +287,7 @@ The turn pipeline remains the source of truth for admission, active-lock handlin
 In V1, `last_status` reflects submit outcome only. It is separate from the
 active-fire claim and does not become an in-flight sentinel.
 
-V1 also persists bounded per-trigger run-history rows for browser inspection:
+V1 also persists bounded per-trigger run-history rows for product-surface inspection:
 
 - each row is scoped by `(tenant_id, trigger_id, fire_slot)` and records the
   deterministic trigger route thread id, optional submitted `TurnRunId`,

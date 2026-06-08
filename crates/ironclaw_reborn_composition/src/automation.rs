@@ -22,21 +22,21 @@ use serde_json::{Value, json};
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
-pub struct RebornWebuiAutomationFacade {
+pub struct RebornAutomationProductFacade {
     host_runtime: Arc<dyn HostRuntime>,
     backend_timeout: Duration,
 }
 
-impl std::fmt::Debug for RebornWebuiAutomationFacade {
+impl std::fmt::Debug for RebornAutomationProductFacade {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("RebornWebuiAutomationFacade")
+            .debug_struct("RebornAutomationProductFacade")
             .field("host_runtime", &"Arc<dyn HostRuntime>")
             .finish()
     }
 }
 
-impl RebornWebuiAutomationFacade {
+impl RebornAutomationProductFacade {
     pub(crate) fn new(host_runtime: Arc<dyn HostRuntime>) -> Self {
         Self {
             host_runtime,
@@ -117,7 +117,7 @@ impl RebornWebuiAutomationFacade {
 }
 
 #[async_trait::async_trait]
-impl AutomationProductFacade for RebornWebuiAutomationFacade {
+impl AutomationProductFacade for RebornAutomationProductFacade {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
@@ -233,6 +233,28 @@ fn sanitize_automation_list_output(output: &mut Value) {
         };
         trigger_object.insert("last_status".to_string(), status);
         trigger_object.insert("state".to_string(), state);
+        sanitize_recent_run_statuses(trigger_object);
+    }
+}
+
+fn sanitize_recent_run_statuses(trigger_object: &mut serde_json::Map<String, Value>) {
+    let Some(recent_runs) = trigger_object
+        .get_mut("recent_runs")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for run in recent_runs {
+        let Some(run_object) = run.as_object_mut() else {
+            continue;
+        };
+        let status = match run_object.get("status").and_then(Value::as_str) {
+            Some("running") => Value::String("running".to_string()),
+            Some("ok") => Value::String("ok".to_string()),
+            Some("error") => Value::String("error".to_string()),
+            _ => Value::String("unknown".to_string()),
+        };
+        run_object.insert("status".to_string(), status);
     }
 }
 
@@ -366,7 +388,7 @@ fn map_host_runtime_error(error: HostRuntimeError) -> RebornServicesError {
 }
 
 fn automation_extension_id() -> Result<ExtensionId, RebornServicesError> {
-    ExtensionId::new("reborn.webui.automation").map_err(|_| internal_invariant())
+    ExtensionId::new("reborn.product.automation").map_err(|_| internal_invariant())
 }
 
 fn services_error(
@@ -419,12 +441,12 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::sync::Mutex;
 
-    use super::RebornWebuiAutomationFacade;
+    use super::RebornAutomationProductFacade;
 
     #[tokio::test]
     async fn automation_facade_preserves_caller_scope_and_capability_path() {
         let runtime = Arc::new(RecordingHostRuntime::default());
-        let facade = RebornWebuiAutomationFacade::new(runtime.clone());
+        let facade = RebornAutomationProductFacade::new(runtime.clone());
         let caller = caller();
 
         let automations = facade
@@ -485,7 +507,7 @@ mod tests {
 
     #[tokio::test]
     async fn automation_facade_rejects_malformed_trigger_list_output() {
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "unexpected": true
         }))));
 
@@ -500,7 +522,7 @@ mod tests {
 
     #[tokio::test]
     async fn automation_facade_rejects_non_array_trigger_list_output() {
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "triggers": {
                 "trigger_id": "trigger-listed"
             }
@@ -526,7 +548,7 @@ mod tests {
             "last_status".to_string(),
             json!({"trace": "internal details", "secret": "token"}),
         );
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "triggers": [Value::Object(trigger)]
         }))));
 
@@ -561,7 +583,7 @@ mod tests {
         .cloned()
         .expect("object trigger");
         non_string_status["recent_runs"][0]["status"] = json!({"raw": "backend-only"});
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "triggers": [
                 Value::Object(unknown_status),
                 Value::Object(non_string_status)
@@ -576,11 +598,11 @@ mod tests {
         assert_eq!(automations.len(), 2);
         assert_eq!(
             automations[0].recent_runs[0].status,
-            RebornAutomationRecentRunStatus::Error
+            RebornAutomationRecentRunStatus::Unknown
         );
         assert_eq!(
             automations[1].recent_runs[0].status,
-            RebornAutomationRecentRunStatus::Error
+            RebornAutomationRecentRunStatus::Unknown
         );
     }
 
@@ -632,7 +654,7 @@ mod tests {
             "is_active": true,
             "created_at": "2026-06-02T18:00:00Z"
         });
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "triggers": [
                 Value::Object(paused),
                 Value::Object(scheduled),
@@ -657,7 +679,7 @@ mod tests {
 
     #[tokio::test]
     async fn automation_facade_filters_unknown_future_sources() {
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "triggers": [
                 raw_automation("trigger-schedule", "Daily status", "0 9 * * *", Some("ok")),
                 {
@@ -682,7 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn automation_facade_rejects_malformed_trigger_records() {
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "triggers": [{
                 "name": "Missing trigger id",
                 "schedule": {"kind": "cron", "expression": "0 9 * * *"},
@@ -705,7 +727,7 @@ mod tests {
     #[tokio::test]
     async fn automation_facade_redacts_runtime_failure_messages() {
         let runtime = Arc::new(FailingHostRuntime::new(RuntimeFailureKind::Internal));
-        let facade = RebornWebuiAutomationFacade::new(runtime);
+        let facade = RebornAutomationProductFacade::new(runtime);
         let caller = caller();
 
         let error = facade
@@ -722,7 +744,7 @@ mod tests {
 
     #[tokio::test]
     async fn automation_facade_times_out_stalled_runtime() {
-        let facade = RebornWebuiAutomationFacade::with_backend_timeout(
+        let facade = RebornAutomationProductFacade::with_backend_timeout(
             Arc::new(HangingHostRuntime),
             std::time::Duration::from_millis(1),
         );
@@ -807,7 +829,7 @@ mod tests {
 
         for (outcome, code, kind, status_code, retryable) in cases {
             let facade =
-                RebornWebuiAutomationFacade::new(Arc::new(OutcomeHostRuntime::new(outcome)));
+                RebornAutomationProductFacade::new(Arc::new(OutcomeHostRuntime::new(outcome)));
 
             let error = facade
                 .list_automations(caller(), automation_list_request(50, 10))
@@ -856,7 +878,7 @@ mod tests {
 
         for (failure_kind, code, kind, status_code, retryable) in cases {
             let facade =
-                RebornWebuiAutomationFacade::new(Arc::new(FailingHostRuntime::new(failure_kind)));
+                RebornAutomationProductFacade::new(Arc::new(FailingHostRuntime::new(failure_kind)));
 
             let error = facade
                 .list_automations(caller(), automation_list_request(10, 5))
@@ -891,7 +913,7 @@ mod tests {
 
         for (host_error, code, kind, status_code, retryable) in cases {
             let facade =
-                RebornWebuiAutomationFacade::new(Arc::new(ErrorHostRuntime::new(host_error)));
+                RebornAutomationProductFacade::new(Arc::new(ErrorHostRuntime::new(host_error)));
 
             let error = facade
                 .list_automations(caller(), automation_list_request(10, 5))

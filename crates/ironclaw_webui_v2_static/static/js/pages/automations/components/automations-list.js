@@ -65,9 +65,8 @@ function recentRunKey(run) {
   return run.run_id || run.thread_id || run.submitted_at || run.timestamp_source;
 }
 
-function automationRowKeyDown(event, automationId, onSelectAutomation) {
-  if (event.key !== "Enter" && event.key !== " ") return;
-  event.preventDefault();
+function selectAutomationFromButton(event, automationId, onSelectAutomation) {
+  event.stopPropagation();
   onSelectAutomation(automationId);
 }
 
@@ -304,28 +303,31 @@ export function AutomationsList({
                         return html`
                           <tr
                             key=${automation.automation_id}
-                            tabIndex=${0}
-                            role="button"
-                            aria-pressed=${selected}
                             onClick=${() => onSelectAutomation(automation.automation_id)}
-                            onKeyDown=${(event) =>
-                              automationRowKeyDown(
-                                event,
-                                automation.automation_id,
-                                onSelectAutomation
-                              )}
                             className=${cn(
-                              "cursor-pointer border-b border-[var(--v2-panel-border)] last:border-0 hover:bg-white/[0.03] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--v2-accent)]",
+                              "cursor-pointer border-b border-[var(--v2-panel-border)] last:border-0 hover:bg-white/[0.03]",
                               selected && "bg-[var(--v2-accent-soft)]/30"
                             )}
                           >
                             <td className="max-w-[280px] px-5 py-4 align-top">
-                              <div className="truncate text-sm font-semibold text-iron-100">
-                                ${automation.display_name}
-                              </div>
-                              <div className="mt-1 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-iron-400">
-                                ${automation.automation_id}
-                              </div>
+                              <button
+                                type="button"
+                                aria-pressed=${selected}
+                                onClick=${(event) =>
+                                  selectAutomationFromButton(
+                                    event,
+                                    automation.automation_id,
+                                    onSelectAutomation
+                                  )}
+                                className="block w-full min-w-0 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]"
+                              >
+                                <div className="truncate text-sm font-semibold text-iron-100">
+                                  ${automation.display_name}
+                                </div>
+                                <div className="mt-1 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-iron-400">
+                                  ${automation.automation_id}
+                                </div>
+                              </button>
                             </td>
                             <td className="px-5 py-4 align-top text-sm text-iron-200">
                               ${automation.schedule_label}

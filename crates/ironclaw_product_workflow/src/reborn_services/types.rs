@@ -245,7 +245,7 @@ pub struct RebornListThreadsResponse {
     pub next_cursor: Option<String>,
 }
 
-/// Bounded browser projection for caller-scoped automations.
+/// Bounded product projection for caller-scoped automations.
 ///
 /// The beta API currently returns one capped page without a cursor. Future
 /// pagination can extend this response with an optional cursor without changing
@@ -640,7 +640,7 @@ pub enum RebornAutomationRunStatus {
     Error,
 }
 
-/// Browser-visible status for an individual automation run.
+/// Client-visible status for an individual automation run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornAutomationRecentRunStatus {
@@ -652,7 +652,7 @@ pub enum RebornAutomationRecentRunStatus {
     Unknown,
 }
 
-/// Browser-safe automation run projection.
+/// Client-safe automation run projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornAutomationRecentRunInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -667,9 +667,9 @@ pub struct RebornAutomationRecentRunInfo {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-/// Allowlisted browser-visible state for automation list projections.
+/// Allowlisted client-visible state for automation list projections.
 ///
-/// Unknown runtime states are collapsed to `unknown` so the browser DTO stays
+/// Unknown runtime states are collapsed to `unknown` so the client DTO stays
 /// typed without surfacing raw backend strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

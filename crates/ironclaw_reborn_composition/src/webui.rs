@@ -12,8 +12,8 @@ use ironclaw_product_workflow::{
 };
 
 use crate::{
-    RebornBuildError, RebornProductAuthServices, RebornReadiness, RebornRuntime,
-    RebornWebuiAutomationFacade,
+    RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
+    RebornRuntime,
     lifecycle::{
         RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
     },
@@ -72,7 +72,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     let automation_facade = services
         .host_runtime
         .as_ref()
-        .map(|host_runtime| Arc::new(RebornWebuiAutomationFacade::new(Arc::clone(host_runtime))));
+        .map(|host_runtime| Arc::new(RebornAutomationProductFacade::new(Arc::clone(host_runtime))));
 
     let mut api = ProductRebornServices::new(
         runtime.webui_thread_service(),
