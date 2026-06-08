@@ -162,28 +162,33 @@ pub(super) fn is_eligible_user_boundary(
 /// `CompactionInitiator` variant that should be emitted in the resulting
 /// `LoopProgressEvent::CompactionStarted` event.
 ///
-/// Future impls (e.g. `BudgetFractionPolicy` for #4311) drop in alongside
-/// `ByteCapPolicy` without changing call sites.
-pub(crate) trait CompactionPolicy: Send + Sync {
+/// The name `CompactionForceStrategy` distinguishes this from `CompactionStrategy`
+/// (which decides when/how to run normal compaction) — this trait specifically
+/// decides whether to FORCE a compact-then-skip-model on the next iteration
+/// based on per-capability byte accounting.
+///
+/// Future impls (e.g. `BudgetFractionStrategy` for #4311) drop in alongside
+/// `ByteCapStrategy` without changing call sites.
+pub(crate) trait CompactionForceStrategy: Send + Sync {
     fn should_force_compact(
         &self,
         state: &LoopExecutionState,
     ) -> Option<CompactionInitiator>;
 }
 
-/// Per-capability byte-cap compaction policy. Trips compaction when any single
-/// capability id has accumulated more than its configured byte cap in
+/// Per-capability byte-cap compaction force strategy. Trips compaction when any
+/// single capability id has accumulated more than its configured byte cap in
 /// `pending_capability_bytes` during the current turn.
 ///
-/// v2 (`BudgetFractionPolicy`) will land alongside this once #4311 budget
+/// v2 (`BudgetFractionStrategy`) will land alongside this once #4311 budget
 /// governance collapse merges.
 #[derive(Debug, Clone)]
-pub(crate) struct ByteCapPolicy {
+pub(crate) struct ByteCapStrategy {
     caps: BTreeMap<CapabilityId, u64>,
     default_cap: u64,
 }
 
-impl ByteCapPolicy {
+impl ByteCapStrategy {
     /// Default cap applied to any capability not explicitly listed.
     pub const DEFAULT_FALLBACK_CAP_BYTES: u64 = 32_000;
 
@@ -213,13 +218,13 @@ impl ByteCapPolicy {
     }
 }
 
-impl Default for ByteCapPolicy {
+impl Default for ByteCapStrategy {
     fn default() -> Self {
         Self::with_defaults()
     }
 }
 
-impl CompactionPolicy for ByteCapPolicy {
+impl CompactionForceStrategy for ByteCapStrategy {
     fn should_force_compact(
         &self,
         state: &LoopExecutionState,
@@ -733,10 +738,10 @@ mod tests {
         assert_eq!(boundary, Some(1));
     }
 
-    // --- ByteCapPolicy tests ---
+    // --- ByteCapStrategy tests ---
 
     #[test]
-    fn byte_cap_policy_trips_when_capability_exceeds_cap() {
+    fn byte_cap_strategy_trips_when_capability_exceeds_cap() {
         let context = crate::test_support::test_run_context("byte-cap-policy-trips");
         let mut state = LoopExecutionState::initial_for_run(&context);
         let id = CapabilityId::new("builtin.http").expect("valid capability");
@@ -746,15 +751,15 @@ mod tests {
             .pending_capability_bytes
             .insert(id, 32_001);
 
-        let policy = ByteCapPolicy::with_defaults();
+        let strategy = ByteCapStrategy::with_defaults();
         assert_eq!(
-            policy.should_force_compact(&state),
+            strategy.should_force_compact(&state),
             Some(CompactionInitiator::CapabilityResultOverflow)
         );
     }
 
     #[test]
-    fn byte_cap_policy_skips_when_under_threshold() {
+    fn byte_cap_strategy_skips_when_under_threshold() {
         let context = crate::test_support::test_run_context("byte-cap-policy-under");
         let mut state = LoopExecutionState::initial_for_run(&context);
         let http_id = CapabilityId::new("builtin.http").expect("valid capability");
@@ -769,12 +774,12 @@ mod tests {
             .pending_capability_bytes
             .insert(subagent_id, 47_999);
 
-        let policy = ByteCapPolicy::with_defaults();
-        assert_eq!(policy.should_force_compact(&state), None);
+        let strategy = ByteCapStrategy::with_defaults();
+        assert_eq!(strategy.should_force_compact(&state), None);
     }
 
     #[test]
-    fn byte_cap_policy_uses_default_cap_for_unknown_capability() {
+    fn byte_cap_strategy_uses_default_cap_for_unknown_capability() {
         let context = crate::test_support::test_run_context("byte-cap-policy-unknown");
         let mut state = LoopExecutionState::initial_for_run(&context);
         let id = CapabilityId::new("custom.unknown_tool").expect("valid capability");
@@ -782,26 +787,26 @@ mod tests {
         state
             .post_capability_state
             .pending_capability_bytes
-            .insert(id, ByteCapPolicy::DEFAULT_FALLBACK_CAP_BYTES + 1);
+            .insert(id, ByteCapStrategy::DEFAULT_FALLBACK_CAP_BYTES + 1);
 
-        let policy = ByteCapPolicy::with_defaults();
+        let strategy = ByteCapStrategy::with_defaults();
         assert_eq!(
-            policy.should_force_compact(&state),
+            strategy.should_force_compact(&state),
             Some(CompactionInitiator::CapabilityResultOverflow)
         );
     }
 
     #[test]
-    fn byte_cap_policy_empty_accumulator_returns_none() {
+    fn byte_cap_strategy_empty_accumulator_returns_none() {
         let context = crate::test_support::test_run_context("byte-cap-policy-empty");
         let state = LoopExecutionState::initial_for_run(&context);
         // pending_capability_bytes is empty by default.
-        let policy = ByteCapPolicy::with_defaults();
-        assert_eq!(policy.should_force_compact(&state), None);
+        let strategy = ByteCapStrategy::with_defaults();
+        assert_eq!(strategy.should_force_compact(&state), None);
     }
 
     #[test]
-    fn byte_cap_policy_with_cap_overrides_default_cap() {
+    fn byte_cap_strategy_with_cap_overrides_default_cap() {
         let ctx = crate::test_support::test_run_context("byte-cap-with-cap");
         let mut state = LoopExecutionState::initial_for_run(&ctx);
         let id = CapabilityId::new("custom.large_tool").unwrap();
@@ -810,9 +815,9 @@ mod tests {
             .pending_capability_bytes
             .insert(id.clone(), 5_000);
         // Default cap (32_000) would NOT trip at 5_000; custom cap of 4_000 should trip.
-        let policy = ByteCapPolicy::with_defaults().with_cap(id, 4_000);
+        let strategy = ByteCapStrategy::with_defaults().with_cap(id, 4_000);
         assert_eq!(
-            policy.should_force_compact(&state),
+            strategy.should_force_compact(&state),
             Some(CompactionInitiator::CapabilityResultOverflow)
         );
     }

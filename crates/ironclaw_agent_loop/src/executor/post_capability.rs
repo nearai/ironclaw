@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_turns::run_profile::{LoopProgressEvent, SystemInferenceTaskId};
 
-use crate::strategies::{ByteCapPolicy, CompactionPolicy};
+use crate::strategies::{ByteCapStrategy, CompactionForceStrategy};
 
 use super::{
     AgentLoopExecutorError, CheckpointStage, ExecutorStage, StageContext, TurnCompletedStep,
@@ -26,11 +26,11 @@ use super::{
 /// file (single-seam thesis per the WU-A design doc).
 #[derive(Clone)]
 pub(crate) struct PostCapabilityStage {
-    policy: Arc<dyn CompactionPolicy>,
+    policy: Arc<dyn CompactionForceStrategy>,
 }
 
 impl PostCapabilityStage {
-    pub(crate) fn new(policy: Arc<dyn CompactionPolicy>) -> Self {
+    pub(crate) fn new(policy: Arc<dyn CompactionForceStrategy>) -> Self {
         Self { policy }
     }
 
@@ -44,7 +44,7 @@ impl PostCapabilityStage {
 
 impl Default for PostCapabilityStage {
     fn default() -> Self {
-        Self::new(Arc::new(ByteCapPolicy::default()))
+        Self::new(Arc::new(ByteCapStrategy::default()))
     }
 }
 
@@ -75,25 +75,25 @@ impl ExecutorStage<TurnCompletedStep> for PostCapabilityStage {
         // Only consult policy if any capability bytes accumulated this turn.
         // AssistantReply turns reach here with an empty map and gain nothing
         // from the policy scan + Arc<dyn> virtual dispatch.
-        if !state.post_capability_state.pending_capability_bytes.is_empty() {
-            if let Some(initiator) = self.policy.should_force_compact(&state) {
-                state.compaction_state.force_compact_on_next_iteration = true;
-                state.post_capability_state.skip_model_this_iteration = true;
+        if !state.post_capability_state.pending_capability_bytes.is_empty()
+            && let Some(initiator) = self.policy.should_force_compact(&state)
+        {
+            state.compaction_state.force_compact_on_next_iteration = true;
+            state.post_capability_state.skip_model_this_iteration = true;
 
-                CheckpointStage
-                    .emit_progress(
-                        ctx,
-                        LoopProgressEvent::CompactionStarted {
-                            task_id: SystemInferenceTaskId::new(),
-                            initiator,
-                        },
-                    )
-                    .await;
-            }
+            CheckpointStage
+                .emit_progress(
+                    ctx,
+                    LoopProgressEvent::CompactionStarted {
+                        task_id: SystemInferenceTaskId::new(),
+                        initiator,
+                    },
+                )
+                .await;
         }
 
         // Always clear the per-turn byte accumulator regardless of whether the
-        // policy tripped. ByteCapPolicy doc states "during the current turn" —
+        // policy tripped. ByteCapStrategy doc states "during the current turn" —
         // carrying entries across turns would cause cross-turn accumulation and
         // false-positive trips on subsequent AssistantReply turns. Map is cheap
         // to drop and re-populate per turn.
@@ -111,17 +111,17 @@ mod tests {
     use ironclaw_turns::{LoopExit, LoopExitId, LoopFailureKind, run_profile::CompactionInitiator};
 
     use crate::state::LoopExecutionState;
-    use crate::strategies::CompactionPolicy;
+    use crate::strategies::CompactionForceStrategy;
     use crate::strategies::TurnSummary;
     use crate::test_support::{MockAgentLoopDriverHost, test_run_context};
 
     use super::super::{ExecutorStage, StageContext, TurnCompletedStep};
     use super::PostCapabilityStage;
 
-    /// Minimal stub policy that always returns the same outcome.
+    /// Minimal stub strategy that always returns the same outcome.
     struct StubPolicy(Option<CompactionInitiator>);
 
-    impl CompactionPolicy for StubPolicy {
+    impl CompactionForceStrategy for StubPolicy {
         fn should_force_compact(
             &self,
             _state: &LoopExecutionState,

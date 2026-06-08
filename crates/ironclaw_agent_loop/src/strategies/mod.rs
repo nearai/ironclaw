@@ -38,7 +38,7 @@ pub(crate) use batch::{
 pub(crate) use budget::{BudgetStrategy, DefaultBudgetStrategy};
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};
 pub(crate) use compaction::{
-    ByteCapPolicy, CompactionDecision, CompactionPolicy, CompactionStrategy,
+    ByteCapStrategy, CompactionDecision, CompactionForceStrategy, CompactionStrategy,
     DefaultCompactionStrategy,
 };
 pub(crate) use context::{ContextPlan, ContextStrategy, DefaultContextStrategy};

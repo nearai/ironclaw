@@ -2770,7 +2770,7 @@ async fn prompt_stage_skip_model_carries_pending_input_ack() {
 // ---------------------------------------------------------------------------
 
 /// Byte-threshold trips through the full executor turn: capability batch returns
-/// a result whose `byte_len` exceeds `ByteCapPolicy::DEFAULT_FALLBACK_CAP_BYTES`
+/// a result whose `byte_len` exceeds `ByteCapStrategy::DEFAULT_FALLBACK_CAP_BYTES`
 /// (32 000). PostCapabilityStage should set both compaction flags on the state
 /// that is written to the Final checkpoint.
 #[tokio::test]
@@ -2994,7 +2994,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
 }
 
 /// D2 regression: byte_len was hardcoded to 0 for SpawnedChildRun outcomes.
-/// ByteCapPolicy (WU-A) never tripped for builtin.spawn_subagent — the
+/// ByteCapStrategy (WU-A) never tripped for builtin.spawn_subagent — the
 /// capability with the largest configured cap (48 KB) — even when the spawned
 /// result was huge. This test drives the full executor turn with a
 /// SpawnedChildRun outcome carrying a large byte_len and asserts that
