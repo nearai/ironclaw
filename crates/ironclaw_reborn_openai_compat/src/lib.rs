@@ -13,6 +13,7 @@ mod descriptors;
 mod error;
 #[cfg(feature = "openai-compat-beta")]
 mod handlers;
+mod refs;
 mod responses;
 #[cfg(feature = "openai-compat-beta")]
 mod router;
@@ -42,6 +43,16 @@ pub use error::{
 pub use handlers::{
     chat_completions, responses_api_cancel, responses_api_create, responses_api_retrieve,
     responses_v1_cancel, responses_v1_create, responses_v1_retrieve,
+};
+pub use refs::{
+    InMemoryOpenAiCompatRefStore, OpenAiChatCompletionId, OpenAiCompatActorScope,
+    OpenAiCompatBindInternalRefs, OpenAiCompatIdempotencyConflict, OpenAiCompatIdempotencyKey,
+    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
+    OpenAiCompatPublicId, OpenAiCompatRefError, OpenAiCompatRefLookup, OpenAiCompatRefOperation,
+    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore,
+    OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding, OpenAiCompatResourceKind,
+    OpenAiCompatResourceMapping, OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef,
+    OpenAiResponseId,
 };
 pub use responses::{
     OpenAiResponseErrorObject, OpenAiResponseObject, OpenAiResponseOutputItem,

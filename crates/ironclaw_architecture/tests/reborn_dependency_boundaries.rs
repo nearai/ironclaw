@@ -1685,6 +1685,57 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // Durable storage for OpenAI-compatible public refs sits behind
+            // the OpenAiCompatRefStore port. It may use the universal
+            // filesystem backend and the OpenAI-compatible contract crate, but
+            // must not grow route handling, ProductWorkflow orchestration, or
+            // runtime/composition reach-through.
+            crate_name: "ironclaw_reborn_openai_compat_storage",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_event_streams",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_workflow",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_first_party_extensions",
+                "ironclaw_first_party_extension_ports",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_storage",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_webui_v2",
+            ],
+        },
+        BoundaryRule {
             // Registry projects ProductAdapter host-api sections from the single
             // Extension Manifest v2 over extension-owned installation and activation
             // state. Runtime/dispatcher/engine crates would invert ownership, secrets

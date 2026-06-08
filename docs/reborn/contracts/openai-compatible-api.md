@@ -1,8 +1,9 @@
 # Reborn OpenAI-Compatible API Contract
 
-**Status:** contract surface slice (#4442)
+**Status:** contract and identity slices (#4442, #4443)
 **Parent:** #3283
-**Crate:** `crates/ironclaw_reborn_openai_compat`
+**Crates:** `crates/ironclaw_reborn_openai_compat`,
+`crates/ironclaw_reborn_openai_compat_storage`
 
 ## Purpose
 
@@ -11,9 +12,10 @@ that speak Chat Completions or Responses. It is behavior-compatible at the HTTP
 shape where practical, but it must not reuse the v1 gateway's stateless LLM
 proxy code path.
 
-This slice is contract-first. It defines DTOs, host-owned ingress descriptors,
-a sanitized OpenAI-style error envelope, and fail-closed route fragments. It
-does not submit turns, retrieve projections, cancel runs, or translate SSE yet.
+These first slices are contract-first. They define DTOs, host-owned ingress
+descriptors, a sanitized OpenAI-style error envelope, fail-closed route
+fragments, and the opaque ref/idempotency vocabulary. They do not submit turns,
+retrieve projections, cancel runs, or translate SSE yet.
 
 ## Route Surface
 
@@ -43,6 +45,21 @@ bind sockets or call `axum::serve`.
   capability host.
 - External ids (`chatcmpl-*`, `resp_*`) are opaque product references. They must
   not encode tenant, user, thread, run, projection cursor, or host paths.
+- Durable ref mappings are persisted behind `OpenAiCompatRefStore`; the
+  contract crate defines the port and the storage crate provides
+  filesystem-backed adapters under `/engine/openai_compat/refs/` with
+  per-public-id mapping records plus per-scope idempotency index records.
+- Client idempotency keys are scoped by authenticated actor scope, route
+  surface, and request-body fingerprint. Same key + same fingerprint replays the
+  same public ref; same key + different fingerprint is a sanitized conflict.
+- Absence of an idempotency key always creates a fresh public ref/action
+  mapping.
+- Ref lookup for retrieve, stream resume, and cancel is actor/scope checked.
+  Unauthorized and nonexistent refs must produce the same sanitized not-found
+  response at the API boundary.
+- Ref mappings are two-stage: route code may reserve a pending public ref before
+  ProductWorkflow side effects, then bind it to internal product-action,
+  turn-run, and projection refs after those refs exist.
 - Non-streaming timeout behavior is a later slice: timeout detaches from the
   wait, not from the underlying turn.
 - SSE translation is a later slice over `ironclaw_event_streams`; Reborn stream

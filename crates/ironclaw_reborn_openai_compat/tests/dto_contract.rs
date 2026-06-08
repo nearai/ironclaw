@@ -1,10 +1,10 @@
 use ironclaw_reborn_openai_compat::{
-    OpenAiChatCompletionChunk, OpenAiChatCompletionRequest, OpenAiChatCompletionResponse,
-    OpenAiChatFinishReason, OpenAiChatMessageRole, OpenAiCompatErrorCode, OpenAiCompatErrorKind,
-    OpenAiResponseErrorObject, OpenAiResponseObject, OpenAiResponseOutputItem,
-    OpenAiResponseOutputItemStatus, OpenAiResponseStatus, OpenAiResponseUsage,
-    OpenAiResponsesCreateRequest, OpenAiResponsesInput, OpenAiResponsesInputItem,
-    OpenAiResponsesMessageRole,
+    OpenAiChatCompletionChunk, OpenAiChatCompletionId, OpenAiChatCompletionRequest,
+    OpenAiChatCompletionResponse, OpenAiChatFinishReason, OpenAiChatMessageRole,
+    OpenAiCompatErrorCode, OpenAiCompatErrorKind, OpenAiResponseErrorObject, OpenAiResponseId,
+    OpenAiResponseObject, OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus,
+    OpenAiResponseStatus, OpenAiResponseUsage, OpenAiResponsesCreateRequest, OpenAiResponsesInput,
+    OpenAiResponsesInputItem, OpenAiResponsesMessageRole,
 };
 use serde_json::json;
 
@@ -48,10 +48,18 @@ fn responses_create_request_accepts_text_or_item_input() {
     let text: OpenAiResponsesCreateRequest = serde_json::from_value(json!({
         "model": "gpt-reborn",
         "input": "hello",
-        "stream": false
+        "stream": false,
+        "previous_response_id": "resp_previous"
     }))
     .expect("text input");
     assert!(matches!(text.input, OpenAiResponsesInput::Text(_)));
+    assert_eq!(
+        text.previous_response_id
+            .as_ref()
+            .expect("previous response")
+            .as_str(),
+        "resp_previous"
+    );
 
     let items: OpenAiResponsesCreateRequest = serde_json::from_value(json!({
         "model": "gpt-reborn",
@@ -77,6 +85,18 @@ fn responses_create_request_accepts_text_or_item_input() {
         OpenAiResponsesInput::Text(_) => panic!("expected item input"),
     }
     assert_eq!(items.tools.as_ref().expect("tools").len(), 1);
+
+    let invalid_previous_response = serde_json::from_value::<OpenAiResponsesCreateRequest>(json!({
+        "model": "gpt-reborn",
+        "input": "hello",
+        "previous_response_id": "chatcmpl-not-a-response"
+    }))
+    .expect_err("previous_response_id must be a typed response ref");
+    assert!(
+        invalid_previous_response
+            .to_string()
+            .contains("expected OpenAI-compatible prefix")
+    );
 }
 
 #[test]
@@ -132,7 +152,7 @@ fn request_dtos_reject_missing_required_fields() {
 #[test]
 fn response_dtos_serialize_openai_shapes() {
     let chat = OpenAiChatCompletionResponse {
-        id: "chatcmpl-test".to_string(),
+        id: OpenAiChatCompletionId::new("chatcmpl-test").expect("chat id"),
         object: "chat.completion".to_string(),
         created: 1_777_777_777,
         model: "gpt-reborn".to_string(),
@@ -154,7 +174,7 @@ fn response_dtos_serialize_openai_shapes() {
     assert_eq!(chat_json["choices"][0]["finish_reason"], "stop");
 
     let chunk = OpenAiChatCompletionChunk {
-        id: "chatcmpl-test".to_string(),
+        id: OpenAiChatCompletionId::new("chatcmpl-test").expect("chat id"),
         object: "chat.completion.chunk".to_string(),
         created: 1_777_777_777,
         model: "gpt-reborn".to_string(),
@@ -194,7 +214,7 @@ fn response_dtos_serialize_openai_shapes() {
     );
 
     let response = OpenAiResponseObject {
-        id: "resp_test".to_string(),
+        id: OpenAiResponseId::new("resp_test").expect("response id"),
         object: "response".to_string(),
         created_at: 1_777_777_777,
         status: OpenAiResponseStatus::Completed,
@@ -238,7 +258,7 @@ fn response_dtos_serialize_openai_shapes() {
     assert!(response_json["usage"].get("prompt_tokens").is_none());
 
     let queued = OpenAiResponseObject {
-        id: "resp_queued".to_string(),
+        id: OpenAiResponseId::new("resp_queued").expect("response id"),
         object: "response".to_string(),
         created_at: 1_777_777_778,
         status: OpenAiResponseStatus::Queued,

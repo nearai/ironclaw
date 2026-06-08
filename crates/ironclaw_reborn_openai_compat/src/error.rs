@@ -1,6 +1,8 @@
 use ironclaw_product_adapters::{ProductAdapterError, ProductWorkflowRejectionKind};
 use serde::{Deserialize, Serialize};
 
+use crate::OpenAiCompatRefError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenAiCompatErrorKind {
@@ -132,6 +134,14 @@ impl OpenAiCompatHttpError {
         Self::from_kind(400, false, OpenAiCompatErrorKind::Validation, param)
     }
 
+    pub fn not_found(param: Option<String>) -> Self {
+        Self::from_kind(404, false, OpenAiCompatErrorKind::NotFound, param)
+    }
+
+    pub fn conflict(param: Option<String>) -> Self {
+        Self::from_kind(409, false, OpenAiCompatErrorKind::Conflict, param)
+    }
+
     pub fn not_wired() -> Self {
         Self::from_kind(501, false, OpenAiCompatErrorKind::Unsupported, None)
     }
@@ -199,6 +209,18 @@ impl OpenAiCompatHttpError {
 impl From<ProductAdapterError> for OpenAiCompatHttpError {
     fn from(error: ProductAdapterError) -> Self {
         Self::from_product_adapter_error(error)
+    }
+}
+
+impl From<OpenAiCompatRefError> for OpenAiCompatHttpError {
+    fn from(error: OpenAiCompatRefError) -> Self {
+        match error {
+            OpenAiCompatRefError::InvalidIdentifier { .. } => Self::invalid_request(None),
+            OpenAiCompatRefError::StoreUnavailable => {
+                Self::from_kind(503, true, OpenAiCompatErrorKind::ServiceUnavailable, None)
+            }
+            OpenAiCompatRefError::CorruptMapping => Self::internal(),
+        }
     }
 }
 

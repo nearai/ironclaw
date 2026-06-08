@@ -3,6 +3,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{OpenAiCompatError, OpenAiCompatErrorCode, OpenAiCompatErrorKind};
 
+use crate::OpenAiResponseId;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiResponsesCreateRequest {
     pub model: String,
@@ -12,7 +14,7 @@ pub struct OpenAiResponsesCreateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_response_id: Option<String>,
+    pub previous_response_id: Option<OpenAiResponseId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,7 +59,7 @@ pub enum OpenAiResponsesMessageRole {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiResponseObject {
-    pub id: String,
+    pub id: OpenAiResponseId,
     pub object: String,
     pub created_at: u64,
     pub status: OpenAiResponseStatus,

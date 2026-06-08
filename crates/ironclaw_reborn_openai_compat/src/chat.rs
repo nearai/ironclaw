@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::OpenAiChatCompletionId;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiChatCompletionRequest {
     pub model: String,
@@ -91,7 +93,7 @@ pub struct OpenAiChatToolCallFunction {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiChatCompletionResponse {
-    pub id: String,
+    pub id: OpenAiChatCompletionId,
     pub object: String,
     pub created: u64,
     pub model: String,
@@ -110,7 +112,7 @@ pub struct OpenAiChatChoice {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiChatCompletionChunk {
-    pub id: String,
+    pub id: OpenAiChatCompletionId,
     pub object: String,
     pub created: u64,
     pub model: String,

@@ -17,11 +17,16 @@ default = []
 openai-compat-beta = ["dep:axum"]
 
 [dependencies]
+async-trait = "0.1"
+hex = "0.4"
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
 tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 axum = { version = "0.8", optional = true }
 
