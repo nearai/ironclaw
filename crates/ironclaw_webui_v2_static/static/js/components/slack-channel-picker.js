@@ -29,6 +29,7 @@ export function SlackChannelPicker({ action }) {
     queryFn: listSlackRoutableSubjects,
   });
   const subjects = subjectsQuery.data?.subjects || [];
+  const subjectsReady = subjectsQuery.isSuccess;
   const hasRoutableSubjects = subjects.length > 0;
   const subjectOptions = mergeSubjectOptions(subjects, channels);
   const defaultSubjectUserId = subjects[0]?.subject_user_id || "";
@@ -136,7 +137,7 @@ export function SlackChannelPicker({ action }) {
           size="sm"
           className="shrink-0"
           onClick=${addChannel}
-          disabled=${!draftChannelId.trim()}
+          disabled=${!draftChannelId.trim() || !subjectsReady}
         >
           ${copy.addLabel}
         <//>
@@ -199,7 +200,10 @@ export function SlackChannelPicker({ action }) {
           size="sm"
           className="shrink-0"
           onClick=${saveChannels}
-          disabled=${!channelsQuery.isSuccess || saveMutation.isPending || hasMissingSubject}
+          disabled=${!channelsQuery.isSuccess ||
+          !subjectsReady ||
+          saveMutation.isPending ||
+          hasMissingSubject}
         >
           ${saveMutation.isPending ? copy.savingLabel : copy.submitLabel}
         <//>
