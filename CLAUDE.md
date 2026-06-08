@@ -262,6 +262,12 @@ See `.env.example` for all environment variables. LLM backends (`openai`, `anthr
 
 The `t3n-mcp-sidecar` image bundles trinity `client/` (`t3n-sdk` + `mcp/t3n-mcp`). That code defines the **agent-facing MCP tool surface** — tool names, descriptions, and schemas the CodeAct agent reads — so a change to it can change agent behaviour.
 
+**When a bump is *not* needed.** The pin governs only what the sidecar bundles — `client/mcp/t3n-mcp` and `client/t3n-sdk/src`. A trinity merge that doesn't touch those (SDK `scripts/`, docs, a version-only `package.json` bump) changes nothing the sidecar ships, so **leave the pin alone** — it deliberately trails trinity `main`. Re-pointing it at `main` just to "catch up" is the float-on-main footgun the pin exists to prevent: it can drag in *unrelated*, un-chat-verified tool-surface changes. Quick check before assuming a bump is due — empty diff means no bump needed:
+
+```
+git diff <pinned-sha>..<target> -- client/mcp/t3n-mcp client/t3n-sdk/src
+```
+
 The three sidecar build workflows (`build-sidecar.yml`, `staging-gcp.yml`, `testnet-gcp.yml`) check trinity out at a **pinned commit**, never floating on trinity `main`. The pinned SHA is the single source of truth in **`.github/trinity-sdk-ref`**; each workflow reads it and fails the build if it is empty (so the float can never silently return). This is the tool-surface analogue of the trinity→contracts `rev` pin in trinity's `node/Cargo.toml`.
 
 **Two-layer verification:**

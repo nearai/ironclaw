@@ -14,6 +14,7 @@ mod coercion;
 pub mod dispatch;
 pub mod execute;
 pub mod mcp;
+pub mod payroll_audit;
 pub mod permissions;
 pub mod rate_limiter;
 pub mod redaction;

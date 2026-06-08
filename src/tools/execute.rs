@@ -79,6 +79,16 @@ pub async fn execute_tool_with_safety(
                 result_size_bytes = result_size,
                 "Tool call succeeded"
             );
+            // Curated human-readable audit line for payroll milestone tools.
+            // This is the shared execution funnel for every agent delegate, so
+            // the line fires regardless of which engine path drove the call.
+            // No-ops for non-payroll tools.
+            crate::tools::payroll_audit::emit_payroll_milestone(
+                tool_name,
+                Some(&params),
+                Some(&output.result),
+                None,
+            );
         }
         Ok(Err(e)) => {
             tracing::debug!(
@@ -87,6 +97,12 @@ pub async fn execute_tool_with_safety(
                 error = %e,
                 "Tool call failed"
             );
+            crate::tools::payroll_audit::emit_payroll_milestone(
+                tool_name,
+                Some(&params),
+                None,
+                Some(&e.to_string()),
+            );
         }
         Err(_) => {
             tracing::debug!(
@@ -94,6 +110,12 @@ pub async fn execute_tool_with_safety(
                 elapsed_ms = elapsed.as_millis() as u64,
                 timeout_secs = timeout.as_secs(),
                 "Tool call timed out"
+            );
+            crate::tools::payroll_audit::emit_payroll_milestone(
+                tool_name,
+                Some(&params),
+                None,
+                Some("tool call timed out"),
             );
         }
     }
