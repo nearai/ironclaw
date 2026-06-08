@@ -146,6 +146,7 @@ type LocalDevWorkspaceFilesystems = (
 );
 
 const LOCAL_DEV_DEFAULT_SYSTEM_PROMPT_PATH: &str = "system/prompts/default-system.md";
+const LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MARKER: &str = ".legacy-skills-backfilled";
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
 
@@ -922,6 +923,11 @@ fn backfill_local_dev_legacy_user_skills_for_tenant(
         .join("users")
         .join(owner_user_id.as_str())
         .join("skills");
+    let marker = scoped_root.join(LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MARKER);
+    if marker.exists() {
+        return Ok(());
+    }
+
     for entry in std::fs::read_dir(legacy_root).map_err(|_| RebornBuildError::InvalidConfig {
         reason: "local-dev legacy skills root could not be inspected".to_string(),
     })? {
@@ -935,6 +941,12 @@ fn backfill_local_dev_legacy_user_skills_for_tenant(
         }
         copy_local_dev_legacy_skill_entry(&source, &destination)?;
     }
+    std::fs::create_dir_all(&scoped_root).map_err(|_| RebornBuildError::InvalidConfig {
+        reason: "local-dev scoped skill root could not be initialized".to_string(),
+    })?;
+    std::fs::write(marker, b"").map_err(|_| RebornBuildError::InvalidConfig {
+        reason: "local-dev legacy skill migration marker could not be written".to_string(),
+    })?;
     Ok(())
 }
 
@@ -942,15 +954,16 @@ fn copy_local_dev_legacy_skill_entry(
     source: &Path,
     destination: &Path,
 ) -> Result<(), RebornBuildError> {
-    let metadata = std::fs::symlink_metadata(source).map_err(|_| {
-        RebornBuildError::InvalidConfig {
+    let metadata =
+        std::fs::symlink_metadata(source).map_err(|_| RebornBuildError::InvalidConfig {
             reason: "local-dev legacy skill entry could not be inspected".to_string(),
-        }
-    })?;
+        })?;
     if metadata.file_type().is_symlink() {
-        return Err(RebornBuildError::InvalidConfig {
-            reason: "local-dev legacy skill symlinks cannot be migrated".to_string(),
-        });
+        tracing::warn!(
+            path = %source.display(),
+            "Skipping symlinked local-dev legacy skill entry during backfill"
+        );
+        return Ok(());
     }
     if metadata.is_dir() {
         std::fs::create_dir_all(destination).map_err(|_| RebornBuildError::InvalidConfig {
@@ -3776,6 +3789,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn local_dev_legacy_skill_backfill_marker_preserves_deletions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let legacy_skill_dir = storage_root.join("skills/legacy-skill");
+        std::fs::create_dir_all(&legacy_skill_dir).expect("legacy skill dir");
+        std::fs::write(legacy_skill_dir.join("SKILL.md"), "legacy skill").expect("legacy skill");
+        let owner_user_id = UserId::new("owner").expect("owner");
+
+        backfill_local_dev_legacy_user_skills(&storage_root, &owner_user_id)
+            .expect("initial backfill");
+        let scoped_skill_dir = storage_root.join("tenants/default/users/owner/skills/legacy-skill");
+        assert!(scoped_skill_dir.join("SKILL.md").exists());
+
+        std::fs::remove_dir_all(&scoped_skill_dir).expect("delete migrated skill");
+        backfill_local_dev_legacy_user_skills(&storage_root, &owner_user_id)
+            .expect("second backfill");
+        assert!(
+            !scoped_skill_dir.exists(),
+            "one-time legacy backfill must not resurrect user-deleted migrated skills"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_dev_legacy_skill_backfill_skips_symlinks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let legacy_root = storage_root.join("skills");
+        let target_dir = storage_root.join("target-skill");
+        std::fs::create_dir_all(&legacy_root).expect("legacy root");
+        std::fs::create_dir_all(&target_dir).expect("target dir");
+        std::os::unix::fs::symlink(&target_dir, legacy_root.join("linked-skill"))
+            .expect("legacy symlink");
+        let owner_user_id = UserId::new("owner").expect("owner");
+
+        backfill_local_dev_legacy_user_skills(&storage_root, &owner_user_id)
+            .expect("symlink should be skipped, not fail startup");
+        assert!(
+            !storage_root
+                .join("tenants/default/users/owner/skills/linked-skill")
+                .exists()
+        );
+        assert!(
+            storage_root
+                .join(format!(
+                    "tenants/default/users/owner/skills/{LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MARKER}"
+                ))
+                .exists(),
+            "migration should still be marked complete after skipping symlinks"
+        );
     }
 
     #[test]
