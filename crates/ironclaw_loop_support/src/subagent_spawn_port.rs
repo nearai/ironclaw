@@ -66,7 +66,10 @@ pub fn build_spawn_subagent_parameters_schema(
             .iter()
             .map(|f| format!("- {}: {}", f.id, f.summary))
             .collect();
-        format!("Which subagent profile to spawn. Options:\n{}", lines.join("\n"))
+        format!(
+            "Which subagent profile to spawn. Options:\n{}",
+            lines.join("\n")
+        )
     };
 
     serde_json::json!({

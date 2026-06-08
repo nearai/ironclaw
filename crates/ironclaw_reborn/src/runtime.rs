@@ -9,9 +9,9 @@ use ironclaw_loop_support::{
     DecoratingLoopCapabilityPortFactory, HostIdentityContextSource, HostInputQueue,
     HostManagedModelGateway, HostSkillContextSource, LoopCapabilityPortDecorator,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationReadiness,
-    RunCancellationFactory, SpawnSubagentInputCodec, SubagentDefinitionResolver,
-    SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
+    RunCancellationFactory, SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec,
+    SubagentDefinitionResolver, SubagentPromptComposer, SubagentPromptMaterialSource,
+    SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
     verify_product_live_cancellation_probe,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -44,7 +44,7 @@ use crate::{
     },
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver,
-        completion_observer::SubagentCompletionObserver,
+        completion_observer::SubagentCompletionObserver, flavors,
         gate_resolution::BoundedSubagentGateResolutionStore, goal_store::SubagentGoalStore,
         prompt_material::GateBackedSubagentPromptMaterialSource,
     },
@@ -419,6 +419,13 @@ where
             result_writer: Arc::clone(&parts.capability_result_writer),
         },
         parts.subagent_spawn_limits,
+        flavors::builtin_flavor_catalog()
+            .into_iter()
+            .map(|d| SpawnSubagentFlavorDescriptor {
+                id: d.id.to_string(),
+                summary: d.summary.to_string(),
+            })
+            .collect(),
     )?);
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(
         DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
@@ -504,12 +511,14 @@ struct SubagentSpawnCapabilityDecorator {
     spawn_deps: Arc<SubagentSpawnDeps>,
     spawn_id: CapabilityId,
     spawn_limits: SubagentSpawnLimits,
+    flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
 }
 
 impl SubagentSpawnCapabilityDecorator {
     fn new(
         spawn_deps: SubagentSpawnDeps,
         spawn_limits: SubagentSpawnLimits,
+        flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
     ) -> Result<Self, DefaultPlannedRuntimeBuildError> {
         let spawn_id =
             CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
@@ -518,6 +527,7 @@ impl SubagentSpawnCapabilityDecorator {
             spawn_deps: Arc::new(spawn_deps),
             spawn_id,
             spawn_limits,
+            flavor_catalog,
         })
     }
 }
@@ -534,6 +544,7 @@ impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
             self.spawn_id.clone(),
             self.spawn_limits,
             Arc::clone(&self.spawn_deps),
+            self.flavor_catalog.clone(),
         ))
     }
 }

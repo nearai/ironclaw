@@ -375,7 +375,7 @@ mod tests {
         gate_store
             .record_awaited_child(awaited_child_record(
                 &context,
-                SubagentKindId::new("researcher").unwrap(),
+                SubagentKindId::new("planner").unwrap(),
             ))
             .await
             .unwrap();
@@ -387,7 +387,7 @@ mod tests {
 
         let material = source.material_for_run(&context).await.unwrap();
 
-        assert!(material.direction_markdown.contains("research subagent"));
+        assert!(material.direction_markdown.contains("Planner subagent"));
         assert_eq!(material.goal.task, "research task");
     }
 

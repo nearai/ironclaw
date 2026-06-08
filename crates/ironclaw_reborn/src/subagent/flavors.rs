@@ -230,10 +230,7 @@ mod tests {
 
     #[test]
     fn parse_flavor_id_planner_returns_some() {
-        assert_eq!(
-            parse_flavor_id("planner"),
-            Some(SubagentFlavorId::Planner)
-        );
+        assert_eq!(parse_flavor_id("planner"), Some(SubagentFlavorId::Planner));
     }
 
     #[test]
