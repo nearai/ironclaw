@@ -809,6 +809,44 @@ ready, connect trigger-origin final reply delivery:
 - validate with `OutboundPolicyService`.
 - send only through Reborn product-adapter outbound paths that are ready.
 
+Carry-forward finding from the default outbound preference service slice:
+Phase 2 composes a WebUI-usable `OutboundPreferencesProductFacade` backed by
+`RebornLocalRuntimeServices::outbound_preferences`, but Slack host-beta final
+reply delivery still constructs its own outbound state store inside
+`slack_host_beta.rs`. Before PR 19 claims Slack end-to-end delivery, the Slack
+integration must bridge this split by exposing Slack delivery targets through
+the composition-owned target inventory and making Slack final-reply delivery
+read the same communication preference repository used by the default outbound
+preference API. Do not encode WebUI rendering assumptions in this bridge; the
+API must remain usable by any authenticated product surface.
+
+Carry-forward API and repository follow-ups from GitHub PR #4537 review:
+
+- Expand `RebornOutboundDeliveryModality` in a dedicated product API follow-up
+  before surfacing non-text outbound defaults. The outbound repository already
+  supports `Text`, `Voice`, `Image`, `Mixed`, and `Unknown`, while the current
+  WebUI/product response DTO intentionally exposes only `Text`. Do not add a
+  partial mapper in composition until the public enum and serde contract are
+  deliberately expanded.
+- Add a product-safe stale-target representation before treating missing
+  inventory matches as first-class UI state. The preferred low-churn shape is a
+  sibling status field that can distinguish `none_configured` from
+  `unavailable` while preserving the existing `final_reply_target:
+  Option<RebornOutboundDeliveryTargetSummary>` field. A tagged target-state DTO
+  is cleaner but should be evaluated as a larger API contract change.
+- Add an atomic update operation to `CommunicationPreferenceRepository` before
+  depending on concurrent preference updates for production behavior. The fix
+  belongs in the repository/store contract so in-memory and filesystem-backed
+  stores re-read and re-apply the update under their own lock/CAS semantics. Do
+  not paper over this with a composition-local facade mutex; that would only
+  serialize one process and one facade instance.
+- Decide whether local-dev builds with the `postgres` feature should move
+  outbound preferences, and possibly the broader non-libSQL local-dev store
+  graph, to filesystem-backed persistence. Do not switch only this one
+  preference store casually: the current non-`libsql` local-dev graph still uses
+  in-memory run, thread, checkpoint, and event stores, while production
+  PostgreSQL already routes durable state through `PostgresRootFilesystem`.
+
 If concrete Reborn product egress is not ready, leave this as fast-follow and
 ship trigger V1 as local persisted threads only.
 

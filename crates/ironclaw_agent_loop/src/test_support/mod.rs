@@ -1087,6 +1087,7 @@ fn scripted_capability_outcome(
             Ok(CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind,
                 safe_summary: "failed".to_string(),
+                detail: None,
             }))
         }
     }

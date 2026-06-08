@@ -63,6 +63,7 @@ mod oauth_dcr;
 mod oauth_dcr_protocol;
 mod oauth_gate;
 mod oauth_provider_client;
+mod outbound_preferences;
 mod product_auth_durable;
 mod product_auth_providers;
 mod product_auth_runtime_credentials;
@@ -220,10 +221,13 @@ pub use slack_actor_identity::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+    SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
+    WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
 };
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack_connectable_channel::build_webui_services_with_slack_host_beta_mounts;
+pub use slack_connectable_channel::{
+    SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
+};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,

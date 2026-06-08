@@ -178,11 +178,18 @@ personal-binding pairing service. The browser must not call provider-specific
 pairing paths directly.
 
 When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
-`GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` inside the same bearer
-auth layer. The browser supplies only `channel_id` and `subject_user_id`;
-tenant, adapter installation, and Slack team come from host configuration. The
-route writes to Slack host state so runtime assignments are durable and are
-resolved before static TOML `channel_routes` fallback.
+`GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` and
+`GET|PUT /api/webchat/v2/channels/slack/allowed` inside the same bearer auth
+layer. The low-level `routes` API accepts `channel_id` plus `subject_user_id`;
+the WebUI v2 channel picker uses the admin-managed `allowed` API and supplies
+only `channel_ids`; the host deterministically assigns each selected channel
+its own tenant-scoped Slack channel subject before writing routes. Tenant,
+adapter installation, and Slack team always come from host configuration. These
+routes write to Slack host state so runtime assignments are durable and are
+resolved before static TOML `channel_routes` fallback. In
+admin-managed host-beta mode, new shared Slack conversations without a dynamic
+or static channel route fail closed instead of falling back to the installation
+default subject.
 
 ### Host-supplied public route mount (#4116 — SSO login surface)
 
