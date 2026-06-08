@@ -402,27 +402,20 @@ pub struct GateStrategyState {}
 
 /// Per-turn pipeline-directive state for `PostCapabilityStage`.
 ///
-/// Unlike sibling `<Domain>StrategyState` types in this module, this slot
-/// belongs to a pipeline stage (not a strategy) and is **cleared every
-/// turn** rather than carried across iterations as resumable state. The
-/// distinct naming marks it as a different category: stages own
-/// transient one-shot directives (`skip_model_this_iteration`,
-/// `pending_capability_bytes`); strategies own resumable accounting.
+/// Unlike sibling `<Domain>StrategyState` types, this slot belongs to a
+/// pipeline stage (not a strategy) and tracks two distinct lifecycles:
 ///
-/// ### `pending_capability_bytes`
-/// Per-capability byte accounting accumulator. Filled on each completed
-/// capability call within a turn by `push_completed_result` (later steps).
-/// Read and cleared by `PostCapabilityStage` when the per-capability byte
-/// policy trips, at which point the stage sets `skip_model_this_iteration`
-/// and drains this map to zero so the next turn starts fresh.
+/// - `pending_capability_bytes` is **per-turn**: filled by
+///   `push_completed_result` during a capability batch, cleared at the
+///   end of every `PostCapabilityStage::process` call (BUG-N1 fix).
+/// - `skip_model_this_iteration` is a **one-shot directive**: set by
+///   `PostCapabilityStage` when its policy trips, then consumed by the
+///   NEXT iteration's `PromptStage` which clears the flag and emits
+///   `PromptStep::SkipModel` to short-circuit the model call.
 ///
-/// ### `skip_model_this_iteration`
-/// One-shot pipeline directive set by `PostCapabilityStage` when a
-/// byte-policy violation is detected. Read by `PromptStage` at the START
-/// of the NEXT iteration to compact-then-bypass the model (i.e. write a
-/// compacted summary without an additional model round-trip). Cleared
-/// immediately after `PromptStage` consumes it so it does not persist
-/// across subsequent iterations.
+/// The distinct naming (`StageState` vs `StrategyState`) marks the
+/// category difference: stages own transient one-shot directives;
+/// strategies own resumable accounting.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PostCapabilityStageState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

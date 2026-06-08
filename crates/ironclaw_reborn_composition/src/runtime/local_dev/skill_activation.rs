@@ -77,7 +77,7 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
             "activated": activated,
             "count": activated.len(),
         });
-        let (result_ref, _byte_len) = invocation
+        let (result_ref, byte_len) = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {
                 run_context: &invocation.run_context,
@@ -93,7 +93,7 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
             safe_summary: format!("activated {} skill(s)", activated.len()),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
-            byte_len: 0,
+            byte_len,
         }))
     }
 }
