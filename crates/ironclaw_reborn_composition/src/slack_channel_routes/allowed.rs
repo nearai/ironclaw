@@ -1,6 +1,6 @@
 //! WebUI v2 Slack allowed-channel admin facade.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{
     Json, Router,
@@ -13,9 +13,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     MAX_LIST_LIMIT, SLACK_CHANNEL_ROUTES_BODY_LIMIT_BYTES, SlackChannelRoute,
-    SlackChannelRouteAdminRouteConfig, SlackRouteError, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
-    ensure_authorized_operator, route_policy, scan_route_admin_field,
+    SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackRouteError,
+    WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, ensure_allowed_subject_user, ensure_authorized_operator,
+    route_policy, scan_route_admin_field,
 };
+use ironclaw_host_api::UserId;
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 
 const SLACK_CHANNEL_ALLOWED_LIST_ROUTE_ID: &str = "webui.v2.channels.slack.allowed.list";
@@ -65,7 +67,14 @@ struct SlackAllowedChannelListResponse {
 
 #[derive(Debug, Deserialize)]
 struct SlackAllowedChannelSaveRequest {
-    channel_ids: Vec<String>,
+    channel_ids: Option<Vec<String>>,
+    channels: Option<Vec<SlackAllowedChannelSaveAssignment>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackAllowedChannelSaveAssignment {
+    channel_id: String,
+    subject_user_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,17 +100,13 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
 
     async fn replace(
         &self,
-        channel_ids: Vec<String>,
+        request: SlackAllowedChannelSaveRequest,
     ) -> Result<Vec<SlackAllowedChannel>, SlackRouteError> {
-        let channel_ids = self.normalize_channel_ids(channel_ids)?;
-        let assignments = channel_ids
-            .into_iter()
-            .map(|channel_id| {
-                self.config
-                    .channel_subject_assigner
-                    .assignment_for(channel_id)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let assignments = match (request.channel_ids, request.channels) {
+            (Some(channel_ids), None) => self.managed_assignments(channel_ids)?,
+            (None, Some(channels)) => self.explicit_assignments(channels)?,
+            _ => return Err(SlackRouteError::BadRequest),
+        };
         let routes = self
             .config
             .store
@@ -113,6 +118,62 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
             )
             .await?;
         Ok(routes.into_iter().map(SlackAllowedChannel::from).collect())
+    }
+
+    fn managed_assignments(
+        &self,
+        channel_ids: Vec<String>,
+    ) -> Result<Vec<SlackChannelRouteAssignment>, SlackRouteError> {
+        let channel_ids = self.normalize_channel_ids(channel_ids)?;
+        channel_ids
+            .into_iter()
+            .map(|channel_id| {
+                self.config
+                    .channel_subject_assigner
+                    .assignment_for(channel_id)
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+
+    fn explicit_assignments(
+        &self,
+        channels: Vec<SlackAllowedChannelSaveAssignment>,
+    ) -> Result<Vec<SlackChannelRouteAssignment>, SlackRouteError> {
+        if channels.len() > MAX_ALLOWED_CHANNELS {
+            return Err(SlackRouteError::BadRequest);
+        }
+        let mut assignments = BTreeMap::new();
+        for channel in channels {
+            let channel_id = channel.channel_id.trim().to_string();
+            if channel_id.is_empty() {
+                return Err(SlackRouteError::BadRequest);
+            }
+            scan_route_admin_field(self.config, "channel_id", &channel_id)?;
+            self.config.key_for_channel(channel_id.clone())?;
+
+            let subject_user_id = channel.subject_user_id.trim().to_string();
+            if subject_user_id.is_empty() {
+                return Err(SlackRouteError::BadRequest);
+            }
+            scan_route_admin_field(self.config, "subject_user_id", &subject_user_id)?;
+            let subject_user_id =
+                UserId::new(subject_user_id).map_err(|_| SlackRouteError::BadRequest)?;
+            ensure_allowed_subject_user(self.config, &subject_user_id)?;
+
+            if assignments
+                .insert(channel_id.clone(), subject_user_id.clone())
+                .is_some()
+            {
+                return Err(SlackRouteError::BadRequest);
+            }
+        }
+        Ok(assignments
+            .into_iter()
+            .map(|(channel_id, subject_user_id)| {
+                SlackChannelRouteAssignment::new(channel_id, subject_user_id)
+            })
+            .collect())
     }
 
     async fn list_all_routes(&self) -> Result<Vec<SlackChannelRoute>, SlackRouteError> {
@@ -185,7 +246,7 @@ async fn save_handler(
     Ok(Json(SlackAllowedChannelSaveResponse {
         success: true,
         team_id: config.team_id.clone(),
-        channels: admin.replace(request.channel_ids).await?,
+        channels: admin.replace(request).await?,
     }))
 }
 
@@ -305,6 +366,81 @@ mod tests {
                     "subject_user_id": replace_body["channels"][0]["subject_user_id"].clone()
                 }
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn allowed_channel_admin_replaces_with_selected_team_subjects() {
+        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
+
+        let save_response = mount
+            .protected
+            .clone()
+            .oneshot(request(
+                "PUT",
+                r#"{"channels":[{"channel_id":"C0PRODUCT","subject_user_id":"user:eng-team-agent"}]}"#,
+                TENANT,
+            ))
+            .await
+            .expect("save responds");
+
+        assert_eq!(save_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(save_response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(
+            body["channels"],
+            serde_json::json!([
+                {
+                    "channel_id": "C0PRODUCT",
+                    "subject_user_id": "user:eng-team-agent"
+                }
+            ])
+        );
+        let routes = store
+            .list_routes(
+                &TenantId::new(TENANT).expect("tenant"),
+                &AdapterInstallationId::new(INSTALLATION).expect("installation"),
+                TEAM,
+                0,
+                DEFAULT_LIST_LIMIT,
+            )
+            .await
+            .expect("routes list");
+        assert_eq!(routes.routes[0].subject_user_id, "user:eng-team-agent");
+    }
+
+    #[tokio::test]
+    async fn allowed_channel_admin_rejects_unknown_selected_team_subject() {
+        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
+
+        let response = mount
+            .protected
+            .oneshot(request(
+                "PUT",
+                r#"{"channels":[{"channel_id":"C0PRODUCT","subject_user_id":"user:finance-team-agent"}]}"#,
+                TENANT,
+            ))
+            .await
+            .expect("save responds");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            store
+                .list_routes(
+                    &TenantId::new(TENANT).expect("tenant"),
+                    &AdapterInstallationId::new(INSTALLATION).expect("installation"),
+                    TEAM,
+                    0,
+                    DEFAULT_LIST_LIMIT,
+                )
+                .await
+                .expect("routes list")
+                .routes
+                .is_empty()
         );
     }
 

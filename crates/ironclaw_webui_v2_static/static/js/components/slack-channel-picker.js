@@ -4,6 +4,7 @@ import { Button } from "../design-system/button.js";
 import { useT } from "../lib/i18n.js";
 import {
   listSlackAllowedChannels,
+  listSlackRoutableSubjects,
   normalizeSlackChannelIds,
   saveSlackAllowedChannels,
   slackChannelPickerError,
@@ -15,30 +16,38 @@ export function SlackChannelPicker({ action }) {
   const t = useT();
   const queryClient = useQueryClient();
   const [draftChannelId, setDraftChannelId] = React.useState("");
-  const [channelIds, setChannelIds] = React.useState([]);
+  const [draftSubjectUserId, setDraftSubjectUserId] = React.useState("");
+  const [channels, setChannels] = React.useState([]);
   const copy = slackChannelPickerCopy(action, t);
 
   const channelsQuery = useQuery({
     queryKey: QUERY_KEY,
     queryFn: listSlackAllowedChannels,
   });
+  const subjectsQuery = useQuery({
+    queryKey: ["slack-routable-subjects"],
+    queryFn: listSlackRoutableSubjects,
+  });
+  const subjects = subjectsQuery.data?.subjects || [];
+  const subjectOptions = mergeSubjectOptions(subjects, channels);
+  const defaultSubjectUserId = subjectOptions[0]?.subject_user_id || "";
 
   React.useEffect(() => {
     if (!channelsQuery.data) return;
-    setChannelIds(
-      normalizeSlackChannelIds(
-        channelsQuery.data.channels?.map((channel) => channel.channel_id) || [],
-      ),
-    );
+    setChannels(normalizeSlackChannels(channelsQuery.data.channels || []));
   }, [channelsQuery.data]);
 
+  React.useEffect(() => {
+    if (!defaultSubjectUserId || draftSubjectUserId) return;
+    setDraftSubjectUserId(defaultSubjectUserId);
+  }, [defaultSubjectUserId]);
+
   const saveMutation = useMutation({
-    mutationFn: ({ ids }) => saveSlackAllowedChannels(ids),
+    mutationFn: ({ channels }) => saveSlackAllowedChannels(channels),
     onSuccess: (data) => {
-      setChannelIds(
-        normalizeSlackChannelIds(data.channels?.map((channel) => channel.channel_id) || []),
-      );
+      setChannels(normalizeSlackChannels(data.channels || []));
       queryClient.invalidateQueries({ queryKey: QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: ["slack-routable-subjects"] });
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
       queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });
     },
@@ -47,17 +56,35 @@ export function SlackChannelPicker({ action }) {
   const addChannel = () => {
     const nextId = draftChannelId.trim();
     if (!nextId) return;
-    setChannelIds((ids) => normalizeSlackChannelIds([...ids, nextId]));
+    const subjectUserId = draftSubjectUserId || defaultSubjectUserId;
+    setChannels((channels) =>
+      normalizeSlackChannels([
+        ...channels,
+        { channel_id: nextId, subject_user_id: subjectUserId },
+      ]),
+    );
     setDraftChannelId("");
   };
 
   const removeChannel = (channelId) => {
-    setChannelIds((ids) => ids.filter((id) => id !== channelId));
+    setChannels((channels) => channels.filter((channel) => channel.channel_id !== channelId));
+  };
+
+  const updateChannelSubject = (channelId, subjectUserId) => {
+    setChannels((channels) =>
+      channels.map((channel) =>
+        channel.channel_id === channelId
+          ? { ...channel, subject_user_id: subjectUserId }
+          : channel,
+      ),
+    );
   };
 
   const saveChannels = () => {
-    saveMutation.mutate({ ids: channelIds });
+    saveMutation.mutate({ channels });
   };
+  const hasMissingSubject =
+    subjectOptions.length > 0 && channels.some((channel) => !channel.subject_user_id);
 
   return html`
     <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
@@ -85,6 +112,22 @@ export function SlackChannelPicker({ action }) {
           placeholder=${copy.inputPlaceholder}
           className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
         />
+        <select
+          value=${draftSubjectUserId || defaultSubjectUserId}
+          onChange=${(event) => setDraftSubjectUserId(event.target.value)}
+          disabled=${subjectOptions.length === 0}
+          className="h-9 min-w-0 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
+        >
+          ${subjectOptions.length === 0 &&
+          html`<option value="">${copy.noSubjectsLabel}</option>`}
+          ${subjectOptions.map(
+            (subject) => html`
+              <option key=${subject.subject_user_id} value=${subject.subject_user_id}>
+                ${subject.display_name}
+              </option>
+            `,
+          )}
+        </select>
         <${Button}
           variant="secondary"
           size="sm"
@@ -100,26 +143,42 @@ export function SlackChannelPicker({ action }) {
         ${channelsQuery.isLoading &&
         html`<div className="px-3 py-2 text-xs text-iron-400">${copy.loadingMessage}</div>`}
         ${!channelsQuery.isLoading &&
-        channelIds.length === 0 &&
+        channels.length === 0 &&
         html`<div className="px-3 py-2 text-xs text-iron-500">
           ${copy.emptyMessage}
         </div>`}
-        ${channelIds.map(
-          (channelId) => html`
+        ${channels.map(
+          (channel) => html`
             <label
-              key=${channelId}
+              key=${channel.channel_id}
               className="flex min-h-10 items-center justify-between gap-3 border-t border-white/[0.05] px-3 first:border-t-0"
             >
               <span className="min-w-0 truncate font-mono text-xs text-iron-200">
-                ${channelId}
+                ${channel.channel_id}
               </span>
-              <input
-                type="checkbox"
-                checked=${true}
-                aria-label=${copy.allowLabel(channelId)}
-                onChange=${() => removeChannel(channelId)}
-                className="h-4 w-4 rounded border-white/20 bg-white/[0.04] text-signal"
-              />
+              <div className="flex shrink-0 items-center gap-2">
+                <select
+                  value=${channel.subject_user_id}
+                  onChange=${(event) =>
+                    updateChannelSubject(channel.channel_id, event.target.value)}
+                  className="h-8 rounded-md border border-white/10 bg-white/[0.04] px-2 text-xs text-iron-100 outline-none focus:border-signal/45"
+                >
+                  ${subjectOptions.map(
+                    (subject) => html`
+                      <option key=${subject.subject_user_id} value=${subject.subject_user_id}>
+                        ${subject.display_name}
+                      </option>
+                    `,
+                  )}
+                </select>
+                <input
+                  type="checkbox"
+                  checked=${true}
+                  aria-label=${copy.allowLabel(channel.channel_id)}
+                  onChange=${() => removeChannel(channel.channel_id)}
+                  className="h-4 w-4 rounded border-white/20 bg-white/[0.04] text-signal"
+                />
+              </div>
             </label>
           `,
         )}
@@ -131,7 +190,7 @@ export function SlackChannelPicker({ action }) {
           size="sm"
           className="shrink-0"
           onClick=${saveChannels}
-          disabled=${!channelsQuery.isSuccess || saveMutation.isPending}
+          disabled=${!channelsQuery.isSuccess || saveMutation.isPending || hasMissingSubject}
         >
           ${saveMutation.isPending ? copy.savingLabel : copy.submitLabel}
         <//>
@@ -151,6 +210,45 @@ export function SlackChannelPicker({ action }) {
   `;
 }
 
+function mergeSubjectOptions(subjects = [], channels = []) {
+  const bySubjectUserId = new Map();
+  for (const subject of subjects) {
+    const subjectUserId = String(subject.subject_user_id || "").trim();
+    if (!subjectUserId) continue;
+    bySubjectUserId.set(subjectUserId, {
+      subject_user_id: subjectUserId,
+      display_name: subject.display_name || subjectUserId,
+    });
+  }
+  for (const channel of channels) {
+    const subjectUserId = String(channel.subject_user_id || "").trim();
+    if (!subjectUserId || bySubjectUserId.has(subjectUserId)) continue;
+    bySubjectUserId.set(subjectUserId, {
+      subject_user_id: subjectUserId,
+      display_name: subjectUserId,
+    });
+  }
+  return Array.from(bySubjectUserId.values()).sort((left, right) =>
+    left.display_name.localeCompare(right.display_name) ||
+    left.subject_user_id.localeCompare(right.subject_user_id),
+  );
+}
+
+function normalizeSlackChannels(channels = []) {
+  const byChannelId = new Map();
+  for (const channel of channels) {
+    const channelId = String(channel.channel_id || "").trim();
+    if (!channelId) continue;
+    byChannelId.set(channelId, {
+      channel_id: channelId,
+      subject_user_id: String(channel.subject_user_id || "").trim(),
+    });
+  }
+  return normalizeSlackChannelIds(Array.from(byChannelId.keys())).map((channelId) =>
+    byChannelId.get(channelId),
+  );
+}
+
 function slackChannelPickerCopy(action, t) {
   return {
     title: action?.title || t("channels.slackAccessTitle"),
@@ -164,6 +262,7 @@ function slackChannelPickerCopy(action, t) {
     savingLabel: t("channels.slackAccessSaving"),
     successMessage: action?.success_message || t("channels.slackAccessSuccess"),
     errorMessage: action?.error_message || t("channels.slackAccessError"),
+    noSubjectsLabel: t("channels.slackAccessNoSubjects"),
     allowLabel: (channelId) => t("channels.slackAccessAllow", { channelId }),
   };
 }

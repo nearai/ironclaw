@@ -41,9 +41,11 @@ function createReactStub(state) {
       ];
     },
     useEffect: (effect, deps) => {
+      const index = state.hookIndex++;
       const dep = deps?.[0];
-      if (state.lastEffectDep !== dep) {
-        state.lastEffectDep = dep;
+      state.effectDeps = state.effectDeps || {};
+      if (state.effectDeps[index] !== dep) {
+        state.effectDeps[index] = dep;
         effect();
       }
     },
@@ -75,7 +77,7 @@ function channelRows(rendered) {
   return rendered.values.find(
     (value) =>
       Array.isArray(value) &&
-      value.every((row) => row?.strings?.some((part) => part.includes("key="))),
+      value.every((row) => row?.strings?.some((part) => part.includes("min-h-10"))),
   );
 }
 
@@ -86,7 +88,22 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   const query = {
     data: {
       team_id: "T0HOST",
-      channels: [{ channel_id: " C0OPS " }, { channel_id: "C0ENG" }],
+      channels: [
+        { channel_id: " C0OPS ", subject_user_id: "user:ops-team-agent" },
+        { channel_id: "C0ENG", subject_user_id: "user:eng-team-agent" },
+      ],
+    },
+    isLoading: false,
+    isSuccess: true,
+    isError: false,
+  };
+  const subjectsQuery = {
+    data: {
+      team_id: "T0HOST",
+      subjects: [
+        { subject_user_id: "user:eng-team-agent", display_name: "Eng agent" },
+        { subject_user_id: "user:ops-team-agent", display_name: "Ops agent" },
+      ],
     },
     isLoading: false,
     isSuccess: true,
@@ -106,10 +123,11 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
             .filter(Boolean),
         ),
       ).sort(),
-    saveSlackAllowedChannels: (channelIds) => {
-      saveCalls.push(channelIds);
+    listSlackRoutableSubjects: () => subjectsQuery.data,
+    saveSlackAllowedChannels: (channels) => {
+      saveCalls.push(channels);
       return {
-        channels: channelIds.map((channel_id) => ({ channel_id })),
+        channels,
       };
     },
     slackChannelPickerError: () => "error",
@@ -122,12 +140,14 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
         "channels.slackAccessLoading": "Loading Slack channels...",
         "channels.slackAccessEmpty": "No Slack channels allowed yet.",
         "channels.slackAccessAllow": `Allow ${params.channelId}`,
+        "channels.slackAccessNoSubjects": "No team agents available",
         "channels.slackAccessSave": "Save channels",
         "channels.slackAccessSaving": "Saving...",
         "channels.slackAccessSuccess": "Slack channels saved.",
         "channels.slackAccessError": "Slack channel update failed.",
       })[key] || key,
-    useQuery: () => query,
+    useQuery: ({ queryKey }) =>
+      queryKey[0] === "slack-routable-subjects" ? subjectsQuery : query,
     useQueryClient: () => ({
       invalidateQueries: (query) => invalidations.push(query.queryKey),
     }),
@@ -145,22 +165,43 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
 
   renderPicker(context, state);
   let rendered = renderPicker(context, state);
-  assert.deepEqual(state.values[1], ["C0ENG", "C0OPS"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
+    { channel_id: "C0ENG", subject_user_id: "user:eng-team-agent" },
+    { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent" },
+  ]);
 
-  rendered.values[4]({ target: { value: " C0NEW " } });
+  valuesAfter(rendered, "onChange=")[0]({ target: { value: " C0NEW " } });
   rendered = renderPicker(context, state);
-  rendered.values[8]();
-  assert.deepEqual(state.values[1], ["C0ENG", "C0NEW", "C0OPS"]);
+  valuesAfter(rendered, "onClick=")[0]();
+  assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
+    { channel_id: "C0ENG", subject_user_id: "user:eng-team-agent" },
+    { channel_id: "C0NEW", subject_user_id: "user:eng-team-agent" },
+    { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent" },
+  ]);
 
   rendered = renderPicker(context, state);
-  channelRows(rendered)[0].values[4]();
-  assert.deepEqual(state.values[1], ["C0NEW", "C0OPS"]);
+  {
+    const rowFunctions = channelRows(rendered)[0].values.filter(
+      (value) => typeof value === "function",
+    );
+    rowFunctions[rowFunctions.length - 1]();
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
+    { channel_id: "C0NEW", subject_user_id: "user:eng-team-agent" },
+    { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent" },
+  ]);
 
   rendered = renderPicker(context, state);
   valuesAfter(rendered, "onClick=").at(-1)();
-  assert.deepEqual(saveCalls, [["C0NEW", "C0OPS"]]);
+  assert.deepEqual(JSON.parse(JSON.stringify(saveCalls)), [
+    [
+      { channel_id: "C0NEW", subject_user_id: "user:eng-team-agent" },
+      { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent" },
+    ],
+  ]);
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["slack-allowed-channels"],
+    ["slack-routable-subjects"],
     ["extensions"],
     ["connectable-channels"],
   ]);

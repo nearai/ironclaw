@@ -35,9 +35,11 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 mod allowed;
+mod subjects;
 
 pub const WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH: &str = "/api/webchat/v2/channels/slack/routes";
 pub const WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH: &str = "/api/webchat/v2/channels/slack/allowed";
+pub const WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH: &str = "/api/webchat/v2/channels/slack/subjects";
 
 const SLACK_CHANNEL_ROUTES_LIST_ROUTE_ID: &str = "webui.v2.channels.slack.routes.list";
 const SLACK_CHANNEL_ROUTES_UPSERT_ROUTE_ID: &str = "webui.v2.channels.slack.routes.upsert";
@@ -401,6 +403,7 @@ pub struct SlackChannelRouteAdminRouteConfig {
     team_id: String,
     operator_user_id: UserId,
     allowed_subject_user_ids: HashSet<UserId>,
+    routable_team_subjects: Vec<subjects::SlackRoutableTeamSubject>,
     channel_subject_assigner: SlackChannelSubjectAssigner,
     store: Arc<dyn SlackChannelRouteStore>,
     safety_layer: Arc<SafetyLayer>,
@@ -424,6 +427,7 @@ impl SlackChannelRouteAdminRouteConfig {
             installation_id,
             team_id,
             allowed_subject_user_ids: HashSet::from([operator_user_id.clone()]),
+            routable_team_subjects: Vec::new(),
             operator_user_id,
             channel_subject_assigner,
             store,
@@ -438,8 +442,31 @@ impl SlackChannelRouteAdminRouteConfig {
         mut self,
         subject_user_ids: impl IntoIterator<Item = UserId>,
     ) -> Self {
-        self.allowed_subject_user_ids.extend(subject_user_ids);
+        for subject_user_id in subject_user_ids {
+            self.add_allowed_subject_user(subject_user_id);
+        }
         self
+    }
+
+    fn add_allowed_subject_user(&mut self, subject_user_id: UserId) {
+        self.allowed_subject_user_ids
+            .insert(subject_user_id.clone());
+        if subject_user_id != self.operator_user_id
+            && !self
+                .routable_team_subjects
+                .iter()
+                .any(|subject| subject.subject_user_id == subject_user_id.as_str())
+        {
+            self.routable_team_subjects
+                .push(subjects::SlackRoutableTeamSubject::from_user_id(
+                    subject_user_id,
+                ));
+            self.routable_team_subjects.sort_by(|left, right| {
+                left.display_name
+                    .cmp(&right.display_name)
+                    .then_with(|| left.subject_user_id.cmp(&right.subject_user_id))
+            });
+        }
     }
 
     fn key_for_channel(&self, channel_id: String) -> Result<SlackChannelRouteKey, SlackRouteError> {
@@ -470,6 +497,7 @@ pub(crate) fn slack_channel_route_admin_route_mount(
                     .delete(delete_slack_channel_route_handler),
             )
             .merge(allowed::router())
+            .merge(subjects::router())
             .with_state(config),
         descriptors: slack_channel_route_admin_descriptors(),
     }
@@ -504,6 +532,7 @@ pub(crate) fn slack_channel_route_admin_descriptors() -> Vec<IngressRouteDescrip
         .expect("Slack channel route delete descriptor must validate at startup"), // safety: route id, method, path, and policy are static typed literals.
     ];
     descriptors.extend(allowed::descriptors());
+    descriptors.extend(subjects::descriptors());
     descriptors
 }
 
@@ -999,6 +1028,43 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(body["routes"], serde_json::json!([]));
         assert_eq!(body["next_cursor"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn route_admin_lists_routable_team_subjects_for_picker() {
+        let mount = slack_channel_route_admin_route_mount(route_config(Arc::new(
+            InMemorySlackChannelRouteStore::new(),
+        )));
+
+        let response = mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH)
+                    .header("content-length", "0")
+                    .extension(caller(TENANT, "user:admin"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(body["team_id"], TEAM);
+        assert_eq!(
+            body["subjects"],
+            serde_json::json!([
+                {
+                    "subject_user_id": "user:eng-team-agent",
+                    "display_name": "Eng Team Agent"
+                }
+            ])
+        );
     }
 
     #[tokio::test]
