@@ -2500,8 +2500,9 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
         output: serde_json::Value,
-    ) -> Result<(), AgentLoopHostError> {
-        self.inner
+    ) -> Result<u64, AgentLoopHostError> {
+        let byte_len = self
+            .inner
             .update_capability_result(run_context, result_ref, output.clone())
             .await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
@@ -2513,7 +2514,7 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
             })?,
             output,
         });
-        Ok(())
+        Ok(byte_len)
     }
 }
 
