@@ -3878,7 +3878,7 @@ mod tests {
             requests: Arc::clone(&requests),
         });
         let skill_source = Arc::new(StaticSkillContextSource::new(vec![
-            HostSkillContextCandidate::new(
+            HostSkillContextCandidate::loaded(
                 skill_md(
                     "review-helper",
                     "review helper description",
@@ -3963,7 +3963,7 @@ mod tests {
             requests: Arc::clone(&requests),
         });
         let skill_source = Arc::new(StaticSkillContextSource::new(vec![
-            HostSkillContextCandidate::new(
+            HostSkillContextCandidate::loaded(
                 skill_md(
                     "configured-helper",
                     "configured helper description",
@@ -5878,7 +5878,7 @@ mod tests {
             .expect("webui-recorded skill context should load");
         let combined_skill_context = selected
             .iter()
-            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .map(|candidate| candidate.loaded_skill_md().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(selected.len(), 1);

@@ -265,11 +265,15 @@ where
         } else {
             None
         };
-        let compaction_message_index = context
-            .messages
-            .iter()
-            .filter_map(|message| message.compaction.clone())
-            .collect::<Vec<_>>();
+        let compaction_message_index = if context.compaction_message_index.is_empty() {
+            context
+                .messages
+                .iter()
+                .filter_map(|message| message.compaction.clone())
+                .collect::<Vec<_>>()
+        } else {
+            context.compaction_message_index.clone()
+        };
         let instruction_bundle = self.instruction_builder().build(InstructionBundleRequest {
             context_bundle: context,
             visible_surface,
@@ -403,6 +407,7 @@ mod tests {
             Ok(LoopContextBundle {
                 identity_messages: self.identity_messages.clone(),
                 messages: self.messages.clone(),
+                compaction_message_index: Vec::new(),
                 instruction_snippets: vec![],
                 memory_snippets: vec![],
             })
