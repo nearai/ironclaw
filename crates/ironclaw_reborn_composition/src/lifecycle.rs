@@ -87,12 +87,48 @@ impl RebornLocalSkillManagementPort {
         .await?)
     }
 
+    pub(crate) async fn install_from_url(
+        &self,
+        name: Option<&str>,
+        content: &str,
+        source_url: &str,
+    ) -> Result<ironclaw_skills::SkillInstallResult, RebornLocalSkillManagementError> {
+        let context = self.skill_context()?;
+        Ok(install_skill(
+            &context,
+            SkillInstallRequest {
+                name,
+                content,
+                files: &[],
+                source: SkillInstallSource::InstalledUrl,
+                source_url: Some(source_url),
+            },
+        )
+        .await?)
+    }
+
     async fn remove(
         &self,
         name: &str,
     ) -> Result<ironclaw_skills::SkillRemoveResult, RebornLocalSkillManagementError> {
         let context = self.skill_context()?;
         Ok(remove_skill(&context, SkillRemoveRequest { name }).await?)
+    }
+
+    pub(crate) async fn remove_if_installed(
+        &self,
+        name: &str,
+    ) -> Result<ironclaw_skills::SkillRemoveResult, RebornLocalSkillManagementError> {
+        let context = self.skill_context()?;
+        match remove_skill(&context, SkillRemoveRequest { name }).await {
+            Ok(result) => Ok(result),
+            Err(error) if error.kind() == SkillManagementErrorKind::NotFound => {
+                Ok(ironclaw_skills::SkillRemoveResult {
+                    name: name.to_string(),
+                })
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -397,8 +433,8 @@ fn skill_summary(
         description: skill.description,
         source: match skill.source {
             ironclaw_skills::ManagedSkillSource::System => LifecycleSkillSource::System,
-            ironclaw_skills::ManagedSkillSource::User
-            | ironclaw_skills::ManagedSkillSource::Installed => LifecycleSkillSource::User,
+            ironclaw_skills::ManagedSkillSource::User => LifecycleSkillSource::User,
+            ironclaw_skills::ManagedSkillSource::Installed => LifecycleSkillSource::Installed,
         },
         keywords: skill.keywords,
         tags: skill.tags,

@@ -127,6 +127,10 @@ use crate::{
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
+    ironhub::{
+        extend_builtin_first_party_package as extend_builtin_first_party_package_with_ironhub,
+        insert_handlers as insert_ironhub_handlers,
+    },
     web_access::register_bundled_web_access_first_party_handlers,
 };
 
@@ -869,11 +873,21 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             reason: format!("web access first-party handlers are invalid: {error}"),
         },
     )?;
-    insert_extension_lifecycle_handlers(&mut first_party_registry, extension_management).map_err(
-        |error| RebornBuildError::InvalidConfig {
-            reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
-        },
-    )?;
+    insert_extension_lifecycle_handlers(
+        &mut first_party_registry,
+        Arc::clone(&extension_management),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
+    })?;
+    insert_ironhub_handlers(
+        &mut first_party_registry,
+        Arc::clone(&store_graph.local_runtime.skill_management),
+        extension_management,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev IronHub handlers are invalid: {error}"),
+    })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
@@ -1876,6 +1890,11 @@ fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBui
     let package = extend_builtin_first_party_package(package).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("local-dev extension lifecycle package is invalid: {error}"),
+        }
+    })?;
+    let package = extend_builtin_first_party_package_with_ironhub(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev IronHub package is invalid: {error}"),
         }
     })?;
     registry

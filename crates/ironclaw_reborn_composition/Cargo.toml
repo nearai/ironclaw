@@ -82,7 +82,9 @@ async-trait = "0.1"
 base64 = "0.22"
 chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
+ed25519-dalek = "2.2.0"
 futures = "0.3"
+hex = "0.4.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }

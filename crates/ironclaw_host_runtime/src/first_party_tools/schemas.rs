@@ -263,6 +263,34 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["extension_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/ironhub_search.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Optional search query for the signed IronHub catalog. Omit to list all entries." }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/ironhub_info.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "IronHub tool or skill name." },
+                "kind": { "type": "string", "enum": ["tool", "skill"], "description": "Disambiguate when a name exists as both a tool and a skill." }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/ironhub_install.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "IronHub tool or skill name." },
+                "kind": { "type": "string", "enum": ["tool", "skill"], "description": "Disambiguate when a name exists as both a tool and a skill." },
+                "force": { "type": "boolean", "description": "Replace an already installed package.", "default": false },
+                "expected_version": { "type": "string", "description": "Optional catalog version pin for signed install intents." },
+                "expected_artifact_digest": { "type": "string", "description": "Optional artifact digest pin for signed install intents." }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_list.input.v1.json" => json!({
             "type": "object",
             "properties": {},
@@ -413,4 +441,28 @@ fn response_body_limit_schema(require_save_to: bool) -> Value {
         "default": default,
         "description": description
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_builtin_input_schema_ref;
+
+    #[test]
+    fn ironhub_model_visible_schemas_preserve_host_trust_boundary() {
+        let info = resolve_builtin_input_schema_ref("schemas/builtin/ironhub_info.input.v1.json")
+            .expect("ironhub info schema");
+        assert_eq!(
+            info["properties"]["kind"]["enum"],
+            serde_json::json!(["tool", "skill"])
+        );
+
+        let install =
+            resolve_builtin_input_schema_ref("schemas/builtin/ironhub_install.input.v1.json")
+                .expect("ironhub install schema");
+        assert_eq!(
+            install["properties"].get("acknowledge_unverified"),
+            None,
+            "model-visible IronHub install must not self-acknowledge unverified community content"
+        );
+    }
 }

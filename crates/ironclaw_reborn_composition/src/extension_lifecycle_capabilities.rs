@@ -228,6 +228,9 @@ mod tests {
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
     use super::*;
+    use crate::ironhub::{
+        IRONHUB_INFO_CAPABILITY_ID, IRONHUB_INSTALL_CAPABILITY_ID, IRONHUB_SEARCH_CAPABILITY_ID,
+    };
     use crate::{RebornBuildInput, build_reborn_services};
 
     #[tokio::test]
@@ -279,6 +282,67 @@ mod tests {
         assert!(
             activate.effects.contains(&EffectKind::Network),
             "hosted MCP activation needs runtime HTTP egress for discovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_agent_surface_exposes_ironhub_tools() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "ironhub-tools-surface-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let runtime = services.host_runtime.expect("host runtime composed");
+
+        let surface = runtime
+            .visible_capabilities(visible_request([
+                IRONHUB_SEARCH_CAPABILITY_ID,
+                IRONHUB_INFO_CAPABILITY_ID,
+                IRONHUB_INSTALL_CAPABILITY_ID,
+            ]))
+            .await
+            .expect("visible capabilities");
+        let ids = surface_capability_ids(&surface);
+
+        assert!(ids.contains(&IRONHUB_SEARCH_CAPABILITY_ID));
+        assert!(ids.contains(&IRONHUB_INFO_CAPABILITY_ID));
+        assert!(ids.contains(&IRONHUB_INSTALL_CAPABILITY_ID));
+
+        let search = descriptor_for(&surface, IRONHUB_SEARCH_CAPABILITY_ID);
+        assert_eq!(search.default_permission, PermissionMode::Allow);
+        assert_eq!(
+            search.parameters_schema.get("required"),
+            None,
+            "ironhub_search query should be optional so models can list all catalog entries"
+        );
+
+        let info = descriptor_for(&surface, IRONHUB_INFO_CAPABILITY_ID);
+        assert_eq!(info.default_permission, PermissionMode::Allow);
+        assert_eq!(
+            info.parameters_schema["required"],
+            serde_json::json!(["name"])
+        );
+
+        let install = descriptor_for(&surface, IRONHUB_INSTALL_CAPABILITY_ID);
+        assert_eq!(install.default_permission, PermissionMode::Ask);
+        assert_eq!(
+            install.parameters_schema["required"],
+            serde_json::json!(["name"])
+        );
+        assert_eq!(
+            install.parameters_schema["properties"].get("acknowledge_unverified"),
+            None,
+            "model-visible IronHub install must not self-acknowledge unverified community content"
+        );
+        assert!(
+            install.effects.contains(&EffectKind::Network),
+            "IronHub install downloads signed catalog artifacts through runtime HTTP egress"
+        );
+        assert!(
+            install.effects.contains(&EffectKind::WriteFilesystem),
+            "IronHub install writes skills or extension packages into Reborn local-dev state"
         );
     }
 

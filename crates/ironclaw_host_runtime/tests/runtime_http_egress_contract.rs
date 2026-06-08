@@ -266,6 +266,75 @@ async fn host_http_egress_consumes_staged_obligation_secret_once() {
     assert_eq!(network_recorder.lock().unwrap().len(), 1);
 }
 
+#[tokio::test]
+async fn wasm_host_http_egress_reuses_staged_obligation_secret_within_dispatch() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy(&services, &scope, &capability_id, sample_policy()).await;
+    stage_secret(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-wasm-secret",
+    )
+    .await;
+    let service = services.host_http_egress(network);
+    let request = RuntimeHttpEgressRequest {
+        runtime: RuntimeKind::Wasm,
+        scope,
+        capability_id: capability_id.clone(),
+        method: NetworkMethod::Post,
+        url: "https://api.example.test/v1/run".to_string(),
+        headers: vec![],
+        body: b"hello".to_vec(),
+        network_policy: sample_policy(),
+        credential_injections: vec![RuntimeCredentialInjection {
+            handle,
+            source: RuntimeCredentialSource::StagedObligation { capability_id },
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        }],
+        response_body_limit: Some(4096),
+        save_body_to: None,
+        timeout_ms: None,
+    };
+
+    service
+        .execute(request.clone())
+        .await
+        .expect("first WASM request should use staged credential");
+    service
+        .execute(request)
+        .await
+        .expect("second WASM request in the same dispatch should reuse staged credential");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| {
+        request
+            .headers
+            .iter()
+            .any(|(name, value)| name == "authorization" && value == "Bearer sk-staged-wasm-secret")
+    }));
+}
+
 #[test]
 fn host_http_egress_records_injected_credentials_in_zeroizing_network_request() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {

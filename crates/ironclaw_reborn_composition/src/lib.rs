@@ -40,6 +40,7 @@ mod google_oauth;
 mod gsuite;
 mod hooks;
 mod input;
+mod ironhub;
 mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
@@ -165,6 +166,10 @@ pub use ironclaw_skills::{
     skill_summary_json as reborn_skill_summary_json,
 };
 pub use ironclaw_triggers::TriggerId;
+pub use ironhub::{
+    IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions,
+    execute_reborn_ironhub_command, render_reborn_ironhub_response,
+};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,

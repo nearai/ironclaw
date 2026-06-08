@@ -80,8 +80,8 @@ use ironclaw_reborn::hook_gate_refs::{
     InMemoryHookGateRouter, RouterBackedHookGateRefFactory, hook_gate_arguments_digest,
 };
 use ironclaw_reborn::loop_driver_host::{
-    EventTriggeredHookSubscription, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
-    TextOnlyLoopHostConfig,
+    EventTriggeredHookSubscription, RebornLoopDriverHostError, RebornLoopDriverHostFactory,
+    RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
@@ -649,7 +649,7 @@ fn predicate_deny_dispatcher() -> Arc<HookDispatcher> {
 /// builder-factory path can attach a security-audit sink before sealing. This
 /// is the only dispatcher-installation path that consumes
 /// `RebornLoopDriverHostFactory::with_hook_security_audit_sink`.
-fn predicate_deny_builder() -> HookDispatcherBuilder {
+fn predicate_deny_builder() -> Result<HookDispatcherBuilder, RebornLoopDriverHostError> {
     let hook_id = HookId::derive(
         &ExtensionId::new("integration-tests").expect("valid ExtensionId in test"),
         "0.0.1",
@@ -665,7 +665,7 @@ fn predicate_deny_builder() -> HookDispatcherBuilder {
     let evaluator = Arc::new(PredicateEvaluator::new());
     let hook = PredicateBackedBeforeCapabilityHook::new(hook_id, spec, evaluator);
 
-    HookDispatcherBuilder::new(HookRegistry::new())
+    Ok(HookDispatcherBuilder::new(HookRegistry::new())
         .install_installed_before_capability(
             hook_id,
             HookPhase::Policy,
@@ -673,7 +673,7 @@ fn predicate_deny_builder() -> HookDispatcherBuilder {
             HookBindingScope::Global,
             Box::new(hook),
         )
-        .expect("Installed-tier predicate hook installs at policy phase")
+        .expect("Installed-tier predicate hook installs at policy phase"))
 }
 
 fn selective_deny_dispatcher(target: &str) -> Arc<HookDispatcher> {

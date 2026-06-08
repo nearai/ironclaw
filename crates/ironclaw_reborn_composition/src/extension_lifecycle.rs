@@ -281,10 +281,31 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let available = self.catalog.resolve(&package_ref)?;
+        self.install_available_package(available, false).await
+    }
+
+    pub(crate) async fn install_available_package(
+        &self,
+        available: &AvailableExtensionPackage,
+        force: bool,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let package_ref = available.package_ref.clone();
         let plan = prepare_install(available)?;
         let _operation_guard = self.operation_lock.lock().await;
-        self.ensure_not_installed(&available.package.id, plan.installation.installation_id())
-            .await?;
+        if force
+            && self
+                .installation_store
+                .get_installation(plan.installation.installation_id())
+                .await
+                .map_err(map_extension_installation_error)?
+                .is_some()
+        {
+            self.remove_locked(package_ref.clone()).await?;
+        }
+        if !force {
+            self.ensure_not_installed(&available.package.id, plan.installation.installation_id())
+                .await?;
+        }
         self.register_lifecycle_package(&available.package).await?;
 
         if let Err(error) =
@@ -464,8 +485,15 @@ impl RebornLocalExtensionManagementPort {
         &self,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         let _operation_guard = self.operation_lock.lock().await;
+        self.remove_locked(package_ref).await
+    }
+
+    async fn remove_locked(
+        &self,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         let installation = self
             .load_installation(&extension_id, &installation_id)
             .await?;
@@ -902,7 +930,7 @@ fn prepare_install(
         })?;
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
         &available.manifest_toml,
-        ManifestSource::HostBundled,
+        available.package.manifest.source,
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,

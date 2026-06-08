@@ -81,7 +81,11 @@ impl AvailableExtensionPackage {
             name: self.package.manifest.name.clone(),
             version: self.package.manifest.version.clone(),
             description: self.package.manifest.description.clone(),
-            source: LifecycleExtensionSource::HostBundled,
+            source: match self.package.manifest.source {
+                ManifestSource::HostBundled => LifecycleExtensionSource::HostBundled,
+                ManifestSource::InstalledLocal => LifecycleExtensionSource::Installed,
+                ManifestSource::RegistryInstalled => LifecycleExtensionSource::Registry,
+            },
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             visible_capability_ids,
             visible_read_only_capability_ids,
