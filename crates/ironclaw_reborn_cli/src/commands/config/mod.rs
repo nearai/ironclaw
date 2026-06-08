@@ -383,6 +383,16 @@ model = "claude-3-5-sonnet-latest"
     }
 
     #[test]
+    fn json_to_config_value_negative_integer_becomes_float() {
+        let val = serde_json::json!(-5);
+        let config_val = json_to_config_value(&val);
+        assert!(
+            matches!(config_val, ConfigValue::Float(f) if (f - (-5.0)).abs() < f64::EPSILON),
+            "negative integer should coerce to Float since ConfigValue::Integer is u64"
+        );
+    }
+
+    #[test]
     fn build_config_get_dto_known_key_none_value_returns_ok_none() {
         let (_tmp, context) = RebornCliContext::test_context();
         let dto = build_config_get_dto(&context, "identity.tenant").expect("must succeed");
