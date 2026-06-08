@@ -203,6 +203,8 @@ impl DefaultExecutorPipeline {
                         }
                     };
 
+                    let completed = self.post_capability.process(ctx, completed).await?;
+
                     let (next_state, summary) = match completed {
                         TurnCompletedStep::Continue { state, summary } => (*state, summary),
                         TurnCompletedStep::Exit(exit) => return Ok(exit),
