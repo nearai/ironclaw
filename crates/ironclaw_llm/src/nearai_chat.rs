@@ -42,13 +42,13 @@ pub struct ModelInfo {
 }
 
 /// Default NEAR AI model used when no model is configured.
-pub const DEFAULT_MODEL: &str = "Qwen/Qwen3.5-122B-A10B";
+pub const DEFAULT_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 
 /// Fallback model list used by the setup wizard when the `/models` API is
 /// unreachable. Returns `(model_id, display_label)` pairs.
 pub fn default_models() -> Vec<(String, String)> {
     vec![
-        (DEFAULT_MODEL.into(), "Qwen 3.5 122B (default)".into()),
+        (DEFAULT_MODEL.into(), "DeepSeek V4 Flash (default)".into()),
         (
             "Qwen/Qwen3-32B".into(),
             "Qwen 3 32B (smaller, faster)".into(),

@@ -50,9 +50,10 @@ use crate::validation::{
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
-    CommunicationPreferenceRepository, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundDeliveryId, OutboundError, OutboundStateStore, ProjectionSubscriptionId,
-    ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    CommunicationPreferenceRepository, CommunicationPreferenceUpdate,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError,
+    OutboundStateStore, ProjectionSubscriptionId, ProjectionSubscriptionRecord,
+    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
 
 /// Maximum number of compare-and-swap retries on a read-then-write path
@@ -232,21 +233,16 @@ where
             .await?
             .map(|(value, _)| value))
     }
-}
 
-#[async_trait]
-impl<F> CommunicationPreferenceRepository for FilesystemOutboundStateStore<F>
-where
-    F: RootFilesystem,
-{
-    async fn put_communication_preference(
+    async fn write_communication_preference_with_cas(
         &self,
-        record: CommunicationPreferenceRecord,
-    ) -> Result<(), OutboundError> {
-        validate_communication_preference(&record)?;
-        let key = record.key();
+        key: CommunicationPreferenceKey,
+        mut update: CommunicationPreferenceUpdate,
+    ) -> Result<CommunicationPreferenceRecord, OutboundError> {
         let path = communication_preference_path(&key)?;
         let resource_scope = communication_preference_resource_scope(&key.tenant_id, &key.user_id);
+        self.ensure_tenant_id_index(&resource_scope, &communication_preferences_root()?)
+            .await?;
         for _ in 0..MAX_CAS_RETRIES {
             let (cas, existing) = match self
                 .get_versioned_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
@@ -262,18 +258,39 @@ where
             {
                 return Err(OutboundError::Backend);
             }
-            self.ensure_tenant_id_index(&resource_scope, &communication_preferences_root()?)
-                .await?;
+            let record = update(existing)?;
+            validate_communication_preference(&record)?;
+            if record.key() != key {
+                return Err(OutboundError::InvalidRequest {
+                    reason: "communication preference update key mismatch",
+                });
+            }
             match self
                 .put_json(&resource_scope, &path, &record, &record.tenant_id, cas)
                 .await
             {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(record),
                 Err(OutboundError::CasConflict) => continue,
                 Err(error) => return Err(error),
             }
         }
         Err(OutboundError::Backend)
+    }
+}
+
+#[async_trait]
+impl<F> CommunicationPreferenceRepository for FilesystemOutboundStateStore<F>
+where
+    F: RootFilesystem,
+{
+    async fn put_communication_preference(
+        &self,
+        record: CommunicationPreferenceRecord,
+    ) -> Result<(), OutboundError> {
+        let key = record.key();
+        self.write_communication_preference_with_cas(key, Box::new(move |_| Ok(record.clone())))
+            .await?;
+        Ok(())
     }
 
     async fn load_communication_preference(
@@ -292,6 +309,15 @@ where
             return Err(OutboundError::Backend);
         }
         Ok(Some(record))
+    }
+
+    async fn update_communication_preference(
+        &self,
+        key: CommunicationPreferenceKey,
+        update: CommunicationPreferenceUpdate,
+    ) -> Result<CommunicationPreferenceRecord, OutboundError> {
+        self.write_communication_preference_with_cas(key, update)
+            .await
     }
 }
 

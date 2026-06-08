@@ -2,6 +2,10 @@ import { SlackPairingSection } from "../../../components/slack-pairing-section.j
 import { Icon } from "../../../design-system/icons.js";
 import { html } from "../../../lib/html.js";
 
+export function isSlackStrategy(connectAction, strategy) {
+  return connectAction?.channel === "slack" && connectAction.strategy === strategy;
+}
+
 export function ChannelConnectCard({ connectAction, onDismiss }) {
   if (!connectAction) return null;
   const channel = connectAction.channel;
@@ -27,7 +31,7 @@ export function ChannelConnectCard({ connectAction, onDismiss }) {
         `}
       </div>
 
-      ${channel === "slack" && connectAction.strategy === "inbound_proof_code"
+      ${isSlackStrategy(connectAction, "inbound_proof_code")
         ? html`<${SlackPairingSection} action=${connectAction.action} />`
         : html`
             <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 text-xs leading-5 text-iron-300">

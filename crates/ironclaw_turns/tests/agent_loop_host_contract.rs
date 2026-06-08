@@ -365,6 +365,7 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
                 safe_summary: "user safe".to_string(),
                 compaction: None,
             }],
+            compaction_message_index: Vec::new(),
             instruction_snippets: vec![
                 LoopContextSnippet {
                     snippet_ref: "instruction:project".to_string(),
@@ -516,6 +517,7 @@ async fn instruction_bundle_builder_allows_safe_domain_terms_in_summaries() {
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
+                compaction_message_index: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
                     model_content: "Explain how to rotate a secret without exposing values"
@@ -543,6 +545,7 @@ async fn instruction_bundle_builder_allows_terms_inside_larger_words() {
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
+                compaction_message_index: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
                     model_content: "Explain preauthorization sync behavior".to_string(),
@@ -568,6 +571,7 @@ async fn instruction_bundle_builder_rejects_secret_credential_phrases() {
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
+                compaction_message_index: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
                     model_content: "client secret should not appear in prompt context".to_string(),
@@ -627,6 +631,7 @@ async fn instruction_bundle_serialization_hides_materialized_content() {
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
+                compaction_message_index: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
                     model_content: "RAW_MATERIALIZED_PROMPT_SENTINEL".to_string(),
@@ -666,6 +671,7 @@ async fn instruction_bundle_materializes_oversized_snippet_content_separate_from
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
+                compaction_message_index: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "skill:github".to_string(),
                     model_content: model_content.clone(),
@@ -701,6 +707,7 @@ fn skill_instruction_request(
         context_bundle: LoopContextBundle {
             identity_messages: Vec::new(),
             messages: Vec::new(),
+            compaction_message_index: Vec::new(),
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "skill:github".to_string(),
                 model_content: model_content.into(),
@@ -726,6 +733,7 @@ async fn instruction_bundle_rejects_empty_model_content() {
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
+                compaction_message_index: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "skill:empty".to_string(),
                     model_content: String::new(),
@@ -758,6 +766,7 @@ async fn instruction_bundle_rejects_oversized_model_content() {
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
+                compaction_message_index: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "skill:oversized".to_string(),
                     model_content: "x".repeat(LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES + 1),
@@ -872,6 +881,7 @@ async fn instruction_bundle_rejects_generic_model_content_security_vocabulary() 
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
+                compaction_message_index: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
                     model_content: "Review authorization checks before release".to_string(),
@@ -912,6 +922,7 @@ async fn instruction_bundle_orders_snippets_by_model_content_when_summary_matche
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
+                compaction_message_index: Vec::new(),
                 instruction_snippets: Vec::new(),
                 memory_snippets: vec![
                     LoopContextSnippet {
@@ -955,6 +966,7 @@ async fn instruction_bundle_builder_rejects_unsafe_instruction_context() {
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
                 messages: Vec::new(),
+                compaction_message_index: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
                     model_content: "leaks /Users/alice/.ssh/id_rsa path".to_string(),
@@ -2023,6 +2035,28 @@ fn capability_denied_reason_kind_is_typed_and_wire_compatible() {
 }
 
 #[test]
+fn capability_result_message_byte_len_round_trips() {
+    let json = serde_json::json!({
+        "result_ref": "result:big",
+        "safe_summary": "big result",
+        "byte_len": 33_001u64
+    });
+    let decoded: CapabilityResultMessage = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded.byte_len, 33_001);
+}
+
+#[test]
+fn capability_result_message_byte_len_defaults_to_zero_for_legacy_payload() {
+    // Legacy hosts that don't yet emit byte_len must still decode cleanly.
+    let json = serde_json::json!({
+        "result_ref": "result:legacy",
+        "safe_summary": "no byte_len field"
+    });
+    let decoded: CapabilityResultMessage = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded.byte_len, 0);
+}
+
+#[test]
 fn capability_progress_accepts_legacy_complete_wire_value() {
     let legacy_result = serde_json::json!({
         "result_ref": "result:legacy-complete",
@@ -2493,6 +2527,7 @@ impl LoopContextPort for RecordingAgentLoopHost {
         Ok(LoopContextBundle {
             identity_messages: self.context_system_messages.clone(),
             messages,
+            compaction_message_index: Vec::new(),
             instruction_snippets: self.context_instruction_snippets.clone(),
             memory_snippets: self.context_memory_snippets.clone(),
         })

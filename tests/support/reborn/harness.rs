@@ -1776,19 +1776,22 @@ impl HostRuntimeCapabilityHarness {
         network_policy: NetworkPolicy,
     ) -> HarnessResult<Self> {
         let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            br#"{"accepted":true}"#.to_vec(),
+        ));
         let runtime = local_dev_host_runtime_with_http_egress(
             storage_root.clone(),
-            Arc::new(RecordingRuntimeHttpEgress::with_body(
-                br#"{"accepted":true}"#.to_vec(),
-            )),
+            Arc::clone(&runtime_http_egress),
         )?;
-        Self::core_builtin_tools_from_runtime(
+        let mut harness = Self::core_builtin_tools_from_runtime(
             root,
             workspace_root,
             runtime,
             network_policy,
             UserId::new("reborn-e2e-core-builtins-user")?,
-        )
+        )?;
+        harness.http_egress = Some(runtime_http_egress);
+        Ok(harness)
     }
 
     async fn core_builtin_tools_with_live_http_egress(
@@ -2761,15 +2764,15 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
         let capability_id = write.capability_id.clone();
         let output = write.output.clone();
-        let result_ref = self.inner.write_capability_result(write).await?;
+        let (result_ref, byte_len) = self.inner.write_capability_result(write).await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
             capability_id,
             output,
         });
-        Ok(result_ref)
+        Ok((result_ref, byte_len))
     }
 
     async fn update_capability_result(
@@ -2777,8 +2780,9 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
         output: serde_json::Value,
-    ) -> Result<(), AgentLoopHostError> {
-        self.inner
+    ) -> Result<u64, AgentLoopHostError> {
+        let byte_len = self
+            .inner
             .update_capability_result(run_context, result_ref, output.clone())
             .await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
@@ -2790,7 +2794,7 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
             })?,
             output,
         });
-        Ok(())
+        Ok(byte_len)
     }
 }
 
@@ -2972,6 +2976,7 @@ impl RecordingTestCapabilityPort {
             safe_summary: "echo: hi".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len: 0,
         })
     }
 }

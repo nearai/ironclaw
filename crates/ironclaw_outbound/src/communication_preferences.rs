@@ -41,6 +41,18 @@ impl CommunicationPreferenceRecord {
     }
 }
 
+/// Transform the currently stored communication preference record.
+///
+/// Repository implementations may invoke this callback more than once when
+/// retrying compare-and-swap conflicts. Callers must keep the callback
+/// deterministic and free of external side effects.
+pub type CommunicationPreferenceUpdate = Box<
+    dyn FnMut(
+            Option<CommunicationPreferenceRecord>,
+        ) -> Result<CommunicationPreferenceRecord, OutboundError>
+        + Send,
+>;
+
 /// Store for durable tenant/user communication delivery preferences.
 #[async_trait]
 pub trait CommunicationPreferenceRepository: Send + Sync {
@@ -53,4 +65,10 @@ pub trait CommunicationPreferenceRepository: Send + Sync {
         &self,
         key: CommunicationPreferenceKey,
     ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError>;
+
+    async fn update_communication_preference(
+        &self,
+        key: CommunicationPreferenceKey,
+        update: CommunicationPreferenceUpdate,
+    ) -> Result<CommunicationPreferenceRecord, OutboundError>;
 }

@@ -31,16 +31,23 @@ use ironclaw_product_workflow::{
 use ironclaw_safety::{SafetyConfig, SafetyLayer};
 use ironclaw_slack_v2_adapter::SLACK_V2_ADAPTER_ID;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+mod allowed;
+mod subjects;
+
 pub const WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH: &str = "/api/webchat/v2/channels/slack/routes";
+pub const WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH: &str = "/api/webchat/v2/channels/slack/allowed";
+pub const WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH: &str = "/api/webchat/v2/channels/slack/subjects";
 
 const SLACK_CHANNEL_ROUTES_LIST_ROUTE_ID: &str = "webui.v2.channels.slack.routes.list";
 const SLACK_CHANNEL_ROUTES_UPSERT_ROUTE_ID: &str = "webui.v2.channels.slack.routes.upsert";
 const SLACK_CHANNEL_ROUTES_DELETE_ROUTE_ID: &str = "webui.v2.channels.slack.routes.delete";
-const SLACK_CHANNEL_ROUTES_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(16 * 1024).unwrap(); // safety: 16 KiB is non-zero.
+const SLACK_CHANNEL_ROUTES_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(128 * 1024).unwrap(); // safety: 128 KiB is non-zero.
 const SLACK_CHANNEL_ROUTES_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 is non-zero.
 const SLACK_CHANNEL_ROUTES_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 is non-zero.
+const MANAGED_CHANNEL_SUBJECT_PREFIX: &str = "user:slack-channel:";
 const DEFAULT_LIST_LIMIT: usize = 100;
 const MAX_LIST_LIMIT: usize = 500;
 
@@ -97,6 +104,72 @@ pub(crate) struct SlackChannelRouteListPage {
     pub(crate) next_cursor: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SlackChannelRouteAssignment {
+    pub(crate) channel_id: String,
+    pub(crate) subject_user_id: UserId,
+}
+
+impl SlackChannelRouteAssignment {
+    pub(crate) fn new(channel_id: String, subject_user_id: UserId) -> Self {
+        Self {
+            channel_id,
+            subject_user_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SlackChannelSubjectAssigner {
+    tenant_id: TenantId,
+    installation_id: AdapterInstallationId,
+    team_id: String,
+}
+
+impl SlackChannelSubjectAssigner {
+    pub(crate) fn new(
+        tenant_id: TenantId,
+        installation_id: AdapterInstallationId,
+        team_id: String,
+    ) -> Self {
+        Self {
+            tenant_id,
+            installation_id,
+            team_id,
+        }
+    }
+
+    pub(crate) fn assignment_for(
+        &self,
+        channel_id: String,
+    ) -> Result<SlackChannelRouteAssignment, SlackChannelRouteError> {
+        let subject_user_id = self.subject_for_channel(&channel_id)?;
+        Ok(SlackChannelRouteAssignment::new(
+            channel_id,
+            subject_user_id,
+        ))
+    }
+
+    fn subject_for_channel(&self, channel_id: &str) -> Result<UserId, SlackChannelRouteError> {
+        let mut hasher = Sha256::new();
+        hasher.update(self.tenant_id.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.installation_id.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.team_id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(channel_id.as_bytes());
+        let digest = hasher.finalize();
+        let mut suffix = String::with_capacity(32);
+        for byte in digest.iter().take(16) {
+            use std::fmt::Write as _;
+            write!(&mut suffix, "{byte:02x}").map_err(|_| SlackChannelRouteError::InvalidRoute)?;
+        }
+        UserId::new(format!("{MANAGED_CHANNEL_SUBJECT_PREFIX}{suffix}"))
+            .map_err(|_| SlackChannelRouteError::InvalidRoute)
+    }
+}
+
 #[async_trait]
 pub(crate) trait SlackChannelRouteStore: Send + Sync + std::fmt::Debug {
     async fn list_routes(
@@ -118,6 +191,14 @@ pub(crate) trait SlackChannelRouteStore: Send + Sync + std::fmt::Debug {
         &self,
         key: &SlackChannelRouteKey,
     ) -> Result<bool, SlackChannelRouteError>;
+
+    async fn replace_managed_routes(
+        &self,
+        tenant_id: &TenantId,
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+        assignments: Vec<SlackChannelRouteAssignment>,
+    ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError>;
 
     async fn resolve_subject_user_id(
         &self,
@@ -196,6 +277,42 @@ impl SlackChannelRouteStore for InMemorySlackChannelRouteStore {
             .map_err(|_| SlackChannelRouteError::StoreUnavailable)?
             .remove(key)
             .is_some())
+    }
+
+    async fn replace_managed_routes(
+        &self,
+        tenant_id: &TenantId,
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+        assignments: Vec<SlackChannelRouteAssignment>,
+    ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
+        let mut routes = self
+            .routes
+            .write()
+            .map_err(|_| SlackChannelRouteError::StoreUnavailable)?;
+        let requested = assignments
+            .iter()
+            .map(|assignment| &assignment.channel_id)
+            .collect::<HashSet<_>>();
+        routes.retain(|key, _current_subject| {
+            &key.tenant_id != tenant_id
+                || &key.installation_id != installation_id
+                || key.team_id != team_id
+                || requested.contains(&key.channel_id)
+        });
+        let mut replaced = Vec::with_capacity(assignments.len());
+        for assignment in assignments {
+            let key = SlackChannelRouteKey::new(
+                tenant_id.clone(),
+                installation_id.clone(),
+                team_id.to_string(),
+                assignment.channel_id,
+            )?;
+            routes.insert(key.clone(), assignment.subject_user_id.clone());
+            replaced.push(SlackChannelRoute::new(key, assignment.subject_user_id));
+        }
+        replaced.sort_by(|left, right| left.channel_id.cmp(&right.channel_id));
+        Ok(replaced)
     }
 
     async fn resolve_subject_user_id(
@@ -286,6 +403,8 @@ pub struct SlackChannelRouteAdminRouteConfig {
     team_id: String,
     operator_user_id: UserId,
     allowed_subject_user_ids: HashSet<UserId>,
+    routable_team_subjects: Vec<subjects::SlackRoutableTeamSubject>,
+    channel_subject_assigner: SlackChannelSubjectAssigner,
     store: Arc<dyn SlackChannelRouteStore>,
     safety_layer: Arc<SafetyLayer>,
 }
@@ -298,12 +417,19 @@ impl SlackChannelRouteAdminRouteConfig {
         operator_user_id: UserId,
         store: Arc<dyn SlackChannelRouteStore>,
     ) -> Self {
+        let channel_subject_assigner = SlackChannelSubjectAssigner::new(
+            tenant_id.clone(),
+            installation_id.clone(),
+            team_id.clone(),
+        );
         Self {
             tenant_id,
             installation_id,
             team_id,
             allowed_subject_user_ids: HashSet::from([operator_user_id.clone()]),
+            routable_team_subjects: Vec::new(),
             operator_user_id,
+            channel_subject_assigner,
             store,
             safety_layer: Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 16 * 1024,
@@ -316,8 +442,31 @@ impl SlackChannelRouteAdminRouteConfig {
         mut self,
         subject_user_ids: impl IntoIterator<Item = UserId>,
     ) -> Self {
-        self.allowed_subject_user_ids.extend(subject_user_ids);
+        for subject_user_id in subject_user_ids {
+            self.add_allowed_subject_user(subject_user_id);
+        }
         self
+    }
+
+    fn add_allowed_subject_user(&mut self, subject_user_id: UserId) {
+        self.allowed_subject_user_ids
+            .insert(subject_user_id.clone());
+        if subject_user_id != self.operator_user_id
+            && !self
+                .routable_team_subjects
+                .iter()
+                .any(|subject| subject.subject_user_id == subject_user_id.as_str())
+        {
+            self.routable_team_subjects
+                .push(subjects::SlackRoutableTeamSubject::from_user_id(
+                    subject_user_id,
+                ));
+            self.routable_team_subjects.sort_by(|left, right| {
+                left.display_name
+                    .cmp(&right.display_name)
+                    .then_with(|| left.subject_user_id.cmp(&right.subject_user_id))
+            });
+        }
     }
 
     fn key_for_channel(&self, channel_id: String) -> Result<SlackChannelRouteKey, SlackRouteError> {
@@ -347,13 +496,15 @@ pub(crate) fn slack_channel_route_admin_route_mount(
                     .put(upsert_slack_channel_route_handler)
                     .delete(delete_slack_channel_route_handler),
             )
+            .merge(allowed::router())
+            .merge(subjects::router())
             .with_state(config),
         descriptors: slack_channel_route_admin_descriptors(),
     }
 }
 
 pub(crate) fn slack_channel_route_admin_descriptors() -> Vec<IngressRouteDescriptor> {
-    vec![
+    let mut descriptors = vec![
         IngressRouteDescriptor::new(
             SLACK_CHANNEL_ROUTES_LIST_ROUTE_ID,
             NetworkMethod::Get,
@@ -379,7 +530,10 @@ pub(crate) fn slack_channel_route_admin_descriptors() -> Vec<IngressRouteDescrip
             }),
         )
         .expect("Slack channel route delete descriptor must validate at startup"), // safety: route id, method, path, and policy are static typed literals.
-    ]
+    ];
+    descriptors.extend(allowed::descriptors());
+    descriptors.extend(subjects::descriptors());
+    descriptors
 }
 
 fn route_policy(body_limit: BodyLimitPolicy) -> IngressPolicy {
@@ -671,6 +825,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn in_memory_replace_managed_routes_removes_unrequested_subject_routes() {
+        let store = InMemorySlackChannelRouteStore::new();
+        let tenant_id = TenantId::new(TENANT).expect("tenant");
+        let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
+        let assigner = SlackChannelSubjectAssigner::new(
+            tenant_id.clone(),
+            installation_id.clone(),
+            TEAM.into(),
+        );
+        let ceng = assigner
+            .assignment_for("CENG".to_string())
+            .expect("managed assignment");
+        let cops = assigner
+            .assignment_for("COPS".to_string())
+            .expect("managed assignment");
+        store
+            .replace_managed_routes(
+                &tenant_id,
+                &installation_id,
+                TEAM,
+                vec![ceng.clone(), cops.clone()],
+            )
+            .await
+            .expect("initial replace");
+
+        let manual_ops_subject = UserId::new("user:ops-agent").expect("subject");
+        store
+            .upsert_route(
+                SlackChannelRouteKey::new(
+                    tenant_id.clone(),
+                    installation_id.clone(),
+                    TEAM.to_string(),
+                    "COPS".to_string(),
+                )
+                .expect("manual key"),
+                manual_ops_subject.clone(),
+            )
+            .await
+            .expect("manual override");
+
+        store
+            .replace_managed_routes(&tenant_id, &installation_id, TEAM, vec![ceng.clone()])
+            .await
+            .expect("managed replace");
+
+        assert_eq!(
+            store
+                .resolve_subject_user_id(
+                    &SlackChannelRouteKey::new(
+                        tenant_id.clone(),
+                        installation_id.clone(),
+                        TEAM.to_string(),
+                        "CENG".to_string(),
+                    )
+                    .expect("key"),
+                )
+                .await
+                .expect("resolve eng route")
+                .as_ref()
+                .map(UserId::as_str),
+            Some(ceng.subject_user_id.as_str())
+        );
+        assert_eq!(
+            store
+                .resolve_subject_user_id(
+                    &SlackChannelRouteKey::new(
+                        tenant_id,
+                        installation_id,
+                        TEAM.to_string(),
+                        "COPS".to_string(),
+                    )
+                    .expect("key"),
+                )
+                .await
+                .expect("resolve ops route")
+                .as_ref()
+                .map(UserId::as_str),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn route_admin_rejects_cross_tenant_callers() {
         let mount = slack_channel_route_admin_route_mount(route_config(Arc::new(
             InMemorySlackChannelRouteStore::new(),
@@ -795,6 +1031,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_admin_lists_routable_team_subjects_for_picker() {
+        let mount = slack_channel_route_admin_route_mount(route_config(Arc::new(
+            InMemorySlackChannelRouteStore::new(),
+        )));
+
+        let response = mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH)
+                    .header("content-length", "0")
+                    .extension(caller(TENANT, "user:admin"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(body["team_id"], TEAM);
+        assert_eq!(
+            body["subjects"],
+            serde_json::json!([
+                {
+                    "subject_user_id": "user:eng-team-agent",
+                    "display_name": "Eng Team Agent"
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
     async fn route_admin_list_paginates_routes() {
         let store = Arc::new(InMemorySlackChannelRouteStore::new());
         let mount = slack_channel_route_admin_route_mount(route_config(store));
@@ -860,6 +1133,37 @@ mod tests {
             .expect("list responds");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn route_admin_list_handles_oversized_cursor_without_overflow() {
+        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let mount = slack_channel_route_admin_route_mount(route_config(store));
+
+        let response = mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "{WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH}?limit=1&cursor={}",
+                        usize::MAX
+                    ))
+                    .header("content-length", "0")
+                    .extension(caller(TENANT, "user:admin"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("list responds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(body["routes"], serde_json::json!([]));
+        assert_eq!(body["next_cursor"], serde_json::Value::Null);
     }
 
     #[tokio::test]
@@ -1049,6 +1353,16 @@ mod tests {
             Ok(false)
         }
 
+        async fn replace_managed_routes(
+            &self,
+            _tenant_id: &TenantId,
+            _installation_id: &AdapterInstallationId,
+            _team_id: &str,
+            _assignments: Vec<SlackChannelRouteAssignment>,
+        ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
+            Ok(Vec::new())
+        }
+
         async fn resolve_subject_user_id(
             &self,
             _key: &SlackChannelRouteKey,
@@ -1086,6 +1400,16 @@ mod tests {
             &self,
             _key: &SlackChannelRouteKey,
         ) -> Result<bool, SlackChannelRouteError> {
+            Err(SlackChannelRouteError::StoreUnavailable)
+        }
+
+        async fn replace_managed_routes(
+            &self,
+            _tenant_id: &TenantId,
+            _installation_id: &AdapterInstallationId,
+            _team_id: &str,
+            _assignments: Vec<SlackChannelRouteAssignment>,
+        ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
             Err(SlackChannelRouteError::StoreUnavailable)
         }
 

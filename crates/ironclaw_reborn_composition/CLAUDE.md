@@ -119,7 +119,7 @@ Inbound order (outer → inner → handler):
    Composition fails closed if a future descriptor declares an unsupported
    scope.
 9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
-   handlers from `ironclaw_webui_v2` (create-thread, list-threads,
+   handlers from `ironclaw_webui_v2` (create-thread, list-threads, delete-thread,
    send-message, get-timeline, stream-events SSE, stream-events WS,
    cancel-run, resolve-gate, setup-extension, list-automations).
 
@@ -178,11 +178,22 @@ personal-binding pairing service. The browser must not call provider-specific
 pairing paths directly.
 
 When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
-`GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` inside the same bearer
-auth layer. The browser supplies only `channel_id` and `subject_user_id`;
-tenant, adapter installation, and Slack team come from host configuration. The
-route writes to Slack host state so runtime assignments are durable and are
-resolved before static TOML `channel_routes` fallback.
+`GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` and
+`GET|PUT /api/webchat/v2/channels/slack/allowed` plus
+`GET /api/webchat/v2/channels/slack/subjects` inside the same bearer auth
+layer. The low-level `routes` API accepts `channel_id` plus
+`subject_user_id`; the WebUI v2 channel picker uses the admin-managed
+`allowed` API, reads the `subjects` catalog for routable team subjects, and
+can save either legacy `channel_ids` or explicit per-channel
+`{ channel_id, subject_user_id }` assignments. Missing explicit subjects are
+deterministically assigned tenant-scoped Slack channel subjects, while existing
+generated/current route subjects may be preserved for their same channel.
+Tenant, adapter installation, and Slack team always come from host
+configuration. These routes write to Slack host state so runtime assignments
+are durable and are resolved before static TOML `channel_routes` fallback. In
+admin-managed host-beta mode, new shared Slack conversations without a dynamic
+or static channel route fail closed instead of falling back to the installation
+default subject.
 
 ### Host-supplied public route mount (#4116 — SSO login surface)
 
@@ -256,7 +267,9 @@ rows are inventoried here, not implemented in the current PR.
 |---|---|---|---|
 | Send message | `POST /api/chat/send` | `POST /api/webchat/v2/threads/{thread_id}/messages` | Mapped |
 | Create thread | `POST /api/chat/thread/new` | `POST /api/webchat/v2/threads` | Mapped |
+| Session/profile capabilities | `GET /api/profile` | `GET /api/webchat/v2/session` | Mapped to authenticated tenant/user plus server-issued WebUI capabilities; `operator_webui_config` follows `allows_operator_webui_config` |
 | List threads | `GET /api/chat/threads` | `GET /api/webchat/v2/threads` | Mapped |
+| Delete thread | (none) | `DELETE /api/webchat/v2/threads/{thread_id}` | Mapped |
 | Read history / timeline | `GET /api/chat/history` | `GET /api/webchat/v2/threads/{thread_id}/timeline` | Mapped |
 | SSE stream | `GET /api/chat/events` | `GET /api/webchat/v2/threads/{thread_id}/events` | Mapped (incl. `?token=` shim) |
 | WebSocket stream | `GET /api/chat/ws` | `GET /api/webchat/v2/threads/{tid}/ws` | Mapped |
@@ -373,7 +386,16 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
   rate-limit 429 after descriptor budget exhausted, per-caller
   rate-limit independence, descriptor-driven body-limit 413 on
   oversized mutation payload, in-budget mutation reaches facade, and
-  NoBody policy rejecting a non-empty body on a read route.
+  NoBody policy rejecting a non-empty body on a read route. The
+  `static_*` cases additionally serve the embedded SPA bundle through
+  the same composed router and assert asset content shape — including
+  `static_i18n_module_guards_locale_race_and_clears_failed_pack_cache`
+  (the `setLang` latest-request guard plus `pending[lang]` clear on
+  both settle paths) and `static_typing_dot_animation_respects_reduced_motion`
+  (typing dots animate by default, suppressed under
+  `prefers-reduced-motion`). These lock source shape only; behavioral
+  JS/`getComputedStyle` coverage needs a browser harness this workspace
+  does not own and is deferred to the JS/e2e scaffold.
 - `src/webui_serve.rs::tests` — unit tests for `is_v2_sse_event_request`
   matcher and query-token extraction.
 - `src/webui_route_match.rs::tests` — unit tests for the pattern

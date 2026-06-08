@@ -20,6 +20,7 @@ use crate::{
 use super::{
     compaction::{CompactionInitiator, LoopCompactionPort},
     instruction_bundle::InstructionBundleFingerprint,
+    model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation},
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
     snapshot::ResolvedRunProfile,
     system_inference::SystemInferenceTaskId,
@@ -718,6 +719,7 @@ pub const LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES: usize = 256 * 1024;
 pub struct LoopContextBundle {
     pub identity_messages: Vec<LoopContextMessage>,
     pub messages: Vec<LoopContextMessage>,
+    pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     pub instruction_snippets: Vec<LoopContextSnippet>,
     pub memory_snippets: Vec<LoopContextSnippet>,
 }
@@ -1415,11 +1417,22 @@ pub enum CapabilityOutcome {
         gate_ref: LoopGateRef,
         result_ref: LoopResultRef,
         safe_summary: String,
+        /// Size in bytes of the payload staged at `result_ref` time
+        /// (i.e. the serialized capability output, not the size of this struct).
+        /// Propagated from LoopCapabilityResultWriter::write_capability_result.
+        /// Used by ByteCapStrategy to evaluate per-capability byte caps.
+        #[serde(default)]
+        byte_len: u64,
     },
     SpawnedChildRun {
         child_run_id: TurnRunId,
         result_ref: LoopResultRef,
         safe_summary: String,
+        /// Size in bytes of the payload staged at `result_ref` time
+        /// (i.e. the serialized capability output, not the size of this struct).
+        /// Same semantics as AwaitDependentRun.byte_len.
+        #[serde(default)]
+        byte_len: u64,
     },
     Denied(CapabilityDenied),
     Failed(CapabilityFailure),
@@ -1453,6 +1466,9 @@ pub struct CapabilityResultMessage {
     /// with older hosts.
     #[serde(default)]
     pub terminate_hint: bool,
+    /// Serialized output size in bytes — pure metadata, no PII.
+    #[serde(default)]
+    pub byte_len: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1548,6 +1564,8 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
 pub struct CapabilityFailure {
     pub error_kind: CapabilityFailureKind,
     pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<CapabilityFailureDetail>,
 }
 
 #[non_exhaustive]
@@ -1736,6 +1754,8 @@ pub struct AppendCapabilityResultRef {
     pub safe_summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_call: Option<ProviderToolCallReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelVisibleToolObservation>,
 }
 
 #[async_trait]

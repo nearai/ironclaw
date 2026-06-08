@@ -38,18 +38,19 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{Request, State},
     http::{HeaderName, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
+    routing::get,
 };
 use ironclaw_auth::GoogleOAuthRouteConfig;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui_v2::{
-    WebUiV2RouteOptions, WebUiV2State, is_webui_v2_llm_config_route_id,
-    webui_v2_router_with_options,
+    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
+    is_webui_v2_llm_config_route_id, webui_v2_router_with_options,
 };
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -75,6 +76,7 @@ use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+use serde::Serialize;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
 /// decoded attachments plus base64/JSON overhead. Mirrors the existing
@@ -88,6 +90,8 @@ pub(crate) const DEFAULT_WEBUI_MAX_BODY_BYTES: usize = 14 * 1024 * 1024;
 /// fronts an HTML SPA on the same listener.
 pub(crate) const DEFAULT_WEBUI_CSP: &str =
     "default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'";
+
+const REBORN_HEALTH_PATH: &str = "/api/health";
 
 /// Authentication contract the Reborn binary supplies. The composition
 /// layer is intentionally agnostic about WHERE bearer tokens come from
@@ -587,9 +591,14 @@ pub fn webui_v2_app_with_lifecycle(
     } else {
         WebUiV2RouteOptions::without_llm_config_routes()
     };
-    let v2_inner: Router<()> =
-        webui_v2_router_with_options(WebUiV2State::new(bundle.api.clone()), route_options)
-            .with_state(());
+    let v2_state = WebUiV2State::new(
+        bundle.api.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: mount_operator_routes,
+        },
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    );
+    let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
     let mut public_inner: Option<Router> = None;
@@ -668,6 +677,12 @@ pub fn webui_v2_app_with_lifecycle(
         app = app.merge(public);
     }
     let app = app
+        // arch-exempt: rate-limit-bypass, platform-probe-only.
+        // This route exists solely for container orchestrator healthchecks.
+        // It performs no state read/write, exposes no tenant data, and must
+        // remain reachable even when the descriptor-driven public route stack
+        // is unavailable or misconfigured.
+        .route(REBORN_HEALTH_PATH, get(reborn_health_handler))
         // SPA static assets served from the embedded
         // `ironclaw_webui_v2_static` bundle. Routed AFTER the
         // route_layer stack above so the SPA does not require bearer
@@ -718,6 +733,19 @@ pub fn webui_v2_app_with_lifecycle(
     Ok(WebuiV2App {
         router: app,
         public_route_drains,
+    })
+}
+
+#[derive(Serialize)]
+struct RebornHealthResponse {
+    status: &'static str,
+    channel: &'static str,
+}
+
+async fn reborn_health_handler() -> Json<RebornHealthResponse> {
+    Json(RebornHealthResponse {
+        status: "healthy",
+        channel: "reborn",
     })
 }
 

@@ -455,7 +455,7 @@ mod tests {
         let invocation_id = InvocationId::new();
 
         let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
-        let result_ref = capability_io
+        let (result_ref, _byte_len) = capability_io
             .write_capability_result(CapabilityResultWrite {
                 run_context: &run_context,
                 input_ref: &input_ref,
@@ -525,7 +525,7 @@ mod tests {
         let invocation_id = InvocationId::new();
 
         let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
-        let result_ref = capability_io
+        let (result_ref, _byte_len) = capability_io
             .write_capability_result(CapabilityResultWrite {
                 run_context: &run_context,
                 input_ref: &input_ref,
@@ -876,7 +876,9 @@ mod tests {
         ))
         .await
         .expect("local-dev services build");
-        let skill_path = storage_root.join("skills/unit-activate-helper/SKILL.md");
+        let skill_path = storage_root.join(
+            "tenants/tenant-skill-activate-tool/users/skill-activate-user/skills/unit-activate-helper/SKILL.md",
+        );
         std::fs::create_dir_all(skill_path.parent().expect("skill parent")).expect("skill dir");
         std::fs::write(
             &skill_path,
@@ -914,13 +916,11 @@ mod tests {
             crate::local_dev_capability_policy::local_dev_capability_policy()
                 .expect("policy parses"),
         );
-        let skill_mounts = local_runtime.skill_mounts.clone();
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("skill-activate-user").expect("user id"),
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
-            skill_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
@@ -991,8 +991,7 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert!(
             selected[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("UNIT_ACTIVATE_SENTINEL")
         );
@@ -1101,7 +1100,6 @@ mod tests {
             .as_ref()
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
         let workspace_mounts = local_runtime.workspace_mounts.clone();
-        let skill_mounts = local_runtime.skill_mounts.clone();
         let policy = Arc::new(
             crate::local_dev_capability_policy::local_dev_capability_policy()
                 .expect("policy parses"),
@@ -1114,7 +1112,6 @@ mod tests {
             fallback_user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
-            skill_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
@@ -1321,7 +1318,6 @@ mod tests {
             .as_ref()
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
         let workspace_mounts = local_runtime.workspace_mounts.clone();
-        let skill_mounts = local_runtime.skill_mounts.clone();
         let policy = Arc::new(
             crate::local_dev_capability_policy::local_dev_capability_policy()
                 .expect("policy parses"),
@@ -1334,7 +1330,6 @@ mod tests {
             fallback_user_id: UserId::new("local-dev-skill-port-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
-            skill_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
@@ -1379,7 +1374,13 @@ mod tests {
             .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
             .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
         assert_eq!(output["installed"], serde_json::json!(true));
-        assert!(storage_root.join("skills/qa-smoke-skill/SKILL.md").exists());
+        assert!(
+            storage_root
+                .join(
+                    "tenants/tenant-skill-install-write/users/local-dev-skill-port-user/skills/qa-smoke-skill/SKILL.md"
+                )
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -1407,7 +1408,6 @@ mod tests {
             .as_ref()
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
         let workspace_mounts = local_runtime.workspace_mounts.clone();
-        let skill_mounts = local_runtime.skill_mounts.clone();
         let policy = Arc::new(
             crate::local_dev_capability_policy::local_dev_capability_policy()
                 .expect("policy parses"),
@@ -1420,7 +1420,6 @@ mod tests {
             fallback_user_id: UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
-            skill_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
@@ -1798,6 +1797,7 @@ mod tests {
                     result_ref: "result:missing-typed-content".to_string(),
                     safe_summary: ToolResultSafeSummary::new("tool result available")
                         .expect("safe summary"),
+                    model_observation: None,
                 })
                 .expect("envelope serializes"),
                 content_ref: LoopMessageRef::new("msg:missing-typed-content").expect("content ref"),

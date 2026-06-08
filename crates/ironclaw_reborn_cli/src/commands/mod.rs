@@ -8,6 +8,7 @@ pub(crate) mod extension;
 pub(crate) mod hooks;
 pub(crate) mod logs;
 pub(crate) mod models;
+pub(crate) mod onboard;
 pub(crate) mod profile;
 pub(crate) mod repl;
 pub(crate) mod run;
@@ -42,6 +43,8 @@ pub(crate) enum Command {
     Logs(logs::LogsCommand),
     /// Inspect Reborn model slots and route status.
     Models(models::ModelsCommand),
+    /// Initialize the standalone Reborn home and first-run setup marker.
+    Onboard(onboard::OnboardCommand),
     /// Inspect supported Reborn boot profiles.
     Profile(profile::ProfileCommand),
     /// Start the composed Reborn CLI REPL.
@@ -77,6 +80,9 @@ impl Command {
             Self::Hooks(command) => command.execute(),
             Self::Logs(command) => command.execute(),
             Self::Models(command) => command.execute(),
+            Self::Onboard(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
             Self::Profile(command) => command.execute(),
             Self::Repl(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)

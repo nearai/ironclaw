@@ -1,11 +1,11 @@
 use std::fs;
-use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
-use ironclaw_reborn_config::REBORN_CONFIG_API_VERSION;
+use ironclaw_reborn_config::{REBORN_CONFIG_API_VERSION, RebornHome};
 
 use crate::context::RebornCliContext;
+use crate::file_write::{FileWriteAction, write_atomic};
 
 /// Write a commented stub `config.toml` and `providers.json` into the
 /// Reborn home directory so an operator has something editable.
@@ -24,44 +24,91 @@ pub(crate) struct ConfigInitCommand {
 impl ConfigInitCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         let home = context.boot_config().home();
-        let home_path = home.path();
-        fs::create_dir_all(home_path).map_err(|error| {
-            anyhow::anyhow!("create reborn home {}: {error}", home_path.display())
-        })?;
+        let outcome =
+            write_default_config_files(home, self.force, ExistingConfigPolicy::FailIfPresent)?;
 
-        let config_path = home.config_file_path();
-        let providers_path = home.providers_file_path();
-        preflight_targets(
-            [
-                (&config_path, "config.toml"),
-                (&providers_path, "providers.json"),
-            ],
-            self.force,
-        )?;
-
-        write_atomic(&config_path, &config_stub(), self.force, "config.toml")?;
-        write_atomic(
-            &providers_path,
-            PROVIDERS_STUB,
-            self.force,
-            "providers.json",
-        )?;
-
-        println!("wrote: {}", config_path.display());
-        println!("wrote: {}", providers_path.display());
+        println!("{}", outcome.config.display_line());
+        println!("{}", outcome.providers.display_line());
         println!();
         println!("edit them, then run `ironclaw-reborn run`.");
         Ok(())
     }
 }
 
-fn preflight_targets<const N: usize>(
-    targets: [(&Path, &'static str); N],
-    force: bool,
-) -> anyhow::Result<()> {
-    if force {
-        return Ok(());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExistingConfigPolicy {
+    FailIfPresent,
+    Preserve,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigFilesWriteOutcome {
+    pub(crate) config: ConfigFileWrite,
+    pub(crate) providers: ConfigFileWrite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigFileWrite {
+    pub(crate) path: PathBuf,
+    pub(crate) action: FileWriteAction,
+}
+
+impl ConfigFileWrite {
+    pub(crate) fn display_line(&self) -> String {
+        format!("{}: {}", self.action, self.path.display())
     }
+}
+
+pub(crate) fn write_default_config_files(
+    home: &RebornHome,
+    force: bool,
+    existing_policy: ExistingConfigPolicy,
+) -> anyhow::Result<ConfigFilesWriteOutcome> {
+    let home_path = home.path();
+    fs::create_dir_all(home_path)
+        .map_err(|error| anyhow::anyhow!("create reborn home {}: {error}", home_path.display()))?;
+
+    let config_path = home.config_file_path();
+    let providers_path = home.providers_file_path();
+    if existing_policy == ExistingConfigPolicy::FailIfPresent && !force {
+        preflight_targets([
+            (&config_path, "config.toml"),
+            (&providers_path, "providers.json"),
+        ])?;
+    }
+
+    let config =
+        if existing_policy == ExistingConfigPolicy::Preserve && config_path.exists() && !force {
+            ConfigFileWrite {
+                path: config_path,
+                action: FileWriteAction::Preserved,
+            }
+        } else {
+            let action = write_atomic(&config_path, &config_stub(), force, "config.toml")?;
+            ConfigFileWrite {
+                path: config_path,
+                action,
+            }
+        };
+
+    let providers =
+        if existing_policy == ExistingConfigPolicy::Preserve && providers_path.exists() && !force {
+            ConfigFileWrite {
+                path: providers_path,
+                action: FileWriteAction::Preserved,
+            }
+        } else {
+            let action = write_atomic(&providers_path, PROVIDERS_STUB, force, "providers.json")?;
+            ConfigFileWrite {
+                path: providers_path,
+                action,
+            }
+        };
+
+    Ok(ConfigFilesWriteOutcome { config, providers })
+}
+
+fn preflight_targets<const N: usize>(targets: [(&Path, &'static str); N]) -> anyhow::Result<()> {
     let existing = targets
         .into_iter()
         .filter(|(path, _)| path.exists())
@@ -72,50 +119,6 @@ fn preflight_targets<const N: usize>(
     } else {
         anyhow::bail!("{}; pass --force to overwrite", existing.join("; "))
     }
-}
-
-fn write_atomic(
-    path: &Path,
-    contents: &str,
-    force: bool,
-    label: &'static str,
-) -> anyhow::Result<()> {
-    if path.exists() && !force {
-        anyhow::bail!(
-            "{label} already exists at {}; pass --force to overwrite",
-            path.display()
-        );
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path.display()))?;
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|error| anyhow::anyhow!("create temp file in {}: {error}", parent.display()))?;
-    tmp.write_all(contents.as_bytes())
-        .map_err(|error| anyhow::anyhow!("write {}: {error}", tmp.path().display()))?;
-    tmp.flush()
-        .map_err(|error| anyhow::anyhow!("flush {}: {error}", tmp.path().display()))?;
-
-    if force {
-        tmp.persist(path).map_err(|error| {
-            anyhow::anyhow!(
-                "persist {} -> {}: {}",
-                error.file.path().display(),
-                path.display(),
-                error.error
-            )
-        })?;
-    } else {
-        tmp.persist_noclobber(path).map_err(|error| {
-            anyhow::anyhow!(
-                "persist {} -> {}: {}",
-                error.file.path().display(),
-                path.display(),
-                error.error
-            )
-        })?;
-    }
-    Ok(())
 }
 
 /// Build the commented stub TOML with the current API version baked in.

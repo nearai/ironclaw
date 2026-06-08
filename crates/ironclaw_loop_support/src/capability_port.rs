@@ -35,7 +35,8 @@ mod provider_validation;
 mod surface_snapshot;
 
 use self::provider_input::{
-    normalize_provider_arguments, prepare_provider_arguments, schema_contains_external_ref,
+    normalize_provider_arguments, prepare_provider_arguments,
+    prepare_provider_arguments_with_detail, schema_contains_external_ref,
 };
 use self::provider_validation::{
     PROVIDER_TOOL_NAME_MAX_BYTES, validate_provider_arguments, validate_provider_tool_call,
@@ -140,17 +141,22 @@ impl LoopCapabilityInputResolver for ProviderToolCallInputResolver {
 
 #[async_trait]
 pub trait LoopCapabilityResultWriter: Send + Sync {
+    /// Write the result of a completed capability invocation.
+    ///
+    /// Returns a tuple of `(LoopResultRef, u64)` where the `u64` is the
+    /// serialized byte length of the staged result JSON, for downstream
+    /// per-capability byte accounting (no PII; pure size).
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError>;
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError>;
 
     async fn update_capability_result(
         &self,
         _run_context: &LoopRunContext,
         _result_ref: &LoopResultRef,
         _output: serde_json::Value,
-    ) -> Result<(), AgentLoopHostError> {
+    ) -> Result<u64, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "capability result updates are not supported by this writer",
@@ -916,11 +922,12 @@ impl HostRuntimeLoopCapabilityPort {
                 return Ok(CapabilityOutcome::Failed(CapabilityFailure {
                     error_kind: CapabilityFailureKind::InvalidInput,
                     safe_summary: error.safe_summary,
+                    detail: None,
                 }));
             }
             Err(error) => return Err(error),
         };
-        let result_ref = self
+        let (result_ref, byte_len) = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
                 run_context: &self.run_context,
@@ -936,6 +943,7 @@ impl HostRuntimeLoopCapabilityPort {
             safe_summary: "capability info returned".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len,
         }))
     }
 
@@ -1214,25 +1222,26 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
             .await?;
-        let input = match prepare_provider_arguments(
+        let input = match prepare_provider_arguments_with_detail(
             &input,
             &capability.parameters_schema,
             "capability input",
         ) {
             Ok(input) => input,
             Err(error)
-                if error.kind == AgentLoopHostErrorKind::InvalidInvocation
+                if error.error.kind == AgentLoopHostErrorKind::InvalidInvocation
                     && is_provider_tool_call_input_ref(&request.input_ref) =>
             {
                 let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
                     error_kind: CapabilityFailureKind::InvalidInput,
-                    safe_summary: error.safe_summary,
+                    safe_summary: error.error.safe_summary,
+                    detail: error.detail,
                 }));
                 guard.commit();
                 self.record_loop_completed(&idempotency_key, result.clone())?;
                 return result;
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.error),
         };
         let input = host_runtime_input_for_capability(&request.capability_id, input)?;
         let invocation_context = invocation_context_from_visible(
@@ -1744,7 +1753,7 @@ async fn runtime_outcome_to_loop(
     ensure_runtime_outcome_matches(requested_capability_id, &outcome)?;
     Ok(match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
-            let result_ref = result_writer
+            let (result_ref, byte_len) = result_writer
                 .write_capability_result(CapabilityResultWrite {
                     run_context,
                     input_ref,
@@ -1759,6 +1768,7 @@ async fn runtime_outcome_to_loop(
                 safe_summary: "capability completed".to_string(),
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
+                byte_len,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => CapabilityOutcome::ApprovalRequired {
@@ -1794,6 +1804,7 @@ async fn runtime_outcome_to_loop(
                     unknown.message,
                     "capability invocation returned an unknown outcome",
                 ),
+                detail: None,
             })
         }
     })
@@ -1854,6 +1865,7 @@ fn runtime_failure_to_loop(
                     &failure,
                     "capability invocation failed",
                 ),
+                detail: None,
             }))
         }
     }
@@ -1875,6 +1887,7 @@ fn runtime_model_visible_failure_to_loop(
     Ok(CapabilityOutcome::Failed(CapabilityFailure {
         error_kind: model_visible_runtime_failure_kind_to_loop(failure.kind)?,
         safe_summary: runtime_failure_safe_summary(&failure, "capability invocation failed"),
+        detail: None,
     }))
 }
 
@@ -3752,7 +3765,8 @@ mod tests {
                 outcome,
                 CapabilityOutcome::Failed(CapabilityFailure {
                     error_kind: CapabilityFailureKind::InvalidInput,
-                    safe_summary
+                    safe_summary,
+                    ..
                 }) if safe_summary == expected_summary
             ));
         }
@@ -3910,7 +3924,8 @@ mod tests {
             outcome,
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary
+                safe_summary,
+                ..
             }) if safe_summary == "capability_info target is not on the visible surface"
         ));
         assert!(
@@ -3972,7 +3987,8 @@ mod tests {
             outcome,
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary
+                safe_summary,
+                ..
             }) if safe_summary == "capability_info target is not on the visible surface"
         ));
         assert!(
@@ -4049,7 +4065,8 @@ mod tests {
             outcome,
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary
+                safe_summary,
+                ..
             }) if safe_summary == "capability_info target is not on the visible surface"
         ));
         assert!(
@@ -4604,13 +4621,212 @@ mod tests {
             .await
             .expect("schema-invalid provider calls should produce a capability failure");
 
-        assert!(matches!(
-            outcome,
-            CapabilityOutcome::Failed(CapabilityFailure {
-                error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary
-            }) if safe_summary.contains("schema validation")
-        ));
+        let CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind,
+            safe_summary,
+            detail,
+        }) = outcome
+        else {
+            panic!("expected schema-invalid provider call to fail");
+        };
+        assert_eq!(error_kind, CapabilityFailureKind::InvalidInput);
+        assert!(safe_summary.contains("schema validation"));
+        let Some(ironclaw_turns::run_profile::CapabilityFailureDetail::InvalidInput { issues }) =
+            detail
+        else {
+            panic!("schema-invalid provider call should include invalid input detail");
+        };
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].path, "message");
+        assert_eq!(
+            issues[0].code,
+            ironclaw_turns::run_profile::CapabilityInputIssueCode::MissingRequired
+        );
+        assert_eq!(issues[0].expected.as_deref(), Some("required field"));
+        assert!(
+            runtime.take_requests().is_empty(),
+            "schema-invalid provider input must not reach the runtime"
+        );
+        assert!(
+            result_writer.records().is_empty(),
+            "schema-invalid provider calls should report through the provider error-result path"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_runtime_tool_call_schema_failure_preserves_type_mismatch_detail() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut visible = visible_capability(capability_id.clone(), provider_id.clone());
+        visible.descriptor.parameters_schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "message": { "type": "string" },
+                "limit": { "type": "integer" }
+            },
+            "required": ["message"]
+        });
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let context = execution_context("thread-provider-runtime-schema-detail-validation");
+        let run_context = loop_run_context(&context).await;
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id,
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id == capability_id)
+            .expect("runtime capability advertised to provider");
+
+        let mut call = provider_tool_call();
+        call.name = tool_definition.name;
+        call.arguments = serde_json::json!({
+            "message": 123
+        });
+        port.validate_provider_tool_call(&call)
+            .expect("schema-invalid provider calls should stage for model-visible failure");
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("schema-invalid provider calls should register");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id,
+                input_ref: candidate.input_ref,
+            })
+            .await
+            .expect("schema-invalid provider calls should produce a capability failure");
+
+        let CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind, detail, ..
+        }) = outcome
+        else {
+            panic!("expected schema-invalid provider call to fail");
+        };
+        assert_eq!(error_kind, CapabilityFailureKind::InvalidInput);
+        let Some(ironclaw_turns::run_profile::CapabilityFailureDetail::InvalidInput { issues }) =
+            detail
+        else {
+            panic!("schema-invalid provider call should include invalid input detail");
+        };
+        assert!(
+            issues.iter().any(|issue| {
+                issue.path == "message"
+                    && issue.code
+                        == ironclaw_turns::run_profile::CapabilityInputIssueCode::TypeMismatch
+                    && issue.expected.as_deref() == Some("string")
+                    && issue.received.as_deref() == Some("integer")
+            }),
+            "type mismatch issue should identify the mismatched field"
+        );
+        assert!(
+            runtime.take_requests().is_empty(),
+            "schema-invalid provider input must not reach the runtime"
+        );
+        assert!(
+            result_writer.records().is_empty(),
+            "schema-invalid provider calls should report through the provider error-result path"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_runtime_tool_call_schema_failure_preserves_unexpected_field_detail() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut visible = visible_capability(capability_id.clone(), provider_id.clone());
+        visible.descriptor.parameters_schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"]
+        });
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let context = execution_context("thread-provider-runtime-unexpected-field-validation");
+        let run_context = loop_run_context(&context).await;
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id,
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id == capability_id)
+            .expect("runtime capability advertised to provider");
+
+        let mut call = provider_tool_call();
+        call.name = tool_definition.name;
+        call.arguments = serde_json::json!({
+            "message": "hello",
+            "unexpected": true
+        });
+        port.validate_provider_tool_call(&call)
+            .expect("schema-invalid provider calls should stage for model-visible failure");
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("schema-invalid provider calls should register");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id,
+                input_ref: candidate.input_ref,
+            })
+            .await
+            .expect("schema-invalid provider calls should produce a capability failure");
+
+        let CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind, detail, ..
+        }) = outcome
+        else {
+            panic!("expected schema-invalid provider call to fail");
+        };
+        assert_eq!(error_kind, CapabilityFailureKind::InvalidInput);
+        let Some(ironclaw_turns::run_profile::CapabilityFailureDetail::InvalidInput { issues }) =
+            detail
+        else {
+            panic!("schema-invalid provider call should include invalid input detail");
+        };
+        assert!(
+            issues.iter().any(|issue| {
+                issue.path == "unexpected"
+                    && issue.code
+                        == ironclaw_turns::run_profile::CapabilityInputIssueCode::UnexpectedField
+            }),
+            "unexpected field issue should identify the field to remove"
+        );
         assert!(
             runtime.take_requests().is_empty(),
             "schema-invalid provider input must not reach the runtime"
@@ -5666,13 +5882,14 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
-            LoopResultRef::new("result:mount-test").map_err(|_| {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+            let result_ref = LoopResultRef::new("result:mount-test").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",
                 )
-            })
+            })?;
+            Ok((result_ref, 0))
         }
     }
 
@@ -5692,19 +5909,20 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::TranscriptWriteFailed,
                     "transient result write failure",
                 ));
             }
-            LoopResultRef::new("result:capability-info-retry").map_err(|_| {
+            let result_ref = LoopResultRef::new("result:capability-info-retry").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",
                 )
-            })
+            })?;
+            Ok((result_ref, 0))
         }
     }
 
@@ -5732,7 +5950,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             self.records
                 .lock()
                 .expect("records lock")
@@ -5741,12 +5959,13 @@ mod tests {
                 .lock()
                 .expect("display previews lock")
                 .push(write.display_preview);
-            LoopResultRef::new("result:capability-info").map_err(|_| {
+            let result_ref = LoopResultRef::new("result:capability-info").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",
                 )
-            })
+            })?;
+            Ok((result_ref, 0))
         }
     }
 
@@ -5812,7 +6031,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             unreachable!("noop capability io should not be called")
         }
     }

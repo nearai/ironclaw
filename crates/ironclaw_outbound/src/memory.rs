@@ -1,5 +1,8 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
@@ -14,10 +17,29 @@ use crate::validation::{
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
-    CommunicationPreferenceRepository, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundDeliveryId, OutboundError, OutboundStateStore, ProjectionSubscriptionId,
-    ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    CommunicationPreferenceRepository, CommunicationPreferenceUpdate,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError,
+    OutboundStateStore, ProjectionSubscriptionId, ProjectionSubscriptionRecord,
+    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
+
+const MAX_CAS_RETRIES: usize = 5;
+
+struct YieldOnce(bool);
+
+impl Future for YieldOnce {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.0 {
+            Poll::Ready(())
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct InMemoryOutboundStateStore {
@@ -107,6 +129,42 @@ impl CommunicationPreferenceRepository for InMemoryOutboundStateStore {
     ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
         let state = self.lock_state()?;
         Ok(state.communication_preferences.get(&key).cloned())
+    }
+
+    async fn update_communication_preference(
+        &self,
+        key: CommunicationPreferenceKey,
+        mut update: CommunicationPreferenceUpdate,
+    ) -> Result<CommunicationPreferenceRecord, OutboundError> {
+        for _ in 0..MAX_CAS_RETRIES {
+            let existing = {
+                let state = self.lock_state()?;
+                state.communication_preferences.get(&key).cloned()
+            };
+            let record = update(existing.clone())?;
+            validate_communication_preference(&record)?;
+            if record.key() != key {
+                return Err(OutboundError::InvalidRequest {
+                    reason: "communication preference update key mismatch",
+                });
+            }
+            let updated = {
+                let mut state = self.lock_state()?;
+                if state.communication_preferences.get(&key).cloned() == existing {
+                    state
+                        .communication_preferences
+                        .insert(record.key(), record.clone());
+                    true
+                } else {
+                    false
+                }
+            };
+            if updated {
+                return Ok(record);
+            }
+            YieldOnce(false).await;
+        }
+        Err(OutboundError::Backend)
     }
 }
 
