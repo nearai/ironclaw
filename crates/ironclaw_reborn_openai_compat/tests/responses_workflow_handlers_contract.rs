@@ -212,6 +212,7 @@ async fn unsupported_responses_tools_tool_choice_and_stream_reject_before_produc
     assert_eq!(stream.status(), http::StatusCode::BAD_REQUEST);
 
     let tools = router
+        .clone()
         .oneshot(response_create_request(
             "/api/v1/responses",
             json!({"model": "gpt-reborn", "input": "hello", "tools": [{"type": "web_search_preview"}]}),
