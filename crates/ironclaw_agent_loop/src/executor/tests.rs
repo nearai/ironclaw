@@ -2695,7 +2695,9 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
 
     // The flag must be cleared so subsequent iterations call the model normally.
     assert!(
-        !returned_state.post_capability_state.skip_model_this_iteration,
+        !returned_state
+            .post_capability_state
+            .skip_model_this_iteration,
         "skip_model_this_iteration must be cleared after PromptStage consumes it"
     );
 
@@ -2777,20 +2779,19 @@ async fn prompt_stage_skip_model_carries_pending_input_ack() {
 async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
     // Use terminate_hint so the loop exits immediately after the capability
     // turn, giving us a deterministic Final checkpoint to inspect.
-    let host =
-        MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-            ironclaw_turns::run_profile::CapabilityBatchOutcome {
-                outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
-                    result_ref: LoopResultRef::new("result:big").expect("valid"),
-                    safe_summary: "big result".to_string(),
-                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                    terminate_hint: true,
-                    // Exceeds the default 32 000-byte cap for unknown capability ids.
-                    byte_len: 33_001,
-                })],
-                stopped_on_suspension: false,
-            },
-        ]);
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: LoopResultRef::new("result:big").expect("valid"),
+                safe_summary: "big result".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: true,
+                // Exceeds the default 32 000-byte cap for unknown capability ids.
+                byte_len: 33_001,
+            })],
+            stopped_on_suspension: false,
+        },
+    ]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
@@ -2841,19 +2842,18 @@ async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
 /// Under-threshold: small byte_len leaves both flags false in the final state.
 #[tokio::test]
 async fn executor_post_capability_does_not_trip_under_threshold() {
-    let host =
-        MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-            ironclaw_turns::run_profile::CapabilityBatchOutcome {
-                outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
-                    result_ref: LoopResultRef::new("result:small").expect("valid"),
-                    safe_summary: "small result".to_string(),
-                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                    terminate_hint: true,
-                    byte_len: 100, // well under the 32 000-byte default cap
-                })],
-                stopped_on_suspension: false,
-            },
-        ]);
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: LoopResultRef::new("result:small").expect("valid"),
+                safe_summary: "small result".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: true,
+                byte_len: 100, // well under the 32 000-byte default cap
+            })],
+            stopped_on_suspension: false,
+        },
+    ]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
@@ -2998,28 +2998,27 @@ async fn executor_skip_model_turn_bypasses_model_stage() {
 async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
     // two_calls_response() emits two calls with capability_id() ("demo.echo").
     // Each result carries 20 000 bytes → sum = 40 000 > 32 000 → trip.
-    let host =
-        MockHost::new(vec![two_calls_response()]).with_batch_outcomes(vec![
-            ironclaw_turns::run_profile::CapabilityBatchOutcome {
-                outcomes: vec![
-                    CapabilityOutcome::Completed(CapabilityResultMessage {
-                        result_ref: LoopResultRef::new("result:first").expect("valid"),
-                        safe_summary: "first".to_string(),
-                        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                        terminate_hint: true, // exit after batch so we can inspect state
-                        byte_len: 20_000,
-                    }),
-                    CapabilityOutcome::Completed(CapabilityResultMessage {
-                        result_ref: LoopResultRef::new("result:second").expect("valid"),
-                        safe_summary: "second".to_string(),
-                        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                        terminate_hint: true,
-                        byte_len: 20_000,
-                    }),
-                ],
-                stopped_on_suspension: false,
-            },
-        ]);
+    let host = MockHost::new(vec![two_calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![
+                CapabilityOutcome::Completed(CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:first").expect("valid"),
+                    safe_summary: "first".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: true, // exit after batch so we can inspect state
+                    byte_len: 20_000,
+                }),
+                CapabilityOutcome::Completed(CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:second").expect("valid"),
+                    safe_summary: "second".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: true,
+                    byte_len: 20_000,
+                }),
+            ],
+            stopped_on_suspension: false,
+        },
+    ]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
