@@ -44,6 +44,7 @@ mod lifecycle;
 mod outbound_delivery;
 mod policy;
 mod reborn_services;
+mod scoped_lifecycle;
 mod webui_inbound;
 mod workflow;
 
@@ -110,7 +111,7 @@ pub use lifecycle::{
     LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
     LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
     LifecycleReadinessBlocker, LifecycleSkillSource, LifecycleSkillSummary,
-    UnsupportedLifecycleProductFacade,
+    UnsupportedLifecycleProductFacade, lifecycle_package_kind_label,
 };
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.
@@ -162,6 +163,13 @@ pub use reborn_services::{
     RebornTimelineResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
     UnsupportedAutomationProductFacade, UnsupportedOutboundPreferencesProductFacade,
     UpsertLlmProviderRequest,
+};
+pub use scoped_lifecycle::{
+    DeleteScopedLifecycleInstallationRequest, EffectiveScopedLifecycleInstallations,
+    ScopedLifecycleActor, ScopedLifecycleActorRole, ScopedLifecycleInstallation,
+    ScopedLifecycleInstallationId, ScopedLifecycleInstallationStore, ScopedLifecycleOwnership,
+    ScopedLifecycleSubject, UpsertScopedLifecycleInstallationRequest,
+    resolve_effective_scoped_lifecycle_installations,
 };
 
 pub use webui_inbound::{

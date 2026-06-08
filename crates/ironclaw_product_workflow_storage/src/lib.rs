@@ -1,4 +1,4 @@
-//! Durable product workflow [`IdempotencyLedger`] storage adapters.
+//! Durable product workflow storage adapters.
 
 #![cfg_attr(
     not(any(feature = "libsql", feature = "postgres")),
@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 #[cfg(feature = "libsql")]
@@ -19,12 +18,18 @@ use ironclaw_filesystem::{
     RootFilesystem,
 };
 use ironclaw_host_api::VirtualPath;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_product_workflow::IdempotencyLedger;
 use ironclaw_product_workflow::{
-    ActionFingerprintKey, ActionPhase, IdempotencyDecision, ProductInboundAction,
-    ProductWorkflowError,
+    ActionFingerprintKey, ActionPhase, IdempotencyDecision, IdempotencyLedger,
+    ProductInboundAction, ProductWorkflowError,
 };
+
+mod scoped_lifecycle;
+
+pub use scoped_lifecycle::FilesystemScopedLifecycleInstallationStore;
+#[cfg(feature = "libsql")]
+pub use scoped_lifecycle::RebornLibSqlScopedLifecycleInstallationStore;
+#[cfg(feature = "postgres")]
+pub use scoped_lifecycle::RebornPostgresScopedLifecycleInstallationStore;
 
 const DEFAULT_IN_FLIGHT_LEASE: Duration = Duration::seconds(60);
 const DEFAULT_LEDGER_ROOT: &str = "/engine/product_workflow/idempotency/actions";
