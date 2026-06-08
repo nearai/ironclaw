@@ -70,11 +70,11 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
             collect(root, &path, out);
         } else if file_type.is_file() {
             // `*.test.js` are colocated Node `node:test` unit tests, not
-            // browser assets — never embed or serve them.
+            // browser assets — never embed or serve them. A path ending in
+            // `.test.js` implies its file name does too, so check the path.
             if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".test.js"))
+                .to_str()
+                .is_some_and(|p| p.ends_with(".test.js"))
             {
                 continue;
             }

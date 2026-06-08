@@ -38,17 +38,17 @@ export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onS
     enabled: isAdmin,
   });
   // Onboarding is admin-only; non-admins never see the first-run gate.
-  // Even for an admin, skip onboarding when the operator LLM-config route
-  // is gated (multi-user / SSO 404s `/llm/providers`): the provider is
-  // configured operator-side at boot, `/welcome` can't reach the gated
-  // config UI, and a 404 must not be read as "no LLM" — otherwise an admin
-  // SSO user gets trapped on `/welcome`.
+  // Even for an admin, skip onboarding when the providers query errored —
+  // under multi-user / SSO auth the operator LLM-config route is gated
+  // (404), the provider is configured operator-side at boot, and `/welcome`
+  // can't reach the gated config UI, so a failed query must not trap an
+  // admin SSO user on `/welcome`.
   const needsOnboarding =
     isAdmin &&
     shouldRouteToOnboarding({
       isLoading: llmProviders.isLoading,
       hasActiveProvider: llmProviders.hasActiveProvider,
-      providerConfigUnavailable: llmProviders.providerConfigUnavailable,
+      isError: llmProviders.isError,
     });
   const onboardingExempt =
     location.pathname === "/welcome" || location.pathname.startsWith("/settings");

@@ -1,52 +1,40 @@
 // Unit tests for the first-run onboarding gate decision.
 //
 // Run with Node's built-in test runner (no extra deps):
-//   node --test crates/ironclaw_webui_v2_static/static/js/lib/
+//   node --test crates/ironclaw_webui_v2_static/static/js/lib/onboarding-gate.test.js
 //
 // NOTE: `build.rs` deliberately excludes `*.test.js` from the embedded
 // asset bundle, so this file is never served to the browser.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  isProviderConfigRouteUnavailable,
-  shouldRouteToOnboarding,
-} from "./onboarding-gate.js";
+import { shouldRouteToOnboarding } from "./onboarding-gate.js";
 
-test("404 from the providers route is treated as config-route-unavailable", () => {
-  assert.equal(isProviderConfigRouteUnavailable({ status: 404 }), true);
-});
-
-test("non-404 errors are not config-route-unavailable", () => {
-  assert.equal(isProviderConfigRouteUnavailable({ status: 401 }), false);
-  assert.equal(isProviderConfigRouteUnavailable({ status: 500 }), false);
-  assert.equal(isProviderConfigRouteUnavailable(undefined), false);
-  assert.equal(isProviderConfigRouteUnavailable(null), false);
-});
-
-test("a gated providers route (404) does NOT force onboarding", () => {
+test("a failed providers query (e.g. gated 404 under SSO) does NOT force onboarding", () => {
   // The regression this fix exists for: SSO users with a boot-configured
   // provider were trapped on /welcome because /llm/providers 404s and the
   // gatewayStatus.llm_backend stub is null, so hasActiveProvider is false.
+  // A failed query can't prove "no provider", so we must not onboard.
   assert.equal(
     shouldRouteToOnboarding({
       isLoading: false,
       hasActiveProvider: false,
-      providerConfigUnavailable: true,
+      isError: true,
     }),
     false,
-    "must not redirect to onboarding when the config route is gated"
+    "must not redirect to onboarding when the providers query errored"
   );
 });
 
-test("no active provider on a reachable route DOES force onboarding", () => {
-  // env-bearer / single-operator: route is mounted, genuinely no provider
-  // configured yet → first-run onboarding is the correct destination.
+test("no active provider on a successful query DOES force onboarding", () => {
+  // env-bearer / single-operator: route is mounted, query succeeds, and
+  // there is genuinely no provider configured → first-run onboarding is the
+  // correct destination.
   assert.equal(
     shouldRouteToOnboarding({
       isLoading: false,
       hasActiveProvider: false,
-      providerConfigUnavailable: false,
+      isError: false,
     }),
     true
   );
@@ -57,7 +45,7 @@ test("an active provider never forces onboarding", () => {
     shouldRouteToOnboarding({
       isLoading: false,
       hasActiveProvider: true,
-      providerConfigUnavailable: false,
+      isError: false,
     }),
     false
   );
@@ -68,7 +56,7 @@ test("onboarding is deferred while the providers query is still loading", () => 
     shouldRouteToOnboarding({
       isLoading: true,
       hasActiveProvider: false,
-      providerConfigUnavailable: false,
+      isError: false,
     }),
     false,
     "must wait for the query to settle before redirecting"
