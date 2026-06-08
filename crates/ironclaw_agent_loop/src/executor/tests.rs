@@ -2704,3 +2704,226 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
         "no prompt bundle should be requested when skipping the model"
     );
 }
+
+// ---------------------------------------------------------------------------
+// WU-A Step 9 — caller-level executor tests for PostCapabilityStage + SkipModel
+// ---------------------------------------------------------------------------
+
+/// Byte-threshold trips through the full executor turn: capability batch returns
+/// a result whose `byte_len` exceeds `ByteCapPolicy::DEFAULT_FALLBACK_CAP_BYTES`
+/// (32 000). PostCapabilityStage should set both compaction flags on the state
+/// that is written to the Final checkpoint.
+#[tokio::test]
+async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
+    // Use terminate_hint so the loop exits immediately after the capability
+    // turn, giving us a deterministic Final checkpoint to inspect.
+    let host =
+        MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:big").expect("valid"),
+                    safe_summary: "big result".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: true,
+                    // Exceeds the default 32 000-byte cap for unknown capability ids.
+                    byte_len: 33_001,
+                })],
+                stopped_on_suspension: false,
+            },
+        ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+
+    // PostCapabilityStage must have set both flags before stop.decide wrote the
+    // Final checkpoint.
+    let final_state = final_staged_state(&host);
+    assert!(
+        final_state.compaction_state.force_compact_on_next_iteration,
+        "force_compact_on_next_iteration must be set when byte cap is exceeded"
+    );
+    assert!(
+        final_state.post_capability_state.skip_model_this_iteration,
+        "skip_model_this_iteration must be set when byte cap is exceeded"
+    );
+    assert!(
+        final_state
+            .post_capability_state
+            .pending_capability_bytes
+            .is_empty(),
+        "pending_capability_bytes must be cleared after trip"
+    );
+
+    // Progress port must have received a compaction_started event.
+    assert!(
+        host.progress_event_names().contains(&"compaction_started"),
+        "compaction_started event must be emitted when the byte cap trips"
+    );
+}
+
+/// Under-threshold: small byte_len leaves both flags false in the final state.
+#[tokio::test]
+async fn executor_post_capability_does_not_trip_under_threshold() {
+    let host =
+        MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:small").expect("valid"),
+                    safe_summary: "small result".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: true,
+                    byte_len: 100, // well under the 32 000-byte default cap
+                })],
+                stopped_on_suspension: false,
+            },
+        ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+
+    let final_state = final_staged_state(&host);
+    assert!(
+        !final_state.compaction_state.force_compact_on_next_iteration,
+        "force_compact_on_next_iteration must stay false when under threshold"
+    );
+    assert!(
+        !final_state.post_capability_state.skip_model_this_iteration,
+        "skip_model_this_iteration must stay false when under threshold"
+    );
+    assert!(
+        !host.progress_event_names().contains(&"compaction_started"),
+        "no compaction_started event should be emitted when under threshold"
+    );
+}
+
+/// SkipModel route: after a byte-cap trip in iteration 1, iteration 2 runs
+/// through PromptStage → SkipModel, bypassing the model entirely. The model
+/// is called exactly once (iteration 1 only). Iteration 3 calls the model and
+/// returns a reply that terminates the loop.
+#[tokio::test]
+async fn executor_skip_model_turn_bypasses_model_stage() {
+    // Iteration 1: model → capability calls (big byte_len, no terminate).
+    // Iteration 2: SkipModel (flags cleared by PromptStage, no model call).
+    // Iteration 3: model → reply → GracefulStop.
+    let host = MockHost::new(vec![calls_response(), reply_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: LoopResultRef::new("result:big-no-term").expect("valid"),
+                safe_summary: "big result no terminate".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: false, // loop must continue so SkipModel fires
+                byte_len: 33_001,
+            })],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+
+    // The model must have been called exactly twice: once for capabilities
+    // (iteration 1) and once for the final reply (iteration 3). Iteration 2
+    // must have gone through the SkipModel route and never called the model.
+    assert_eq!(
+        host.model_requests().len(),
+        2,
+        "model must be called exactly twice (capability turn + reply turn); \
+         SkipModel iteration must bypass ModelStage"
+    );
+
+    // The SkipModel iteration emits a compaction_started event (from
+    // PostCapabilityStage in iteration 1) — verify the progression.
+    assert!(
+        host.progress_event_names().contains(&"compaction_started"),
+        "compaction_started event must be present from the byte-cap trip"
+    );
+
+    // Final state: skip_model flag cleared (PromptStage consumed it).
+    let final_state = final_staged_state(&host);
+    assert!(
+        !final_state.post_capability_state.skip_model_this_iteration,
+        "skip_model_this_iteration must be cleared by PromptStage before the \
+         final reply turn"
+    );
+}
+
+/// Multi-call batch: two calls in one turn each carrying 20 000 bytes for the
+/// same capability id accumulate to 40 000, exceeding the 32 000-byte default
+/// cap. The policy trips once and clears the byte map.
+#[tokio::test]
+async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
+    // two_calls_response() emits two calls with capability_id() ("demo.echo").
+    // Each result carries 20 000 bytes → sum = 40 000 > 32 000 → trip.
+    let host =
+        MockHost::new(vec![two_calls_response()]).with_batch_outcomes(vec![
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![
+                    CapabilityOutcome::Completed(CapabilityResultMessage {
+                        result_ref: LoopResultRef::new("result:first").expect("valid"),
+                        safe_summary: "first".to_string(),
+                        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                        terminate_hint: true, // exit after batch so we can inspect state
+                        byte_len: 20_000,
+                    }),
+                    CapabilityOutcome::Completed(CapabilityResultMessage {
+                        result_ref: LoopResultRef::new("result:second").expect("valid"),
+                        safe_summary: "second".to_string(),
+                        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                        terminate_hint: true,
+                        byte_len: 20_000,
+                    }),
+                ],
+                stopped_on_suspension: false,
+            },
+        ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+
+    // Both flags must be set (accumulated bytes exceeded cap).
+    let final_state = final_staged_state(&host);
+    assert!(
+        final_state.compaction_state.force_compact_on_next_iteration,
+        "force_compact must trip when per-cap byte sum exceeds the cap"
+    );
+    assert!(
+        final_state.post_capability_state.skip_model_this_iteration,
+        "skip_model must trip when per-cap byte sum exceeds the cap"
+    );
+    // Byte map cleared after trip.
+    assert!(
+        final_state
+            .post_capability_state
+            .pending_capability_bytes
+            .is_empty(),
+        "pending_capability_bytes must be cleared after PostCapabilityStage trips"
+    );
+    assert!(
+        host.progress_event_names().contains(&"compaction_started"),
+        "compaction_started event must be emitted for the accumulated overflow"
+    );
+}
