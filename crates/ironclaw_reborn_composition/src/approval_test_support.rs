@@ -1,5 +1,5 @@
-use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
-use ironclaw_host_api::{Action, CapabilityId, ExecutionContext, Principal, ResourceEstimate};
+use ironclaw_approvals::ApprovalResolver;
+use ironclaw_host_api::{Action, CapabilityId, ExecutionContext, ResourceEstimate};
 use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
     RuntimeFailureKind,
@@ -9,7 +9,10 @@ use ironclaw_trust::TrustDecision;
 
 use crate::{
     RebornServices,
-    local_dev_capability_policy::{LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError},
+    local_dev_capability_policy::{
+        LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
+        local_dev_one_shot_lease_approval,
+    },
 };
 
 pub(crate) async fn invoke_json_with_local_dev_approval(
@@ -114,7 +117,7 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
 fn lease_approval_from_context(
     context: &ExecutionContext,
     capability: &CapabilityId,
-) -> LeaseApproval {
+) -> ironclaw_approvals::LeaseApproval {
     let constraints = context
         .grants
         .grants
@@ -123,14 +126,5 @@ fn lease_approval_from_context(
         .expect("matching test capability grant") // safety: test-only helper in #[cfg(test)] module.
         .constraints
         .clone();
-    LeaseApproval {
-        issued_by: Principal::HostRuntime,
-        allowed_effects: constraints.allowed_effects,
-        mounts: constraints.mounts,
-        network: constraints.network,
-        secrets: constraints.secrets,
-        resource_ceiling: constraints.resource_ceiling,
-        expires_at: constraints.expires_at,
-        max_invocations: Some(1),
-    }
+    local_dev_one_shot_lease_approval(constraints)
 }

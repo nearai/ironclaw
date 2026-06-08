@@ -20,6 +20,7 @@ use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
 use super::*;
+use crate::local_dev_capability_policy::local_dev_one_shot_lease_approval;
 
 #[tokio::test]
 async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one_shot_lease() {
@@ -396,16 +397,15 @@ async fn approve_shell_dispatch(
 }
 
 fn shell_lease_approval() -> LeaseApproval {
-    LeaseApproval {
-        issued_by: Principal::HostRuntime,
+    local_dev_one_shot_lease_approval(GrantConstraints {
         allowed_effects: shell_allowed_effects(),
         mounts: MountView::default(),
         network: shell_network_policy(),
         secrets: Vec::new(),
         resource_ceiling: None,
         expires_at: None,
-        max_invocations: Some(1),
-    }
+        max_invocations: None,
+    })
 }
 
 fn trust_decision(allowed_effects: Vec<EffectKind>) -> TrustDecision {

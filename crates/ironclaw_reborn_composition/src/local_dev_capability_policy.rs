@@ -165,23 +165,7 @@ impl LocalDevCapabilityPolicy {
                 }
             }
         };
-        Ok(LeaseApproval {
-            issued_by: Principal::HostRuntime,
-            allowed_effects: constraints.allowed_effects,
-            mounts: constraints.mounts,
-            network: constraints.network,
-            secrets: constraints.secrets,
-            resource_ceiling: constraints.resource_ceiling,
-            // Local-dev leases are single-use (max_invocations = 1).
-            // Wall-clock expiry is intentionally None: the policy file does
-            // not configure an expires_at ceiling, and a short hard-coded
-            // timeout would race against slow human approval flows. The
-            // one-shot invocation count is the sole consumption bound.
-            // If invocation-count enforcement ever regresses, this lease
-            // becomes perpetual — see approval gate tests for the invariant.
-            expires_at: constraints.expires_at,
-            max_invocations: Some(1),
-        })
+        Ok(local_dev_one_shot_lease_approval(constraints))
     }
 
     pub(crate) fn approval_gate_effects(&self) -> RuntimeProfileApprovalGateEffectSets {
@@ -189,6 +173,26 @@ impl LocalDevCapabilityPolicy {
             self.approval_gates.ask_writes.clone(),
             self.approval_gates.ask_destructive.clone(),
         )
+    }
+}
+
+pub(crate) fn local_dev_one_shot_lease_approval(constraints: GrantConstraints) -> LeaseApproval {
+    LeaseApproval {
+        issued_by: Principal::HostRuntime,
+        allowed_effects: constraints.allowed_effects,
+        mounts: constraints.mounts,
+        network: constraints.network,
+        secrets: constraints.secrets,
+        resource_ceiling: constraints.resource_ceiling,
+        // Local-dev leases are single-use (max_invocations = 1).
+        // Wall-clock expiry is intentionally None: the policy file does
+        // not configure an expires_at ceiling, and a short hard-coded
+        // timeout would race against slow human approval flows. The
+        // one-shot invocation count is the sole consumption bound.
+        // If invocation-count enforcement ever regresses, this lease
+        // becomes perpetual — see approval gate tests for the invariant.
+        expires_at: constraints.expires_at,
+        max_invocations: Some(1),
     }
 }
 
@@ -246,6 +250,7 @@ pub(crate) enum LocalDevNetworkProfile {
     LocalDevWildcard,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum LocalDevApprovalPolicyAction<'a> {
     Dispatch { capability: &'a CapabilityId },
     SpawnCapability { capability: &'a CapabilityId },
@@ -260,6 +265,16 @@ impl<'a> LocalDevApprovalPolicyAction<'a> {
             }
             _ => None,
         }
+    }
+
+    pub(crate) fn capability(&self) -> &CapabilityId {
+        match self {
+            Self::Dispatch { capability } | Self::SpawnCapability { capability } => capability,
+        }
+    }
+
+    pub(crate) fn is_spawn_capability(&self) -> bool {
+        matches!(self, Self::SpawnCapability { .. })
     }
 }
 

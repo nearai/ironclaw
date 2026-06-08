@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_approvals::LeaseApproval;
-use ironclaw_host_api::{Action, CapabilityId, EffectKind, MountView, Principal};
+use ironclaw_host_api::{EffectKind, MountView, Principal};
 use ironclaw_product_workflow::{
     ApprovalGateRecord, ApprovalInteractionRejectionKind, ApprovalLeaseTermsProvider,
     ProductWorkflowError,
@@ -10,6 +10,7 @@ use ironclaw_product_workflow::{
 
 use crate::local_dev_capability_policy::{
     LocalDevApprovalPolicyAction, LocalDevCapabilityPolicy, LocalDevCapabilityPolicyError,
+    local_dev_one_shot_lease_approval,
 };
 
 use super::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
@@ -42,8 +43,9 @@ impl LocalDevApprovalLeaseTermsProvider {
     async fn extension_lease_terms_for(
         &self,
         gate: &ApprovalGateRecord,
+        action: LocalDevApprovalPolicyAction<'_>,
     ) -> Result<LeaseApproval, ProductWorkflowError> {
-        let capability = capability_for_action(gate.request().action.as_ref())?;
+        let capability = action.capability();
         let Principal::Extension(extension_id) = &gate.request().requested_by else {
             return Err(lease_terms_unavailable());
         };
@@ -60,13 +62,11 @@ impl LocalDevApprovalLeaseTermsProvider {
             .into_iter()
             .find(|grant| grant.capability == *capability)
             .ok_or_else(lease_terms_unavailable)?;
-        if matches!(
-            gate.request().action.as_ref(),
-            Action::SpawnCapability { .. }
-        ) && !grant
-            .constraints
-            .allowed_effects
-            .contains(&EffectKind::SpawnProcess)
+        if action.is_spawn_capability()
+            && !grant
+                .constraints
+                .allowed_effects
+                .contains(&EffectKind::SpawnProcess)
         {
             tracing::error!(
                 capability = %capability,
@@ -74,16 +74,7 @@ impl LocalDevApprovalLeaseTermsProvider {
             );
             return Err(lease_terms_unavailable());
         }
-        Ok(LeaseApproval {
-            issued_by: Principal::HostRuntime,
-            allowed_effects: grant.constraints.allowed_effects,
-            mounts: grant.constraints.mounts,
-            network: grant.constraints.network,
-            secrets: grant.constraints.secrets,
-            resource_ceiling: grant.constraints.resource_ceiling,
-            expires_at: grant.constraints.expires_at,
-            max_invocations: Some(1),
-        })
+        Ok(local_dev_one_shot_lease_approval(grant.constraints))
     }
 }
 
@@ -105,24 +96,13 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
         ) {
             Ok(approval) => Ok(approval),
             Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {
-                self.extension_lease_terms_for(gate).await
+                self.extension_lease_terms_for(gate, action).await
             }
             Err(error) => {
                 tracing::error!(%error, "local-dev approval lease terms are unavailable");
                 Err(lease_terms_unavailable())
             }
         }
-    }
-}
-
-fn capability_for_action(action: &Action) -> Result<&CapabilityId, ProductWorkflowError> {
-    match action {
-        Action::Dispatch { capability, .. } | Action::SpawnCapability { capability, .. } => {
-            Ok(capability)
-        }
-        _ => Err(ProductWorkflowError::ApprovalInteractionRejected {
-            kind: ApprovalInteractionRejectionKind::UnsupportedAction,
-        }),
     }
 }
 
