@@ -362,6 +362,17 @@ impl DefaultExecutorPipeline {
                             state: next,
                             pending_input_ack: ack,
                         } => {
+                            // N3 analysis: do NOT ack here. The ack returned by
+                            // stop.decide is the token for the *next* iteration's
+                            // input, not for the current one. The current-turn ack
+                            // was already consumed at line ~319 (before stop.observe),
+                            // mirroring the Prepared path's ack at line ~133 (before
+                            // ModelStage). After stop.decide, both paths — Prepared
+                            // (lines ~290-296) and SkipModel (here) — defer the
+                            // returned ack to the next iteration via pending_input_ack;
+                            // the next iteration's checkpoint drains it via
+                            // std::mem::take. Acking here would double-consume the
+                            // token before the next iteration has a chance to use it.
                             next_state = next;
                             pending_input_ack = ack;
                         }

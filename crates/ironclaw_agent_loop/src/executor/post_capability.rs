@@ -64,6 +64,12 @@ impl ExecutorStage<TurnCompletedStep> for PostCapabilityStage {
         let _drained = self.drain_settled();
 
         // Exit propagates untouched.
+        // N2 analysis: TurnCompletedStep::Exit carries only a LoopExit value —
+        // it holds no LoopExecutionState and therefore no pending_capability_bytes
+        // to clear. Exit signals loop termination; the state is discarded entirely.
+        // The per-turn clear below applies exclusively to the Continue path, which
+        // carries state forward into the next iteration. No stale bytes can survive
+        // an Exit because there is no state object to carry them.
         let TurnCompletedStep::Continue { mut state, summary } = input else {
             return Ok(input);
         };
