@@ -26,7 +26,7 @@ pub(super) struct SlackRoutableTeamSubject {
 
 impl SlackRoutableTeamSubject {
     pub(super) fn from_user_id(subject_user_id: UserId) -> Self {
-        let display_name = display_name_for_subject_user_id(&subject_user_id);
+        let display_name = display_name_for_subject_user_id(subject_user_id.as_str());
         Self {
             subject_user_id: subject_user_id.to_string(),
             display_name,
@@ -67,11 +67,10 @@ async fn list_handler(
     }))
 }
 
-fn display_name_for_subject_user_id(subject_user_id: &UserId) -> String {
+pub(super) fn display_name_for_subject_user_id(subject_user_id: &str) -> String {
     let raw = subject_user_id
-        .as_str()
         .strip_prefix("user:")
-        .unwrap_or(subject_user_id.as_str());
+        .unwrap_or(subject_user_id);
     let mut words = raw
         .replace([':', '_', '-'], " ")
         .split_whitespace()

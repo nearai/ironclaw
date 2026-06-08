@@ -22,7 +22,7 @@ function slackChannelPickerSourceForTest() {
     }
     lines.push(line.replace("export function SlackChannelPicker", "function SlackChannelPicker"));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackChannelPicker, subjectOptionsForChannel, slackChannelDisplayName, subjectDisplayName };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackChannelPicker, subjectOptionsForChannel };`;
 }
 
 function createReactStub(state) {
@@ -89,7 +89,11 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
     data: {
       team_id: "T0HOST",
       channels: [
-        { channel_id: " C0OPS ", subject_user_id: "user:ops-team-agent", name: "ops" },
+        {
+          channel_id: " C0OPS ",
+          subject_user_id: "user:ops-team-agent",
+          subject_display_name: "Ops",
+        },
         { channel_id: "C0ENG", subject_user_id: "user:eng-team-agent" },
       ],
     },
@@ -168,7 +172,11 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   let rendered = renderPicker(context, state);
   assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
     { channel_id: "C0ENG", subject_user_id: "user:eng-team-agent" },
-    { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent", display_name: "ops" },
+    {
+      channel_id: "C0OPS",
+      subject_user_id: "user:ops-team-agent",
+      subject_display_name: "Ops",
+    },
   ]);
 
   valuesAfter(rendered, "onChange=")[0]({ target: { value: " C0NEW " } });
@@ -177,7 +185,11 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
     { channel_id: "C0ENG", subject_user_id: "user:eng-team-agent" },
     { channel_id: "C0NEW", subject_user_id: "" },
-    { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent", display_name: "ops" },
+    {
+      channel_id: "C0OPS",
+      subject_user_id: "user:ops-team-agent",
+      subject_display_name: "Ops",
+    },
   ]);
 
   rendered = renderPicker(context, state);
@@ -189,7 +201,11 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   }
   assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
     { channel_id: "C0NEW", subject_user_id: "" },
-    { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent", display_name: "ops" },
+    {
+      channel_id: "C0OPS",
+      subject_user_id: "user:ops-team-agent",
+      subject_display_name: "Ops",
+    },
   ]);
 
   rendered = renderPicker(context, state);
@@ -213,29 +229,6 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   assert.equal(valuesAfter(rendered, "disabled=").at(-1), true);
 });
 
-test("SlackChannelPicker can render friendly channel names when present", () => {
-  const context = {
-    globalThis: {},
-    html,
-  };
-  vm.runInNewContext(slackChannelPickerSourceForTest(), context);
-
-  assert.equal(
-    context.globalThis.__testExports.slackChannelDisplayName({
-      channel_id: "C0PRODUCT",
-      name: "product",
-    }),
-    "#product",
-  );
-  assert.equal(
-    context.globalThis.__testExports.slackChannelDisplayName({
-      channel_id: "C0FINANCE",
-      display_name: "#finance",
-    }),
-    "#finance",
-  );
-});
-
 test("subjectOptionsForChannel keeps current route subjects row-scoped with friendly labels", () => {
   const context = {
     globalThis: {},
@@ -249,6 +242,7 @@ test("subjectOptionsForChannel keeps current route subjects row-scoped with frie
   const rawRowOptions = context.globalThis.__testExports.subjectOptionsForChannel(subjects, {
     channel_id: "C0RAW",
     subject_user_id: "user:raw-route-subject",
+    subject_display_name: "Raw Route Subject",
   });
   const otherRowOptions = context.globalThis.__testExports.subjectOptionsForChannel(subjects, {
     channel_id: "C0ENG",
@@ -267,14 +261,6 @@ test("subjectOptionsForChannel keeps current route subjects row-scoped with frie
     JSON.parse(JSON.stringify(otherRowOptions.map((subject) => subject.subject_user_id))),
     ["user:eng-team-agent"],
   );
-  assert.equal(
-    context.globalThis.__testExports.subjectDisplayName("user:hr-team-agent"),
-    "HR",
-  );
-  assert.equal(
-    context.globalThis.__testExports.subjectDisplayName("user:product-team-agent"),
-    "Product",
-  );
 });
 
 test("SlackChannelPicker preserves row subjects when subject catalog fails", () => {
@@ -283,7 +269,13 @@ test("SlackChannelPicker preserves row subjects when subject catalog fails", () 
   const query = {
     data: {
       team_id: "T0HOST",
-      channels: [{ channel_id: "C0RAW", subject_user_id: "user:raw-route-subject" }],
+      channels: [
+        {
+          channel_id: "C0RAW",
+          subject_user_id: "user:raw-route-subject",
+          subject_display_name: "Raw Route Subject",
+        },
+      ],
     },
     isLoading: false,
     isSuccess: true,
@@ -358,7 +350,11 @@ test("SlackChannelPicker preserves row subjects when subject catalog fails", () 
   assert.equal(valuesAfter(rendered, "disabled=")[1], true);
   valuesAfter(rendered, "onClick=")[0]();
   assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
-    { channel_id: "C0RAW", subject_user_id: "user:raw-route-subject" },
+    {
+      channel_id: "C0RAW",
+      subject_user_id: "user:raw-route-subject",
+      subject_display_name: "Raw Route Subject",
+    },
   ]);
 
   valuesAfter(rendered, "onClick=").at(-1)();

@@ -185,7 +185,9 @@ layer. The low-level `routes` API accepts `channel_id` plus
 `subject_user_id`; the WebUI v2 channel picker uses the admin-managed
 `allowed` API, reads the `subjects` catalog for named routable team agents,
 and can save either legacy `channel_ids` or explicit per-channel
-`{ channel_id, subject_user_id }` assignments. Missing explicit subjects are
+`{ channel_id, subject_user_id }` assignments. Allowed-channel responses also
+include the backend-derived `subject_display_name` for each saved route so the
+browser does not derive team-agent labels from raw subject ids. Missing explicit subjects are
 deterministically assigned tenant-scoped Slack channel subjects, while existing
 generated/current route subjects may be preserved for their same channel.
 Tenant, adapter installation, and Slack team always come from host
