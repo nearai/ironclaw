@@ -419,13 +419,7 @@ where
             result_writer: Arc::clone(&parts.capability_result_writer),
         },
         parts.subagent_spawn_limits,
-        flavors::builtin_flavor_catalog()
-            .into_iter()
-            .map(|d| SpawnSubagentFlavorDescriptor {
-                id: d.id.to_string(),
-                summary: d.summary.to_string(),
-            })
-            .collect(),
+        flavors::builtin_flavor_catalog(),
     )?);
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(
         DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)

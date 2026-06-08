@@ -66,6 +66,7 @@ pub struct SubagentFlavor {
     pub direction: DirectionId,
     pub tool_allowlist: &'static [SubagentToolId],
     pub allow_nesting: bool,
+    pub summary: &'static str,
 }
 
 // Subagent result delivery is out-of-band: the completion observer reads the
@@ -107,24 +108,28 @@ pub const BUILTIN_SUBAGENT_FLAVORS: &[SubagentFlavor] = &[
         direction: DirectionId::General,
         tool_allowlist: GENERAL_TOOLS,
         allow_nesting: false,
+        summary: "read-only file exploration (read_file, list_dir, grep)",
     },
     SubagentFlavor {
         id: SubagentFlavorId::Explorer,
         direction: DirectionId::Explorer,
         tool_allowlist: EXPLORER_TOOLS,
         allow_nesting: false,
+        summary: "read + glob over filesystem (read_file, list_dir, grep, glob)",
     },
     SubagentFlavor {
         id: SubagentFlavorId::Coder,
         direction: DirectionId::Coder,
         tool_allowlist: CODER_TOOLS,
         allow_nesting: false,
+        summary: "read + write + shell (read_file, write_file, apply_patch, shell, list_dir, grep, glob)",
     },
     SubagentFlavor {
         id: SubagentFlavorId::Planner,
         direction: DirectionId::Planner,
         tool_allowlist: PLANNER_TOOLS,
         allow_nesting: false,
+        summary: "read codebase + web research, returns a structured implementation plan (read_file, list_dir, grep, glob, http)",
     },
 ];
 
@@ -134,35 +139,17 @@ pub fn lookup_flavor(id: SubagentFlavorId) -> Option<&'static SubagentFlavor> {
         .find(|flavor| flavor.id == id)
 }
 
-/// A human-readable summary of a builtin subagent flavor, used by downstream
-/// schema builders to populate the `subagent_type` enum description.
-pub struct FlavorDescriptor {
-    pub id: &'static str,
-    pub summary: &'static str,
-}
-
-/// Returns one [`FlavorDescriptor`] per entry in [`BUILTIN_SUBAGENT_FLAVORS`],
-/// in registry order. Derived directly from the registry — single source of
-/// truth, no drift risk.
-pub fn builtin_flavor_catalog() -> Vec<FlavorDescriptor> {
-    vec![
-        FlavorDescriptor {
-            id: "general",
-            summary: "read-only file exploration (read_file, list_dir, grep)",
-        },
-        FlavorDescriptor {
-            id: "explorer",
-            summary: "read + glob over filesystem (read_file, list_dir, grep, glob)",
-        },
-        FlavorDescriptor {
-            id: "coder",
-            summary: "read + write + shell (read_file, write_file, apply_patch, shell, list_dir, grep, glob)",
-        },
-        FlavorDescriptor {
-            id: "planner",
-            summary: "read codebase + web research, returns a structured implementation plan (read_file, list_dir, grep, glob, http)",
-        },
-    ]
+/// Returns one [`ironclaw_loop_support::SpawnSubagentFlavorDescriptor`] per
+/// entry in [`BUILTIN_SUBAGENT_FLAVORS`], in registry order. Derived directly
+/// from the registry — single source of truth, no drift risk.
+pub fn builtin_flavor_catalog() -> Vec<ironclaw_loop_support::SpawnSubagentFlavorDescriptor> {
+    BUILTIN_SUBAGENT_FLAVORS
+        .iter()
+        .map(|f| ironclaw_loop_support::SpawnSubagentFlavorDescriptor {
+            id: f.id.as_str().to_string(),
+            summary: f.summary.to_string(),
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -262,23 +249,6 @@ mod tests {
         assert_eq!(catalog[1].id, "explorer");
         assert_eq!(catalog[2].id, "coder");
         assert_eq!(catalog[3].id, "planner");
-    }
-
-    #[test]
-    fn builtin_flavor_catalog_has_parity_with_registry() {
-        let catalog = builtin_flavor_catalog();
-        assert_eq!(
-            catalog.len(),
-            BUILTIN_SUBAGENT_FLAVORS.len(),
-            "catalog length must equal registry length"
-        );
-        for (descriptor, flavor) in catalog.iter().zip(BUILTIN_SUBAGENT_FLAVORS.iter()) {
-            assert_eq!(
-                descriptor.id,
-                flavor.id.as_str(),
-                "catalog id must match registry entry in order"
-            );
-        }
     }
 
     #[test]

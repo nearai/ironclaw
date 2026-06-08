@@ -72,16 +72,20 @@ pub fn build_spawn_subagent_parameters_schema(
         )
     };
 
+    let mut subagent_type_props = serde_json::json!({
+        "type": "string",
+        "description": description,
+    });
+    if !enum_values.is_empty() {
+        subagent_type_props["enum"] = serde_json::Value::Array(enum_values);
+    }
+
     serde_json::json!({
         "type": "object",
         "required": ["subagent_type", "task"],
         "additionalProperties": false,
         "properties": {
-            "subagent_type": {
-                "type": "string",
-                "enum": enum_values,
-                "description": description
-            },
+            "subagent_type": subagent_type_props,
             "task": {
                 "type": "string",
                 "maxLength": DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
@@ -380,7 +384,7 @@ pub struct SubagentSpawnCapabilityPort {
     spawn_id: CapabilityId,
     limits: SubagentSpawnLimits,
     deps: Arc<SubagentSpawnDeps>,
-    flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
+    parameters_schema: serde_json::Value,
     auth_input_refs: Mutex<HashSet<CapabilityInputRef>>,
     spawned_this_turn: AtomicU32,
 }
@@ -485,13 +489,14 @@ impl SubagentSpawnCapabilityPort {
         deps: Arc<SubagentSpawnDeps>,
         flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
     ) -> Self {
+        let parameters_schema = build_spawn_subagent_parameters_schema(&flavor_catalog);
         Self {
             inner,
             run_context,
             spawn_id,
             limits,
             deps,
-            flavor_catalog,
+            parameters_schema,
             auth_input_refs: Mutex::new(HashSet::new()),
             spawned_this_turn: AtomicU32::new(0),
         }
@@ -510,7 +515,7 @@ impl SubagentSpawnCapabilityPort {
             capability_id: self.spawn_id.clone(),
             name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
             description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
-            parameters: build_spawn_subagent_parameters_schema(&self.flavor_catalog),
+            parameters: self.parameters_schema.clone(),
         }
     }
 
@@ -522,7 +527,7 @@ impl SubagentSpawnCapabilityPort {
             safe_name: self.spawn_id.as_str().to_string(),
             safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
             concurrency_hint: ConcurrencyHint::Exclusive,
-            parameters_schema: build_spawn_subagent_parameters_schema(&self.flavor_catalog),
+            parameters_schema: self.parameters_schema.clone(),
         }
     }
 

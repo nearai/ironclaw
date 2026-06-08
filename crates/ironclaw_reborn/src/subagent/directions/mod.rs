@@ -22,7 +22,7 @@ impl DirectionId {
 const GENERAL_DIRECTION: &str = include_str!("general.md");
 const EXPLORER_DIRECTION: &str = include_str!("explorer.md");
 const CODER_DIRECTION: &str = include_str!("coder.md");
-pub(crate) const PLANNER_DIRECTION: &str = include_str!("planner.md");
+const PLANNER_DIRECTION: &str = include_str!("planner.md");
 
 pub fn direction_prompt(id: DirectionId) -> &'static str {
     match id {
