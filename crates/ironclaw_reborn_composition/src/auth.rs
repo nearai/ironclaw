@@ -19,6 +19,7 @@ use ironclaw_auth::{
     SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
     SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
 };
+use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_product_adapters::AuthPromptChallengeKind;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
@@ -34,6 +35,8 @@ use crate::product_auth_runtime_credentials::{
     ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountSelectionService,
 };
 use crate::{AuthChallengeProvider, AuthChallengeView};
+
+pub(crate) const AUTH_CONTINUATION_DISPATCH_FAILED_CODE: &str = "auth_continuation_dispatch_failed";
 
 /// Dispatches a typed continuation event once an OAuth callback flow has
 /// completed.
@@ -451,6 +454,7 @@ pub struct RebornProductAuthServices {
     provider_client: Arc<dyn AuthProviderClient>,
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+    security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
     oauth_gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
@@ -495,6 +499,7 @@ impl std::fmt::Debug for RebornProductAuthServices {
                 "continuation_dispatcher",
                 &"Arc<dyn RebornAuthContinuationDispatcher>",
             )
+            .field("security_audit_sink", &self.security_audit_sink.is_some())
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
             .field("oauth_gate_registry", &self.oauth_gate_registry.is_some())
@@ -527,6 +532,7 @@ impl RebornProductAuthServices {
             provider_client,
             cleanup_service,
             continuation_dispatcher,
+            security_audit_sink: None,
             dcr_oauth_registry: None,
             oauth_gate_registry: None,
             flow_record_source: None,
@@ -687,6 +693,11 @@ impl RebornProductAuthServices {
         dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     ) -> Self {
         self.continuation_dispatcher = dispatcher;
+        self
+    }
+
+    pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.security_audit_sink = Some(sink);
         self
     }
 
@@ -1180,6 +1191,7 @@ impl RebornProductAuthServices {
             .dispatch_auth_continuation(event)
             .await
         {
+            self.record_auth_continuation_dispatch_failure(&completed);
             tracing::debug!(
                 flow_id = %completed.id,
                 error_code = ?error.code(),
@@ -1196,6 +1208,19 @@ impl RebornProductAuthServices {
         self.flow_manager
             .mark_continuation_dispatched(&completed.scope, completed.id, emitted_at)
             .await
+    }
+
+    fn record_auth_continuation_dispatch_failure(&self, completed: &AuthFlowRecord) {
+        if let Some(sink) = &self.security_audit_sink {
+            sink.record(
+                SecurityAuditEvent::new(
+                    SecurityBoundary::AuthContinuation,
+                    SecurityDecision::Blocked,
+                    AUTH_CONTINUATION_DISPATCH_FAILED_CODE,
+                )
+                .with_scope(completed.scope.resource.clone()),
+            );
+        }
     }
 
     #[allow(
