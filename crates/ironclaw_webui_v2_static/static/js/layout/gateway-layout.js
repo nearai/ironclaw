@@ -2,6 +2,7 @@ import { Navigate, Outlet, useLocation } from "react-router";
 import { useInterfaceTheme } from "../design-system/theme.js";
 import { useGatewayStatus } from "../hooks/useGatewayStatus.js";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders.js";
+import { shouldRouteToOnboarding } from "../lib/onboarding-gate.js";
 import { useSidebar } from "../hooks/useSidebar.js";
 import { html } from "../lib/html.js";
 import { useT } from "../lib/i18n.js";
@@ -30,7 +31,15 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
   // keys off the honest `hasActiveProvider` (a persisted selection).
   const location = useLocation();
   const llmProviders = useLlmProviders({ settings: {}, gatewayStatus: status });
-  const needsOnboarding = !llmProviders.isLoading && !llmProviders.hasActiveProvider;
+  // Skip onboarding when the operator LLM-config route is gated (multi-user /
+  // SSO 404s `/llm/providers`): the provider is configured operator-side at
+  // boot, `/welcome` can't reach the gated config UI, and a 404 must not be
+  // read as "no LLM" — otherwise SSO users get trapped on `/welcome`.
+  const needsOnboarding = shouldRouteToOnboarding({
+    isLoading: llmProviders.isLoading,
+    hasActiveProvider: llmProviders.hasActiveProvider,
+    providerConfigUnavailable: llmProviders.providerConfigUnavailable,
+  });
   const onboardingExempt =
     location.pathname === "/welcome" || location.pathname.startsWith("/settings");
 

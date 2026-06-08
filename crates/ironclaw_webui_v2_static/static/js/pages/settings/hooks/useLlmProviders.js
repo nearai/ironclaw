@@ -12,6 +12,7 @@ import {
   providerDefaultModel,
   providerMissingReason,
 } from "../lib/llm-providers.js";
+import { isProviderConfigRouteUnavailable } from "../../../lib/onboarding-gate.js";
 
 // The v2 `/llm/providers` snapshot is the single source of truth: a unified
 // provider list (built-in + operator-defined) already annotated with the active
@@ -27,6 +28,12 @@ export function useLlmProviders({ settings: _settings, gatewayStatus }) {
   });
 
   const snapshot = providersQuery.data || { providers: [], active: null };
+  // A 404 means the operator LLM-config route is unmounted (multi-user /
+  // SSO auth): the provider is configured operator-side at boot, not via
+  // this UI, so callers must not treat the missing snapshot as "no LLM".
+  const providerConfigUnavailable = isProviderConfigRouteUnavailable(
+    providersQuery.error
+  );
   const builtinOverrides = {};
   // Map the wire view onto the field names the components/helpers expect.
   const allProviders = (snapshot.providers || []).map((provider) => ({
@@ -114,6 +121,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus }) {
     activeProviderId,
     selectedModel,
     hasActiveProvider,
+    providerConfigUnavailable,
     isLoading: providersQuery.isLoading,
     error: providersQuery.error,
     setActiveProvider: (provider) => setActiveMutation.mutateAsync(provider),

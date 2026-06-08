@@ -69,6 +69,15 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
         if file_type.is_dir() {
             collect(root, &path, out);
         } else if file_type.is_file() {
+            // `*.test.js` are colocated Node `node:test` unit tests, not
+            // browser assets — never embed or serve them.
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".test.js"))
+            {
+                continue;
+            }
             let rel = path.strip_prefix(root).expect("strip prefix"); // safety: build script — strip_prefix only fails on a logic bug
             // Force forward slashes in the URL key even on Windows hosts.
             let url = rel
