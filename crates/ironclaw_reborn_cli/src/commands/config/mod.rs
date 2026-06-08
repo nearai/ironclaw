@@ -125,6 +125,7 @@ fn build_config_list_dto(context: &RebornCliContext) -> anyhow::Result<ConfigLis
 }
 
 fn build_config_get_dto(context: &RebornCliContext, key: &str) -> anyhow::Result<ConfigGetDto> {
+    // Reuses flatten_config rather than a direct dot-path walker: simpler, and this is a cold CLI path.
     let config = load_config_file(context)?;
     let entries = flatten_config(&config)?;
     let value = entries
