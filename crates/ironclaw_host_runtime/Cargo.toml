@@ -57,7 +57,10 @@ tracing = "0.1"
 url = "2"
 
 [dev-dependencies]
+axum = { version = "0.8", features = ["json"] }
+hex = "0.4"
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
+sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-postgres = "0.7"
