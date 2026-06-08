@@ -29,7 +29,7 @@ export function SlackChannelPicker({ action }) {
     queryFn: listSlackRoutableSubjects,
   });
   const subjects = subjectsQuery.data?.subjects || [];
-  const subjectsReady = subjectsQuery.isSuccess;
+  const subjectsSettled = subjectsQuery.isSuccess || subjectsQuery.isError;
   const hasRoutableSubjects = subjects.length > 0;
   const defaultSubjectUserId = subjects[0]?.subject_user_id || "";
 
@@ -84,7 +84,10 @@ export function SlackChannelPicker({ action }) {
   };
 
   const saveChannels = () => {
-    saveMutation.mutate({ channels });
+    const channelsForSave = subjectsQuery.isSuccess
+      ? channels
+      : channels.map((channel) => channel.channel_id);
+    saveMutation.mutate({ channels: channelsForSave });
   };
   const hasMissingSubject =
     hasRoutableSubjects && channels.some((channel) => !channel.subject_user_id);
@@ -136,7 +139,7 @@ export function SlackChannelPicker({ action }) {
           size="sm"
           className="shrink-0"
           onClick=${addChannel}
-          disabled=${!draftChannelId.trim() || !subjectsReady}
+          disabled=${!draftChannelId.trim() || !subjectsSettled}
         >
           ${copy.addLabel}
         <//>
@@ -200,7 +203,7 @@ export function SlackChannelPicker({ action }) {
           className="shrink-0"
           onClick=${saveChannels}
           disabled=${!channelsQuery.isSuccess ||
-          !subjectsReady ||
+          !subjectsSettled ||
           saveMutation.isPending ||
           hasMissingSubject}
         >
@@ -210,10 +213,10 @@ export function SlackChannelPicker({ action }) {
         html`<p className="text-xs text-emerald-300">
           ${copy.successMessage}
         </p>`}
-        ${(channelsQuery.isError || saveMutation.isError) &&
+        ${(channelsQuery.isError || subjectsQuery.isError || saveMutation.isError) &&
         html`<p className="text-xs text-red-300">
           ${slackChannelPickerError(
-            saveMutation.error || channelsQuery.error,
+            saveMutation.error || channelsQuery.error || subjectsQuery.error,
             copy.errorMessage,
           )}
         </p>`}

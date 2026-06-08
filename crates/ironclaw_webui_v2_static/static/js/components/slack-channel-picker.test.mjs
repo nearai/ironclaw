@@ -241,3 +241,84 @@ test("subjectOptionsForChannel keeps current route subjects row-scoped", () => {
     ["user:eng-team-agent"],
   );
 });
+
+test("SlackChannelPicker falls back to channel ids when subject catalog fails", () => {
+  const state = { hookIndex: 0, values: {} };
+  const saveCalls = [];
+  const query = {
+    data: {
+      team_id: "T0HOST",
+      channels: [{ channel_id: "C0RAW", subject_user_id: "user:raw-route-subject" }],
+    },
+    isLoading: false,
+    isSuccess: true,
+    isError: false,
+  };
+  const subjectsQuery = {
+    data: undefined,
+    isLoading: false,
+    isSuccess: false,
+    isError: true,
+    error: new Error("subject catalog unavailable"),
+  };
+  const context = {
+    Button: "button",
+    React: createReactStub(state),
+    globalThis: {},
+    html,
+    listSlackAllowedChannels: () => query.data,
+    normalizeSlackChannelIds: (channelIds = []) =>
+      Array.from(
+        new Set(
+          channelIds
+            .map((channelId) => String(channelId || "").trim())
+            .filter(Boolean),
+        ),
+      ).sort(),
+    listSlackRoutableSubjects: () => subjectsQuery.data,
+    saveSlackAllowedChannels: (channels) => {
+      saveCalls.push(channels);
+      return { channels: [{ channel_id: "C0RAW", subject_user_id: "" }] };
+    },
+    slackChannelPickerError: (error) => error.message,
+    useT: () => (key, params = {}) =>
+      ({
+        "channels.slackAccessTitle": "Slack channel access",
+        "channels.slackAccessInstructions":
+          "Choose the Slack channels this tenant app may answer in.",
+        "channels.slackAccessAdd": "Add",
+        "channels.slackAccessLoading": "Loading Slack channels...",
+        "channels.slackAccessEmpty": "No Slack channels allowed yet.",
+        "channels.slackAccessAllow": `Allow ${params.channelId}`,
+        "channels.slackAccessAutoSubject": "Auto-generated team subject",
+        "channels.slackAccessNoSubjects": "No team agents available",
+        "channels.slackAccessSave": "Save channels",
+        "channels.slackAccessSaving": "Saving...",
+        "channels.slackAccessSuccess": "Slack channels saved.",
+        "channels.slackAccessError": "Slack channel update failed.",
+      })[key] || key,
+    useQuery: ({ queryKey }) =>
+      queryKey[0] === "slack-routable-subjects" ? subjectsQuery : query,
+    useQueryClient: () => ({
+      invalidateQueries: () => {},
+    }),
+    useMutation: (config) => ({
+      isPending: false,
+      isSuccess: false,
+      isError: false,
+      mutate: (variables) => {
+        const data = config.mutationFn(variables);
+        config.onSuccess(data, variables);
+      },
+    }),
+  };
+  vm.runInNewContext(slackChannelPickerSourceForTest(), context);
+
+  renderPicker(context, state);
+  const rendered = renderPicker(context, state);
+  assert.equal(valuesAfter(rendered, "disabled=").at(-1), false);
+
+  valuesAfter(rendered, "onClick=").at(-1)();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(saveCalls)), [["C0RAW"]]);
+});
