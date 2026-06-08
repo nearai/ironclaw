@@ -49,6 +49,7 @@ async fn in_memory_defaults_policy_progress_opt_in_and_subscription_scope() {
     communication_preferences_are_tenant_user_scoped(&store).await;
     communication_preferences_reject_empty_updated_by(&store).await;
     communication_preference_atomic_update_preserves_existing_slots(&store).await;
+    communication_preference_update_inserts_absent_record(&store).await;
     communication_preference_update_propagates_update_error_without_writing(&store).await;
     communication_preference_update_rejects_invalid_or_mismatched_record(&store).await;
     durable_policy_subscription_delivery_flow(&store).await;
@@ -72,6 +73,7 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     communication_preferences_are_tenant_user_scoped(&store).await;
     communication_preferences_reject_empty_updated_by(&store).await;
     communication_preference_atomic_update_preserves_existing_slots(&store).await;
+    communication_preference_update_inserts_absent_record(&store).await;
     communication_preference_update_propagates_update_error_without_writing(&store).await;
     communication_preference_update_rejects_invalid_or_mismatched_record(&store).await;
     filesystem_store_retries_communication_preference_put_through_cas_conflict(&backend).await;
@@ -261,6 +263,48 @@ where
     assert_eq!(
         store.load_communication_preference(key).await.unwrap(),
         Some(updated)
+    );
+}
+
+async fn communication_preference_update_inserts_absent_record<S>(store: &S)
+where
+    S: CommunicationPreferenceRepository + OutboundStateStore,
+{
+    let tenant_id = TenantId::new("tenant-outbound-update-absent").unwrap();
+    let user_id = UserId::new("user-outbound-update-absent").unwrap();
+    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
+    let record = CommunicationPreferenceRecord {
+        tenant_id,
+        user_id,
+        final_reply_target: Some(reply_ref("reply-pref-update-absent-final")),
+        progress_target: Some(reply_ref("reply-pref-update-absent-progress")),
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin-outbound-update-absent").unwrap(),
+    };
+    let update_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&update_calls);
+    let callback_record = record.clone();
+
+    let updated = store
+        .update_communication_preference(
+            key.clone(),
+            Box::new(move |existing| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                assert!(existing.is_none());
+                Ok(callback_record.clone())
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(updated, record);
+    assert_eq!(update_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store.load_communication_preference(key).await.unwrap(),
+        Some(record)
     );
 }
 

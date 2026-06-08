@@ -241,6 +241,8 @@ where
     ) -> Result<CommunicationPreferenceRecord, OutboundError> {
         let path = communication_preference_path(&key)?;
         let resource_scope = communication_preference_resource_scope(&key.tenant_id, &key.user_id);
+        self.ensure_tenant_id_index(&resource_scope, &communication_preferences_root()?)
+            .await?;
         for _ in 0..MAX_CAS_RETRIES {
             let (cas, existing) = match self
                 .get_versioned_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
@@ -263,8 +265,6 @@ where
                     reason: "communication preference update key mismatch",
                 });
             }
-            self.ensure_tenant_id_index(&resource_scope, &communication_preferences_root()?)
-                .await?;
             match self
                 .put_json(&resource_scope, &path, &record, &record.tenant_id, cas)
                 .await

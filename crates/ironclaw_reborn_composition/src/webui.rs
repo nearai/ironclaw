@@ -141,7 +141,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         // until then this product-neutral facade exposes no targets.
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
             Arc::clone(&local_runtime.outbound_preferences),
-            Arc::new(OutboundDeliveryTargetRegistry::empty()),
+            Arc::new(OutboundDeliveryTargetRegistry::new(vec![])),
         )));
     }
     if let Some(connectable_channels) = connectable_channels {
