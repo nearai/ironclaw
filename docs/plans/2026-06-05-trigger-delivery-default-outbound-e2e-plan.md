@@ -335,8 +335,9 @@ Not defaultable in the first E2E:
   - adapter outbound rendering boundary and Slack-like external channel
     capability model.
 - `crates/ironclaw_outbound/src/communication_preferences.rs`
-  - scoped `CommunicationPreferenceRecord`, `CommunicationPreferenceTargets`,
-    `DeliveryDefaultScope`, and versioned repository contract.
+  - current tenant/user-scoped preference baseline; Phase 2 should add or
+    replace this with the scoped default model and versioned repository
+    contract described below.
 - `crates/ironclaw_outbound/src/resolution_engine.rs`
   - triggered notification preference lookup and fail-closed behavior.
 - `crates/ironclaw_product_workflow/src/outbound_delivery.rs`
