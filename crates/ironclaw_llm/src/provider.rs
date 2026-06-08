@@ -285,7 +285,7 @@ pub struct ToolDefinition {
 }
 
 /// A tool call requested by the LLM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -302,6 +302,13 @@ pub struct ToolCall {
     /// See #3225.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// Populated when the provider failed to parse the model's tool-call
+    /// arguments as valid JSON. Diagnostic-only in this phase — the gateway
+    /// does not yet surface this as a model-visible error (Phase C follow-up
+    /// wires `NormalizingProvider` + gateway surfacing). Until then, treat as
+    /// informational.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments_parse_error: Option<String>,
 }
 
 /// Generate a tool-call ID that satisfies all providers.
@@ -874,6 +881,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -919,6 +927,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let mut messages = vec![
             ChatMessage::user("test"),
@@ -946,6 +955,7 @@ mod tests {
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let tc2 = ToolCall {
             id: "call_sel_2".to_string(),
@@ -953,6 +963,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let mut messages = vec![
             ChatMessage::system("You are a helpful assistant."),

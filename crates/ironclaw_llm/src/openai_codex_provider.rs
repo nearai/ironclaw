@@ -694,6 +694,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                                 arguments,
                                 reasoning: None,
                                 signature: None,
+                                arguments_parse_error: None,
                             });
                         } else {
                             // Fallback: extract directly from the item
@@ -721,6 +722,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                                 arguments,
                                 reasoning: None,
                                 signature: None,
+                                arguments_parse_error: None,
                             });
                         }
                     }
@@ -800,6 +802,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                 arguments,
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             });
         }
     }
@@ -898,6 +901,7 @@ mod tests {
                 arguments: serde_json::json!({"query": "test"}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             },
             ToolCall {
                 id: "call_2".to_string(),
@@ -905,6 +909,7 @@ mod tests {
                 arguments: serde_json::json!({"path": "/tmp"}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             },
         ];
         let msg =
@@ -1281,6 +1286,7 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let msg = ChatMessage::assistant_with_tool_calls(None, tool_calls);
         let items = super::convert_message(&msg, 0);
@@ -1333,6 +1339,7 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         if let Some(original) = name_map.get(&tc.name) {
             tc.name = original.clone();

@@ -1380,6 +1380,7 @@ fn provider_tool_call_from_reference(
         arguments: provider_call.arguments.clone(),
         reasoning: provider_call.reasoning.clone(),
         signature: provider_call.signature.clone(),
+        arguments_parse_error: None,
     }
 }
 

@@ -641,6 +641,7 @@ impl LlmProvider for NearAiChatProvider {
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -1361,6 +1362,7 @@ mod tests {
                 arguments: serde_json::json!({"owner": "foo", "repo": "bar"}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             },
             ToolCall {
                 id: "call_2".to_string(),
@@ -1368,6 +1370,7 @@ mod tests {
                 arguments: serde_json::json!({"query": "test"}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             },
         ];
 
@@ -1482,6 +1485,7 @@ mod tests {
             arguments: serde_json::json!({"key": "value"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let chat_msg: ChatCompletionMessage = msg.into();
@@ -1613,6 +1617,7 @@ mod tests {
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -1671,6 +1676,7 @@ mod tests {
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -1772,6 +1778,7 @@ mod tests {
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -2578,6 +2585,7 @@ mod tests {
                 arguments: serde_json::json!({}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             }],
         );
         let chat_msg: ChatCompletionMessage = msg.into();

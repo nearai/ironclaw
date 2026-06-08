@@ -429,6 +429,7 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
                     arguments: c.parameters.clone(),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 })
                 .collect(),
         );
@@ -1695,6 +1696,7 @@ And also check the token price:\n\
                     }),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
                 input_tokens: 10,
                 output_tokens: 10,
