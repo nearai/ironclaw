@@ -346,7 +346,7 @@ mod tests {
 
         let material = source.material_for_run(&context).await.unwrap();
 
-        assert!(material.direction_markdown.contains("Planner subagent"));
+        assert!(material.direction_markdown.contains("planning subagent"));
         assert_eq!(material.goal.task, "research task");
         assert!(
             material
@@ -387,7 +387,7 @@ mod tests {
 
         let material = source.material_for_run(&context).await.unwrap();
 
-        assert!(material.direction_markdown.contains("Planner subagent"));
+        assert!(material.direction_markdown.contains("planning subagent"));
         assert_eq!(material.goal.task, "research task");
     }
 
