@@ -146,9 +146,8 @@ pub fn builtin_flavor_catalog() -> Vec<ironclaw_loop_support::SpawnSubagentFlavo
     BUILTIN_SUBAGENT_FLAVORS
         .iter()
         .map(|f| ironclaw_loop_support::SpawnSubagentFlavorDescriptor {
-            id: ironclaw_loop_support::SubagentKindId::new(f.id.as_str()).expect(
-                "safety: BUILTIN_SUBAGENT_FLAVORS::SubagentFlavorId::as_str() is a compile-time constant valid SubagentKindId by construction",
-            ),
+            id: ironclaw_loop_support::SubagentKindId::new(f.id.as_str())
+                .expect("valid SubagentKindId"), // safety: BUILTIN_SUBAGENT_FLAVORS ids are compile-time-constant valid SubagentKindId values
             summary: f.summary.to_string(),
         })
         .collect()
