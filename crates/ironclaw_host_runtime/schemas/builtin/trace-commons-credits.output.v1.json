@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "pending_credit": { "type": ["number", "integer"] },
+    "final_credit": { "type": ["number", "integer"] },
+    "delayed_credit_delta": { "type": ["number", "integer"] },
+    "submissions_total": { "type": ["number", "integer"] },
+    "submissions_submitted": { "type": ["number", "integer"] },
+    "submissions_accepted": { "type": ["number", "integer"] },
+    "submissions_revoked": { "type": ["number", "integer"] },
+    "submissions_expired": { "type": ["number", "integer"] },
+    "credit_events_total": { "type": ["number", "integer"] },
+    "last_submission_at": { "type": ["string", "null"] },
+    "last_credit_sync_at": { "type": ["string", "null"] },
+    "recent_explanations": { "type": "array", "items": { "type": "string" } },
+    "note": { "type": "string" },
+    "enrolled_or_active": { "type": "boolean" },
+    "message": { "type": "string" }
+  },
+  "required": [],
+  "additionalProperties": false
+}

@@ -1,15 +1,17 @@
-//! First-party Trace Commons capabilities: onboard and status.
+//! First-party Trace Commons capabilities: onboard, status, and credits.
 //!
 //! `trace_commons.onboard` drives the operator-invite enrollment flow.
 //! `trace_commons.status` is a read-only policy inspector.
+//! `trace_commons.credits` is a read-only credit balance reporter.
 //!
-//! Both are model-visible; the agent-facing guidance lives in the
-//! prompt_doc_ref files (prompts/builtin/trace-commons-{onboard,status}.md).
+//! All three are model-visible; the agent-facing guidance lives in the
+//! prompt_doc_ref files (prompts/builtin/trace-commons-{onboard,status,credits}.md).
 
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{EffectKind, PermissionMode, ResourceEstimate, ResourceProfile};
 use ironclaw_reborn_traces::contribution::{
-    StandingTraceContributionPolicy, TraceUploadAuthMode, read_trace_policy_for_scope,
+    StandingTraceContributionPolicy, TraceCreditReport, TraceUploadAuthMode,
+    read_trace_policy_for_scope,
 };
 use ironclaw_reborn_traces::onboarding::{
     OnboardConsents, OnboardError, OnboardOutcome, protocol::OnboardErrorCode,
@@ -26,6 +28,7 @@ use super::{
 
 pub const TRACE_COMMONS_ONBOARD_CAPABILITY_ID: &str = "builtin.trace_commons.onboard";
 pub const TRACE_COMMONS_STATUS_CAPABILITY_ID: &str = "builtin.trace_commons.status";
+pub const TRACE_COMMONS_CREDITS_CAPABILITY_ID: &str = "builtin.trace_commons.credits";
 
 // ── Manifest helpers ─────────────────────────────────────────────────────────
 
@@ -61,6 +64,18 @@ pub(super) fn status_manifest() -> Result<CapabilityManifest, ExtensionError> {
         PermissionMode::Allow,
         // Reuse the shared default profile (small JSON status output) so the
         // capability advertises an output_bytes estimate like the other reads.
+        resource_profile(),
+    )
+}
+
+pub(super) fn credits_manifest() -> Result<CapabilityManifest, ExtensionError> {
+    first_party_capability_manifest(
+        TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+        "Report the current user's Trace Commons credit state: pending and final balance, \
+         submission counts, and recent credit explanations. Read-only; reflects the local \
+         view as of the last sync.",
+        vec![EffectKind::ReadFilesystem],
+        PermissionMode::Allow,
         resource_profile(),
     )
 }
@@ -244,6 +259,55 @@ fn format_status(policy: &StandingTraceContributionPolicy) -> Value {
     })
 }
 
+// ── Credits dispatch ──────────────────────────────────────────────────────────
+
+pub(super) async fn dispatch_credits(
+    request: &FirstPartyCapabilityRequest,
+) -> Result<Value, FirstPartyCapabilityError> {
+    let scope = request.scope.user_id.as_str().to_string();
+    // A missing or unreadable submissions file is a normal "nothing submitted yet"
+    // state — map read errors to a soft fallback value, not a FirstPartyCapabilityError.
+    match ironclaw_reborn_traces::contribution::read_local_trace_records_for_scope(Some(
+        scope.as_str(),
+    )) {
+        Ok(records) => Ok(format_credits(
+            &ironclaw_reborn_traces::contribution::trace_credit_report(&records),
+        )),
+        Err(_) => Ok(json!({
+            "enrolled_or_active": false,
+            "message": "No local Trace Commons submission records found for this user."
+        })),
+    }
+}
+
+pub(crate) fn format_credits(report: &TraceCreditReport) -> Value {
+    let last_submission_at = report
+        .last_submission_at
+        .map(|dt| Value::String(dt.to_rfc3339()))
+        .unwrap_or(Value::Null);
+    let last_credit_sync_at = report
+        .last_credit_sync_at
+        .map(|dt| Value::String(dt.to_rfc3339()))
+        .unwrap_or(Value::Null);
+    json!({
+        "pending_credit": report.pending_credit,
+        "final_credit": report.final_credit,
+        "delayed_credit_delta": report.delayed_credit_delta,
+        "submissions_total": report.submissions_total,
+        "submissions_submitted": report.submissions_submitted,
+        "submissions_accepted": report.submissions_accepted,
+        "submissions_revoked": report.submissions_revoked,
+        "submissions_expired": report.submissions_expired,
+        "credit_events_total": report.credit_events_total,
+        "last_submission_at": last_submission_at,
+        "last_credit_sync_at": last_credit_sync_at,
+        "recent_explanations": report.explanation_lines,
+        "note": "Local view as of last sync; final credit can change after privacy review, \
+    replay/eval, duplicate checks, and downstream utility scoring. \
+    The authoritative ledger is server-side."
+    })
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -251,9 +315,12 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
     use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{CapabilityId, ResourceEstimate, ResourceScope};
-    use ironclaw_reborn_traces::contribution::StandingTraceContributionPolicy;
+    use ironclaw_reborn_traces::contribution::{
+        StandingTraceContributionPolicy, TraceCreditReport,
+    };
     use serde_json::json;
 
     use crate::{
@@ -461,5 +528,68 @@ mod tests {
         let v = format_status(&policy);
         assert_eq!(v["enrolled"], json!(false));
         assert_eq!(v["auth_mode"], json!("workload_token_env"));
+    }
+
+    // ── format_credits tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn format_credits_reports_balances() {
+        let fixed_dt: DateTime<Utc> = DateTime::parse_from_rfc3339("2025-01-15T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let report = TraceCreditReport {
+            submissions_total: 5,
+            submissions_submitted: 3,
+            submissions_revoked: 0,
+            submissions_expired: 1,
+            submissions_accepted: 2,
+            submissions_quarantined: 0,
+            submissions_rejected: 0,
+            pending_credit: 1.5,
+            final_credit: 0.25,
+            credit_events_total: 4,
+            delayed_credit_delta: 0.0,
+            last_submission_at: Some(fixed_dt),
+            last_credit_sync_at: None,
+            explanation_lines: vec!["+0.10 regression catch".to_string()],
+        };
+        let v = format_credits(&report);
+        assert_eq!(v["pending_credit"], json!(1.5_f32));
+        assert_eq!(v["final_credit"], json!(0.25_f32));
+        assert_eq!(v["submissions_submitted"], json!(3_u32));
+        assert_eq!(v["recent_explanations"], json!(["+0.10 regression catch"]));
+        assert_eq!(v["last_submission_at"], json!("2025-01-15T10:00:00+00:00"));
+        assert_eq!(v["last_credit_sync_at"], json!(null));
+        let note = v["note"].as_str().unwrap();
+        assert!(
+            note.contains("authoritative ledger is server-side"),
+            "note must reference the authoritative server-side ledger"
+        );
+    }
+
+    #[test]
+    fn format_credits_empty_report() {
+        let report = TraceCreditReport {
+            submissions_total: 0,
+            submissions_submitted: 0,
+            submissions_revoked: 0,
+            submissions_expired: 0,
+            submissions_accepted: 0,
+            submissions_quarantined: 0,
+            submissions_rejected: 0,
+            pending_credit: 0.0,
+            final_credit: 0.0,
+            credit_events_total: 0,
+            delayed_credit_delta: 0.0,
+            last_submission_at: None,
+            last_credit_sync_at: None,
+            explanation_lines: vec![],
+        };
+        let v = format_credits(&report);
+        assert_eq!(v["pending_credit"], json!(0.0_f32));
+        assert_eq!(v["submissions_total"], json!(0_u32));
+        assert_eq!(v["recent_explanations"], json!([]));
+        assert_eq!(v["last_submission_at"], json!(null));
+        assert_eq!(v["last_credit_sync_at"], json!(null));
     }
 }

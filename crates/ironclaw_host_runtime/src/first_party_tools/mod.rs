@@ -40,7 +40,10 @@ pub use http::HTTP_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
-pub use trace_commons::{TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID};
+pub use trace_commons::{
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID,
+};
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
 
@@ -80,6 +83,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     shell::manifest()?,
                     trace_commons::onboard_manifest()?,
                     trace_commons::status_manifest()?,
+                    trace_commons::credits_manifest()?,
                 ];
                 capabilities.extend(coding::manifests()?);
                 capabilities
@@ -116,6 +120,10 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         )
         .with_handler(
             CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID)?,
+            handler.clone(),
+        )
+        .with_handler(
+            CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID)?,
             handler,
         ))
 }
@@ -208,6 +216,9 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 trace_commons::dispatch_onboard(&request).await?
             }
             TRACE_COMMONS_STATUS_CAPABILITY_ID => trace_commons::dispatch_status(&request).await?,
+            TRACE_COMMONS_CREDITS_CAPABILITY_ID => {
+                trace_commons::dispatch_credits(&request).await?
+            }
             _ => {
                 return Err(FirstPartyCapabilityError::new(
                     RuntimeDispatchErrorKind::UndeclaredCapability,
