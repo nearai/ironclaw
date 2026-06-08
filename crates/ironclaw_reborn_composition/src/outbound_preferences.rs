@@ -91,13 +91,11 @@ impl RebornOutboundPreferencesFacade {
         caller: &WebUiAuthenticatedCaller,
         target: &ReplyTargetBindingRef,
     ) -> Result<Option<RebornOutboundDeliveryTargetSummary>, RebornServicesError> {
-        let targets = self.targets.list_outbound_delivery_targets(caller).await?;
-        Ok(targets
-            .into_iter()
-            .find(|entry| {
-                entry.capabilities.final_replies
-                    && entry.reply_target_binding_ref.as_str() == target.as_str()
+        Ok(self
+            .find_target_entry(caller, |entry| {
+                entry.reply_target_binding_ref.as_str() == target.as_str()
             })
+            .await?
             .map(|entry| entry.summary))
     }
 
@@ -106,16 +104,28 @@ impl RebornOutboundPreferencesFacade {
         caller: &WebUiAuthenticatedCaller,
         target_id: &RebornOutboundDeliveryTargetId,
     ) -> Result<OutboundDeliveryTargetEntry, RebornServicesError> {
-        let targets = self.targets.list_outbound_delivery_targets(caller).await?;
-        targets
-            .into_iter()
-            .find(|entry| {
-                entry.capabilities.final_replies
-                    && entry.summary.target_id.as_str() == target_id.as_str()
-            })
-            .ok_or_else(outbound_target_not_found)
+        self.find_target_entry(caller, |entry| {
+            entry.summary.target_id.as_str() == target_id.as_str()
+        })
+        .await?
+        .ok_or_else(outbound_target_not_found)
     }
 
+    async fn find_target_entry(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        predicate: impl Fn(&OutboundDeliveryTargetEntry) -> bool,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        let targets = self.targets.list_outbound_delivery_targets(caller).await?;
+        Ok(targets
+            .into_iter()
+            .find(|entry| entry.capabilities.final_replies && predicate(entry)))
+    }
+
+    /// Invariant: `WebUiAuthenticatedCaller` must come from the authenticated
+    /// product/session boundary, never from request-body tenant/user fields.
+    /// This key and target-inventory scope intentionally share the same
+    /// verified caller identity.
     fn key(caller: &WebUiAuthenticatedCaller) -> CommunicationPreferenceKey {
         CommunicationPreferenceKey::new(caller.tenant_id.clone(), caller.user_id.clone())
     }
@@ -533,6 +543,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_preferences_with_none_target_on_new_user_creates_empty_record() {
+        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let inventory = Arc::new(FakeTargetInventory::default());
+        let facade = RebornOutboundPreferencesFacade::new(store.clone(), inventory);
+
+        let response = facade
+            .set_outbound_preferences(
+                caller("tenant-alpha", "user-new"),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: None,
+                },
+            )
+            .await
+            .expect("new-user clear");
+
+        assert!(response.final_reply_target.is_none());
+        let stored = store
+            .load_communication_preference(CommunicationPreferenceKey::new(
+                tenant("tenant-alpha"),
+                user("user-new"),
+            ))
+            .await
+            .expect("load stored record")
+            .expect("stored record");
+        assert!(stored.final_reply_target.is_none());
+        assert!(stored.progress_target.is_none());
+        assert!(stored.approval_prompt_target.is_none());
+        assert!(stored.auth_prompt_target.is_none());
+        assert!(stored.default_modality.is_none());
+    }
+
+    #[tokio::test]
     async fn target_inventory_errors_are_propagated_by_get_set_and_list() {
         let store = Arc::new(InMemoryOutboundStateStore::default());
         seed_record(
@@ -655,6 +697,18 @@ mod tests {
 
     #[test]
     fn repository_error_mapping_distinguishes_authority_conflict_and_backend_errors() {
+        for invalid_request_error in [
+            OutboundError::InvalidRequest { reason: "bad" },
+            OutboundError::SubscriptionScopeMismatch,
+            OutboundError::DeliveryNotFound,
+        ] {
+            let mapped = map_outbound_repository_error(invalid_request_error);
+            assert_eq!(mapped.code, RebornServicesErrorCode::InvalidRequest);
+            assert_eq!(mapped.kind, RebornServicesErrorKind::Validation);
+            assert_eq!(mapped.status_code, 400);
+            assert!(!mapped.retryable);
+        }
+
         let access_denied = map_outbound_repository_error(OutboundError::AccessDenied);
         assert_eq!(access_denied.code, RebornServicesErrorCode::Forbidden);
         assert_eq!(
@@ -669,6 +723,9 @@ mod tests {
         assert_eq!(cas_conflict.kind, RebornServicesErrorKind::Conflict);
         assert_eq!(cas_conflict.status_code, 409);
         assert!(!cas_conflict.retryable);
+
+        let serialization = map_outbound_repository_error(OutboundError::Serialization);
+        assert_unavailable_backend_error(serialization);
     }
 
     fn assert_unavailable_backend_error(error: RebornServicesError) {
