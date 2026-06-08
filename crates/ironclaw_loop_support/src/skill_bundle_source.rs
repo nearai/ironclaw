@@ -191,6 +191,7 @@ pub struct SkillBundleDescriptor {
     trust: Option<SkillTrust>,
     visibility: Option<SkillVisibility>,
     provenance: SkillBundleProvenance,
+    description: String,
 }
 
 impl SkillBundleDescriptor {
@@ -199,6 +200,7 @@ impl SkillBundleDescriptor {
         id: SkillBundleId,
         trust: Option<SkillTrust>,
         visibility: Option<SkillVisibility>,
+        description: impl Into<String>,
     ) -> Self {
         Self {
             provenance: SkillBundleProvenance::new(id.source_kind()),
@@ -206,6 +208,7 @@ impl SkillBundleDescriptor {
             skill_md_path: SkillFilePath::skill_md(),
             trust,
             visibility,
+            description: description.into(),
         }
     }
 
@@ -224,6 +227,13 @@ impl SkillBundleDescriptor {
     pub fn with_provenance(mut self, mut provenance: SkillBundleProvenance) -> Self {
         provenance.source_kind = self.id.source_kind();
         self.provenance = provenance;
+        self
+    }
+
+    /// Attaches the safe manifest description that may be shown before prompt loading.
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
         self
     }
 
@@ -250,6 +260,11 @@ impl SkillBundleDescriptor {
     /// Returns provenance metadata for this descriptor.
     pub fn provenance(&self) -> &SkillBundleProvenance {
         &self.provenance
+    }
+
+    /// Returns the safe manifest description supplied by the host source.
+    pub fn description(&self) -> &str {
+        &self.description
     }
 
     /// Returns the deterministic ordering key used by [`Ord`].
@@ -326,6 +341,7 @@ mod tests {
             id(source_kind, name),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
+            format!("{name} description"),
         )
     }
 
@@ -390,6 +406,7 @@ mod tests {
             id(SkillSourceKind::User, "code-review"),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
+            "code-review description",
         )
         .with_skill_md_path(SkillFilePath::new("nested/SKILL.md").unwrap())
         .with_provenance(

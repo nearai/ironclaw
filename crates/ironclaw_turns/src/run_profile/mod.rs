@@ -110,9 +110,9 @@ pub use resolver::{
     RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,
 };
 pub use skill_context::{
-    InstalledSkillSnapshot, NoopSkillContextSource, SkillContextBudget, SkillContextError,
-    SkillContextService, SkillContextSnippet, SkillContextSource, SkillRunSnapshot,
-    SkillTrustLevel, SkillVisibility, is_skill_snippet_model_message_ref,
+    InstalledSkillSnapshot, NoopSkillContextSource, SkillActivationState, SkillContextBudget,
+    SkillContextError, SkillContextService, SkillContextSnippet, SkillContextSource,
+    SkillRunSnapshot, SkillTrustLevel, SkillVisibility, is_skill_snippet_model_message_ref,
     skill_snippet_model_message_ref,
 };
 pub use snapshot::{PersonalContextPolicy, ResolvedRunProfile};

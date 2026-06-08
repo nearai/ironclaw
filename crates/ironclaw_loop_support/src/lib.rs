@@ -85,8 +85,8 @@ pub use skill_bundle_source::{
     SkillBundleSourceError, SkillFilePath, SkillSourceKind, sort_skill_bundle_descriptors,
 };
 pub use skill_context::{
-    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    build_skill_run_snapshot,
+    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextCandidatePayload,
+    HostSkillContextSource, build_skill_run_snapshot,
 };
 pub use subagent_prompt_port::{
     DEFAULT_SUBAGENT_GOAL_MAX_BYTES, SubagentLoopPromptPort, SubagentPromptComposer,
