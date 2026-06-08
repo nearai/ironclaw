@@ -30,8 +30,9 @@ use ironclaw_product_workflow::{
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornListAutomationsResponse,
     RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
@@ -469,6 +470,72 @@ pub async fn list_extensions(
     Ok(Json(response))
 }
 
+/// `GET /api/webchat/v2/skills`
+pub async fn list_skills(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornSkillListResponse>, WebUiV2HttpError> {
+    let response = state.services().list_skills(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/search`
+pub async fn search_skills(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<SearchSkillsBody>,
+) -> Result<Json<RebornSkillSearchResponse>, WebUiV2HttpError> {
+    let response = state.services().search_skills(caller, body.query).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/install`
+pub async fn install_skill(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<InstallSkillBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .install_skill(caller, body.name, body.content)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/skills/{name}`
+pub async fn get_skill_content(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+) -> Result<Json<RebornSkillContentResponse>, WebUiV2HttpError> {
+    let response = state.services().read_skill_content(caller, name).await?;
+    Ok(Json(response))
+}
+
+/// `PUT /api/webchat/v2/skills/{name}`
+pub async fn update_skill(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+    Json(body): Json<UpdateSkillBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .update_skill(caller, name, body.content)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/skills/{name}`
+pub async fn remove_skill(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state.services().remove_skill(caller, name).await?;
+    Ok(Json(response))
+}
+
 /// `GET /api/webchat/v2/extensions/registry`
 pub async fn list_extension_registry(
     State(state): State<WebUiV2State>,
@@ -685,6 +752,27 @@ pub struct ExtensionPackagePath {
 #[derive(Debug, Deserialize)]
 pub struct InstallExtensionBody {
     pub package_ref: LifecyclePackageRef,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillPath {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchSkillsBody {
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstallSkillBody {
+    pub name: String,
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSkillBody {
+    pub content: String,
 }
 
 fn extension_package_ref_for_request(

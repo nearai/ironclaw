@@ -157,11 +157,13 @@ pub use reborn_services::{
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
     RebornResolveGateResponse, RebornResumeGateResponse, RebornServices, RebornServicesApi,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
-    UnsupportedAutomationProductFacade, UnsupportedOutboundPreferencesProductFacade,
-    UpsertLlmProviderRequest,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, SkillsProductFacade,
+    StaticConnectableChannelsProductFacade, UnsupportedAutomationProductFacade,
+    UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
 };
 
 pub use webui_inbound::{

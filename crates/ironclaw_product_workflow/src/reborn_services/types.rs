@@ -737,6 +737,80 @@ pub struct RebornExtensionListResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSkillListResponse {
+    pub skills: Vec<RebornSkillInfo>,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSkillContentResponse {
+    pub name: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSkillSearchResponse {
+    #[serde(default)]
+    pub catalog: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub installed: Vec<RebornSkillInfo>,
+    #[serde(default)]
+    pub registry_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSkillActionResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSkillInfo {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub trust: RebornSkillTrustLevel,
+    pub source: RebornSkillSourceKind,
+    pub source_kind: RebornSkillSourceKind,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_source_url: Option<String>,
+    #[serde(default)]
+    pub has_requirements: bool,
+    #[serde(default)]
+    pub has_scripts: bool,
+    #[serde(default)]
+    pub can_edit: bool,
+    #[serde(default)]
+    pub can_delete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornSkillTrustLevel {
+    Trusted,
+    Installed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornSkillSourceKind {
+    User,
+    Installed,
+    Workspace,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornExtensionRegistryResponse {
     pub entries: Vec<RebornExtensionRegistryEntry>,
 }

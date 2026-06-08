@@ -224,6 +224,28 @@ pub struct SkillRemoveResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillContentRequest<'a> {
+    pub name: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillContentResult {
+    pub name: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillUpdateRequest<'a> {
+    pub name: &'a str,
+    pub content: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillUpdateResult {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillSearchRequest<'a> {
     pub query: &'a str,
     pub limit: usize,
@@ -518,6 +540,67 @@ pub async fn remove_skill(
         })?;
     tracing::debug!("skill remove completed");
     Ok(SkillRemoveResult {
+        name: request.name.to_string(),
+    })
+}
+
+pub async fn read_skill_content(
+    context: &SkillManagementContext,
+    request: SkillContentRequest<'_>,
+) -> Result<SkillContentResult, SkillManagementError> {
+    if !validate_skill_name(request.name) {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+    let skill_path = skill_scoped_path(USER_SKILLS_ROOT, request.name, SKILL_FILE_NAME)?;
+    let content = read_skill_file(context, &skill_path)
+        .await?
+        .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::NotFound))?;
+    Ok(SkillContentResult {
+        name: request.name.to_string(),
+        content,
+    })
+}
+
+pub async fn update_skill(
+    context: &SkillManagementContext,
+    request: SkillUpdateRequest<'_>,
+) -> Result<SkillUpdateResult, SkillManagementError> {
+    if !validate_skill_name(request.name) {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+    if request.content.len() as u64 > MAX_PROMPT_FILE_SIZE {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::Resource,
+        ));
+    }
+
+    let normalized = normalize_line_endings(request.content);
+    let parsed = parse_skill_md(&normalized).map_err(skill_parse_error)?;
+    if parsed.manifest.name != request.name {
+        return Err(SkillManagementError::with_reason(
+            SkillManagementErrorKind::InvalidInput,
+            format!("edited skill name must remain '{}'", request.name),
+        ));
+    }
+
+    let mutation_lock = skill_mutation_lock(request.name);
+    let _mutation_guard = mutation_lock.lock().await;
+    let skill_path = skill_scoped_path(USER_SKILLS_ROOT, request.name, SKILL_FILE_NAME)?;
+    if stat_optional(context, &skill_path).await?.is_none() {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::NotFound,
+        ));
+    }
+    context
+        .filesystem
+        .write_file(&context.scope, &skill_path, normalized.as_bytes())
+        .await
+        .map_err(filesystem_error)?;
+    Ok(SkillUpdateResult {
         name: request.name.to_string(),
     })
 }

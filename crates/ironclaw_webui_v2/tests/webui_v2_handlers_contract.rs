@@ -38,11 +38,13 @@ use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -387,6 +389,55 @@ impl RebornServicesApi for StubServices {
         Ok(RebornExtensionListResponse {
             extensions: Vec::new(),
         })
+    }
+
+    async fn list_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn search_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn install_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn read_skill_content(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn update_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn remove_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
     }
 
     async fn list_connectable_channels(
@@ -1889,6 +1940,49 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             &self,
             _caller: WebUiAuthenticatedCaller,
         ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn list_skills(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornSkillListResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn search_skills(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _query: String,
+        ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn install_skill(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _name: String,
+            _content: Option<String>,
+        ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn read_skill_content(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _name: String,
+        ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn update_skill(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _name: String,
+            _content: String,
+        ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn remove_skill(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _name: String,
+        ) -> Result<RebornSkillActionResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
         async fn list_extension_registry(

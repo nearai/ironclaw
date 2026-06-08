@@ -1,17 +1,57 @@
 import { Badge } from "../../../design-system/badge.js";
 import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
-import { html } from "../../../lib/html.js";
+import { Textarea } from "../../../design-system/input.js";
+import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 
-export function SkillCard({ skill, onRemove, isRemoving }) {
+export function SkillCard({
+  skill,
+  onEdit,
+  onRemove,
+  onUpdate,
+  isRemoving,
+  isUpdating,
+}) {
   const t = useT();
   const name = skill.name || skill.id;
   const trust = skill.trust || skill.trust_level || "installed";
-  const canRemove = String(trust).toLowerCase() !== "trusted";
+  const sourceKind = skill.source_kind || "installed";
+  const canEdit = Boolean(skill.can_edit);
+  const canDelete = Boolean(skill.can_delete);
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState("");
+  const [editError, setEditError] = React.useState("");
+  const [isLoadingContent, setIsLoadingContent] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!isEditing) {
+      setDraft("");
+      setEditError("");
+    }
+  }, [isEditing]);
+
+  const startEdit = React.useCallback(async () => {
+    setIsLoadingContent(true);
+    setEditError("");
+    try {
+      const response = await onEdit(name);
+      setDraft(response?.content || "");
+      setIsEditing(true);
+    } catch (err) {
+      setEditError(err.message || t("skills.contentLoadFailed"));
+    } finally {
+      setIsLoadingContent(false);
+    }
+  }, [name, onEdit, t]);
+
+  const saveEdit = React.useCallback(async () => {
+    const response = await onUpdate(name, draft);
+    if (response?.success) setIsEditing(false);
+  }, [draft, name, onUpdate]);
 
   return html`
-    <div className="border-t border-[var(--v2-panel-border)] py-4 first:border-0 first:pt-0">
+    <div className="ext-card border-t border-[var(--v2-panel-border)] py-4 first:border-0 first:pt-0">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -21,6 +61,11 @@ export function SkillCard({ skill, onRemove, isRemoving }) {
               label=${trust}
               size="sm"
             />
+            <${Badge}
+              tone=${sourceKind === "system" ? "positive" : "muted"}
+              label=${t(`skills.source.${sourceKind}`)}
+              size="sm"
+            />
             ${skill.version &&
             html`<span className="font-mono text-[11px] text-[var(--v2-text-faint)]">v${skill.version}</span>`}
           </div>
@@ -28,23 +73,79 @@ export function SkillCard({ skill, onRemove, isRemoving }) {
           ${skill.description &&
           html`<div className="mt-1 text-xs text-[var(--v2-text-muted)]">${skill.description}</div>`}
 
-          <${SkillMetadata} skill=${skill} />
+          ${isEditing
+            ? html`
+                <div className="mt-3">
+                  <${Textarea}
+                    rows=${12}
+                    value=${draft}
+                    className="font-mono text-xs leading-5"
+                    onInput=${(event) => setDraft(event.currentTarget.value)}
+                  />
+                </div>
+              `
+            : html`<${SkillMetadata} skill=${skill} />`}
         </div>
 
-        ${canRemove &&
-        html`
-          <${Button}
-            type="button"
-            variant="danger"
-            size="sm"
-            disabled=${isRemoving}
-            onClick=${() => onRemove(name)}
-          >
-            <${Icon} name="trash" className="h-4 w-4" />
-            ${t("skills.remove")}
-          <//>
-        `}
+        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+          ${canEdit && !isEditing &&
+          html`
+            <${Button}
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled=${isUpdating || isLoadingContent}
+              title=${t("skills.edit")}
+              onClick=${startEdit}
+            >
+              <${Icon} name="file" className="h-4 w-4" />
+              ${isLoadingContent ? t("skills.loading") : t("skills.edit")}
+            <//>
+          `}
+          ${isEditing &&
+          html`
+            <${Button}
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled=${isUpdating}
+              onClick=${() => {
+                setDraft("");
+                setIsEditing(false);
+              }}
+            >
+              <${Icon} name="close" className="h-4 w-4" />
+              ${t("skills.cancel")}
+            <//>
+            <${Button}
+              type="button"
+              variant="primary"
+              size="sm"
+              disabled=${isUpdating}
+              onClick=${saveEdit}
+            >
+              <${Icon} name="check" className="h-4 w-4" />
+              ${isUpdating ? t("skills.saving") : t("skills.save")}
+            <//>
+          `}
+          ${canDelete && !isEditing &&
+          html`
+            <${Button}
+              type="button"
+              variant="danger"
+              size="sm"
+              disabled=${isRemoving}
+              title=${t("skills.delete")}
+              onClick=${() => onRemove(name)}
+            >
+              <${Icon} name="trash" className="h-4 w-4" />
+              ${t("skills.delete")}
+            <//>
+          `}
+        </div>
       </div>
+      ${editError &&
+      html`<p className="mt-2 text-xs text-[var(--v2-danger-text)]">${editError}</p>`}
     </div>
   `;
 }

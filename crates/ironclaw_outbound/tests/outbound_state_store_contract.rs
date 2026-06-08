@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
@@ -47,6 +48,10 @@ async fn in_memory_defaults_policy_progress_opt_in_and_subscription_scope() {
     let store = InMemoryOutboundStateStore::default();
     communication_preferences_are_tenant_user_scoped(&store).await;
     communication_preferences_reject_empty_updated_by(&store).await;
+    communication_preference_atomic_update_preserves_existing_slots(&store).await;
+    communication_preference_update_inserts_absent_record(&store).await;
+    communication_preference_update_propagates_update_error_without_writing(&store).await;
+    communication_preference_update_rejects_invalid_or_mismatched_record(&store).await;
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
     subscription_ids_are_scoped_not_global(&store).await;
@@ -67,7 +72,12 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     let store = build_outbound_store_for_backend(Arc::clone(&backend));
     communication_preferences_are_tenant_user_scoped(&store).await;
     communication_preferences_reject_empty_updated_by(&store).await;
+    communication_preference_atomic_update_preserves_existing_slots(&store).await;
+    communication_preference_update_inserts_absent_record(&store).await;
+    communication_preference_update_propagates_update_error_without_writing(&store).await;
+    communication_preference_update_rejects_invalid_or_mismatched_record(&store).await;
     filesystem_store_retries_communication_preference_put_through_cas_conflict(&backend).await;
+    filesystem_store_retries_communication_preference_update_through_cas_conflict(&backend).await;
     filesystem_store_rejects_mismatched_communication_preference_identity(&backend, &store).await;
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
@@ -200,6 +210,199 @@ where
     assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
 }
 
+async fn communication_preference_atomic_update_preserves_existing_slots<S>(store: &S)
+where
+    S: CommunicationPreferenceRepository + OutboundStateStore,
+{
+    let tenant_id = TenantId::new("tenant-outbound-atomic").unwrap();
+    let user_id = UserId::new("user-outbound-atomic").unwrap();
+    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
+    let record = CommunicationPreferenceRecord {
+        tenant_id,
+        user_id,
+        final_reply_target: Some(reply_ref("reply-pref-atomic-final")),
+        progress_target: Some(reply_ref("reply-pref-atomic-progress")),
+        approval_prompt_target: Some(reply_ref("reply-pref-atomic-approval")),
+        auth_prompt_target: Some(reply_ref("reply-pref-atomic-auth")),
+        default_modality: Some(CommunicationModality::Voice),
+        updated_at: now(),
+        updated_by: UserId::new("user-outbound-atomic-updater").unwrap(),
+    };
+    store
+        .put_communication_preference(record.clone())
+        .await
+        .unwrap();
+
+    let updated = store
+        .update_communication_preference(
+            key.clone(),
+            Box::new(move |existing| {
+                let existing = existing.expect("existing communication preference");
+                Ok(CommunicationPreferenceRecord {
+                    final_reply_target: Some(reply_ref("reply-pref-atomic-final-updated")),
+                    updated_at: now(),
+                    updated_by: UserId::new("user-outbound-atomic-updater-2").unwrap(),
+                    ..existing
+                })
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        updated.final_reply_target,
+        Some(reply_ref("reply-pref-atomic-final-updated"))
+    );
+    assert_eq!(updated.progress_target, record.progress_target);
+    assert_eq!(
+        updated.approval_prompt_target,
+        record.approval_prompt_target
+    );
+    assert_eq!(updated.auth_prompt_target, record.auth_prompt_target);
+    assert_eq!(updated.default_modality, record.default_modality);
+    assert_eq!(
+        store.load_communication_preference(key).await.unwrap(),
+        Some(updated)
+    );
+}
+
+async fn communication_preference_update_inserts_absent_record<S>(store: &S)
+where
+    S: CommunicationPreferenceRepository + OutboundStateStore,
+{
+    let tenant_id = TenantId::new("tenant-outbound-update-absent").unwrap();
+    let user_id = UserId::new("user-outbound-update-absent").unwrap();
+    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
+    let record = CommunicationPreferenceRecord {
+        tenant_id,
+        user_id,
+        final_reply_target: Some(reply_ref("reply-pref-update-absent-final")),
+        progress_target: Some(reply_ref("reply-pref-update-absent-progress")),
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin-outbound-update-absent").unwrap(),
+    };
+    let update_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&update_calls);
+    let callback_record = record.clone();
+
+    let updated = store
+        .update_communication_preference(
+            key.clone(),
+            Box::new(move |existing| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                assert!(existing.is_none());
+                Ok(callback_record.clone())
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(updated, record);
+    assert_eq!(update_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store.load_communication_preference(key).await.unwrap(),
+        Some(record)
+    );
+}
+
+async fn communication_preference_update_propagates_update_error_without_writing<S>(store: &S)
+where
+    S: CommunicationPreferenceRepository + OutboundStateStore,
+{
+    let tenant_id = TenantId::new("tenant-outbound-update-error").unwrap();
+    let user_id = UserId::new("user-outbound-update-error").unwrap();
+    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
+    let record = CommunicationPreferenceRecord {
+        tenant_id,
+        user_id,
+        final_reply_target: Some(reply_ref("reply-pref-update-error-final")),
+        progress_target: Some(reply_ref("reply-pref-update-error-progress")),
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: UserId::new("user-outbound-update-error-updater").unwrap(),
+    };
+    store
+        .put_communication_preference(record.clone())
+        .await
+        .unwrap();
+
+    let result = store
+        .update_communication_preference(
+            key.clone(),
+            Box::new(|_| Err(OutboundError::AccessDenied)),
+        )
+        .await;
+
+    assert!(matches!(result, Err(OutboundError::AccessDenied)));
+    assert_eq!(
+        store.load_communication_preference(key).await.unwrap(),
+        Some(record)
+    );
+}
+
+async fn communication_preference_update_rejects_invalid_or_mismatched_record<S>(store: &S)
+where
+    S: CommunicationPreferenceRepository + OutboundStateStore,
+{
+    let tenant_id = TenantId::new("tenant-outbound-update-invalid").unwrap();
+    let user_id = UserId::new("user-outbound-update-invalid").unwrap();
+    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
+    let record = CommunicationPreferenceRecord {
+        tenant_id,
+        user_id,
+        final_reply_target: Some(reply_ref("reply-pref-update-invalid-final")),
+        progress_target: None,
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: UserId::new("user-outbound-update-invalid-updater").unwrap(),
+    };
+    store
+        .put_communication_preference(record.clone())
+        .await
+        .unwrap();
+
+    let invalid_result = store
+        .update_communication_preference(
+            key.clone(),
+            Box::new(|existing| {
+                let mut record = existing.expect("existing communication preference");
+                record.updated_by = UserId::from_trusted(String::new());
+                Ok(record)
+            }),
+        )
+        .await;
+    assert!(matches!(
+        invalid_result,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    let mismatch_result = store
+        .update_communication_preference(
+            key.clone(),
+            Box::new(|existing| {
+                let mut record = existing.expect("existing communication preference");
+                record.user_id = UserId::new("user-outbound-update-invalid-other").unwrap();
+                Ok(record)
+            }),
+        )
+        .await;
+    assert!(matches!(
+        mismatch_result,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+    assert_eq!(
+        store.load_communication_preference(key).await.unwrap(),
+        Some(record)
+    );
+}
+
 async fn filesystem_store_rejects_mismatched_communication_preference_identity(
     backend: &Arc<InMemoryBackend>,
     store: &FilesystemOutboundStateStore<InMemoryBackend>,
@@ -312,6 +515,74 @@ async fn filesystem_store_retries_communication_preference_put_through_cas_confl
         Some(record)
     );
     assert_eq!(racing.injected_count().await, 1);
+}
+
+async fn filesystem_store_retries_communication_preference_update_through_cas_conflict(
+    backend: &Arc<InMemoryBackend>,
+) {
+    let racing = Arc::new(VersionRacingBackend::new(Arc::clone(backend)));
+    let store =
+        FilesystemOutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+    let tenant_id = TenantId::new("tenant-outbound-update-cas").unwrap();
+    let user_id = UserId::new("user-outbound-update-cas").unwrap();
+    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
+    let record = CommunicationPreferenceRecord {
+        tenant_id,
+        user_id,
+        final_reply_target: Some(reply_ref("reply-pref-update-cas")),
+        progress_target: Some(reply_ref("reply-pref-update-cas-progress")),
+        approval_prompt_target: Some(reply_ref("reply-pref-update-cas-approval")),
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Voice),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin-outbound-update-cas").unwrap(),
+    };
+    store
+        .put_communication_preference(record.clone())
+        .await
+        .unwrap();
+    racing
+        .arm(
+            &format!("{TEST_OUTBOUND_ROOT}/communication-preferences/"),
+            1,
+        )
+        .await;
+
+    let update_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&update_calls);
+    let updated = store
+        .update_communication_preference(
+            key.clone(),
+            Box::new(move |existing| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let existing = existing.expect("existing communication preference");
+                Ok(CommunicationPreferenceRecord {
+                    final_reply_target: Some(reply_ref("reply-pref-update-cas-final-updated")),
+                    updated_at: now(),
+                    updated_by: UserId::new("tenant-admin-outbound-update-cas-2").unwrap(),
+                    ..existing
+                })
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        updated.final_reply_target,
+        Some(reply_ref("reply-pref-update-cas-final-updated"))
+    );
+    assert_eq!(updated.progress_target, record.progress_target);
+    assert_eq!(
+        updated.approval_prompt_target,
+        record.approval_prompt_target
+    );
+    assert_eq!(updated.default_modality, record.default_modality);
+    assert_eq!(racing.injected_count().await, 1);
+    assert_eq!(update_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        store.load_communication_preference(key).await.unwrap(),
+        Some(updated)
+    );
 }
 
 async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateStore) {

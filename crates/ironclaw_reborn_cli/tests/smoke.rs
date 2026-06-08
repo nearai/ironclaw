@@ -759,7 +759,7 @@ fn assert_empty_not_wired_surface(
 }
 
 fn write_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
-    let skill_dir = reborn_home.join("local-dev/skills").join(name);
+    let skill_dir = reborn_cli_skill_root(reborn_home).join(name);
     std::fs::create_dir_all(&skill_dir).expect("skill dir");
     std::fs::write(
         skill_dir.join("SKILL.md"),
@@ -769,7 +769,7 @@ fn write_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &s
 }
 
 fn write_verbose_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
-    let skill_dir = reborn_home.join("local-dev/skills").join(name);
+    let skill_dir = reborn_cli_skill_root(reborn_home).join(name);
     std::fs::create_dir_all(&skill_dir).expect("skill dir");
     std::fs::write(
         skill_dir.join("SKILL.md"),
@@ -789,6 +789,10 @@ Use {name}.
         ),
     )
     .expect("skill file");
+}
+
+fn reborn_cli_skill_root(reborn_home: &std::path::Path) -> std::path::PathBuf {
+    reborn_home.join("local-dev/tenants/default/users/reborn-cli/skills")
 }
 
 fn assert_verbose_detail(args: &[&str], expected_detail: &str) {

@@ -5290,6 +5290,7 @@ dependencies = [
  "futures",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "libc",
  "regex",
  "reqwest",
  "serde",

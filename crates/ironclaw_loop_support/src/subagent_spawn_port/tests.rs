@@ -241,6 +241,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
             safe_summary: "authorized".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len: 0,
         }))
     }
 
@@ -361,6 +362,7 @@ impl LoopCapabilityPort for AuthPassPort {
             safe_summary: "authorized".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len: 0,
         }))
     }
 
@@ -507,8 +509,8 @@ impl LoopCapabilityResultWriter for NoopResultWriter {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
-        Ok(LoopResultRef::new("result:spawn").unwrap())
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        Ok((LoopResultRef::new("result:spawn").unwrap(), 0))
     }
 }
 
@@ -1158,6 +1160,7 @@ fn completed_outcome(label: &str) -> CapabilityOutcome {
         safe_summary: "completed".to_string(),
         progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
         terminate_hint: false,
+        byte_len: 0,
     })
 }
 
@@ -2785,5 +2788,70 @@ fn child_submit_bindings_are_unique_per_prepared_child_run() {
     assert_ne!(
         idempotency_key(parent_run_id, first_child).unwrap(),
         idempotency_key(parent_run_id, second_child).unwrap()
+    );
+}
+
+/// Stub writer that returns a fixed non-zero byte_len.
+struct FixedByteResultWriter {
+    byte_len: u64,
+}
+
+#[async_trait]
+impl LoopCapabilityResultWriter for FixedByteResultWriter {
+    async fn write_capability_result(
+        &self,
+        _write: CapabilityResultWrite<'_>,
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        Ok((
+            LoopResultRef::new("result:fixed-bytes").unwrap(),
+            self.byte_len,
+        ))
+    }
+}
+
+/// F5: Verify the CapabilityOutcome::AwaitDependentRun produced by the spawn
+/// port carries the byte_len returned by the result writer. Tests that use
+/// NoopResultWriter (byte_len=0) cannot catch a silent discard of this field.
+#[tokio::test]
+async fn spawn_subagent_propagates_byte_len_from_result_writer() {
+    let context = test_run_context_with_agent_actor("spawn-byte-len").await;
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let fixed_byte_len: u64 = 42_000;
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0)))),
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        goal_store: Arc::new(NoopGoalStore),
+        gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: default_spawn_args(),
+        }),
+        result_writer: Arc::new(FixedByteResultWriter {
+            byte_len: fixed_byte_len,
+        }),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(AuthPassPort),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    );
+    port.auth_input_refs.lock().unwrap().insert(input_ref());
+
+    let outcome = invoke_spawn(&port).await;
+
+    let CapabilityOutcome::AwaitDependentRun { byte_len, .. } = outcome else {
+        panic!("expected AwaitDependentRun outcome from blocking spawn");
+    };
+    assert_eq!(
+        byte_len, fixed_byte_len,
+        "spawn port must propagate the byte_len returned by the result writer \
+         (D2 un-discard regression: byte_len must reach CapabilityOutcome)"
     );
 }

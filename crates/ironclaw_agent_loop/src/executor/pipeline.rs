@@ -5,7 +5,7 @@ use crate::planner::AgentLoopPlannerInternal;
 
 use super::{
     AgentLoopExecutorError, AssistantReplyStage, BudgetStage, CapabilityStage, ExitStage,
-    InputStage, ModelStage, PromptStage, ReplyAdmissionStage, StopStage,
+    InputStage, ModelStage, PostCapabilityStage, PromptStage, ReplyAdmissionStage, StopStage,
 };
 
 #[derive(Clone, Copy)]
@@ -25,7 +25,7 @@ pub(crate) trait ExecutorStage<Input>: Send + Sync {
     ) -> Result<Self::Output, AgentLoopExecutorError>;
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct DefaultExecutorPipeline {
     pub(crate) budget: BudgetStage,
     pub(crate) input: InputStage,
@@ -34,6 +34,24 @@ pub(crate) struct DefaultExecutorPipeline {
     pub(crate) reply_admission: ReplyAdmissionStage,
     pub(crate) assistant_reply: AssistantReplyStage,
     pub(crate) capabilities: CapabilityStage,
+    pub(crate) post_capability: PostCapabilityStage,
     pub(crate) stop: StopStage,
     pub(crate) exit: ExitStage,
+}
+
+impl Default for DefaultExecutorPipeline {
+    fn default() -> Self {
+        Self {
+            budget: BudgetStage,
+            input: InputStage,
+            prompt: PromptStage,
+            model: ModelStage,
+            reply_admission: ReplyAdmissionStage,
+            assistant_reply: AssistantReplyStage,
+            capabilities: CapabilityStage,
+            post_capability: PostCapabilityStage::default(),
+            stop: StopStage,
+            exit: ExitStage,
+        }
+    }
 }

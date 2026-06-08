@@ -652,6 +652,40 @@ async fn progress_port_routes_compaction_progress_milestones() {
 }
 
 #[tokio::test]
+async fn progress_port_routes_capability_result_overflow_initiator() {
+    // Mirror progress_port_routes_compaction_progress_milestones but using
+    // CompactionInitiator::CapabilityResultOverflow to validate the
+    // snake_case serialization ("capability_result_overflow") and the
+    // milestone routing path don't drop the new variant.
+    let fixture = HostFixture::new("thread-progress-overflow-initiator", "hello overflow").await;
+    let host = fixture.build_host().await;
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    let started_task = SystemInferenceTaskId::new();
+
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CompactionStarted {
+            task_id: started_task,
+            initiator: CompactionInitiator::CapabilityResultOverflow,
+        })
+        .await
+        .unwrap();
+
+    let milestones = fixture.milestones();
+    assert!(matches!(
+        milestones[0].kind,
+        LoopHostMilestoneKind::CompactionStarted {
+            task_id,
+            initiator: CompactionInitiator::CapabilityResultOverflow,
+        } if task_id == started_task
+    ));
+    assert!(milestones.iter().all(|milestone| {
+        milestone.scope == fixture.context.scope
+            && milestone.turn_id == fixture.context.turn_id
+            && milestone.run_id == fixture.context.run_id
+    }));
+}
+
+#[tokio::test]
 async fn progress_port_checkpoint_written_does_not_double_emit() {
     let fixture = HostFixture::new("thread-progress-checkpoint", "hello progress").await;
     let host = fixture.build_host().await;
@@ -6319,7 +6353,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
         let mut remaining_failures = self.fail_result_writes_remaining.lock().unwrap();
         if *remaining_failures > 0 {
             *remaining_failures -= 1;
@@ -6339,12 +6373,13 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
             write.capability_id.as_str()
         );
         self.result_refs.lock().unwrap().push(result_ref.clone());
-        LoopResultRef::new(result_ref).map_err(|_| {
+        let result_ref = LoopResultRef::new(result_ref).map_err(|_| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
                 "capability result ref could not be represented",
             )
-        })
+        })?;
+        Ok((result_ref, 0))
     }
 }
 

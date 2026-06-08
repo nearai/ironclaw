@@ -792,6 +792,23 @@ Expected size: less than 1000 lines; split into config and lifecycle if needed.
 
 ### PR 19 — Trigger Delivery Integration Fast-Follow
 
+Phase 3 entrypoint after PR #4537 merged to `main`:
+
+- Start from the composition-owned outbound preferences facade and shared
+  `CommunicationPreferenceRepository`; do not reintroduce a WebUI-specific
+  backend contract for default delivery settings.
+- Add product outbound targets through a generic composition-owned provider
+  registry backed by the shared preference repository. Slack should become the
+  first registered provider, not a Slack-specific bridge in the backend; later
+  outbound channels must be able to plug into the same provider contract.
+- Keep non-text modalities, stale-target UI/API status, repository-level
+  atomic preference updates, and local-dev filesystem persistence as explicit
+  follow-up decisions unless the phase is scoped to one of those contracts.
+- For external trigger result delivery, the required flow remains
+  `RunNotificationOrigin::Triggered` or `TriggeredFromSourceRoute` ->
+  `OutboundResolutionEngine` -> `OutboundPolicyService` -> ready Reborn
+  product-adapter outbound path.
+
 Only after delivery-resolution PRs are merged and a concrete adapter path is
 ready, connect trigger-origin final reply delivery:
 
@@ -813,12 +830,13 @@ Carry-forward finding from the default outbound preference service slice:
 Phase 2 composes a WebUI-usable `OutboundPreferencesProductFacade` backed by
 `RebornLocalRuntimeServices::outbound_preferences`, but Slack host-beta final
 reply delivery still constructs its own outbound state store inside
-`slack_host_beta.rs`. Before PR 19 claims Slack end-to-end delivery, the Slack
-integration must bridge this split by exposing Slack delivery targets through
-the composition-owned target inventory and making Slack final-reply delivery
-read the same communication preference repository used by the default outbound
-preference API. Do not encode WebUI rendering assumptions in this bridge; the
-API must remain usable by any authenticated product surface.
+`slack_host_beta.rs`. Before PR 19 claims Slack end-to-end delivery, add a
+channel-neutral outbound target provider registry in composition, then register
+Slack as the first provider. That provider must expose only product targets it
+can validate at send time and Slack final-reply delivery must read the same
+communication preference repository used by the default outbound preference
+API. Do not encode WebUI rendering assumptions in this provider path; the API
+must remain usable by any authenticated product surface.
 
 Carry-forward API and repository follow-ups from GitHub PR #4537 review:
 
@@ -834,12 +852,16 @@ Carry-forward API and repository follow-ups from GitHub PR #4537 review:
   `unavailable` while preserving the existing `final_reply_target:
   Option<RebornOutboundDeliveryTargetSummary>` field. A tagged target-state DTO
   is cleaner but should be evaluated as a larger API contract change.
-- Add an atomic update operation to `CommunicationPreferenceRepository` before
-  depending on concurrent preference updates for production behavior. The fix
-  belongs in the repository/store contract so in-memory and filesystem-backed
-  stores re-read and re-apply the update under their own lock/CAS semantics. Do
-  not paper over this with a composition-local facade mutex; that would only
-  serialize one process and one facade instance.
+- Harden `CommunicationPreferenceRepository` read-modify-write semantics before
+  depending on concurrent preference updates for production delivery behavior.
+  PR #4558 added the repository update surface and bounded in-memory retries,
+  but byte-only filesystem roots can still reject `Version`/`Absent` CAS and
+  fall back to `CasExpectation::Any`. The next backend-hardening slice must make
+  communication preference updates fail closed on CAS-less roots, use a scoped
+  backend lock/transaction, or change the filesystem fallback contract so stale
+  preference writes cannot drop another writer's slots. Do not paper over this
+  with a composition-local facade mutex; that would only serialize one process
+  and one facade instance.
 - Decide whether local-dev builds with the `postgres` feature should move
   outbound preferences, and possibly the broader non-libSQL local-dev store
   graph, to filesystem-backed persistence. Do not switch only this one

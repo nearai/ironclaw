@@ -163,6 +163,22 @@ impl CommunicationPreferenceRepository for FakePreferenceRepository {
             .get(&key)
             .cloned())
     }
+
+    async fn update_communication_preference(
+        &self,
+        key: CommunicationPreferenceKey,
+        mut update: ironclaw_outbound::CommunicationPreferenceUpdate,
+    ) -> Result<CommunicationPreferenceRecord, OutboundError> {
+        let existing = self.load_communication_preference(key.clone()).await?;
+        let record = update(existing)?;
+        if record.key() != key {
+            return Err(OutboundError::InvalidRequest {
+                reason: "communication preference update key mismatch",
+            });
+        }
+        self.put_communication_preference(record.clone()).await?;
+        Ok(record)
+    }
 }
 
 #[derive(Default)]
@@ -249,6 +265,16 @@ impl CommunicationPreferenceRepository for StatusFailingOutboundStore {
         key: CommunicationPreferenceKey,
     ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
         self.inner.load_communication_preference(key).await
+    }
+
+    async fn update_communication_preference(
+        &self,
+        key: CommunicationPreferenceKey,
+        update: ironclaw_outbound::CommunicationPreferenceUpdate,
+    ) -> Result<CommunicationPreferenceRecord, OutboundError> {
+        self.inner
+            .update_communication_preference(key, update)
+            .await
     }
 }
 

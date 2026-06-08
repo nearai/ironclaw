@@ -27,10 +27,12 @@ use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
     PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
@@ -481,6 +483,55 @@ impl RebornServicesApi for StubServices {
         Ok(RebornExtensionListResponse {
             extensions: Vec::new(),
         })
+    }
+
+    async fn list_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn search_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn install_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn read_skill_content(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn update_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn remove_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(unused_services_error())
     }
 
     async fn list_extension_registry(

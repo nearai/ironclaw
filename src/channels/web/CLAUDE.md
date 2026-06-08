@@ -108,10 +108,12 @@ subset that can later be replaced by a typed `Deps` alias.
 ### Skills
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/skills` | List installed skills |
+| GET | `/api/skills` | List system skills and the signed-in user's skills |
+| GET | `/api/skills/{name}` | Read editable SKILL.md content for the signed-in user's manageable skill |
 | POST | `/api/skills/search` | Search ClawHub registry + local skills |
-| POST | `/api/skills/install` | Install a skill from ClawHub or by URL/content |
-| DELETE | `/api/skills/{name}` | Remove an installed skill |
+| POST | `/api/skills/install` | Install a skill for the signed-in user from ClawHub or by URL/content |
+| PUT | `/api/skills/{name}` | Update SKILL.md content for the signed-in user's manageable skill |
+| DELETE | `/api/skills/{name}` | Remove the signed-in user's installed skill |
 
 ### Extensions
 | Method | Path | Description |

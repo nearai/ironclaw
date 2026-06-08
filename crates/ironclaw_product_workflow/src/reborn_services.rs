@@ -83,9 +83,11 @@ pub use types::{
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetSummary,
     RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -126,6 +128,76 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
         })
     }
 }
+
+#[async_trait]
+pub trait SkillsProductFacade: Send + Sync {
+    async fn list_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn search_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn install_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name, content);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn read_skill_content(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        let _ = (caller, name);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn update_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name, content);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn remove_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedSkillsProductFacade;
+
+impl UnsupportedSkillsProductFacade {
+    pub fn new_static() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl SkillsProductFacade for UnsupportedSkillsProductFacade {}
 
 #[async_trait]
 pub trait OutboundPreferencesProductFacade: Send + Sync {
@@ -452,6 +524,43 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError>;
 
+    async fn list_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError>;
+
+    async fn search_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError>;
+
+    async fn install_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
+
+    async fn read_skill_content(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError>;
+
+    async fn update_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
+
+    async fn remove_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
+
     async fn list_extension_registry(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -595,6 +704,7 @@ pub struct RebornServices {
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
+    skills_facade: Arc<dyn SkillsProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
@@ -619,6 +729,7 @@ impl RebornServices {
                 "reborn_lifecycle_facade_unwired",
             )),
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
+            skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
             connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
@@ -656,6 +767,14 @@ impl RebornServices {
         automation_facade: Arc<dyn AutomationProductFacade>,
     ) -> Self {
         self.automation_facade = automation_facade;
+        self
+    }
+
+    pub fn with_skills_product_facade(
+        mut self,
+        skills_facade: Arc<dyn SkillsProductFacade>,
+    ) -> Self {
+        self.skills_facade = skills_facade;
         self
     }
 
@@ -1273,6 +1392,57 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
         extensions::list_extensions(self.lifecycle_facade.as_ref(), caller).await
+    }
+
+    async fn list_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        self.skills_facade.list_skills(caller).await
+    }
+
+    async fn search_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        self.skills_facade.search_skills(caller, query).await
+    }
+
+    async fn install_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade
+            .install_skill(caller, name, content)
+            .await
+    }
+
+    async fn read_skill_content(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        self.skills_facade.read_skill_content(caller, name).await
+    }
+
+    async fn update_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade.update_skill(caller, name, content).await
+    }
+
+    async fn remove_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade.remove_skill(caller, name).await
     }
 
     async fn list_extension_registry(
