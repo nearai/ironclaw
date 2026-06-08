@@ -995,33 +995,21 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(runs_by_trigger);
         }
         let limit = limit.min(crate::MAX_TRIGGER_RUN_HISTORY_LIMIT) as i64;
-        let placeholders = (0..trigger_ids.len())
-            .map(|index| format!("?{}", index + 2))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let limit_parameter = trigger_ids.len() + 2;
+        let trigger_ids_json = trigger_ids_json_array(trigger_ids);
         let sql = format!(
             "SELECT {TRIGGER_RUN_COLUMNS}
              FROM (
                  SELECT {TRIGGER_RUN_COLUMNS},
                         ROW_NUMBER() OVER (PARTITION BY trigger_id ORDER BY fire_slot DESC) AS row_rank
                  FROM {TRIGGER_RUN_TABLE}
-                 WHERE tenant_id = ?1 AND trigger_id IN ({placeholders})
+                 WHERE tenant_id = ?1 AND trigger_id IN (SELECT value FROM json_each(?2))
              )
-             WHERE row_rank <= ?{limit_parameter}
+             WHERE row_rank <= ?3
              ORDER BY trigger_id, fire_slot DESC"
         );
-        let mut params = Vec::with_capacity(trigger_ids.len() + 2);
-        params.push(libsql::Value::Text(tenant_id.as_str().to_string()));
-        params.extend(
-            trigger_ids
-                .iter()
-                .map(|trigger_id| libsql::Value::Text(trigger_id.to_string())),
-        );
-        params.push(libsql::Value::Integer(limit));
         let conn = self.connect().await?;
         let mut rows = conn
-            .query(&sql, params)
+            .query(&sql, params![tenant_id.as_str(), trigger_ids_json, limit])
             .await
             .map_err(|error| backend_error("query trigger run history batch", error))?;
         loop {
@@ -1420,6 +1408,21 @@ async fn upsert_run_history(
 }
 
 #[cfg(feature = "libsql")]
+fn trigger_ids_json_array(trigger_ids: &[TriggerId]) -> String {
+    let mut value = String::from("[");
+    for (index, trigger_id) in trigger_ids.iter().enumerate() {
+        if index > 0 {
+            value.push(',');
+        }
+        value.push('"');
+        value.push_str(&trigger_id.to_string());
+        value.push('"');
+    }
+    value.push(']');
+    value
+}
+
+#[cfg(feature = "libsql")]
 async fn complete_run_history(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1455,7 +1458,7 @@ async fn complete_run_history(
             .thread_id
             .as_str(),
             run_history_status_text(status),
-            fmt_ts(&fire_slot),
+            fmt_ts(&completed_at),
             fmt_ts(&completed_at),
         ],
     )

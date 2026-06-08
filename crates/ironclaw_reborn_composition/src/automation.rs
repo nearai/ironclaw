@@ -12,12 +12,11 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_product_workflow::{
     AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind,
+    RebornAutomationRecentRunInfo, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -156,28 +155,11 @@ struct RawAutomationRecord {
     #[serde(default)]
     last_status: Option<RebornAutomationRunStatus>,
     #[serde(default)]
-    recent_runs: Vec<RawAutomationRecentRunRecord>,
+    recent_runs: Vec<RebornAutomationRecentRunInfo>,
     #[serde(default)]
     is_active: bool,
     #[serde(default)]
     created_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawAutomationRecentRunRecord {
-    #[serde(default)]
-    run_id: Option<String>,
-    thread_id: String,
-    #[serde(default)]
-    fire_slot: Option<DateTime<Utc>>,
-    #[serde(
-        default = "default_recent_run_error_status",
-        deserialize_with = "deserialize_recent_run_status"
-    )]
-    status: RebornAutomationRecentRunStatus,
-    submitted_at: DateTime<Utc>,
-    #[serde(default)]
-    completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,27 +199,10 @@ fn automation_info(record: RawAutomationRecord) -> Option<RebornAutomationInfo> 
         next_run_at: record.next_run_at,
         last_run_at: record.last_run_at,
         last_status: record.last_status,
-        recent_runs: record
-            .recent_runs
-            .into_iter()
-            .map(automation_recent_run_info)
-            .collect(),
+        recent_runs: record.recent_runs,
         is_active: record.is_active,
         created_at: record.created_at,
     })
-}
-
-fn automation_recent_run_info(
-    record: RawAutomationRecentRunRecord,
-) -> RebornAutomationRecentRunInfo {
-    RebornAutomationRecentRunInfo {
-        run_id: record.run_id,
-        thread_id: record.thread_id,
-        fire_slot: record.fire_slot,
-        status: record.status,
-        submitted_at: record.submitted_at,
-        completed_at: record.completed_at,
-    }
 }
 
 fn automation_source(schedule: RawAutomationSchedule) -> Option<RebornAutomationSource> {
@@ -269,25 +234,6 @@ fn sanitize_automation_list_output(output: &mut Value) {
         trigger_object.insert("last_status".to_string(), status);
         trigger_object.insert("state".to_string(), state);
     }
-}
-
-fn default_recent_run_error_status() -> RebornAutomationRecentRunStatus {
-    RebornAutomationRecentRunStatus::Error
-}
-
-fn deserialize_recent_run_status<'de, D>(
-    deserializer: D,
-) -> Result<RebornAutomationRecentRunStatus, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = Value::deserialize(deserializer)?;
-    Ok(match value.as_str() {
-        Some("running") => RebornAutomationRecentRunStatus::Running,
-        Some("ok") => RebornAutomationRecentRunStatus::Ok,
-        Some("error") => RebornAutomationRecentRunStatus::Error,
-        _ => RebornAutomationRecentRunStatus::Error,
-    })
 }
 
 fn trigger_execution_context(
@@ -500,10 +446,16 @@ mod tests {
         );
         assert_eq!(automations[0].recent_runs.len(), 1);
         assert_eq!(
-            automations[0].recent_runs[0].run_id.as_deref(),
-            Some("run-listed")
+            automations[0].recent_runs[0]
+                .run_id
+                .map(|run_id| run_id.to_string())
+                .as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
         );
-        assert_eq!(automations[0].recent_runs[0].thread_id, "thread-listed");
+        assert_eq!(
+            automations[0].recent_runs[0].thread_id.as_str(),
+            "thread-listed"
+        );
         assert_eq!(
             automations[0].recent_runs[0].status,
             RebornAutomationRecentRunStatus::Running
@@ -986,7 +938,7 @@ mod tests {
             "is_active": true,
             "created_at": "2026-06-02T18:00:00Z",
             "recent_runs": [{
-                "run_id": "run-listed",
+                "run_id": "11111111-1111-1111-1111-111111111111",
                 "thread_id": "thread-listed",
                 "fire_slot": "2026-06-03T09:00:00Z",
                 "status": "running",

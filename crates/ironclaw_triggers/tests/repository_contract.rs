@@ -2699,6 +2699,47 @@ mod fire_claim_contract {
         assert_eq!(runs[0].run_id, None);
         assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
         assert!(runs[0].completed_at.is_some());
+
+        let missing_history_trigger_id =
+            TriggerId::parse("01J00000000000000000000034").expect("ulid");
+        let missing_history_tenant_id = tenant("tenant-run-history-missing-running-row");
+        let missing_history_fire_slot = ts(1_704_067_300);
+        let missing_history_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f82").expect("valid run");
+        let mut missing_history_record = sample_record(
+            missing_history_trigger_id,
+            missing_history_tenant_id.clone(),
+            missing_history_fire_slot,
+        );
+        missing_history_record.active_fire_slot = Some(missing_history_fire_slot);
+        missing_history_record.active_run_ref = Some(missing_history_run_id);
+        repo.upsert_trigger(missing_history_record)
+            .await
+            .expect("insert active record without run history row");
+
+        repo.clear_active_fire(ClearActiveFireRequest {
+            tenant_id: missing_history_tenant_id.clone(),
+            trigger_id: missing_history_trigger_id,
+            fire_slot: missing_history_fire_slot,
+            run_id: missing_history_run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("clear active fire without running history row")
+        .expect("active fire should clear");
+
+        let runs = repo
+            .list_trigger_run_history(missing_history_tenant_id, missing_history_trigger_id, 10)
+            .await
+            .expect("list inserted completion run history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, Some(missing_history_run_id));
+        assert_eq!(runs[0].status, TriggerRunHistoryStatus::Ok);
+        assert_eq!(
+            runs[0].submitted_at,
+            runs[0].completed_at.expect("completion timestamp"),
+            "completion-only run-history rows must use completed_at as fallback submitted_at"
+        );
     }
 
     async fn assert_run_history_retention_contract(repo: &impl TriggerRepository) {

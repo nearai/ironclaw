@@ -68,6 +68,26 @@ test("normalizeAutomations handles empty and malformed schedule payloads", () =>
   assert.equal(automations[0].last_status_tone, "muted");
 });
 
+test("normalizeAutomations preserves legacy last_run_at when recent history is empty", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "legacy-run",
+        name: "Legacy run",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        last_run_at: "2026-06-04T16:01:00Z",
+        last_status: "ok",
+        recent_runs: [],
+      },
+    ],
+  });
+
+  assert.equal(automations.length, 1);
+  assert.match(automations[0].last_run_label, /Jun 4/);
+  assert.equal(automations[0].last_status_label, "Done");
+});
+
 test("scheduleLabel presents common recurring schedules in friendly language", () => {
   assert.equal(scheduleLabel("30 14 * * *"), "Every day at 2:30 PM");
   assert.equal(scheduleLabel("0 30 14 * * *"), "Every day at 2:30 PM");

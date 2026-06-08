@@ -1013,7 +1013,7 @@ async fn complete_run_history(
             &format!(
                 "INSERT INTO {TRIGGER_RUN_TABLE} (
                     tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $3, $7)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
                 ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
                     run_id = COALESCE(trigger_run_history.run_id, EXCLUDED.run_id),
                     status = EXCLUDED.status,

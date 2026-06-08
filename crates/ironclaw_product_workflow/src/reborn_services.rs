@@ -2418,7 +2418,7 @@ fn clamp_automation_list_limit(requested: Option<u32>) -> usize {
 
 fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE);
-    let clamped = raw.clamp(1, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE);
+    let clamped = raw.min(AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE);
     clamped as usize
 }
 

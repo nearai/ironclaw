@@ -185,7 +185,7 @@ function normalizeAutomation(automation) {
     recentRuns.find((run) => run.status === "ok" || run.status === "error") ||
     null;
   const lastStatus = lastCompletedRun?.status || automation.last_status;
-  const lastRunAt = lastCompletedRun?.completed_at || null;
+  const lastRunAt = lastCompletedRun?.completed_at || automation.last_run_at || null;
 
   return {
     ...automation,

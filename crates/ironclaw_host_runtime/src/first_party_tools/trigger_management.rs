@@ -9,7 +9,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_triggers::{
     TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerRunRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -24,7 +24,7 @@ use super::{
     first_party_capability_manifest, input_error, resource_profile,
 };
 
-const TRIGGER_LIST_LIMIT: usize = 100;
+const TRIGGER_LIST_MAX_LIMIT: usize = 100;
 const TRIGGER_RUN_HISTORY_DEFAULT_LIMIT: usize = 25;
 const TRIGGER_RUN_HISTORY_MAX_LIMIT: usize = 100;
 
@@ -271,8 +271,8 @@ async fn list_triggers(
     let input: TriggerListInput = serde_json::from_value(input).map_err(|_| input_error())?;
     let limit = input
         .limit
-        .unwrap_or(TRIGGER_LIST_LIMIT)
-        .min(TRIGGER_LIST_LIMIT);
+        .unwrap_or(TRIGGER_LIST_MAX_LIMIT)
+        .min(TRIGGER_LIST_MAX_LIMIT);
     let run_limit = input
         .run_limit
         .unwrap_or(TRIGGER_RUN_HISTORY_DEFAULT_LIMIT)
@@ -354,18 +354,10 @@ fn trigger_run_output(run: &TriggerRunRecord) -> Value {
         "fire_slot": run.fire_slot,
         "run_id": run.run_id.as_ref().map(ToString::to_string),
         "thread_id": run.thread_id.as_str(),
-        "status": trigger_run_history_status_text(run.status),
+        "status": run.status,
         "submitted_at": run.submitted_at,
         "completed_at": run.completed_at,
     })
-}
-
-fn trigger_run_history_status_text(status: TriggerRunHistoryStatus) -> &'static str {
-    match status {
-        TriggerRunHistoryStatus::Running => "running",
-        TriggerRunHistoryStatus::Ok => "ok",
-        TriggerRunHistoryStatus::Error => "error",
-    }
 }
 
 fn trigger_remove_output(record: &TriggerRecord) -> Value {

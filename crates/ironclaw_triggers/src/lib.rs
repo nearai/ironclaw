@@ -6,7 +6,7 @@
 //! by later slices.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -795,8 +795,12 @@ pub trait TriggerRepository: Send + Sync {
     /// Returns recent run-history rows for several tenant-scoped triggers.
     ///
     /// Each entry is ordered newest first by fire slot and truncated to `limit`.
-    /// Implementations should override this when they can fetch all trigger
-    /// histories in one query.
+    ///
+    /// The default implementation issues one serial
+    /// [`list_trigger_run_history`] call per trigger id. Storage-backed
+    /// repositories used by list-page or UI paths should override this with a
+    /// true batch query so callers do not accidentally introduce N sequential
+    /// round-trips.
     async fn list_trigger_run_history_batch(
         &self,
         tenant_id: TenantId,
@@ -1292,6 +1296,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         record.active_fire_slot = None;
         record.active_run_ref = None;
         let record = record.clone();
+        let completed_at = Utc::now();
         state
             .runs
             .entry(TriggerRunRepositoryKey::new(
@@ -1302,7 +1307,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             .and_modify(|run| {
                 run.run_id = Some(request.run_id);
                 run.status = request.status;
-                run.completed_at = Some(Utc::now());
+                run.completed_at = Some(completed_at);
             })
             .or_insert_with(|| {
                 let mut run = TriggerRunRecord::running(
@@ -1310,10 +1315,10 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     request.trigger_id,
                     request.fire_slot,
                     Some(request.run_id),
-                    request.fire_slot,
+                    completed_at,
                 );
                 run.status = request.status;
-                run.completed_at = Some(Utc::now());
+                run.completed_at = Some(completed_at);
                 run
             });
         prune_run_history_locked(&mut state, &request.tenant_id, request.trigger_id);
@@ -1354,16 +1359,23 @@ impl TriggerRepository for InMemoryTriggerRepository {
         }
         let limit = limit.min(MAX_TRIGGER_RUN_HISTORY_LIMIT);
         let state = self.lock_state()?;
+        let trigger_id_set = trigger_ids.iter().copied().collect::<HashSet<_>>();
         for trigger_id in trigger_ids {
-            let mut runs = state
-                .runs
-                .values()
-                .filter(|run| run.tenant_id == tenant_id && run.trigger_id == *trigger_id)
-                .cloned()
-                .collect::<Vec<_>>();
+            runs_by_trigger.insert(*trigger_id, Vec::new());
+        }
+        for run in state
+            .runs
+            .values()
+            .filter(|run| run.tenant_id == tenant_id && trigger_id_set.contains(&run.trigger_id))
+        {
+            runs_by_trigger
+                .entry(run.trigger_id)
+                .or_default()
+                .push(run.clone());
+        }
+        for runs in runs_by_trigger.values_mut() {
             runs.sort_by_key(|run| std::cmp::Reverse(run.fire_slot));
             runs.truncate(limit);
-            runs_by_trigger.insert(*trigger_id, runs);
         }
         Ok(runs_by_trigger)
     }
@@ -1448,7 +1460,7 @@ impl InMemoryTriggerRepository {
                     trigger_id,
                     fire_slot,
                     run_id,
-                    fire_slot,
+                    completed_at,
                 );
                 run.status = status;
                 run.completed_at = Some(completed_at);

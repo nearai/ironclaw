@@ -641,7 +641,7 @@ pub enum RebornAutomationRunStatus {
 }
 
 /// Browser-visible status for an individual automation run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornAutomationRecentRunStatus {
     Running,
@@ -649,14 +649,36 @@ pub enum RebornAutomationRecentRunStatus {
     Error,
 }
 
+impl Default for RebornAutomationRecentRunStatus {
+    fn default() -> Self {
+        Self::Error
+    }
+}
+
+impl<'de> Deserialize<'de> for RebornAutomationRecentRunStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            Some("running") => Self::Running,
+            Some("ok") => Self::Ok,
+            Some("error") => Self::Error,
+            _ => Self::Error,
+        })
+    }
+}
+
 /// Browser-safe automation run projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornAutomationRecentRunInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    pub thread_id: String,
+    pub run_id: Option<TurnRunId>,
+    pub thread_id: ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fire_slot: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub status: RebornAutomationRecentRunStatus,
     pub submitted_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

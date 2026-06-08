@@ -46,7 +46,7 @@ function RunDots({ runs }) {
     <div className="flex items-center gap-1.5" aria-label=${t("automations.table.recentRuns")}>
       ${visibleRuns.map((run) => html`
         <span
-          key=${run.run_id || run.thread_id || run.timestamp_source}
+          key=${recentRunKey(run)}
           title=${`${run.status_label} · ${run.fired_label}`}
           className=${cn(
             "h-3 w-3 rounded-full border",
@@ -59,6 +59,16 @@ function RunDots({ runs }) {
       `)}
     </div>
   `;
+}
+
+function recentRunKey(run) {
+  return run.run_id || run.thread_id || run.submitted_at || run.timestamp_source;
+}
+
+function automationRowKeyDown(event, automationId, onSelectAutomation) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  onSelectAutomation(automationId);
 }
 
 function RecentRunRow({ run, onOpenRun }) {
@@ -165,7 +175,7 @@ function AutomationDetailPanel({ automation }) {
                 <div>
                   ${automation.recent_runs.map((run) => html`
                     <${RecentRunRow}
-                      key=${run.run_id || run.thread_id || run.timestamp_source}
+                      key=${recentRunKey(run)}
                       run=${run}
                       onOpenRun=${navigate}
                     />
@@ -294,10 +304,18 @@ export function AutomationsList({
                         return html`
                           <tr
                             key=${automation.automation_id}
+                            tabIndex=${0}
+                            role="button"
                             aria-selected=${selected}
                             onClick=${() => onSelectAutomation(automation.automation_id)}
+                            onKeyDown=${(event) =>
+                              automationRowKeyDown(
+                                event,
+                                automation.automation_id,
+                                onSelectAutomation
+                              )}
                             className=${cn(
-                              "cursor-pointer border-b border-[var(--v2-panel-border)] last:border-0 hover:bg-white/[0.03]",
+                              "cursor-pointer border-b border-[var(--v2-panel-border)] last:border-0 hover:bg-white/[0.03] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--v2-accent)]",
                               selected && "bg-[var(--v2-accent-soft)]/30"
                             )}
                           >

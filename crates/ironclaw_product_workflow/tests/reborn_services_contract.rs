@@ -111,6 +111,10 @@ fn run_id_string() -> String {
     "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18".to_string()
 }
 
+fn automation_run_id() -> TurnRunId {
+    TurnRunId::parse("11111111-1111-1111-1111-111111111111").expect("valid automation run id")
+}
+
 fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> ThreadHistory {
     let thread_id = ThreadId::new(thread_id).expect("valid thread id");
     let scope = ThreadScope {
@@ -906,8 +910,8 @@ fn automation_info(
         last_run_at: None,
         last_status,
         recent_runs: vec![RebornAutomationRecentRunInfo {
-            run_id: Some("run-listed".to_string()),
-            thread_id: "thread-listed".to_string(),
+            run_id: Some(automation_run_id()),
+            thread_id: ThreadId::new("thread-listed").expect("valid thread id"),
             fire_slot: Some("2026-06-03T09:00:00Z".parse().expect("fire slot")),
             status: RebornAutomationRecentRunStatus::Ok,
             submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
@@ -4003,7 +4007,7 @@ async fn list_automation_dispatches_through_product_facade() {
         RebornAutomationRecentRunStatus::Ok
     );
     assert_eq!(
-        listed.automations[0].recent_runs[0].thread_id,
+        listed.automations[0].recent_runs[0].thread_id.as_str(),
         "thread-listed"
     );
 
@@ -4778,7 +4782,7 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
 }
 
 #[tokio::test]
-async fn list_automations_clamps_zero_run_limit_before_product_facade() {
+async fn list_automations_allows_zero_run_limit_before_product_facade() {
     let automation_facade = Arc::new(RecordingAutomationFacade::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -4800,8 +4804,8 @@ async fn list_automations_clamps_zero_run_limit_before_product_facade() {
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
-        list_calls[0].run_limit, 1,
-        "automation run history limit must be clamped to at least one run"
+        list_calls[0].run_limit, 0,
+        "explicit zero automation run history limit must disable embedded run history"
     );
 }
 
@@ -4824,6 +4828,59 @@ fn reborn_automation_state_round_trips_serde_for_every_variant() {
             serde_json::from_str(&serialized).expect("deserialize state");
         assert_eq!(deserialized, state);
     }
+}
+
+#[test]
+fn reborn_automation_recent_run_info_round_trips_typed_ids_and_sanitizes_status() {
+    let recent_run = RebornAutomationRecentRunInfo {
+        run_id: Some(automation_run_id()),
+        thread_id: ThreadId::new("thread-listed").expect("valid thread id"),
+        fire_slot: Some("2026-06-03T09:00:00Z".parse().expect("fire slot")),
+        status: RebornAutomationRecentRunStatus::Running,
+        submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
+        completed_at: None,
+    };
+
+    let serialized = serde_json::to_value(&recent_run).expect("serialize recent run");
+    assert_eq!(
+        serialized,
+        json!({
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "thread_id": "thread-listed",
+            "fire_slot": "2026-06-03T09:00:00Z",
+            "status": "running",
+            "submitted_at": "2026-06-03T09:00:01Z",
+        })
+    );
+
+    let deserialized: RebornAutomationRecentRunInfo =
+        serde_json::from_value(serialized).expect("deserialize recent run");
+    assert_eq!(deserialized, recent_run);
+
+    let sanitized: RebornAutomationRecentRunInfo = serde_json::from_value(json!({
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "thread_id": "thread-listed",
+        "status": { "backend": "future" },
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect("deserialize sanitized recent run");
+    assert_eq!(sanitized.status, RebornAutomationRecentRunStatus::Error);
+
+    serde_json::from_value::<RebornAutomationRecentRunInfo>(json!({
+        "run_id": "not-a-uuid",
+        "thread_id": "thread-listed",
+        "status": "running",
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect_err("recent run rejects malformed run_id");
+
+    serde_json::from_value::<RebornAutomationRecentRunInfo>(json!({
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "thread_id": "thread/listed",
+        "status": "running",
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect_err("recent run rejects malformed thread_id");
 }
 
 #[tokio::test]
