@@ -3476,6 +3476,16 @@ mod tests {
         .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        // This test directly seeds synthetic queued turns; stop the live worker
+        // so it cannot claim the child run before cancellation propagation.
+        runtime.worker_cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !runtime.worker_handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("turn-runner worker should stop before synthetic turn setup");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let parent_scope = runtime.turn_scope_for(&conversation.0);
         let actor = TurnActor::new(runtime.actor_user_id.clone());
