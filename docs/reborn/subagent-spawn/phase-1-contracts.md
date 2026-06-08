@@ -1407,7 +1407,7 @@ const SUBAGENT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "identity=component_identity_v1;",
     "planner=DefaultPlanner;",
     "strategies=",
-    "context:DefaultContextStrategy(max_messages=16),",
+    "context:DefaultContextStrategy(max_messages=128),",
     "capability:DefaultCapabilityStrategy(all),",
     "model:DefaultModelStrategy(primary_or_fallback_index),",
     "batch:DefaultBatchPolicyStrategy(exclusive_sequential),",

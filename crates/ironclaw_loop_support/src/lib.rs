@@ -28,6 +28,7 @@ pub mod identity_context;
 mod input_port;
 mod input_queue;
 mod model_capability_view;
+mod prompt_context_budget;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
@@ -75,6 +76,7 @@ pub use identity_context::{
 };
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
+pub use ironclaw_turns::run_profile::PromptContextTokenBudget;
 pub use skill_bundle_context_source::SkillBundleContextSource;
 pub use skill_bundle_source::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
@@ -197,6 +199,7 @@ where
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     identity_budget: IdentityBudget,
+    prompt_context_budget: PromptContextTokenBudget,
     identity_candidates: Arc<IdentityCandidateCache>,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
 }
@@ -262,6 +265,7 @@ where
             skill_context_source: None,
             identity_context_source: None,
             identity_budget: IdentityBudget::default(),
+            prompt_context_budget: PromptContextTokenBudget::default(),
             identity_candidates: Arc::new(IdentityCandidateCache::new()),
             milestone_sink: None,
         }
@@ -282,6 +286,11 @@ where
 
     pub fn with_identity_budget(mut self, budget: IdentityBudget) -> Self {
         self.identity_budget = budget;
+        self
+    }
+
+    pub fn with_prompt_context_token_budget(mut self, budget: PromptContextTokenBudget) -> Self {
+        self.prompt_context_budget = budget;
         self
     }
 
@@ -356,10 +365,14 @@ where
             None => Vec::new(),
         };
 
+        let messages = prompt_context_budget::select_prompt_context_messages(
+            context.messages,
+            self.prompt_context_budget,
+        );
+
         Ok(LoopContextBundle {
             identity_messages,
-            messages: context
-                .messages
+            messages: messages
                 .into_iter()
                 .filter_map(context_message_to_loop_message)
                 .collect(),
@@ -846,6 +859,7 @@ where
     gateway: Arc<G>,
     capabilities: Option<Arc<dyn LoopCapabilityPort>>,
     max_messages: usize,
+    prompt_context_budget: PromptContextTokenBudget,
     prompt_authority: LoopPromptBundleAuthority,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
@@ -872,6 +886,7 @@ where
             gateway,
             capabilities: None,
             max_messages,
+            prompt_context_budget: PromptContextTokenBudget::default(),
             prompt_authority: LoopPromptBundleAuthority::shared(),
             milestone_sink: None,
             skill_context_source: None,
@@ -895,6 +910,7 @@ where
             gateway,
             capabilities: None,
             max_messages,
+            prompt_context_budget: PromptContextTokenBudget::default(),
             prompt_authority: LoopPromptBundleAuthority::shared(),
             milestone_sink: Some(milestone_sink),
             skill_context_source: None,
@@ -913,6 +929,11 @@ where
         prompt_authority: LoopPromptBundleAuthority,
     ) -> Self {
         self.prompt_authority = prompt_authority;
+        self
+    }
+
+    pub fn with_prompt_context_token_budget(mut self, budget: PromptContextTokenBudget) -> Self {
+        self.prompt_context_budget = budget;
         self
     }
 
@@ -1107,8 +1128,12 @@ where
             .map_err(context_read_error)?;
 
         if requested_messages.is_empty() {
-            let mut messages = Vec::with_capacity(context.messages.len());
-            for message in context.messages {
+            let context_messages = prompt_context_budget::select_prompt_context_messages(
+                context.messages,
+                self.prompt_context_budget,
+            );
+            let mut messages = Vec::with_capacity(context_messages.len());
+            for message in context_messages {
                 let Some(content_ref) = message_ref_from_context(&message) else {
                     continue;
                 };

@@ -1,5 +1,5 @@
 use crate::state::{IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
-use ironclaw_turns::run_profile::LoopRunContext;
+use ironclaw_turns::run_profile::{LoopRunContext, PromptContextTokenBudget};
 
 /// Decides whether to replace older transcript context with a host-managed summary.
 ///
@@ -39,18 +39,27 @@ pub(crate) struct DefaultCompactionStrategy {
 }
 
 impl DefaultCompactionStrategy {
-    pub const DEFAULT_CONTEXT_LIMIT_TOKENS: u64 = 128_000;
-    pub const DEFAULT_RESERVE_TOKENS: u64 = 20_000;
-    pub const DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS: u64 = 0;
+    pub const DEFAULT_CONTEXT_LIMIT_TOKENS: u64 =
+        PromptContextTokenBudget::DEFAULT_CONTEXT_LIMIT_TOKENS;
+    pub const DEFAULT_RESERVE_TOKENS: u64 = PromptContextTokenBudget::DEFAULT_RESERVE_TOKENS;
+    pub const DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS: u64 =
+        PromptContextTokenBudget::DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS;
     pub const DEFAULT_PRESERVE_TAIL_TOKENS: u64 = 8_000;
     pub const DEFAULT_DEADLINE_MS: u64 = 30_000;
+
+    fn prompt_context_budget(&self) -> PromptContextTokenBudget {
+        PromptContextTokenBudget::new(
+            self.context_limit_tokens,
+            self.reserve_tokens,
+            self.main_loop_max_output_tokens,
+        )
+    }
 
     pub(super) fn can_evaluate(&self, state: &LoopExecutionState) -> bool {
         if state.compaction_prompt.message_index.is_empty() {
             return false;
         }
-        let output_buffer = self.reserve_tokens.max(self.main_loop_max_output_tokens);
-        let threshold = self.context_limit_tokens.saturating_sub(output_buffer);
+        let threshold = self.prompt_context_budget().visible_transcript_tokens();
         if threshold <= self.preserve_tail_tokens {
             return false;
         }

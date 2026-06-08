@@ -14,10 +14,11 @@ use ironclaw_loop_support::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
     HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    IdentityApplicability, IdentityBudget, IdentityFileName, SkillBundleContextSource,
-    SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath,
-    SkillSourceKind, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
-    ThreadBackedLoopTranscriptPort, build_skill_run_snapshot, identity_message_ref,
+    IdentityApplicability, IdentityBudget, IdentityFileName, PromptContextTokenBudget,
+    SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId, SkillBundleSource,
+    SkillBundleSourceError, SkillFilePath, SkillSourceKind, ThreadBackedLoopContextPort,
+    ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, build_skill_run_snapshot,
+    identity_message_ref,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
@@ -95,6 +96,109 @@ async fn thread_context_port_loads_policy_filtered_transcript_messages() {
     assert_eq!(compaction.kind, LoopContextCompactionKind::User);
     assert!(compaction.estimated_tokens > 0);
     assert!(bundle.memory_snippets.is_empty());
+}
+
+#[tokio::test]
+async fn thread_context_port_applies_prompt_token_budget_to_scanned_messages() {
+    let fixture = ThreadFixture::new_with_user_content("old short").await;
+    fixture
+        .accept_user_message("event-2", &"large ".repeat(32))
+        .await;
+    fixture.accept_user_message("event-3", "latest short").await;
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_prompt_context_token_budget(PromptContextTokenBudget::new(4, 0, 0));
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.messages.len(), 1);
+    let compaction = bundle.messages[0]
+        .compaction
+        .as_ref()
+        .expect("budget-admitted message should retain compaction metadata");
+    assert_eq!(compaction.sequence, 3);
+}
+
+#[tokio::test]
+async fn prompt_port_default_scan_reaches_past_old_sixteen_message_tail() {
+    let fixture = ThreadFixture::new_with_user_content("message 1").await;
+    for sequence in 2..=17 {
+        fixture
+            .accept_user_message(&format!("event-{sequence}"), &format!("message {sequence}"))
+            .await;
+    }
+    let context_port = Arc::new(ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        128,
+    ));
+    let prompt_port = HostManagedLoopPromptPort::new(
+        fixture.run_context.clone(),
+        context_port,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+    );
+
+    let prompt_bundle = prompt_port
+        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(128),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(prompt_bundle.compaction_message_index.len(), 17);
+    assert_eq!(prompt_bundle.compaction_message_index[0].sequence, 1);
+    assert_eq!(prompt_bundle.compaction_message_index[16].sequence, 17);
+}
+
+#[tokio::test]
+async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallback() {
+    let fixture = ThreadFixture::new_with_user_content("old short").await;
+    fixture
+        .accept_user_message("event-2", &"large ".repeat(32))
+        .await;
+    fixture.accept_user_message("event-3", "latest short").await;
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_prompt_context_token_budget(PromptContextTokenBudget::new(4, 0, 0));
+    issue_prompt_grant(&fixture.run_context, &[]);
+
+    port.stream_model(LoopModelRequest {
+        messages: Vec::new(),
+        surface_version: None,
+        model_preference: None,
+        capability_view: None,
+    })
+    .await
+    .unwrap();
+
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].messages.len(), 1);
+    assert_eq!(calls[0].messages[0].content, "latest short");
 }
 
 #[tokio::test]
@@ -3649,6 +3753,25 @@ impl ThreadFixture {
             user_message_id: accepted.message_id,
             run_context,
         }
+    }
+
+    async fn accept_user_message(
+        &self,
+        external_event_id: &str,
+        content: &str,
+    ) -> AcceptedInboundMessage {
+        self.thread_service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: self.thread_scope.clone(),
+                thread_id: self.thread_id.clone(),
+                actor_id: "user-loop-support".to_string(),
+                source_binding_id: Some("source-web".to_string()),
+                reply_target_binding_id: Some("reply-web".to_string()),
+                external_event_id: Some(external_event_id.to_string()),
+                content: MessageContent::text(content),
+            })
+            .await
+            .unwrap()
     }
 }
 
