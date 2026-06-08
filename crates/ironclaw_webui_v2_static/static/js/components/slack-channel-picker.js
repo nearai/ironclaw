@@ -31,17 +31,11 @@ export function SlackChannelPicker({ action }) {
   const subjects = subjectsQuery.data?.subjects || [];
   const subjectsSettled = subjectsQuery.isSuccess || subjectsQuery.isError;
   const hasRoutableSubjects = subjects.length > 0;
-  const defaultSubjectUserId = subjects[0]?.subject_user_id || "";
 
   React.useEffect(() => {
     if (!channelsQuery.data) return;
     setChannels(normalizeSlackChannels(channelsQuery.data.channels || []));
   }, [channelsQuery.data]);
-
-  React.useEffect(() => {
-    if (!defaultSubjectUserId || draftSubjectUserId) return;
-    setDraftSubjectUserId(defaultSubjectUserId);
-  }, [defaultSubjectUserId]);
 
   const saveMutation = useMutation({
     mutationFn: ({ channels }) => saveSlackAllowedChannels(channels),
@@ -57,13 +51,10 @@ export function SlackChannelPicker({ action }) {
   const addChannel = () => {
     const nextId = draftChannelId.trim();
     if (!nextId || !subjectsQuery.isSuccess) return;
-    const subjectUserId = hasRoutableSubjects
-      ? draftSubjectUserId || defaultSubjectUserId
-      : "";
     setChannels((channels) =>
       normalizeSlackChannels([
         ...channels,
-        { channel_id: nextId, subject_user_id: subjectUserId },
+        { channel_id: nextId, subject_user_id: draftSubjectUserId },
       ]),
     );
     setDraftChannelId("");
@@ -86,8 +77,6 @@ export function SlackChannelPicker({ action }) {
   const saveChannels = () => {
     saveMutation.mutate({ channels });
   };
-  const hasMissingSubject =
-    hasRoutableSubjects && channels.some((channel) => !channel.subject_user_id);
   const hasBlankSubjectDuringCatalogError =
     subjectsQuery.isError && channels.some((channel) => !channel.subject_user_id);
 
@@ -118,13 +107,15 @@ export function SlackChannelPicker({ action }) {
           className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
         />
         <select
-          value=${draftSubjectUserId || defaultSubjectUserId}
+          value=${draftSubjectUserId}
           onChange=${(event) => setDraftSubjectUserId(event.target.value)}
           disabled=${!hasRoutableSubjects}
           className="h-9 min-w-0 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
         >
           ${!hasRoutableSubjects &&
           html`<option value="">${copy.noSubjectsLabel}</option>`}
+          ${hasRoutableSubjects &&
+          html`<option value="">${copy.autoSubjectLabel}</option>`}
           ${subjects.map(
             (subject) => html`
               <option key=${subject.subject_user_id} value=${subject.subject_user_id}>
@@ -170,6 +161,7 @@ export function SlackChannelPicker({ action }) {
                         updateChannelSubject(channel.channel_id, event.target.value)}
                       className="h-8 rounded-md border border-white/10 bg-white/[0.04] px-2 text-xs text-iron-100 outline-none focus:border-signal/45"
                     >
+                      <option value="">${copy.autoSubjectLabel}</option>
                       ${subjectOptionsForChannel(subjects, channel).map(
                         (subject) => html`
                           <option key=${subject.subject_user_id} value=${subject.subject_user_id}>
@@ -204,8 +196,7 @@ export function SlackChannelPicker({ action }) {
           disabled=${!channelsQuery.isSuccess ||
           !subjectsSettled ||
           saveMutation.isPending ||
-          hasBlankSubjectDuringCatalogError ||
-          hasMissingSubject}
+          hasBlankSubjectDuringCatalogError}
         >
           ${saveMutation.isPending ? copy.savingLabel : copy.submitLabel}
         <//>

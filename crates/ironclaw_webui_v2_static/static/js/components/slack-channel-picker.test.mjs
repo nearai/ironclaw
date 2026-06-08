@@ -176,7 +176,7 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   valuesAfter(rendered, "onClick=")[0]();
   assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
     { channel_id: "C0ENG", subject_user_id: "user:eng-team-agent" },
-    { channel_id: "C0NEW", subject_user_id: "user:eng-team-agent" },
+    { channel_id: "C0NEW", subject_user_id: "" },
     { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent" },
   ]);
 
@@ -188,7 +188,7 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
     rowFunctions[rowFunctions.length - 1]();
   }
   assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
-    { channel_id: "C0NEW", subject_user_id: "user:eng-team-agent" },
+    { channel_id: "C0NEW", subject_user_id: "" },
     { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent" },
   ]);
 
@@ -196,7 +196,7 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   valuesAfter(rendered, "onClick=").at(-1)();
   assert.deepEqual(JSON.parse(JSON.stringify(saveCalls)), [
     [
-      { channel_id: "C0NEW", subject_user_id: "user:eng-team-agent" },
+      { channel_id: "C0NEW", subject_user_id: "" },
       { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent" },
     ],
   ]);
