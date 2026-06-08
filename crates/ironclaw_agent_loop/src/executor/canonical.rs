@@ -298,15 +298,23 @@ impl DefaultExecutorPipeline {
                     state.iteration = state.iteration.saturating_add(1);
                 }
 
-                PromptStep::SkipModel(skipped_state) => {
+                PromptStep::SkipModel(skipped_state, ack) => {
                     // Compaction-only turn: the prompt stage ran compaction and
                     // set skip_model_this_iteration. Bypass CheckpointStage
-                    // (BeforeModel), pending_input_ack.ack, ModelStage,
-                    // reply/capability, and PostCapabilityStage entirely. Route
-                    // the synthetic summary through stop.observe + stop.decide
-                    // so noprogress detection sees the turn (without counting it
-                    // as AfterCapabilityBatch evidence).
+                    // (BeforeModel), ModelStage, reply/capability, and
+                    // PostCapabilityStage entirely. Route the synthetic summary
+                    // through stop.observe + stop.decide so noprogress detection
+                    // sees the turn (without counting it as AfterCapabilityBatch
+                    // evidence).
                     let skipped_state = *skipped_state;
+                    // Restore the inbound ack that PromptStep::SkipModel now
+                    // carries (PromptCompactionStep only acks on Compacted; the
+                    // Skipped branch returns without acking, so without this
+                    // field the ack would be permanently lost).
+                    pending_input_ack = ack;
+                    // Deliver the ack before stop.observe, mirroring the timing
+                    // of the Prepared path (line ~133: ack before ModelStage).
+                    pending_input_ack.ack(host).await?;
                     let summary = crate::strategies::TurnSummary::compaction_only();
 
                     let (mut next_state, summary) = match self

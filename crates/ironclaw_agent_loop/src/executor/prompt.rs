@@ -56,8 +56,15 @@ pub(super) enum PromptStep {
     /// model call this iteration. canonical.rs bypasses ModelStage +
     /// CapabilityStage + PostCapabilityStage and routes directly to
     /// StopStage.observe().
+    ///
+    /// Carries `pending_input_ack` alongside the state so canonical.rs can
+    /// ack inbound user input after stop.observe runs, mirroring the
+    /// Prepared path. PromptCompactionStep::run only acks internally on
+    /// Compacted; the Skipped branch (reachable when force_compact is
+    /// true but message_index is empty) returns without acking — without
+    /// this field the ack would silently drop.
     // Boxed to avoid a large_enum_variant warning.
-    SkipModel(Box<LoopExecutionState>),
+    SkipModel(Box<LoopExecutionState>, PendingInputAck),
 }
 
 pub(super) struct BuiltPromptBundle {
@@ -195,7 +202,7 @@ impl<'a> PromptPlanningPipeline<'a> {
                 PromptCompactionOutcome::Skipped(state) => state,
                 PromptCompactionOutcome::Compacted(state) => state,
             };
-            return Ok(PromptStep::SkipModel(Box::new(state)));
+            return Ok(PromptStep::SkipModel(Box::new(state), self.pending_input_ack));
         }
 
         let surface = self.visible_surface(surface_filter).await?;

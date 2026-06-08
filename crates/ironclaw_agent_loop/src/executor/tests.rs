@@ -262,7 +262,7 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 2);
     assert_eq!(
@@ -337,7 +337,7 @@ async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 1);
     assert_eq!(
@@ -419,7 +419,7 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
         output.state.compaction_state.last_compacted_through_seq,
@@ -504,7 +504,7 @@ async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
         output.state.compaction_prompt.message_index,
@@ -556,7 +556,7 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
         }
         PromptStep::Prepared(_) => panic!("expected cancelled exit"),
         PromptStep::Exit(exit) => panic!("expected cancelled exit, got {exit:?}"),
-        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     }
     assert_eq!(host.prompt_requests().len(), 1);
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
@@ -658,7 +658,7 @@ async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
         }
         PromptStep::Prepared(_) => panic!("security rejection should end the run"),
         PromptStep::Exit(exit) => panic!("expected failed exit, got {exit:?}"),
-        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     }
     assert_eq!(host.prompt_requests().len(), 1);
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
@@ -2332,6 +2332,7 @@ async fn spawned_child_run_result_append_failure_propagates_without_completed_re
                 child_run_id: TurnRunId::new(),
                 result_ref,
                 safe_summary: "spawned child completed".to_string(),
+                byte_len: 0,
             }],
             stopped_on_suspension: false,
         }])
@@ -2362,6 +2363,7 @@ async fn spawned_child_run_rejects_unsafe_safe_summary_without_appending_result(
                 child_run_id: TurnRunId::new(),
                 result_ref,
                 safe_summary: "/Users/alice/.ssh/id_rsa".to_string(),
+                byte_len: 0,
             }],
             stopped_on_suspension: false,
         },
@@ -2686,7 +2688,7 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
         .expect("prompt stage");
 
     let returned_state = match step {
-        PromptStep::SkipModel(state) => *state,
+        PromptStep::SkipModel(state, _ack) => *state,
         PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
         PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
     };
@@ -2702,6 +2704,64 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
         host.prompt_requests().len(),
         0,
         "no prompt bundle should be requested when skipping the model"
+    );
+}
+
+/// D1 regression: PromptStep::SkipModel must carry the pending_input_ack so
+/// canonical.rs can deliver it. Before the fix, SkipModel(Box<LoopExecutionState>)
+/// had no second field, so the ack was silently dropped when
+/// PromptCompactionStep::run returned Skipped (empty message_index path).
+#[tokio::test]
+async fn prompt_stage_skip_model_carries_pending_input_ack() {
+    let host = MockHost::new(Vec::new());
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.post_capability_state.skip_model_this_iteration = true;
+
+    // Seed a pending ack token into the PendingInputAck that will be handed
+    // to PromptStage — this simulates an inbound user input that was drained
+    // but not yet acked.
+    let mut pending_input_ack = PendingInputAck::default();
+    pending_input_ack
+        .replace(vec![
+            LoopInputAckToken::new("input-ack:skip-model").expect("valid"),
+        ])
+        .expect("store pending ack");
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack,
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    // The step must be SkipModel, and the second field must carry the ack.
+    let mut carried_ack = match step {
+        PromptStep::SkipModel(_state, ack) => ack,
+        PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
+        PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
+    };
+
+    // Nothing should have been acked yet — the ack must be carried, not fired.
+    assert!(
+        host.acked_input_tokens().is_empty(),
+        "ack must not have been delivered inside PromptStage on the Skipped path"
+    );
+
+    // Delivering the carried ack must forward the token to the host.
+    carried_ack.ack(&host).await.expect("ack inputs");
+    assert_eq!(
+        host.acked_input_tokens(),
+        vec![LoopInputAckToken::new("input-ack:skip-model").expect("valid")],
+        "carried ack must deliver the original token to the host"
     );
 }
 
@@ -2930,5 +2990,62 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
     assert!(
         host.progress_event_names().contains(&"compaction_started"),
         "compaction_started event must be emitted for the accumulated overflow"
+    );
+}
+
+/// D2 regression: byte_len was hardcoded to 0 for SpawnedChildRun outcomes.
+/// ByteCapPolicy (WU-A) never tripped for builtin.spawn_subagent — the
+/// capability with the largest configured cap (48 KB) — even when the spawned
+/// result was huge. This test drives the full executor turn with a
+/// SpawnedChildRun outcome carrying a large byte_len and asserts that
+/// pending_capability_bytes accumulates those bytes (not 0).
+#[tokio::test]
+async fn spawned_child_run_byte_len_accumulates_and_trips_policy() {
+    // Iteration 1: model → SpawnedChildRun with 49 001 bytes (> 32 000-byte
+    // default cap). PostCapabilityStage should set compaction flags.
+    // Iteration 2: SkipModel route — no model call.
+    // Iteration 3: model → reply → GracefulStop.
+    let host = MockHost::new(vec![calls_response(), reply_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::SpawnedChildRun {
+                child_run_id: TurnRunId::new(),
+                result_ref: LoopResultRef::new("result:spawned-child-large").expect("valid"),
+                safe_summary: "spawned child with large result".to_string(),
+                // Exceeds the default 32 000-byte fallback cap.
+                // If byte_len were still hardcoded to 0 in append_spawned_child_result,
+                // the policy would never trip and both flag assertions below would fail.
+                byte_len: 49_001,
+            }],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+
+    // The byte cap trip forces a SkipModel iteration before the reply, so the
+    // model is called exactly twice: once for capabilities (iteration 1) and
+    // once for the final reply (iteration 3). If byte_len were still 0, no
+    // trip would occur and the model would be called only once (no SkipModel
+    // iteration), making this assertion fail.
+    assert_eq!(
+        host.model_requests().len(),
+        2,
+        "model must be called exactly twice (capability turn + reply turn); \
+         SkipModel iteration must have fired because the byte cap was tripped by \
+         the SpawnedChildRun byte_len — was hardcoded to 0 before D2 fix"
+    );
+
+    // compaction_started event must have been emitted by PostCapabilityStage.
+    assert!(
+        host.progress_event_names().contains(&"compaction_started"),
+        "compaction_started event must be emitted when spawned-child byte_len \
+         exceeds the per-capability cap (49 001 > 32 000 default)"
     );
 }
