@@ -209,8 +209,8 @@ mod tests {
                 DoctorCheck {
                     name: "config_file".to_string(),
                     category: CheckCategory::Core,
-                    outcome: CheckOutcome::Pass,
-                    detail: "valid".to_string(),
+                    outcome: CheckOutcome::Fail,
+                    detail: "missing".to_string(),
                 },
                 DoctorCheck {
                     name: "text_only_driver".to_string(),
@@ -218,11 +218,17 @@ mod tests {
                     outcome: CheckOutcome::Pass,
                     detail: "initialized".to_string(),
                 },
+                DoctorCheck {
+                    name: "subagent_planned_driver".to_string(),
+                    category: CheckCategory::Drivers,
+                    outcome: CheckOutcome::Skip,
+                    detail: "not configured".to_string(),
+                },
             ],
             summary: DoctorSummary {
-                pass: 3,
-                fail: 0,
-                skip: 0,
+                pass: 2,
+                fail: 1,
+                skip: 1,
             },
         }
     }
@@ -295,9 +301,24 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
         assert_eq!(parsed["checks"][0]["name"], "reborn_home");
         assert_eq!(parsed["checks"][0]["outcome"], "pass");
-        assert_eq!(parsed["checks"][2]["category"], "drivers");
-        assert_eq!(parsed["summary"]["pass"], 3);
-        assert_eq!(parsed["summary"]["fail"], 0);
+        assert_eq!(parsed["checks"][1]["outcome"], "fail");
+        assert_eq!(parsed["checks"][3]["outcome"], "skip");
+        assert_eq!(parsed["checks"][3]["category"], "drivers");
+        assert_eq!(parsed["summary"]["pass"], 2);
+        assert_eq!(parsed["summary"]["fail"], 1);
+        assert_eq!(parsed["summary"]["skip"], 1);
+    }
+
+    #[test]
+    fn doctor_render_text_contains_all_three_outcome_icons() {
+        let text = render_to_string(&sample_doctor());
+        assert!(text.contains('\u{2714}'), "missing pass icon ✔");
+        assert!(text.contains('\u{2718}'), "missing fail icon ✘");
+        assert!(
+            text.contains("- subagent_planned_driver"),
+            "missing skip icon -"
+        );
+        assert!(text.contains("2 passed, 1 failed, 1 skipped"));
     }
 
     #[test]
