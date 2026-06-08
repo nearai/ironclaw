@@ -840,6 +840,12 @@ Carry-forward API and repository follow-ups from GitHub PR #4537 review:
   stores re-read and re-apply the update under their own lock/CAS semantics. Do
   not paper over this with a composition-local facade mutex; that would only
   serialize one process and one facade instance.
+- Decide whether local-dev builds with the `postgres` feature should move
+  outbound preferences, and possibly the broader non-libSQL local-dev store
+  graph, to filesystem-backed persistence. Do not switch only this one
+  preference store casually: the current non-`libsql` local-dev graph still uses
+  in-memory run, thread, checkpoint, and event stores, while production
+  PostgreSQL already routes durable state through `PostgresRootFilesystem`.
 
 If concrete Reborn product egress is not ready, leave this as fast-follow and
 ship trigger V1 as local persisted threads only.
