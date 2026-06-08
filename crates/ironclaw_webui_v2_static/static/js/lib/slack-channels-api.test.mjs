@@ -117,3 +117,28 @@ test("saveSlackAllowedChannels sends explicit selected subjects when present", a
     channels: [{ channel_id: "C0OPS", subject_user_id: "user:ops-team-agent" }],
   });
 });
+
+test("saveSlackAllowedChannels falls back to channel ids when one subject is missing", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ success: true, channels: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await saveSlackAllowedChannels([
+    { channel_id: "C0OPS", subject_user_id: "user:slack-channel:abc" },
+    { channel_id: "C0NEW", subject_user_id: "" },
+  ]);
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    channel_ids: ["C0OPS", "C0NEW"],
+  });
+});
