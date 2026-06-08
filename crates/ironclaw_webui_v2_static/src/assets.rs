@@ -137,7 +137,7 @@ mod tests {
 
         let picker = asset_text("js/components/slack-channel-picker.js");
         assert!(picker.contains("listSlackAllowedChannels"));
-        assert!(picker.contains("saveSlackAllowedChannels(ids)"));
+        assert!(picker.contains("saveSlackAllowedChannels(channels)"));
 
         let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
         assert!(channels_tab.contains("slackBuiltinStatus"));

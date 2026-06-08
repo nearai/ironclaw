@@ -74,7 +74,7 @@ struct SlackAllowedChannelSaveRequest {
 #[derive(Debug, Deserialize)]
 struct SlackAllowedChannelSaveAssignment {
     channel_id: String,
-    subject_user_id: String,
+    subject_user_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,19 +156,31 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
             scan_route_admin_field(self.config, "channel_id", &channel_id)?;
             self.config.key_for_channel(channel_id.clone())?;
 
-            let subject_user_id = channel.subject_user_id.trim().to_string();
-            if subject_user_id.is_empty() {
-                return Err(SlackRouteError::BadRequest);
-            }
-            scan_route_admin_field(self.config, "subject_user_id", &subject_user_id)?;
-            let subject_user_id =
-                UserId::new(subject_user_id).map_err(|_| SlackRouteError::BadRequest)?;
-            ensure_selected_subject_user(
-                self.config,
-                current_subjects_by_channel,
-                &channel_id,
-                &subject_user_id,
-            )?;
+            let subject_user_id = match channel
+                .subject_user_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|subject_user_id| !subject_user_id.is_empty())
+            {
+                Some(subject_user_id) => {
+                    scan_route_admin_field(self.config, "subject_user_id", subject_user_id)?;
+                    let subject_user_id = UserId::new(subject_user_id.to_string())
+                        .map_err(|_| SlackRouteError::BadRequest)?;
+                    ensure_selected_subject_user(
+                        self.config,
+                        current_subjects_by_channel,
+                        &channel_id,
+                        &subject_user_id,
+                    )?;
+                    subject_user_id
+                }
+                None => {
+                    self.config
+                        .channel_subject_assigner
+                        .assignment_for(channel_id.clone())?
+                        .subject_user_id
+                }
+            };
 
             if assignments
                 .insert(channel_id.clone(), subject_user_id.clone())
@@ -645,6 +657,59 @@ mod tests {
                     "subject_user_id": "user:raw-route-subject"
                 }
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn allowed_channel_admin_generates_only_missing_explicit_subjects() {
+        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
+        let tenant_id = TenantId::new(TENANT).expect("tenant");
+        let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
+        store
+            .upsert_route(
+                SlackChannelRouteKey::new(
+                    tenant_id,
+                    installation_id,
+                    TEAM.to_string(),
+                    "C0RAW".to_string(),
+                )
+                .expect("raw key"),
+                UserId::new("user:raw-route-subject").expect("raw subject"),
+            )
+            .await
+            .expect("seed raw route");
+
+        let response = mount
+            .protected
+            .oneshot(request(
+                "PUT",
+                r#"{"channels":[{"channel_id":"C0RAW","subject_user_id":"user:raw-route-subject"},{"channel_id":"C0NEW"}]}"#,
+                TENANT,
+            ))
+            .await
+            .expect("save responds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(
+            body["channels"][1],
+            serde_json::json!({
+                "channel_id": "C0RAW",
+                "subject_user_id": "user:raw-route-subject"
+            })
+        );
+        let generated_subject = body["channels"][0]["subject_user_id"]
+            .as_str()
+            .expect("generated subject");
+        assert_eq!(body["channels"][0]["channel_id"], "C0NEW");
+        assert_ne!(generated_subject, "user:raw-route-subject");
+        assert!(
+            generated_subject.starts_with("user:slack-channel:"),
+            "{generated_subject}"
         );
     }
 

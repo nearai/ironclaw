@@ -242,7 +242,7 @@ test("subjectOptionsForChannel keeps current route subjects row-scoped", () => {
   );
 });
 
-test("SlackChannelPicker falls back to channel ids when subject catalog fails", () => {
+test("SlackChannelPicker preserves row subjects when subject catalog fails", () => {
   const state = { hookIndex: 0, values: {} };
   const saveCalls = [];
   const query = {
@@ -320,5 +320,7 @@ test("SlackChannelPicker falls back to channel ids when subject catalog fails", 
 
   valuesAfter(rendered, "onClick=").at(-1)();
 
-  assert.deepEqual(JSON.parse(JSON.stringify(saveCalls)), [["C0RAW"]]);
+  assert.deepEqual(JSON.parse(JSON.stringify(saveCalls)), [
+    [{ channel_id: "C0RAW", subject_user_id: "user:raw-route-subject" }],
+  ]);
 });

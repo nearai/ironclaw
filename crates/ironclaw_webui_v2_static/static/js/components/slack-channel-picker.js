@@ -84,10 +84,7 @@ export function SlackChannelPicker({ action }) {
   };
 
   const saveChannels = () => {
-    const channelsForSave = subjectsQuery.isSuccess
-      ? channels
-      : channels.map((channel) => channel.channel_id);
-    saveMutation.mutate({ channels: channelsForSave });
+    saveMutation.mutate({ channels });
   };
   const hasMissingSubject =
     hasRoutableSubjects && channels.some((channel) => !channel.subject_user_id);

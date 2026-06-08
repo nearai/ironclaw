@@ -22,18 +22,17 @@ export function listSlackRoutableSubjects() {
 }
 
 export function saveSlackAllowedChannels(channels) {
-  const normalized = channels.map((channel) =>
-    typeof channel === "string"
-      ? { channel_id: channel }
-      : {
-          channel_id: channel.channel_id,
-          subject_user_id: channel.subject_user_id,
-        },
-  );
-  const body =
-    normalized.length > 0 && normalized.every((channel) => channel.subject_user_id)
-      ? { channels: normalized }
-      : { channel_ids: normalized.map((channel) => channel.channel_id) };
+  const hasStructuredChannels = channels.some((channel) => typeof channel !== "string");
+  const normalized = channels.map((channel) => {
+    if (typeof channel === "string") return { channel_id: channel };
+    return {
+      channel_id: channel.channel_id,
+      subject_user_id: channel.subject_user_id,
+    };
+  });
+  const body = hasStructuredChannels
+    ? { channels: normalized }
+    : { channel_ids: normalized.map((channel) => channel.channel_id) };
   return apiFetch(SLACK_ALLOWED_CHANNELS_PATH, {
     method: "PUT",
     body: JSON.stringify(body),
