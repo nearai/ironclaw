@@ -765,6 +765,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_terminal_byte_len_stores_value_on_matching_child() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-byte-len-happy").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_run_id))
+            .await
+            .unwrap();
+
+        store
+            .record_terminal_byte_len(&gate, child_run_id, 65_000)
+            .unwrap();
+
+        let inner = store.inner.lock();
+        let states = inner.by_gate.get(&gate).expect("gate states");
+        let state = states
+            .iter()
+            .find(|s| s.record.child_run_id == child_run_id)
+            .expect("child state");
+        assert_eq!(state.terminal_byte_len, 65_000);
+    }
+
+    #[tokio::test]
+    async fn record_terminal_byte_len_no_op_on_unknown_gate() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let bogus_gate = GateRef::new("gate:subagent-byte-len-unknown").unwrap();
+
+        // No record_awaited_child call — gate does not exist in the store.
+        let result = store.record_terminal_byte_len(&bogus_gate, child_run_id, 42);
+
+        assert!(result.is_ok(), "unknown gate must be a silent no-op");
+    }
+
+    #[tokio::test]
     async fn mark_child_delivered_does_not_mark_shared_gate_siblings() {
         let store = BoundedSubagentGateResolutionStore::new();
         let child_a = TurnRunId::new();
