@@ -77,6 +77,8 @@ impl ScopedLifecycleInstallationStore for FilesystemScopedLifecycleInstallationS
                         "created_by must match scoped lifecycle create actor",
                     ));
                 }
+                self.ensure_unique_package_installation(&installation)
+                    .await?;
             }
         }
         let cas = existing
@@ -180,6 +182,27 @@ impl ScopedLifecycleInstallationStore for FilesystemScopedLifecycleInstallationS
 }
 
 impl FilesystemScopedLifecycleInstallationStore {
+    async fn ensure_unique_package_installation(
+        &self,
+        installation: &ScopedLifecycleInstallation,
+    ) -> Result<(), ProductWorkflowError> {
+        let duplicate = self
+            .list_installations(installation.tenant_id())
+            .await?
+            .into_iter()
+            .any(|existing| {
+                existing.installation_id != installation.installation_id
+                    && existing.ownership == installation.ownership
+                    && existing.package_ref == installation.package_ref
+            });
+        if duplicate {
+            return Err(scoped_lifecycle_invalid_request(
+                "scoped lifecycle installation package already exists for ownership",
+            ));
+        }
+        Ok(())
+    }
+
     async fn load_installation(
         &self,
         tenant_id: &TenantId,
@@ -495,7 +518,7 @@ fn hex_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, Utc};
-    use ironclaw_filesystem::{DirEntry, FileStat, FilesystemOperation};
+    use ironclaw_filesystem::{DirEntry, FileStat, FilesystemOperation, Filter, Page};
     use ironclaw_host_api::UserId;
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, ScopedLifecycleActor,
@@ -549,6 +572,15 @@ mod tests {
                 path: path.clone(),
                 operation: FilesystemOperation::ListDir,
             })
+        }
+
+        async fn query(
+            &self,
+            _path: &VirtualPath,
+            _filter: &Filter,
+            _page: Page,
+        ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+            Ok(Vec::new())
         }
 
         async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {

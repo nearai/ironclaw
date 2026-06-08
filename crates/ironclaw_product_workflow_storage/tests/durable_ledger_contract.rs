@@ -356,6 +356,43 @@ async fn assert_scoped_lifecycle_store_resolves_shared_and_private_after_reopen(
         .await
         .expect("upsert private notion");
 
+    let duplicate_shared_github = ScopedLifecycleInstallation::admin_shared(
+        scoped_install_id(suffix, "shared-github-duplicate"),
+        package_ref("github"),
+        admin.clone(),
+        now,
+    )
+    .expect("duplicate admin shared install");
+    let duplicate_shared_error = store
+        .upsert_installation(UpsertScopedLifecycleInstallationRequest {
+            actor: admin.clone(),
+            installation: duplicate_shared_github,
+        })
+        .await
+        .expect_err("store rejects duplicate admin shared package");
+    assert!(matches!(
+        duplicate_shared_error,
+        ProductWorkflowError::InvalidBindingRequest { .. }
+    ));
+
+    let duplicate_private_github = ScopedLifecycleInstallation::user_private(
+        scoped_install_id(suffix, "private-github-duplicate"),
+        package_ref("github"),
+        user.clone(),
+        now,
+    );
+    let duplicate_private_error = store
+        .upsert_installation(UpsertScopedLifecycleInstallationRequest {
+            actor: user.clone(),
+            installation: duplicate_private_github,
+        })
+        .await
+        .expect_err("store rejects duplicate user private package");
+    assert!(matches!(
+        duplicate_private_error,
+        ProductWorkflowError::InvalidBindingRequest { .. }
+    ));
+
     let overwrite_as_user = store
         .upsert_installation(UpsertScopedLifecycleInstallationRequest {
             actor: user.clone(),
