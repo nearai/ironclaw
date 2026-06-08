@@ -9,6 +9,7 @@ Files here are not implementation. They describe the vocabulary, validation rule
 ## What lives here
 
 - `host-api.md` — neutral host API vocabulary contract (IDs, scopes, paths, mounts, capability grants, host ports, capability profiles, dispatch, audit).
+- `openai-compatible-api.md` — Reborn-native OpenAI-compatible Chat Completions / Responses ingress contract.
 - `capability-access.md`, `capabilities.md`, `approvals.md`, `run-state.md`, `kernel-boundary.md` — companion contracts for caller-facing capability workflow.
 - `memory-profiles.md` — draft host-defined memory capability profiles (`memory.context_retrieval.v1`, `memory.interaction_log.v1`, `memory.document_store.v1`) plus deferred entries.
 - `schemas/memory/*.json` — extension-local relative JSON schema refs that the memory profile contracts point at. These files are **cold registry artifacts**: they must never be inlined into the hot per-turn context.
