@@ -10,13 +10,13 @@ use crate::families::DEFAULT_FAMILY_DIGEST;
 use crate::family::{ComponentIdentity, LoopFamilyId};
 use crate::planner::{AgentLoopPlanner, AgentLoopPlannerInternal};
 use crate::strategies::{
-    BatchPolicyStrategy, BudgetStrategy, CapabilityStrategy, CompactionStrategy, ContextStrategy,
-    DefaultBatchPolicyStrategy, DefaultBudgetStrategy, DefaultCapabilityStrategy,
-    DefaultCompactionStrategy, DefaultContextStrategy, DefaultGateHandlingStrategy,
-    DefaultInputDrainStrategy, DefaultModelStrategy, DefaultRecoveryStrategy,
-    DefaultReplyAdmissionStrategy, DefaultStopConditionStrategy, GateHandlingStrategy,
-    InputDrainStrategy, ModelStrategy, RecoveryStrategy, ReplyAdmissionStrategy,
-    StopConditionStrategy,
+    ActiveTaskPreservingCompactionStrategy, BatchPolicyStrategy, BudgetStrategy,
+    CapabilityStrategy, CompactionStrategy, ContextStrategy, DefaultBatchPolicyStrategy,
+    DefaultBudgetStrategy, DefaultCapabilityStrategy, DefaultContextStrategy,
+    DefaultGateHandlingStrategy, DefaultInputDrainStrategy, DefaultModelStrategy,
+    DefaultRecoveryStrategy, DefaultReplyAdmissionStrategy, DefaultStopConditionStrategy,
+    GateHandlingStrategy, InputDrainStrategy, ModelStrategy, RecoveryStrategy,
+    ReplyAdmissionStrategy, StopConditionStrategy,
 };
 
 /// The reference planner: a concrete, Builtin-only strategy composition.
@@ -220,7 +220,7 @@ impl Default for DefaultStrategySlots {
     fn default() -> Self {
         Self {
             context: Arc::new(DefaultContextStrategy::default()),
-            compaction: Arc::new(DefaultCompactionStrategy::default()),
+            compaction: Arc::new(ActiveTaskPreservingCompactionStrategy::default()),
             capability: Arc::new(DefaultCapabilityStrategy),
             model: Arc::new(DefaultModelStrategy),
             batch: Arc::new(DefaultBatchPolicyStrategy),
@@ -250,8 +250,13 @@ mod tests {
     };
 
     use crate::family::{ComponentDigest, LoopFamilyId};
-    use crate::state::LoopExecutionState;
-    use crate::strategies::{BatchPolicy, CapabilityFilter, ContextPlan, ContextStrategy};
+    use crate::state::{
+        CompactionPromptSnapshot, IndexedMessageKind, LoopExecutionState, MessageIndexEntry,
+    };
+    use crate::strategies::{
+        ActiveTaskPreservingCompactionStrategy, BatchPolicy, CapabilityFilter, CompactionDecision,
+        ContextPlan, ContextStrategy, DefaultCompactionStrategy,
+    };
 
     use super::*;
 
@@ -325,6 +330,73 @@ mod tests {
 
         let filter = planner.capability().filter(&state).await;
         assert_eq!(filter, CapabilityFilter::All);
+    }
+
+    #[test]
+    fn builder_chain_overrides_compaction_strategy() {
+        let planner = DefaultPlanner::compose_default().with_compaction(Arc::new(
+            ActiveTaskPreservingCompactionStrategy::from(DefaultCompactionStrategy {
+                context_limit_tokens: 100,
+                reserve_tokens: 10,
+                main_loop_max_output_tokens: 0,
+                preserve_tail_tokens: 1,
+                deadline_ms: 7,
+            }),
+        ));
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.force_compact_on_next_iteration = true;
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 4,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 5,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 6,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 7,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 8,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+        ]);
+
+        assert_eq!(
+            planner.compaction().should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 5,
+                preserve_tail_tokens: 1,
+                deadline_ms: 7,
+            }
+        );
     }
 
     #[allow(clippy::too_many_lines)]

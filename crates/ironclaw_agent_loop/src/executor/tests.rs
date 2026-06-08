@@ -7,11 +7,11 @@ use ironclaw_turns::{
         CapabilityInputIssueCode, CapabilityInputRef, CapabilityInputRepair, CapabilityOutcome,
         CapabilityRecoveryHint, CapabilityResultMessage, LoopCancelReasonKind, LoopCheckpointKind,
         LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
-        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopInput, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopRunInfoPort,
-        LoopSafeSummary, LoopSummaryArtifactId, ObservationTrust, ParentLoopOutput,
-        ProcessHandleSummary, ProviderToolCallReplay, SameCallRetryConstraint,
-        ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest,
+        LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+        LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
+        ObservationTrust, ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay,
+        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
+        VisibleCapabilityRequest,
     },
 };
 
@@ -22,6 +22,9 @@ use crate::state::{
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
     StopKind, TurnSummary,
+};
+use crate::test_support::compaction::{
+    active_task_preserving_compaction_index, compaction_metadata,
 };
 
 use super::{
@@ -35,18 +38,6 @@ use super::{
 
 #[allow(dead_code)]
 fn _check(_: &dyn AgentLoopExecutor) {}
-
-fn compaction_metadata(
-    sequence: u64,
-    kind: LoopContextCompactionKind,
-    estimated_tokens: u64,
-) -> LoopContextCompactionMetadata {
-    LoopContextCompactionMetadata {
-        sequence,
-        kind,
-        estimated_tokens,
-    }
-}
 
 mod support;
 use support::*;
@@ -859,7 +850,7 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
         )])
         .with_prompt_compaction_indexes(vec![
             vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
-            vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
+            active_task_preserving_compaction_index(),
             Vec::new(),
         ])
         .with_compaction_result(Ok(LoopCompactionResponse {
@@ -887,7 +878,7 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
     let final_state = final_staged_state(&host);
     assert_eq!(
         final_state.compaction_state.last_compacted_through_seq,
-        Some(1)
+        Some(5)
     );
     assert!(!final_state.compaction_state.force_compact_on_next_iteration);
 }

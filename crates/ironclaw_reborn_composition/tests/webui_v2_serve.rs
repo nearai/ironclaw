@@ -608,6 +608,52 @@ async fn bearer_happy_path_dispatches_to_facade_with_host_tenant() {
 }
 
 #[tokio::test]
+async fn session_endpoint_reports_operator_capability_for_operator_authenticator() {
+    let (app, _services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&read_body_string(response).await).expect("session json");
+    assert_eq!(body["tenant_id"], TENANT);
+    assert_eq!(body["user_id"], USER);
+    assert_eq!(body["capabilities"]["operator_webui_config"], true);
+}
+
+#[tokio::test]
+async fn session_endpoint_reports_no_operator_capability_for_multi_user_authenticator() {
+    let (app, _services) = build_app_with_authenticator(Arc::new(MultiUserToken));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&read_body_string(response).await).expect("session json");
+    assert_eq!(body["tenant_id"], TENANT);
+    assert_eq!(body["user_id"], USER);
+    assert_eq!(body["capabilities"]["operator_webui_config"], false);
+}
+
+#[tokio::test]
 async fn missing_bearer_returns_401_before_facade() {
     let (app, services) = build_app();
     let response = app
@@ -1691,6 +1737,94 @@ async fn static_css_asset_returns_text_css_content_type() {
         .map(|v| v.to_str().unwrap().to_string())
         .unwrap_or_default();
     assert!(ct.starts_with("text/css"), "got content-type `{ct}`");
+}
+
+#[tokio::test]
+async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
+    // Content-shape regression guard for the i18n loader fixes (PR
+    // #4493 review): the single `setLang` transition must (1) discard a
+    // slow pack load whose promise resolves after a newer language was
+    // requested, and (2) drop the in-flight `pending[lang]` entry once it
+    // settles so a transient import failure does not cache a permanent
+    // miss. It also locks the follow-up cleanup that removed the
+    // `version` counter in favor of committing the loaded pack to state.
+    // There is no JS test harness in this workspace (see the route-shape
+    // note below), so this locks the source shape; a behavioral provider
+    // test driving `setLang('es')` through an unloaded pack belongs in
+    // the deferred JS/e2e scaffold.
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/lib/i18n.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("const activeLangRef = React.useRef(lang);"),
+        "i18n provider must track the latest requested language in a ref",
+    );
+    assert!(
+        body.contains("activeLangRef.current = next;"),
+        "setLang must stamp the requested language before awaiting the pack",
+    );
+    assert!(
+        body.contains("if (!loaded || activeLangRef.current !== next) return;"),
+        "a resolved pack load must only commit when the pack is available and still the latest request",
+    );
+    assert_eq!(
+        body.matches("delete pending[lang];").count(),
+        2,
+        "ensurePack must clear pending[lang] on BOTH the success and failure paths so a transient import failure can be retried",
+    );
+    assert!(
+        !body.contains("setVersion"),
+        "the version counter must stay removed: async loads re-render by committing the pack to state",
+    );
+}
+
+#[tokio::test]
+async fn static_typing_dot_animation_respects_reduced_motion() {
+    // Content-shape regression guard for the typing-indicator animation
+    // contract (PR #4493 review): `.v2-typing-dot` is the single
+    // intentional animation exception, so it must animate by default and
+    // be suppressed under `prefers-reduced-motion: reduce`. A behavioral
+    // check that the dot computes to `animation: none` via the emulated
+    // media query needs a browser (`getComputedStyle`), which this
+    // workspace's Rust/oneshot harness cannot drive; that belongs in the
+    // deferred e2e scaffold.
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/styles/app.css")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("animation: v2-typing-bounce"),
+        "typing dots must animate by default",
+    );
+    assert!(
+        body.contains("@media (prefers-reduced-motion: reduce)"),
+        "stylesheet must carry a reduced-motion opt-out block",
+    );
+    assert!(
+        body.contains(".v2-typing-dot { animation: none"),
+        "the typing dot must be suppressed under prefers-reduced-motion: reduce",
+    );
 }
 
 #[tokio::test]

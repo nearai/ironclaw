@@ -344,6 +344,24 @@ input:focus, select:focus, textarea:focus {
   transition: none !important;
 }
 
+/* The typing indicator is the single intentional exception: the three dots
+   loop to signal the assistant is working. The class selector outranks the
+   universal `*` rule above (both !important), so the animation survives.
+   Suppressed again under prefers-reduced-motion to respect that opt-out. */
+@keyframes v2-typing-bounce {
+  0%, 80%, 100% { transform: translateY(0);    opacity: 0.45; }
+  40%           { transform: translateY(-4px); opacity: 1; }
+}
+.v2-typing-dot {
+  animation: v2-typing-bounce 1.4s ease-in-out infinite !important;
+}
+.v2-typing-dot:nth-child(2) { animation-delay: 0.15s !important; }
+.v2-typing-dot:nth-child(3) { animation-delay: 0.3s  !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .v2-typing-dot { animation: none !important; }
+}
+
 /* ── Markdown body ───────────────────────────────────────────────── */
 
 .markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4 {

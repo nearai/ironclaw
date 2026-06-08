@@ -251,7 +251,7 @@ fn truncate_model_observation_text(value: &str) -> String {
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
-    value[..end].to_string()
+    value[..end].to_string() // safety: `end` is reduced until it lands on a valid UTF-8 boundary.
 }
 
 fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleToolObservation {

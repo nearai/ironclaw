@@ -50,6 +50,7 @@ browser-reachable.
 
 | Route ID | Method | Pattern | Streaming | Effect path |
 |---|---|---|---|---|
+| `webui.v2.get_session` | GET | `/api/webchat/v2/session` | None | `ProjectionOnly` |
 | `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | None | `ProductWorkflow` |
 | `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
 | `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | None | `ProductWorkflow` |

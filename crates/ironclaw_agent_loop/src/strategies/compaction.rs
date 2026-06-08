@@ -44,6 +44,27 @@ impl DefaultCompactionStrategy {
     pub const DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS: u64 = 0;
     pub const DEFAULT_PRESERVE_TAIL_TOKENS: u64 = 8_000;
     pub const DEFAULT_DEADLINE_MS: u64 = 30_000;
+
+    pub(super) fn can_evaluate(&self, state: &LoopExecutionState) -> bool {
+        if state.compaction_prompt.message_index.is_empty() {
+            return false;
+        }
+        let output_buffer = self.reserve_tokens.max(self.main_loop_max_output_tokens);
+        let threshold = self.context_limit_tokens.saturating_sub(output_buffer);
+        if threshold <= self.preserve_tail_tokens {
+            return false;
+        }
+        state.compaction_state.force_compact_on_next_iteration
+            || state.compaction_prompt.observed_prompt_tokens >= threshold
+    }
+
+    pub(super) fn trigger_at(&self, drop_through_seq: u64) -> CompactionDecision {
+        CompactionDecision::Trigger {
+            drop_through_seq,
+            preserve_tail_tokens: self.preserve_tail_tokens,
+            deadline_ms: self.deadline_ms,
+        }
+    }
 }
 
 impl Default for DefaultCompactionStrategy {
@@ -64,52 +85,65 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         state: &LoopExecutionState,
         _ctx: &LoopRunContext,
     ) -> CompactionDecision {
-        if state.compaction_prompt.message_index.is_empty() {
-            return CompactionDecision::Skip;
-        }
-        let output_buffer = self.reserve_tokens.max(self.main_loop_max_output_tokens);
-        let threshold = self.context_limit_tokens.saturating_sub(output_buffer);
-        if threshold <= self.preserve_tail_tokens {
-            return CompactionDecision::Skip;
-        }
-        let total_tokens = state.compaction_prompt.observed_prompt_tokens;
-        if !state.compaction_state.force_compact_on_next_iteration && total_tokens < threshold {
+        if !self.can_evaluate(state) {
             return CompactionDecision::Skip;
         }
         let prompt_fingerprint = state.compaction_prompt.fingerprint();
         if state.compaction_state.force_compact_on_next_iteration {
-            return state
-                .compaction_prompt
-                .message_index
-                .iter()
-                .rev()
-                .find(|entry| is_eligible_user_boundary(entry, state, prompt_fingerprint))
-                .map(|entry| CompactionDecision::Trigger {
-                    drop_through_seq: entry.sequence,
-                    preserve_tail_tokens: self.preserve_tail_tokens,
-                    deadline_ms: self.deadline_ms,
-                })
+            return latest_eligible_user_boundary(state, prompt_fingerprint)
+                .map(|sequence| self.trigger_at(sequence))
                 .unwrap_or(CompactionDecision::Skip);
         }
 
-        let mut tail_tokens = 0_u64;
-        for entry in state.compaction_prompt.message_index.iter().rev() {
-            if is_eligible_user_boundary(entry, state, prompt_fingerprint)
-                && tail_tokens >= self.preserve_tail_tokens
-            {
-                return CompactionDecision::Trigger {
-                    drop_through_seq: entry.sequence,
-                    preserve_tail_tokens: self.preserve_tail_tokens,
-                    deadline_ms: self.deadline_ms,
-                };
-            }
-            tail_tokens = tail_tokens.saturating_add(entry.estimated_tokens);
-        }
-        CompactionDecision::Skip
+        tail_preserving_user_boundary(
+            state,
+            prompt_fingerprint,
+            self.preserve_tail_tokens,
+            0,
+            |_| true,
+        )
+        .map(|sequence| self.trigger_at(sequence))
+        .unwrap_or(CompactionDecision::Skip)
     }
 }
 
-fn is_eligible_user_boundary(
+fn latest_eligible_user_boundary(
+    state: &LoopExecutionState,
+    prompt_fingerprint: u64,
+) -> Option<u64> {
+    state
+        .compaction_prompt
+        .message_index
+        .iter()
+        .rev()
+        .find(|entry| is_eligible_user_boundary(entry, state, prompt_fingerprint))
+        .map(|entry| entry.sequence)
+}
+
+pub(super) fn tail_preserving_user_boundary(
+    state: &LoopExecutionState,
+    prompt_fingerprint: u64,
+    preserve_tail_tokens: u64,
+    minimum_tail_messages: usize,
+    boundary_guard: impl Fn(&MessageIndexEntry) -> bool,
+) -> Option<u64> {
+    let mut tail_tokens = 0_u64;
+    let mut tail_messages = 0_usize;
+    for entry in state.compaction_prompt.message_index.iter().rev() {
+        if tail_tokens >= preserve_tail_tokens
+            && tail_messages >= minimum_tail_messages
+            && is_eligible_user_boundary(entry, state, prompt_fingerprint)
+            && boundary_guard(entry)
+        {
+            return Some(entry.sequence);
+        }
+        tail_tokens = tail_tokens.saturating_add(entry.estimated_tokens);
+        tail_messages = tail_messages.saturating_add(1);
+    }
+    None
+}
+
+pub(super) fn is_eligible_user_boundary(
     entry: &MessageIndexEntry,
     state: &LoopExecutionState,
     prompt_fingerprint: u64,

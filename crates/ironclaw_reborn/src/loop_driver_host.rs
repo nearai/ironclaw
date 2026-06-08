@@ -17,14 +17,14 @@ use ironclaw_hooks::middleware::{
 };
 use ironclaw_host_api::ExtensionId;
 use ironclaw_loop_support::{
-    CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
-    HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
-    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
-    ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
-    default_host_managed_loop_compaction_port,
+    ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
+    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, GuardedSystemInferencePort,
+    HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
+    HostSkillContextSource, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
+    ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
+    RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
+    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
+    active_task_compaction_prompt_id, host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -1060,11 +1060,12 @@ where
                 Arc::clone(&self.model_accountant),
                 Arc::clone(&self.model_policy_guard),
             ));
-        default_host_managed_loop_compaction_port(
+        host_managed_loop_compaction_port_with_prompt_id(
             system_inference,
             Arc::clone(&self.thread_service),
             self.effective_thread_scope(run_context),
-            include_str!("../../ironclaw_loop_support/prompts/compaction_summarizer_fresh.md"),
+            active_task_compaction_prompt_id(),
+            ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT,
         )
     }
 

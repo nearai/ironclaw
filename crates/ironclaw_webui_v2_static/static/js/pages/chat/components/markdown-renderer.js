@@ -86,18 +86,28 @@ function enhanceCodeBlocks(root) {
   });
 }
 
-export function MarkdownRenderer({ content, className = "" }) {
+function MarkdownRendererImpl({ content, className = "" }) {
   const ref = React.useRef(null);
+
+  // marked.parse + DOMPurify.sanitize are expensive; only re-run when
+  // the source content actually changes, not on every parent render
+  // (during streaming the message list re-renders on every token).
+  const rendered = React.useMemo(() => renderMarkdown(content), [content]);
 
   React.useEffect(() => {
     enhanceCodeBlocks(ref.current);
-  }, [content]);
+  }, [rendered]);
 
   return html`
     <div
       ref=${ref}
       className=${["markdown-body", className].join(" ")}
-      dangerouslySetInnerHTML=${{ __html: renderMarkdown(content) }}
+      dangerouslySetInnerHTML=${{ __html: rendered }}
     />
   `;
 }
+
+// Memoized so a bubble whose `content`/`className` are unchanged skips
+// re-rendering when sibling messages update (e.g. a new streaming chunk
+// elsewhere in the list).
+export const MarkdownRenderer = React.memo(MarkdownRendererImpl);
