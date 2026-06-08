@@ -322,6 +322,12 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "minimum": 0,
                     "maximum": 100,
                     "description": "Maximum triggers to return. Defaults to 100."
+                },
+                "run_limit": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Maximum recent runs to embed per trigger. Defaults to 25."
                 }
             },
             "additionalProperties": false

@@ -198,7 +198,7 @@ fn active_run_index(
         .iter()
         .map(|run| {
             let state = if run.status.is_terminal() {
-                TriggerActiveRunState::Terminal
+                TriggerActiveRunState::Terminal { status: run.status }
             } else {
                 TriggerActiveRunState::Nonterminal
             };
@@ -453,7 +453,12 @@ mod tests {
             .await;
 
         assert!(matches!(results[0], Ok(TriggerActiveRunState::Nonterminal)));
-        assert!(matches!(results[1], Ok(TriggerActiveRunState::Terminal)));
+        assert!(matches!(
+            results[1],
+            Ok(TriggerActiveRunState::Terminal {
+                status: TurnStatus::Completed
+            })
+        ));
         assert!(matches!(results[2], Ok(TriggerActiveRunState::Missing)));
     }
 

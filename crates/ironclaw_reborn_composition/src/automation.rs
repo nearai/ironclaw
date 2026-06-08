@@ -11,12 +11,13 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityRequest, RuntimeFailureKind, TRIGGER_LIST_CAPABILITY_ID,
 };
 use ironclaw_product_workflow::{
-    AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
-    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind,
+    AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -121,14 +122,15 @@ impl AutomationProductFacade for RebornWebuiAutomationFacade {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
-        limit: usize,
+        request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         let output = self
             .invoke_trigger(
                 caller,
                 TRIGGER_LIST_CAPABILITY_ID,
                 json!({
-                    "limit": limit,
+                    "limit": request.limit,
+                    "run_limit": request.run_limit,
                 }),
             )
             .await?;
@@ -154,9 +156,28 @@ struct RawAutomationRecord {
     #[serde(default)]
     last_status: Option<RebornAutomationRunStatus>,
     #[serde(default)]
+    recent_runs: Vec<RawAutomationRecentRunRecord>,
+    #[serde(default)]
     is_active: bool,
     #[serde(default)]
     created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAutomationRecentRunRecord {
+    #[serde(default)]
+    run_id: Option<String>,
+    thread_id: String,
+    #[serde(default)]
+    fire_slot: Option<DateTime<Utc>>,
+    #[serde(
+        default = "default_recent_run_error_status",
+        deserialize_with = "deserialize_recent_run_status"
+    )]
+    status: RebornAutomationRecentRunStatus,
+    submitted_at: DateTime<Utc>,
+    #[serde(default)]
+    completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,9 +217,27 @@ fn automation_info(record: RawAutomationRecord) -> Option<RebornAutomationInfo> 
         next_run_at: record.next_run_at,
         last_run_at: record.last_run_at,
         last_status: record.last_status,
+        recent_runs: record
+            .recent_runs
+            .into_iter()
+            .map(automation_recent_run_info)
+            .collect(),
         is_active: record.is_active,
         created_at: record.created_at,
     })
+}
+
+fn automation_recent_run_info(
+    record: RawAutomationRecentRunRecord,
+) -> RebornAutomationRecentRunInfo {
+    RebornAutomationRecentRunInfo {
+        run_id: record.run_id,
+        thread_id: record.thread_id,
+        fire_slot: record.fire_slot,
+        status: record.status,
+        submitted_at: record.submitted_at,
+        completed_at: record.completed_at,
+    }
 }
 
 fn automation_source(schedule: RawAutomationSchedule) -> Option<RebornAutomationSource> {
@@ -230,6 +269,25 @@ fn sanitize_automation_list_output(output: &mut Value) {
         trigger_object.insert("last_status".to_string(), status);
         trigger_object.insert("state".to_string(), state);
     }
+}
+
+fn default_recent_run_error_status() -> RebornAutomationRecentRunStatus {
+    RebornAutomationRecentRunStatus::Error
+}
+
+fn deserialize_recent_run_status<'de, D>(
+    deserializer: D,
+) -> Result<RebornAutomationRecentRunStatus, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(match value.as_str() {
+        Some("running") => RebornAutomationRecentRunStatus::Running,
+        Some("ok") => RebornAutomationRecentRunStatus::Ok,
+        Some("error") => RebornAutomationRecentRunStatus::Error,
+        _ => RebornAutomationRecentRunStatus::Error,
+    })
 }
 
 fn trigger_execution_context(
@@ -408,9 +466,9 @@ mod tests {
         RuntimeProcessHandle, RuntimeResourceGate, TRIGGER_LIST_CAPABILITY_ID,
     };
     use ironclaw_product_workflow::{
-        AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationRunStatus,
-        RebornAutomationSource, RebornAutomationState, RebornServicesErrorCode,
-        RebornServicesErrorKind,
+        AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller,
+        RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+        RebornAutomationState, RebornServicesErrorCode, RebornServicesErrorKind,
     };
     use serde_json::{Value, json};
     use tokio::sync::Mutex;
@@ -424,7 +482,7 @@ mod tests {
         let caller = caller();
 
         let automations = facade
-            .list_automations(caller.clone(), 25)
+            .list_automations(caller.clone(), automation_list_request(25, 10))
             .await
             .expect("trigger list output");
 
@@ -439,6 +497,16 @@ mod tests {
         assert_eq!(
             automations[0].last_status,
             Some(RebornAutomationRunStatus::Ok)
+        );
+        assert_eq!(automations[0].recent_runs.len(), 1);
+        assert_eq!(
+            automations[0].recent_runs[0].run_id.as_deref(),
+            Some("run-listed")
+        );
+        assert_eq!(automations[0].recent_runs[0].thread_id, "thread-listed");
+        assert_eq!(
+            automations[0].recent_runs[0].status,
+            RebornAutomationRecentRunStatus::Running
         );
         let request = runtime
             .requests
@@ -460,6 +528,7 @@ mod tests {
         assert_eq!(request.context.resource_scope.project_id, caller.project_id);
         assert_eq!(request.context.trust, TrustClass::UserTrusted);
         assert_eq!(request.input["limit"], 25);
+        assert_eq!(request.input["run_limit"], 10);
     }
 
     #[tokio::test]
@@ -469,7 +538,7 @@ mod tests {
         }))));
 
         let error = facade
-            .list_automations(caller(), 50)
+            .list_automations(caller(), automation_list_request(50, 10))
             .await
             .expect_err("malformed automation output should fail closed");
 
@@ -486,7 +555,7 @@ mod tests {
         }))));
 
         let error = facade
-            .list_automations(caller(), 50)
+            .list_automations(caller(), automation_list_request(50, 10))
             .await
             .expect_err("malformed automation output should fail closed");
 
@@ -510,12 +579,57 @@ mod tests {
         }))));
 
         let automations = facade
-            .list_automations(caller(), 50)
+            .list_automations(caller(), automation_list_request(50, 10))
             .await
             .expect("list automations");
 
         assert_eq!(automations.len(), 1);
         assert_eq!(automations[0].last_status, None);
+    }
+
+    #[tokio::test]
+    async fn automation_facade_sanitizes_malformed_recent_run_status_payloads() {
+        let mut unknown_status = raw_automation(
+            "trigger-unknown-status",
+            "Unknown run status",
+            "0 9 * * *",
+            Some("ok"),
+        )
+        .as_object()
+        .cloned()
+        .expect("object trigger");
+        unknown_status["recent_runs"][0]["status"] = json!("future_state");
+        let mut non_string_status = raw_automation(
+            "trigger-non-string-status",
+            "Non-string run status",
+            "0 10 * * *",
+            Some("ok"),
+        )
+        .as_object()
+        .cloned()
+        .expect("object trigger");
+        non_string_status["recent_runs"][0]["status"] = json!({"raw": "backend-only"});
+        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+            "triggers": [
+                Value::Object(unknown_status),
+                Value::Object(non_string_status)
+            ]
+        }))));
+
+        let automations = facade
+            .list_automations(caller(), automation_list_request(50, 10))
+            .await
+            .expect("list automations");
+
+        assert_eq!(automations.len(), 2);
+        assert_eq!(
+            automations[0].recent_runs[0].status,
+            RebornAutomationRecentRunStatus::Error
+        );
+        assert_eq!(
+            automations[1].recent_runs[0].status,
+            RebornAutomationRecentRunStatus::Error
+        );
     }
 
     #[tokio::test]
@@ -577,7 +691,7 @@ mod tests {
         }))));
 
         let automations = facade
-            .list_automations(caller(), 50)
+            .list_automations(caller(), automation_list_request(50, 10))
             .await
             .expect("list automations");
 
@@ -606,7 +720,7 @@ mod tests {
         }))));
 
         let automations = facade
-            .list_automations(caller(), 50)
+            .list_automations(caller(), automation_list_request(50, 10))
             .await
             .expect("list automations");
 
@@ -627,7 +741,7 @@ mod tests {
         }))));
 
         let error = facade
-            .list_automations(caller(), 50)
+            .list_automations(caller(), automation_list_request(50, 10))
             .await
             .expect_err("malformed record should fail closed");
 
@@ -643,7 +757,7 @@ mod tests {
         let caller = caller();
 
         let error = facade
-            .list_automations(caller, 10)
+            .list_automations(caller, automation_list_request(10, 5))
             .await
             .expect_err("runtime failure should map to services error");
 
@@ -663,7 +777,7 @@ mod tests {
 
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            facade.list_automations(caller(), 10),
+            facade.list_automations(caller(), automation_list_request(10, 5)),
         )
         .await
         .expect("facade timeout should complete promptly")
@@ -744,7 +858,7 @@ mod tests {
                 RebornWebuiAutomationFacade::new(Arc::new(OutcomeHostRuntime::new(outcome)));
 
             let error = facade
-                .list_automations(caller(), 50)
+                .list_automations(caller(), automation_list_request(50, 10))
                 .await
                 .expect_err("outcome should map to services error");
 
@@ -793,7 +907,7 @@ mod tests {
                 RebornWebuiAutomationFacade::new(Arc::new(FailingHostRuntime::new(failure_kind)));
 
             let error = facade
-                .list_automations(caller(), 10)
+                .list_automations(caller(), automation_list_request(10, 5))
                 .await
                 .expect_err("runtime failure should map to services error");
 
@@ -828,7 +942,7 @@ mod tests {
                 RebornWebuiAutomationFacade::new(Arc::new(ErrorHostRuntime::new(host_error)));
 
             let error = facade
-                .list_automations(caller(), 10)
+                .list_automations(caller(), automation_list_request(10, 5))
                 .await
                 .expect_err("host runtime error should map to services error");
 
@@ -846,6 +960,10 @@ mod tests {
             agent_id: AgentId::new("agent-alpha").expect("valid agent"),
             project_id: Some(ProjectId::new("project-alpha").expect("valid project")),
         }
+    }
+
+    fn automation_list_request(limit: usize, run_limit: usize) -> AutomationListRequest {
+        AutomationListRequest { limit, run_limit }
     }
 
     fn raw_automation(
@@ -866,7 +984,15 @@ mod tests {
             "last_run_at": null,
             "last_status": last_status,
             "is_active": true,
-            "created_at": "2026-06-02T18:00:00Z"
+            "created_at": "2026-06-02T18:00:00Z",
+            "recent_runs": [{
+                "run_id": "run-listed",
+                "thread_id": "thread-listed",
+                "fire_slot": "2026-06-03T09:00:00Z",
+                "status": "running",
+                "submitted_at": "2026-06-03T09:00:01Z",
+                "completed_at": null
+            }]
         })
     }
 

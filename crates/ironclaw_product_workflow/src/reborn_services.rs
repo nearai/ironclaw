@@ -69,7 +69,8 @@ pub use llm_config::{
     NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 pub use types::{
-    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornAutomationInfo, RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
@@ -327,12 +328,18 @@ impl ProductAgentBoundCaller {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutomationListRequest {
+    pub limit: usize,
+    pub run_limit: usize,
+}
+
 #[async_trait]
 pub trait AutomationProductFacade: Send + Sync {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
-        limit: usize,
+        request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError>;
 }
 
@@ -350,7 +357,7 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
-        _limit: usize,
+        _request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Err(automation_unavailable())
     }
@@ -1343,9 +1350,10 @@ impl RebornServicesApi for RebornServices {
             ));
         };
         let limit = clamp_automation_list_limit(request.limit);
+        let run_limit = clamp_automation_run_limit(request.run_limit);
         let automations = self
             .automation_facade
-            .list_automations(caller, limit)
+            .list_automations(caller, AutomationListRequest { limit, run_limit })
             .await?;
         Ok(RebornListAutomationsResponse { automations })
     }
@@ -2370,6 +2378,12 @@ pub const AUTOMATION_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
 /// opaque cursor contract.
 pub const AUTOMATION_LIST_MAX_PAGE_SIZE: u32 = 100;
 
+/// Default number of recent runs returned per automation row.
+pub const AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE: u32 = 25;
+
+/// Hard ceiling for recent runs embedded in each automation row.
+pub const AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE: u32 = 100;
+
 /// Hard ceiling on summary artifacts returned per response. Summary
 /// artifacts are typically much smaller than the message transcript so
 /// this cap is generous; it exists to bound the worst case where a
@@ -2385,6 +2399,12 @@ fn clamp_timeline_limit(requested: Option<u32>) -> usize {
 fn clamp_automation_list_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(AUTOMATION_LIST_DEFAULT_PAGE_SIZE);
     let clamped = raw.clamp(1, AUTOMATION_LIST_MAX_PAGE_SIZE);
+    clamped as usize
+}
+
+fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
+    let raw = requested.unwrap_or(AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE);
+    let clamped = raw.clamp(1, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE);
     clamped as usize
 }
 

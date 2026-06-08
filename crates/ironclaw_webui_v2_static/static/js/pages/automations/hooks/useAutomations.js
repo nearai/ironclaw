@@ -8,11 +8,16 @@ import {
 } from "../lib/automations-presenters.js";
 
 const AUTOMATIONS_PAGE_LIMIT = 50;
+const AUTOMATION_RUNS_LIMIT = 25;
 
 export function useAutomations() {
   const query = useQuery({
     queryKey: ["automations"],
-    queryFn: () => listAutomations({ limit: AUTOMATIONS_PAGE_LIMIT }),
+    queryFn: () =>
+      listAutomations({
+        limit: AUTOMATIONS_PAGE_LIMIT,
+        runLimit: AUTOMATION_RUNS_LIMIT,
+      }),
     refetchInterval: 30000,
     refetchIntervalInBackground: false,
   });

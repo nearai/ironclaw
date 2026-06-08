@@ -640,6 +640,29 @@ pub enum RebornAutomationRunStatus {
     Error,
 }
 
+/// Browser-visible status for an individual automation run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationRecentRunStatus {
+    Running,
+    Ok,
+    Error,
+}
+
+/// Browser-safe automation run projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationRecentRunInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire_slot: Option<DateTime<Utc>>,
+    pub status: RebornAutomationRecentRunStatus,
+    pub submitted_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
 /// Allowlisted browser-visible state for automation list projections.
 ///
 /// Unknown runtime states are collapsed to `unknown` so the browser DTO stays
@@ -700,8 +723,9 @@ impl<'de> Deserialize<'de> for RebornAutomationState {
 
 /// Browser-safe automation row returned by the WebUI facade.
 ///
-/// This deliberately exposes source, state, run timestamps, and sanitized
-/// status only; trigger repository internals remain behind the product facade.
+/// This deliberately exposes source, state, run timestamps, sanitized status,
+/// and bounded recent-run history; trigger repository internals remain behind
+/// the product facade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornAutomationInfo {
     pub automation_id: String,
@@ -714,6 +738,8 @@ pub struct RebornAutomationInfo {
     pub last_run_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_status: Option<RebornAutomationRunStatus>,
+    #[serde(default)]
+    pub recent_runs: Vec<RebornAutomationRecentRunInfo>,
     #[serde(default)]
     pub is_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

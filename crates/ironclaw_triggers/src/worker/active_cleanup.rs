@@ -1,4 +1,9 @@
-use crate::{ActiveTriggerScanCursor, ClearActiveFireRequest, TriggerError, TriggerRecord};
+use ironclaw_turns::TurnStatus;
+
+use crate::{
+    ActiveTriggerScanCursor, ClearActiveFireRequest, TriggerError, TriggerRecord,
+    TriggerRunHistoryStatus,
+};
 
 use super::{
     TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerPollerFailureReason,
@@ -112,7 +117,7 @@ impl TriggerPollerWorker {
                 }
             };
             match state {
-                TriggerActiveRunState::Terminal => {
+                TriggerActiveRunState::Terminal { status } => {
                     if self
                         .deps
                         .repository
@@ -121,6 +126,7 @@ impl TriggerPollerWorker {
                             trigger_id: record.trigger_id,
                             fire_slot,
                             run_id,
+                            status: terminal_run_history_status(status),
                         })
                         .await?
                         .is_some()
@@ -204,5 +210,21 @@ impl TriggerPollerWorker {
                 reason: "trigger poller active scan cursor mutex poisoned".to_string(),
             })? = cursor;
         Ok(())
+    }
+}
+
+fn terminal_run_history_status(status: TurnStatus) -> TriggerRunHistoryStatus {
+    match status {
+        TurnStatus::Completed => TriggerRunHistoryStatus::Ok,
+        TurnStatus::Cancelled | TurnStatus::Failed | TurnStatus::RecoveryRequired => {
+            TriggerRunHistoryStatus::Error
+        }
+        TurnStatus::Queued
+        | TurnStatus::Running
+        | TurnStatus::BlockedApproval
+        | TurnStatus::BlockedAuth
+        | TurnStatus::BlockedResource
+        | TurnStatus::BlockedDependentRun
+        | TurnStatus::CancelRequested => TriggerRunHistoryStatus::Error,
     }
 }

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, Timestamp};
-use ironclaw_turns::TurnRunId;
+use ironclaw_turns::{TurnRunId, TurnStatus};
 
 use crate::{TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt};
 
@@ -83,7 +83,7 @@ pub struct TriggerActiveRunStateRequest {
 pub enum TriggerActiveRunState {
     Missing,
     Nonterminal,
-    Terminal,
+    Terminal { status: TurnStatus },
 }
 
 #[async_trait]

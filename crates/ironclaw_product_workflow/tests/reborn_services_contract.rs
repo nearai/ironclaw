@@ -17,9 +17,11 @@ use ironclaw_product_adapters::{
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
-    AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, ApprovalInteractionDecision,
-    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
-    AutomationProductFacade, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
+    AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
+    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
+    AuthInteractionService, AutomationListRequest, AutomationProductFacade,
+    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
@@ -28,7 +30,8 @@ use ironclaw_product_workflow::{
     LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
-    ProductWorkflowError, RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource,
+    ProductWorkflowError, RebornAutomationInfo, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
     RebornGetRunStateRequest, RebornOutboundDeliveryModality,
@@ -746,6 +749,7 @@ impl LifecycleProductFacade for ListingLifecycleFacade {
 struct ListAutomationCall {
     caller: ProductAgentBoundCaller,
     limit: usize,
+    run_limit: usize,
 }
 
 #[derive(Default)]
@@ -764,12 +768,16 @@ impl AutomationProductFacade for RecordingAutomationFacade {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
-        limit: usize,
+        request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         self.list_calls
             .lock()
             .expect("lock")
-            .push(ListAutomationCall { caller, limit });
+            .push(ListAutomationCall {
+                caller,
+                limit: request.limit,
+                run_limit: request.run_limit,
+            });
         Ok(vec![automation_info(
             "trigger-listed",
             "Daily status",
@@ -789,7 +797,7 @@ impl AutomationProductFacade for StaticAutomationFacade {
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
-        _limit: usize,
+        _request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Ok(self.output.clone())
     }
@@ -897,6 +905,14 @@ fn automation_info(
         next_run_at: Some("2026-06-03T09:00:00Z".parse().expect("next run")),
         last_run_at: None,
         last_status,
+        recent_runs: vec![RebornAutomationRecentRunInfo {
+            run_id: Some("run-listed".to_string()),
+            thread_id: "thread-listed".to_string(),
+            fire_slot: Some("2026-06-03T09:00:00Z".parse().expect("fire slot")),
+            status: RebornAutomationRecentRunStatus::Ok,
+            submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
+            completed_at: Some("2026-06-03T09:00:42Z".parse().expect("completed at")),
+        }],
         is_active: true,
         created_at: Some("2026-06-02T18:00:00Z".parse().expect("created at")),
     }
@@ -3959,7 +3975,13 @@ async fn list_automation_dispatches_through_product_facade() {
     .with_automation_product_facade(automation_facade.clone());
 
     let listed = services
-        .list_automations(caller(), WebUiListAutomationsRequest { limit: Some(10) })
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: Some(10),
+                run_limit: None,
+            },
+        )
         .await
         .expect("list automations");
     assert_eq!(listed.automations.len(), 1);
@@ -3975,6 +3997,15 @@ async fn list_automation_dispatches_through_product_facade() {
         listed.automations[0].last_status,
         Some(RebornAutomationRunStatus::Ok)
     );
+    assert_eq!(listed.automations[0].recent_runs.len(), 1);
+    assert_eq!(
+        listed.automations[0].recent_runs[0].status,
+        RebornAutomationRecentRunStatus::Ok
+    );
+    assert_eq!(
+        listed.automations[0].recent_runs[0].thread_id,
+        "thread-listed"
+    );
 
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
@@ -3989,6 +4020,11 @@ async fn list_automation_dispatches_through_product_facade() {
         Some("project-alpha")
     );
     assert_eq!(list_calls[0].limit, 10);
+    assert_eq!(
+        list_calls[0].run_limit, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE as usize,
+        "omitted automation run history limit must use AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE ({})",
+        AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE
+    );
 }
 
 #[tokio::test]
@@ -4613,7 +4649,10 @@ async fn list_automations_rejects_missing_agent_id() {
     let err = services
         .list_automations(
             caller_without_agent(),
-            WebUiListAutomationsRequest { limit: Some(10) },
+            WebUiListAutomationsRequest {
+                limit: Some(10),
+                run_limit: None,
+            },
         )
         .await
         .expect_err("missing agent id should fail closed");
@@ -4637,6 +4676,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
             caller(),
             WebUiListAutomationsRequest {
                 limit: Some(u32::MAX),
+                run_limit: None,
             },
         )
         .await
@@ -4661,7 +4701,13 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(caller(), WebUiListAutomationsRequest { limit: Some(0) })
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: Some(0),
+                run_limit: None,
+            },
+        )
         .await
         .expect("list automations");
 
@@ -4683,7 +4729,13 @@ async fn list_automations_uses_default_limit_when_omitted() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(caller(), WebUiListAutomationsRequest { limit: None })
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: None,
+                run_limit: None,
+            },
+        )
         .await
         .expect("list automations");
 
@@ -4693,6 +4745,63 @@ async fn list_automations_uses_default_limit_when_omitted() {
         list_calls[0].limit, AUTOMATION_LIST_DEFAULT_PAGE_SIZE as usize,
         "omitted automation list limit must use AUTOMATION_LIST_DEFAULT_PAGE_SIZE ({})",
         AUTOMATION_LIST_DEFAULT_PAGE_SIZE
+    );
+}
+
+#[tokio::test]
+async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: None,
+                run_limit: Some(u32::MAX),
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(
+        list_calls[0].run_limit, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE as usize,
+        "automation run history limit must be clamped to AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE ({}) before the product facade",
+        AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE
+    );
+}
+
+#[tokio::test]
+async fn list_automations_clamps_zero_run_limit_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: None,
+                run_limit: Some(0),
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(
+        list_calls[0].run_limit, 1,
+        "automation run history limit must be clamped to at least one run"
     );
 }
 
