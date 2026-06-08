@@ -36,7 +36,7 @@ pub enum SubagentToolId {
     ListFiles,
     Search,
     Glob,
-    WebSearch,
+    Http,
 }
 
 impl SubagentToolId {
@@ -55,7 +55,7 @@ impl SubagentToolId {
             Self::ListFiles => "builtin.list_dir",
             Self::Search => "builtin.grep",
             Self::Glob => "builtin.glob",
-            Self::WebSearch => "builtin.http",
+            Self::Http => "builtin.http",
         }
     }
 }
@@ -99,7 +99,7 @@ const PLANNER_TOOLS: &[SubagentToolId] = &[
     SubagentToolId::ListFiles,
     SubagentToolId::Search,
     SubagentToolId::Glob,
-    SubagentToolId::WebSearch,
+    SubagentToolId::Http,
 ];
 
 pub const BUILTIN_SUBAGENT_FLAVORS: &[SubagentFlavor] = &[
