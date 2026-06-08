@@ -18,7 +18,8 @@ use ironclaw_host_api::{
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId,
-    GrantConstraints, MountView, NetworkPolicy, Principal, ResourceEstimate, TrustClass, UserId,
+    GrantConstraints, MountView, NetworkPolicy, Principal, ResourceEstimate, SecretHandle,
+    TrustClass, UserId,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_runtime::{
@@ -40,6 +41,8 @@ use ironclaw_reborn_composition::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
+#[cfg(feature = "libsql")]
+use ironclaw_secrets::{FilesystemSecretStore, SecretStore, SecretStoreError, SecretsCrypto};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(feature = "libsql")]
@@ -49,7 +52,7 @@ use ironclaw_turns::{
     InMemoryTurnStateStore,
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
 };
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 #[cfg(feature = "libsql")]
 use serde_json::{Value, json};
 #[cfg(feature = "libsql")]
@@ -331,6 +334,36 @@ async fn libsql_db_at(path: impl AsRef<std::path::Path>) -> Arc<libsql::Database
             .await
             .unwrap(),
     )
+}
+
+#[cfg(feature = "libsql")]
+async fn production_secret_store_for_db(
+    db: Arc<libsql::Database>,
+) -> FilesystemSecretStore<ironclaw_filesystem::LibSqlRootFilesystem> {
+    let filesystem = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+    FilesystemSecretStore::new(
+        ironclaw_reborn_composition::wrap_scoped(filesystem),
+        Arc::new(SecretsCrypto::new(test_master_key()).unwrap()),
+    )
+}
+
+#[cfg(feature = "libsql")]
+async fn consume_secret(
+    store: &dyn SecretStore,
+    scope: &ironclaw_host_api::ResourceScope,
+    handle: &SecretHandle,
+) -> String {
+    let lease = store
+        .lease_once(scope, handle)
+        .await
+        .expect("secret lease should be created");
+    store
+        .consume(scope, lease.id)
+        .await
+        .expect("secret lease should expose material")
+        .expose_secret()
+        .to_string()
 }
 
 #[cfg(feature = "libsql")]
@@ -744,6 +777,263 @@ async fn production_factory_built_product_auth_manual_token_round_trips() {
         .unwrap();
     assert_eq!(accounts.accounts.len(), 1);
     assert_eq!(accounts.accounts[0].id, result.account_id);
+
+    handle.shutdown().await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_manual_token_secret_material_survives_service_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            Arc::clone(&db),
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
+    )
+    .await
+    .expect("production services should build durable product-auth ports");
+
+    let product_auth = services
+        .product_auth
+        .as_ref()
+        .expect("production composes product auth");
+    let scope = auth_scope("alice");
+    let provider = ironclaw_auth::AuthProviderId::new("manual-provider").unwrap();
+    let label = ironclaw_auth::CredentialAccountLabel::new("durable manual").unwrap();
+    let challenge = product_auth
+        .request_manual_token_setup(RebornManualTokenSetupRequest::new(
+            scope.clone(),
+            provider.clone(),
+            label,
+            ironclaw_auth::AuthContinuationRef::SetupOnly,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        ))
+        .await
+        .expect("manual-token setup should create challenge");
+
+    let submitted = product_auth
+        .submit_manual_token(RebornManualTokenSubmitRequest::new(
+            scope.clone(),
+            challenge.interaction_id,
+            SecretString::from("production-secret-before-rebuild"),
+        ))
+        .await
+        .expect("manual-token submit should persist secret");
+    let account = product_auth
+        .credential_account_service()
+        .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
+            scope.clone(),
+            submitted.account_id,
+        ))
+        .await
+        .expect("account lookup should succeed")
+        .expect("manual-token submit should create an account");
+    let access_secret = account
+        .access_secret
+        .clone()
+        .expect("manual-token account should reference a secret handle");
+    assert!(
+        access_secret.as_str().starts_with("product-auth-manual-"),
+        "manual-token account should reference a product-auth SecretStore handle"
+    );
+
+    let secret_store = production_secret_store_for_db(Arc::clone(&db)).await;
+    assert_eq!(
+        consume_secret(&secret_store, &scope.resource, &access_secret).await,
+        "production-secret-before-rebuild"
+    );
+    let other_scope = auth_scope("bob");
+    assert!(
+        matches!(
+            secret_store
+                .lease_once(&other_scope.resource, &access_secret)
+                .await,
+            Err(SecretStoreError::UnknownSecret { .. })
+        ),
+        "a leaked manual-token handle must not be leaseable from another caller scope"
+    );
+
+    drop(services);
+    handle.shutdown().await;
+
+    let (rebuilt_notifier, rebuilt_handle) = live_wake_notifier();
+    let rebuilt_services = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            Arc::clone(&db),
+            dir.path().join("events-rebuilt.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(rebuilt_notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
+    )
+    .await
+    .expect("rebuilt production services should read durable product-auth ports");
+    let rebuilt_product_auth = rebuilt_services
+        .product_auth
+        .as_ref()
+        .expect("rebuilt production composes product auth");
+    let rebuilt_account = rebuilt_product_auth
+        .credential_account_service()
+        .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
+            scope.clone(),
+            submitted.account_id,
+        ))
+        .await
+        .expect("rebuilt account lookup should succeed")
+        .expect("manual-token account should survive production service rebuild");
+    assert_eq!(rebuilt_account.access_secret.as_ref(), Some(&access_secret));
+
+    let rebuilt_secret_store = production_secret_store_for_db(db).await;
+    assert_eq!(
+        consume_secret(&rebuilt_secret_store, &scope.resource, &access_secret).await,
+        "production-secret-before-rebuild"
+    );
+
+    rebuilt_handle.shutdown().await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_manual_token_resubmit_rotates_secret_and_removes_old_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            Arc::clone(&db),
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
+    )
+    .await
+    .expect("production services should build durable product-auth ports");
+
+    let product_auth = services
+        .product_auth
+        .as_ref()
+        .expect("production composes product auth");
+    let scope = auth_scope("alice");
+    let provider = ironclaw_auth::AuthProviderId::new("manual-provider").unwrap();
+    let label = ironclaw_auth::CredentialAccountLabel::new("rotating manual").unwrap();
+
+    let first_challenge = product_auth
+        .request_manual_token_setup(RebornManualTokenSetupRequest::new(
+            scope.clone(),
+            provider.clone(),
+            label.clone(),
+            ironclaw_auth::AuthContinuationRef::SetupOnly,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        ))
+        .await
+        .expect("first manual-token setup should create challenge");
+    let first_submit = product_auth
+        .submit_manual_token(RebornManualTokenSubmitRequest::new(
+            scope.clone(),
+            first_challenge.interaction_id,
+            SecretString::from("production-secret-before-rotation"),
+        ))
+        .await
+        .expect("first manual-token submit should persist secret");
+    let first_account = product_auth
+        .credential_account_service()
+        .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
+            scope.clone(),
+            first_submit.account_id,
+        ))
+        .await
+        .expect("first account lookup should succeed")
+        .expect("first manual-token submit should create an account");
+    let first_secret = first_account
+        .access_secret
+        .clone()
+        .expect("first account should reference a secret handle");
+
+    let second_challenge = product_auth
+        .request_manual_token_setup(RebornManualTokenSetupRequest::new(
+            scope.clone(),
+            provider,
+            label,
+            ironclaw_auth::AuthContinuationRef::SetupOnly,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        ))
+        .await
+        .expect("second manual-token setup should create challenge");
+    let second_submit = product_auth
+        .submit_manual_token(RebornManualTokenSubmitRequest::new(
+            scope.clone(),
+            second_challenge.interaction_id,
+            SecretString::from("production-secret-after-rotation"),
+        ))
+        .await
+        .expect("second manual-token submit should rotate reusable account");
+    assert_eq!(
+        second_submit.account_id, first_submit.account_id,
+        "same provider/label/user should reuse the existing manual-token account"
+    );
+    let second_account = product_auth
+        .credential_account_service()
+        .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
+            scope.clone(),
+            second_submit.account_id,
+        ))
+        .await
+        .expect("second account lookup should succeed")
+        .expect("second manual-token submit should keep the account");
+    let second_secret = second_account
+        .access_secret
+        .clone()
+        .expect("rotated account should reference a secret handle");
+    assert_ne!(
+        first_secret, second_secret,
+        "resubmitting a manual token should rotate to the new interaction-scoped handle"
+    );
+
+    let secret_store = production_secret_store_for_db(db).await;
+    assert!(
+        matches!(
+            secret_store.metadata(&scope.resource, &first_secret).await,
+            Ok(None)
+        ),
+        "rotation should delete the old manual-token secret handle"
+    );
+    assert!(
+        matches!(
+            secret_store
+                .lease_once(&scope.resource, &first_secret)
+                .await,
+            Err(SecretStoreError::UnknownSecret { .. })
+        ),
+        "old manual-token material must not remain leaseable after rotation"
+    );
+    assert_eq!(
+        consume_secret(&secret_store, &scope.resource, &second_secret).await,
+        "production-secret-after-rotation"
+    );
 
     handle.shutdown().await;
 }
