@@ -166,26 +166,11 @@ fn driver_check(name: &str, status: &RebornRuntimeComponentStatus) -> DoctorChec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_reborn_config::RebornBootConfig;
-
-    fn test_context() -> (tempfile::TempDir, crate::context::RebornCliContext) {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let config = RebornBootConfig::resolve_from_env_parts(
-            None,
-            Some(tmp.path().as_os_str().to_os_string()),
-            None,
-            None,
-        )
-        .expect("config must resolve with HOME set");
-        (
-            tmp,
-            crate::context::RebornCliContext::from_boot_config(config),
-        )
-    }
+    use crate::context::RebornCliContext;
 
     #[test]
     fn doctor_dto_builds_with_defaults() {
-        let (_tmp, context) = test_context();
+        let (_tmp, context) = RebornCliContext::test_context();
         let dto = build_doctor_dto(&context);
         assert!(!dto.checks.is_empty());
         assert_eq!(
@@ -196,7 +181,7 @@ mod tests {
 
     #[test]
     fn doctor_has_core_and_driver_checks() {
-        let (_tmp, context) = test_context();
+        let (_tmp, context) = RebornCliContext::test_context();
         let dto = build_doctor_dto(&context);
         assert!(dto.checks.iter().any(|c| c.category == CheckCategory::Core));
         assert!(
