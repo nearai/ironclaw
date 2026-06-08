@@ -4425,6 +4425,7 @@ name = "ironclaw_host_runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum 0.8.9",
  "base64 0.22.1",
  "blake3",
  "chrono",
@@ -4433,6 +4434,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "glob",
+ "hex",
  "ironclaw_approvals",
  "ironclaw_authorization",
  "ironclaw_capabilities",
@@ -4466,6 +4468,7 @@ dependencies = [
  "rust_decimal",
  "secrecy",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
