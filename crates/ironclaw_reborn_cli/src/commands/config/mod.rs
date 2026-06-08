@@ -225,7 +225,11 @@ fn json_to_config_value(value: &serde_json::Value) -> ConfigValue {
         }
         serde_json::Value::Array(arr) => ConfigValue::List(
             arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
+                .map(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| v.to_string())
+                })
                 .collect(),
         ),
         other => ConfigValue::String(other.to_string()),
@@ -402,7 +406,7 @@ model = "claude-3-5-sonnet-latest"
     }
 
     #[test]
-    fn collect_leaf_entries_array_drops_non_string_elements() {
+    fn collect_leaf_entries_array_coerces_non_string_elements() {
         let value = serde_json::json!({
             "tags": ["alpha", 42, true, "beta"]
         });
@@ -412,9 +416,9 @@ model = "claude-3-5-sonnet-latest"
         assert!(
             matches!(
                 &entries[0].value,
-                Some(ConfigValue::List(items)) if items == &["alpha", "beta"]
+                Some(ConfigValue::List(items)) if items == &["alpha", "42", "true", "beta"]
             ),
-            "non-string elements should be dropped, got {:?}",
+            "non-string elements should be coerced to strings, got {:?}",
             entries[0].value
         );
     }
