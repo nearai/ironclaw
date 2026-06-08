@@ -763,7 +763,8 @@ registerPack("es", {
   "admin.users.createToken": "Crear token",
   "admin.users.delete": "Eliminar",
   "admin.users.deleteUserTitle": "Eliminar usuario",
-  "admin.users.deleteUserDesc": "",
+  "admin.users.deleteUserDesc":
+    '¿Seguro que quieres eliminar a "{name}"? Esta acción no se puede deshacer.',
 
   // Admin — user detail
   "admin.user.profile": "Perfil",
