@@ -42,7 +42,8 @@ pub const DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN: u32 = 4;
 pub const DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS: u32 = 16;
 pub const DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID: &str = "builtin.spawn_subagent";
 const SPAWN_SUBAGENT_PROVIDER_TOOL_NAME: &str = "builtin__spawn_subagent";
-pub(crate) const SPAWN_SUBAGENT_DESCRIPTION: &str = "Delegate a focused task to a fresh child agent with its own context window and tool scope. The child runs to completion and returns its final result. Use when the task would otherwise pollute your context (deep file reads, multi-step research) or needs different tool permissions than your current scope. For complex tasks involving multiple steps, design choices, or unfamiliar libraries, spawn a `planner` first — it returns a structured plan you can then execute or hand to a `coder`. Pick `subagent_type` based on what the child needs: exploration, planning, or code changes.";
+pub(crate) const SPAWN_SUBAGENT_DESCRIPTION: &str =
+    include_str!("../prompts/spawn_subagent_description.md");
 
 /// A flavor descriptor passed into [`SubagentSpawnCapabilityPort`] at
 /// construction time so the port can build a dynamic schema without depending
@@ -189,6 +190,7 @@ pub struct SpawnSubagentArgs {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpawnSubagentWireArgs {
     #[serde(rename = "subagent_type", alias = "flavor_id")]
     subagent_kind: SubagentKindId,
@@ -490,6 +492,30 @@ impl SubagentSpawnCapabilityPort {
         flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
     ) -> Self {
         let parameters_schema = build_spawn_subagent_parameters_schema(&flavor_catalog);
+        Self {
+            inner,
+            run_context,
+            spawn_id,
+            limits,
+            deps,
+            parameters_schema,
+            auth_input_refs: Mutex::new(HashSet::new()),
+            spawned_this_turn: AtomicU32::new(0),
+        }
+    }
+
+    /// Creates a port with a precomputed parameters schema, avoiding the
+    /// schema-build cost when the caller already computed it (e.g. the
+    /// decorator precomputes once at startup and reuses across `decorate()`
+    /// calls).
+    pub fn new_with_schema(
+        inner: Arc<dyn LoopCapabilityPort>,
+        run_context: LoopRunContext,
+        spawn_id: CapabilityId,
+        limits: SubagentSpawnLimits,
+        deps: Arc<SubagentSpawnDeps>,
+        parameters_schema: serde_json::Value,
+    ) -> Self {
         Self {
             inner,
             run_context,

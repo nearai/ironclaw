@@ -505,7 +505,9 @@ struct SubagentSpawnCapabilityDecorator {
     spawn_deps: Arc<SubagentSpawnDeps>,
     spawn_id: CapabilityId,
     spawn_limits: SubagentSpawnLimits,
-    flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
+    /// Schema precomputed once at construction time so `decorate()` does not
+    /// rebuild it on every loop run.
+    parameters_schema: Arc<serde_json::Value>,
 }
 
 impl SubagentSpawnCapabilityDecorator {
@@ -517,11 +519,14 @@ impl SubagentSpawnCapabilityDecorator {
         let spawn_id =
             CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
                 .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+        let parameters_schema = Arc::new(
+            ironclaw_loop_support::build_spawn_subagent_parameters_schema(&flavor_catalog),
+        );
         Ok(Self {
             spawn_deps: Arc::new(spawn_deps),
             spawn_id,
             spawn_limits,
-            flavor_catalog,
+            parameters_schema,
         })
     }
 }
@@ -532,13 +537,15 @@ impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
     ) -> Arc<dyn LoopCapabilityPort> {
-        Arc::new(SubagentSpawnCapabilityPort::new(
+        // Use the precomputed schema (built once in new()) rather than
+        // rebuilding it on every decorate() call.
+        Arc::new(SubagentSpawnCapabilityPort::new_with_schema(
             inner,
             run_context.clone(),
             self.spawn_id.clone(),
             self.spawn_limits,
             Arc::clone(&self.spawn_deps),
-            self.flavor_catalog.clone(),
+            (*self.parameters_schema).clone(),
         ))
     }
 }

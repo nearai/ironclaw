@@ -2322,6 +2322,25 @@ async fn json_spawn_input_codec_defaults_to_blocking_when_mode_is_absent() {
 }
 
 #[tokio::test]
+async fn json_spawn_input_codec_decode_accepts_subagent_type_canonical_key() {
+    // Covers the codec decode path with the canonical `subagent_type` wire key.
+    // Legacy `flavor_id` coverage already exists in
+    // `json_spawn_input_codec_defaults_to_blocking_when_mode_is_absent`.
+    let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
+        value: Ok(json!({
+            "subagent_type": "planner",
+            "task": "build a plan"
+        })),
+    }));
+    let context = test_run_context("spawn-codec-canonical-key").await;
+
+    let args = codec.decode(&context, &input_ref()).await.unwrap();
+
+    assert_eq!(args.subagent_kind.as_str(), "planner");
+    assert_eq!(args.task, "build a plan");
+}
+
+#[tokio::test]
 async fn json_spawn_input_codec_accepts_legacy_blocking_inputs() {
     for value in [
         json!({
@@ -2987,6 +3006,34 @@ fn build_spawn_subagent_parameters_schema_empty_catalog_has_no_enum() {
         subagent_type.get("enum").is_none(),
         "subagent_type must NOT have an 'enum' key when catalog is empty, \
          got: {subagent_type}"
+    );
+}
+
+// ── C3: single-entry catalog produces a single-value enum ───────────────────
+
+#[test]
+fn build_spawn_subagent_parameters_schema_single_entry_catalog() {
+    let catalog = vec![SpawnSubagentFlavorDescriptor {
+        id: "solo".into(),
+        summary: "the only one".into(),
+    }];
+    let schema = build_spawn_subagent_parameters_schema(&catalog);
+
+    let enum_vals = schema["properties"]["subagent_type"]["enum"]
+        .as_array()
+        .expect("single-entry catalog must produce an 'enum' key");
+    assert_eq!(enum_vals, &[serde_json::json!("solo")]);
+
+    let description = schema["properties"]["subagent_type"]["description"]
+        .as_str()
+        .expect("description must be present");
+    assert!(
+        description.contains("solo"),
+        "description must contain the flavor id 'solo', got: {description}"
+    );
+    assert!(
+        description.contains("the only one"),
+        "description must contain the summary 'the only one', got: {description}"
     );
 }
 

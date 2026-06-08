@@ -207,6 +207,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn builtin_flavor_catalog_summaries_are_non_empty() {
+        for descriptor in builtin_flavor_catalog() {
+            assert!(
+                !descriptor.summary.trim().is_empty(),
+                "flavor `{}` has empty summary — schema description would render as a trailing-blank bullet",
+                descriptor.id
+            );
+        }
+    }
+
+    #[test]
     fn builtin_table_has_expected_flavors() {
         assert_eq!(BUILTIN_SUBAGENT_FLAVORS.len(), 4);
         assert!(lookup_flavor(SubagentFlavorId::General).is_some());
