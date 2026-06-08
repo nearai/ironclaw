@@ -170,10 +170,7 @@ pub(super) fn is_eligible_user_boundary(
 /// Future impls (e.g. `BudgetFractionStrategy` for #4311) drop in alongside
 /// `ByteCapStrategy` without changing call sites.
 pub(crate) trait CompactionForceStrategy: Send + Sync {
-    fn should_force_compact(
-        &self,
-        state: &LoopExecutionState,
-    ) -> Option<CompactionInitiator>;
+    fn should_force_compact(&self, state: &LoopExecutionState) -> Option<CompactionInitiator>;
 }
 
 /// Per-capability byte-cap compaction force strategy. Trips compaction when any
@@ -225,12 +222,13 @@ impl Default for ByteCapStrategy {
 }
 
 impl CompactionForceStrategy for ByteCapStrategy {
-    fn should_force_compact(
-        &self,
-        state: &LoopExecutionState,
-    ) -> Option<CompactionInitiator> {
+    fn should_force_compact(&self, state: &LoopExecutionState) -> Option<CompactionInitiator> {
         for (capability_id, bytes) in &state.post_capability_state.pending_capability_bytes {
-            let cap = self.caps.get(capability_id).copied().unwrap_or(self.default_cap);
+            let cap = self
+                .caps
+                .get(capability_id)
+                .copied()
+                .unwrap_or(self.default_cap);
             if *bytes > cap {
                 return Some(CompactionInitiator::CapabilityResultOverflow);
             }

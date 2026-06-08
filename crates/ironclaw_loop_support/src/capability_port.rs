@@ -5916,13 +5916,12 @@ mod tests {
                     "transient result write failure",
                 ));
             }
-            let result_ref =
-                LoopResultRef::new("result:capability-info-retry").map_err(|_| {
-                    AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::Internal,
-                        "result ref could not be built",
-                    )
-                })?;
+            let result_ref = LoopResultRef::new("result:capability-info-retry").map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "result ref could not be built",
+                )
+            })?;
             Ok((result_ref, 0))
         }
     }

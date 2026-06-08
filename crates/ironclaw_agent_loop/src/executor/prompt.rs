@@ -210,7 +210,10 @@ impl<'a> PromptPlanningPipeline<'a> {
                 }
                 PromptCompactionOutcome::Compacted(state) => state,
             };
-            return Ok(PromptStep::SkipModel(Box::new(state), self.pending_input_ack));
+            return Ok(PromptStep::SkipModel(
+                Box::new(state),
+                self.pending_input_ack,
+            ));
         }
 
         let surface = self.visible_surface(surface_filter).await?;

@@ -12,9 +12,9 @@ pub use slots::{
     CapabilityStrategyState, CompactionPromptSnapshot, CompactionStrategyState,
     ContextStrategyState, DeferredCompactionWatermark, GateStrategyState, GoalRefreshStrategyState,
     IndexedMessageKind, MessageIndexEntry, ModelStrategyState, PostCapabilityStageState,
-    RecoveryAttemptClass, RecoveryStrategyState, RepeatedCallWarningPhase, RepeatedCallWarningState,
-    ReplyAdmissionRejection, ReplyAdmissionRejectionReason, ReplyAdmissionStrategyState,
-    StopStrategyState,
+    RecoveryAttemptClass, RecoveryStrategyState, RepeatedCallWarningPhase,
+    RepeatedCallWarningState, ReplyAdmissionRejection, ReplyAdmissionRejectionReason,
+    ReplyAdmissionStrategyState, StopStrategyState,
 };
 
 use ironclaw_turns::{
@@ -592,7 +592,10 @@ mod tests {
                 .expect("decode checkpoint payload");
 
         assert_eq!(
-            restored.post_capability_state.pending_capability_bytes.get(&cap_id),
+            restored
+                .post_capability_state
+                .pending_capability_bytes
+                .get(&cap_id),
             Some(&33_001),
             "pending_capability_bytes must survive checkpoint encode/decode"
         );
@@ -602,8 +605,7 @@ mod tests {
         );
         // Full equality check — no other fields must have changed.
         assert_eq!(
-            restored.post_capability_state,
-            state.post_capability_state,
+            restored.post_capability_state, state.post_capability_state,
             "entire PostCapabilityStageState must round-trip without loss"
         );
     }

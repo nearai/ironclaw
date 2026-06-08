@@ -183,10 +183,12 @@ impl DefaultExecutorPipeline {
                                         )
                                         .await?
                                 }
-                                ReplyAdmissionStep::Reject { state } => TurnCompletedStep::Continue {
-                                    state,
-                                    summary: crate::strategies::TurnSummary::reply_rejected(),
-                                },
+                                ReplyAdmissionStep::Reject { state } => {
+                                    TurnCompletedStep::Continue {
+                                        state,
+                                        summary: crate::strategies::TurnSummary::reply_rejected(),
+                                    }
+                                }
                             }
                         }
                         ParentLoopOutput::CapabilityCalls(calls) => {

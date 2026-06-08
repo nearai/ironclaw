@@ -72,7 +72,10 @@ impl ExecutorStage<TurnCompletedStep> for PostCapabilityStage {
         // Only consult policy if any capability bytes accumulated this turn.
         // AssistantReply turns reach here with an empty map and gain nothing
         // from the policy scan + Arc<dyn> virtual dispatch.
-        if !state.post_capability_state.pending_capability_bytes.is_empty()
+        if !state
+            .post_capability_state
+            .pending_capability_bytes
+            .is_empty()
             && let Some(initiator) = self.compaction_force.should_force_compact(&state)
         {
             state.compaction_state.force_compact_on_next_iteration = true;
@@ -115,10 +118,7 @@ mod tests {
     struct StubPolicy(Option<CompactionInitiator>);
 
     impl CompactionForceStrategy for StubPolicy {
-        fn should_force_compact(
-            &self,
-            _state: &LoopExecutionState,
-        ) -> Option<CompactionInitiator> {
+        fn should_force_compact(&self, _state: &LoopExecutionState) -> Option<CompactionInitiator> {
             self.0
         }
     }
@@ -161,7 +161,11 @@ mod tests {
         };
         assert!(!out.compaction_state.force_compact_on_next_iteration);
         assert!(!out.post_capability_state.skip_model_this_iteration);
-        assert!(out.post_capability_state.pending_capability_bytes.is_empty());
+        assert!(
+            out.post_capability_state
+                .pending_capability_bytes
+                .is_empty()
+        );
     }
 
     /// Policy returns Some(...) — both flags set and byte map cleared.
@@ -206,7 +210,11 @@ mod tests {
              compaction_state.force_compact_initiator instead of emitting CompactionStarted"
         );
         assert!(out.post_capability_state.skip_model_this_iteration);
-        assert!(out.post_capability_state.pending_capability_bytes.is_empty());
+        assert!(
+            out.post_capability_state
+                .pending_capability_bytes
+                .is_empty()
+        );
     }
 
     /// Exit variant passes through untouched — R1 and R2 skipped.
@@ -254,7 +262,10 @@ mod tests {
             .insert(cap_id, 100);
 
         assert!(
-            !state.post_capability_state.pending_capability_bytes.is_empty(),
+            !state
+                .post_capability_state
+                .pending_capability_bytes
+                .is_empty(),
             "pre-condition: map must be non-empty before process()"
         );
 
@@ -287,7 +298,9 @@ mod tests {
         );
         // BUG-N1 fix: map must be cleared unconditionally even on the non-trip path.
         assert!(
-            out.post_capability_state.pending_capability_bytes.is_empty(),
+            out.post_capability_state
+                .pending_capability_bytes
+                .is_empty(),
             "pending_capability_bytes must be cleared even when the policy does not trip \
              (BUG-N1: non-trip turns were carrying bytes over to the next iteration)"
         );
