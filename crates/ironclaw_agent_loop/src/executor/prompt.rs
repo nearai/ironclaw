@@ -58,7 +58,7 @@ pub(super) enum PromptStep {
     /// StopStage.observe().
     ///
     /// Carries `pending_input_ack` alongside the state so canonical.rs can
-    /// ack inbound user input after stop.observe runs, mirroring the
+    /// ack inbound user input BEFORE stop.observe runs, mirroring the
     /// Prepared path. PromptCompactionStep::run only acks internally on
     /// Compacted; the Skipped branch (reachable when force_compact is
     /// true but message_index is empty) returns without acking — without
@@ -201,9 +201,11 @@ impl<'a> PromptPlanningPipeline<'a> {
                 PromptCompactionOutcome::Exited(exit) => return Ok(PromptStep::Exit(exit)),
                 PromptCompactionOutcome::Skipped(mut state) => {
                     // Compaction couldn't actually run (e.g. empty message_index) — clear
-                    // force_compact_on_next_iteration too so we don't re-enter this branch
-                    // on every subsequent iteration with the same stale flag.
+                    // both the force flag AND the initiator so a later unrelated
+                    // compaction (Auto-triggered) doesn't .take() a stale
+                    // CapabilityResultOverflow initiator and misattribute telemetry.
                     state.compaction_state.force_compact_on_next_iteration = false;
+                    state.compaction_state.force_compact_initiator = None;
                     state
                 }
                 PromptCompactionOutcome::Compacted(state) => state,

@@ -152,8 +152,10 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
         byte_len: 0,
     };
     let spawned_json = serde_json::to_value(&spawned).unwrap();
-    // byte_len is serde(default) so it is omitted from serialization when 0
-    // (skip_serializing_if is not set — it will be present with value 0).
+    // #[serde(default)] ensures legacy wire payloads (without byte_len) decode
+    // cleanly with byte_len = 0. Non-zero values must always round-trip through
+    // serialize→deserialize since byte_len has no skip_serializing_if attribute
+    // (so 0 is also always present on the wire, as this assertion verifies).
     assert_eq!(
         spawned_json,
         serde_json::json!({
