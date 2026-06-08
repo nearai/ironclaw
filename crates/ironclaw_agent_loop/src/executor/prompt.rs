@@ -199,7 +199,13 @@ impl<'a> PromptPlanningPipeline<'a> {
                 .await?;
             let state = match compaction {
                 PromptCompactionOutcome::Exited(exit) => return Ok(PromptStep::Exit(exit)),
-                PromptCompactionOutcome::Skipped(state) => state,
+                PromptCompactionOutcome::Skipped(mut state) => {
+                    // Compaction couldn't actually run (e.g. empty message_index) — clear
+                    // force_compact_on_next_iteration too so we don't re-enter this branch
+                    // on every subsequent iteration with the same stale flag.
+                    state.compaction_state.force_compact_on_next_iteration = false;
+                    state
+                }
                 PromptCompactionOutcome::Compacted(state) => state,
             };
             return Ok(PromptStep::SkipModel(Box::new(state), self.pending_input_ack));
