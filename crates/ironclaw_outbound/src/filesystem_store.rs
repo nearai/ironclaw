@@ -236,6 +236,11 @@ where
             .map(|(value, _)| value))
     }
 
+    /// Writes preference records with versioned CAS only.
+    ///
+    /// This intentionally bypasses the byte-only fallback used by non-CAS
+    /// helpers: preference updates must fail closed when the mount cannot
+    /// preserve the expected version.
     async fn put_json_strict_cas<T: Serialize>(
         &self,
         scope: &ResourceScope,
@@ -656,7 +661,7 @@ fn hash_delivery_default_scope(hasher: &mut Sha256, scope: &DeliveryDefaultScope
 }
 
 fn update_hash_part(hasher: &mut Sha256, value: &str) {
-    hasher.update(value.len().to_be_bytes());
+    hasher.update((value.len() as u64).to_be_bytes());
     hasher.update(value.as_bytes());
 }
 

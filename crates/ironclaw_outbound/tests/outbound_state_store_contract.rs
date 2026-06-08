@@ -359,13 +359,22 @@ where
     let result = store.put_communication_preference(missing_tenant).await;
     assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
 
-    let mut missing_agent = valid_record;
+    let mut missing_agent = valid_record.clone();
     missing_agent.scope = DeliveryDefaultScope::shared_agent(
         TenantId::new("tenant-outbound-shared-validation").unwrap(),
         AgentId::from_trusted(String::new()),
         None,
     );
     let result = store.put_communication_preference(missing_agent).await;
+    assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
+
+    let mut missing_project = valid_record;
+    missing_project.scope = DeliveryDefaultScope::shared_agent(
+        TenantId::new("tenant-outbound-shared-validation").unwrap(),
+        AgentId::new("agent-outbound-shared-validation").unwrap(),
+        Some(ProjectId::from_trusted(String::new())),
+    );
+    let result = store.put_communication_preference(missing_project).await;
     assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
 }
 
@@ -664,6 +673,60 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
         .load_communication_preference(tenant_mismatch_key)
         .await;
     assert!(matches!(result, Err(OutboundError::Backend)));
+}
+
+#[tokio::test]
+async fn filesystem_store_personal_and_shared_agent_hashes_are_always_distinct() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(Arc::clone(&backend));
+    let tenant_id = TenantId::new("tenant-outbound-hash-distinct").unwrap();
+    let shared_id = "same-principal-id";
+    let personal_key =
+        CommunicationPreferenceKey::personal(tenant_id.clone(), UserId::new(shared_id).unwrap());
+    let personal_record = CommunicationPreferenceRecord {
+        scope: personal_key.scope.clone(),
+        final_reply_target: Some(reply_ref("reply-pref-hash-personal")),
+        progress_target: None,
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin-outbound-hash-personal").unwrap(),
+    };
+    let (_, personal_path) =
+        put_preference_and_find_virtual_path(&backend, &store, personal_record.clone()).await;
+
+    let shared_key =
+        CommunicationPreferenceKey::shared_agent(tenant_id, AgentId::new(shared_id).unwrap(), None);
+    let shared_record = CommunicationPreferenceRecord {
+        scope: shared_key.scope.clone(),
+        final_reply_target: Some(reply_ref("reply-pref-hash-shared")),
+        progress_target: None,
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Voice),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin-outbound-hash-shared").unwrap(),
+    };
+    let (_, shared_path) =
+        put_preference_and_find_virtual_path(&backend, &store, shared_record.clone()).await;
+
+    assert_ne!(
+        personal_path, shared_path,
+        "personal and shared-agent preference scopes with the same id text must not share a v2 hash path",
+    );
+    assert_eq!(
+        communication_preference_virtual_paths(&backend).await.len(),
+        2
+    );
+    assert_eq!(
+        load_preference_record(&store, personal_key).await,
+        Some(personal_record)
+    );
+    assert_eq!(
+        load_preference_record(&store, shared_key).await,
+        Some(shared_record)
+    );
 }
 
 async fn filesystem_store_rejects_communication_preference_put_cas_conflict(

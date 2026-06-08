@@ -192,7 +192,7 @@ pub(crate) fn validate_communication_preference(
         DeliveryDefaultScope::SharedAgent {
             tenant_id,
             agent_id,
-            ..
+            project_id,
         } => {
             if tenant_id.as_str().is_empty() {
                 return Err(OutboundError::InvalidRequest {
@@ -202,6 +202,14 @@ pub(crate) fn validate_communication_preference(
             if agent_id.as_str().is_empty() {
                 return Err(OutboundError::InvalidRequest {
                     reason: "communication preference shared agent is required",
+                });
+            }
+            if project_id
+                .as_ref()
+                .is_some_and(|project_id| project_id.as_str().is_empty())
+            {
+                return Err(OutboundError::InvalidRequest {
+                    reason: "communication preference project is required when present",
                 });
             }
         }

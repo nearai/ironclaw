@@ -5,7 +5,7 @@ use chrono::Utc;
 use futures::future::try_join_all;
 use ironclaw_outbound::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    OutboundError, WriteCommunicationPreferenceRequest,
+    DeliveryDefaultScope, OutboundError, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, RebornOutboundDeliveryModality,
@@ -150,7 +150,7 @@ impl RebornOutboundPreferencesFacade {
     /// This key and target-provider scope intentionally share the same
     /// verified caller identity.
     fn key(caller: &WebUiAuthenticatedCaller) -> CommunicationPreferenceKey {
-        CommunicationPreferenceKey::new(caller.tenant_id.clone(), caller.user_id.clone())
+        CommunicationPreferenceKey::personal(caller.tenant_id.clone(), caller.user_id.clone())
     }
 }
 
@@ -188,8 +188,7 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
             .await
             .map_err(map_outbound_repository_error)?;
         let scope =
-            CommunicationPreferenceKey::personal(caller.tenant_id.clone(), caller.user_id.clone())
-                .scope;
+            DeliveryDefaultScope::personal(caller.tenant_id.clone(), caller.user_id.clone());
         let user_id = caller.user_id.clone();
         let updated_at = Utc::now();
         let updated = self
