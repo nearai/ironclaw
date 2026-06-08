@@ -401,6 +401,26 @@ model = "claude-3-5-sonnet-latest"
     }
 
     #[test]
+    fn build_config_get_dto_known_key_set_value_returns_ok_some() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let reborn_home = context.boot_config().home().path();
+        std::fs::create_dir_all(reborn_home).expect("create reborn_home");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            "[boot]\nprofile = \"custom-profile\"\n",
+        )
+        .expect("write config");
+
+        let dto = build_config_get_dto(&context, "boot.profile").expect("must succeed");
+        assert_eq!(dto.key, "boot.profile");
+        assert!(
+            matches!(dto.value, Some(ConfigValue::String(ref s)) if s == "custom-profile"),
+            "expected Some(String(\"custom-profile\")), got {:?}",
+            dto.value
+        );
+    }
+
+    #[test]
     fn build_config_get_dto_unknown_key_returns_err() {
         let (_tmp, context) = RebornCliContext::test_context();
         let result = build_config_get_dto(&context, "nonexistent.key");
