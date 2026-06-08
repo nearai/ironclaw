@@ -4,12 +4,12 @@
 WebUI v2 and Slack host-beta features enabled. The image defaults to:
 
 ```text
-ironclaw-reborn serve --host ${IRONCLAW_REBORN_SERVE_HOST:-0.0.0.0} --port ${PORT:-3000}
+ironclaw-reborn serve --host ${IRONCLAW_REBORN_SERVE_HOST:-127.0.0.1} --port ${PORT:-3000}
 ```
 
-Railway supplies `PORT`; local Docker runs can set
-`IRONCLAW_REBORN_SERVE_HOST=127.0.0.1` and
-`IRONCLAW_REBORN_SERVE_PORT=3000`.
+Railway supplies `PORT`; set `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0` for
+Railway/public deployments. Local Docker runs can keep the loopback default and
+set `IRONCLAW_REBORN_SERVE_PORT=3000`.
 
 ## Build
 
@@ -31,7 +31,7 @@ docker run --rm \
 Minimum local env shape:
 
 ```bash
-IRONCLAW_REBORN_SERVE_HOST=0.0.0.0
+IRONCLAW_REBORN_SERVE_HOST=127.0.0.1
 IRONCLAW_REBORN_SERVE_PORT=3000
 IRONCLAW_REBORN_PROFILE=local-dev
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
@@ -101,10 +101,10 @@ redeploys. The image default is `/data/ironclaw-reborn`; without a Railway
 volume, that path is ephemeral. The container workdir is `/workspace` so the
 local-dev workspace root stays separate from Reborn's state and skill roots.
 
-To seed a custom config instead of the bundled default, set
-`IRONCLAW_REBORN_DEFAULT_CONFIG` to a mounted TOML path. On first start, the
-entrypoint copies that file into `$IRONCLAW_REBORN_HOME/config.toml`; later
-starts preserve the existing home config.
+To seed a custom config instead of the bundled default, mount it under
+`/opt/ironclaw/` and set `IRONCLAW_REBORN_DEFAULT_CONFIG` to that path. On first
+start, the entrypoint copies that file into `$IRONCLAW_REBORN_HOME/config.toml`;
+later starts preserve the existing home config.
 
 For public WebUI Google login, use the Reborn WebUI SSO variables and an HTTPS
 base URL that matches the deployed Railway domain:

@@ -635,6 +635,11 @@ pub fn webui_v2_app_with_lifecycle(
         app = app.merge(public);
     }
     let app = app
+        // arch-exempt: rate-limit-bypass, platform-probe-only.
+        // This route exists solely for container orchestrator healthchecks.
+        // It performs no state read/write, exposes no tenant data, and must
+        // remain reachable even when the descriptor-driven public route stack
+        // is unavailable or misconfigured.
         .route(REBORN_HEALTH_PATH, get(reborn_health_handler))
         // SPA static assets served from the embedded
         // `ironclaw_webui_v2_static` bundle. Routed AFTER the

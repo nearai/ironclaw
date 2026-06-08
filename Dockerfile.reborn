@@ -4,10 +4,11 @@
 #   docker build -f Dockerfile.reborn -t ironclaw-reborn:latest .
 #
 # Run locally:
-#   docker run --rm --env-file .env.reborn -p 3000:3000 ironclaw-reborn:latest
+#   docker run --rm --env-file .env.reborn -p 127.0.0.1:3000:3000 ironclaw-reborn:latest
 #
 # Railway:
-#   Set Dockerfile path to Dockerfile.reborn. Railway supplies PORT.
+#   Set Dockerfile path to Dockerfile.reborn and IRONCLAW_REBORN_SERVE_HOST=0.0.0.0.
+#   Railway supplies PORT.
 
 FROM rust:1.92-bookworm AS chef
 
@@ -35,7 +36,10 @@ ENV CARGO_PROFILE_DIST_PANIC=abort \
     CARGO_PROFILE_DIST_CODEGEN_UNITS=1
 
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --profile dist --recipe-path recipe.json
+RUN cargo chef cook \
+    --profile dist \
+    --features webui-v2-beta,slack-v2-host-beta \
+    --recipe-path recipe.json
 
 FROM deps AS builder
 
@@ -68,7 +72,7 @@ COPY docker/reborn/entrypoint.sh /usr/local/bin/ironclaw-reborn-entrypoint
 ENV HOME=/home/ironclaw \
     IRONCLAW_REBORN_HOME=/data/ironclaw-reborn \
     IRONCLAW_REBORN_LOG=info \
-    IRONCLAW_REBORN_SERVE_HOST=0.0.0.0
+    IRONCLAW_REBORN_SERVE_HOST=127.0.0.1
 
 RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
     && mkdir -p /data/ironclaw-reborn /workspace \

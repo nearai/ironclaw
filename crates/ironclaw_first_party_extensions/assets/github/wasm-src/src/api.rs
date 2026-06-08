@@ -605,6 +605,19 @@ pub(crate) fn create_branch(
     branch: &str,
     from_ref: &str,
 ) -> Result<String, String> {
+    create_branch_with_request(owner, repo, branch, from_ref, github_request)
+}
+
+fn create_branch_with_request<F>(
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    from_ref: &str,
+    mut request: F,
+) -> Result<String, String>
+where
+    F: FnMut(&str, &str, Option<String>) -> Result<String, String>,
+{
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
@@ -623,7 +636,7 @@ pub(crate) fn create_branch(
             encoded_repo,
             encode_repo_path(&source_ref)
         );
-        let source_ref_resp = github_request("GET", &source_path, None)?;
+        let source_ref_resp = request("GET", &source_path, None)?;
         let source_ref_json: serde_json::Value = serde_json::from_str(&source_ref_resp)
             .map_err(|e| format!("Invalid GitHub response for source ref: {e}"))?;
         source_ref_json
@@ -638,7 +651,7 @@ pub(crate) fn create_branch(
         "sha": sha,
     });
     let path = format!("/repos/{}/{}/git/refs", encoded_owner, encoded_repo);
-    github_request("POST", &path, Some(req_body.to_string()))
+    request("POST", &path, Some(req_body.to_string()))
 }
 
 pub(crate) fn get_file_content(
@@ -929,4 +942,38 @@ pub(crate) fn get_workflow_runs(
         path.push_str(&format!("&page={}", p));
     }
     github_request("GET", &path, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_branch_with_request;
+    use serde_json::json;
+
+    #[test]
+    fn create_branch_full_sha_fast_path_skips_ref_lookup() {
+        let mut requests = Vec::new();
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+
+        let response = create_branch_with_request(
+            "nearai",
+            "ironclaw",
+            "codex/reborn-cli-docker-image",
+            sha,
+            |method, path, body| {
+                requests.push((method.to_string(), path.to_string(), body));
+                Ok(json!({"status": 201}).to_string())
+            },
+        )
+        .expect("full SHA branch creation should post directly");
+
+        assert_eq!(response, json!({"status": 201}).to_string());
+        assert_eq!(requests.len(), 1, "full SHA must not GET source ref");
+        let (method, path, body) = &requests[0];
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/repos/nearai/ironclaw/git/refs");
+        let body: serde_json::Value =
+            serde_json::from_str(body.as_ref().expect("POST body")).expect("json body");
+        assert_eq!(body["ref"], "refs/heads/codex/reborn-cli-docker-image");
+        assert_eq!(body["sha"], sha);
+    }
 }

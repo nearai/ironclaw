@@ -25,6 +25,58 @@ fn read_repo_file(relative: &str) -> String {
     std::fs::read_to_string(repo_file(relative)).expect("repo file should be readable")
 }
 
+#[cfg(unix)]
+struct FakeEntrypoint {
+    _temp: tempfile::TempDir,
+    bin_dir: PathBuf,
+    home_dir: PathBuf,
+    default_config: String,
+    args_file: PathBuf,
+}
+
+#[cfg(unix)]
+impl FakeEntrypoint {
+    fn path_env(&self) -> String {
+        format!("{}:/usr/bin:/bin", self.bin_dir.display())
+    }
+}
+
+#[cfg(unix)]
+fn setup_fake_entrypoint() -> FakeEntrypoint {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = temp.path().join("bin");
+    let home_dir = temp.path().join("home");
+    let args_file = temp.path().join("args.txt");
+
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_executable(
+        &bin_dir.join("ironclaw-reborn"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_REBORN_TEST_ARGS_FILE\"\n",
+    );
+    write_executable(
+        &bin_dir.join("cp"),
+        "#!/bin/sh\nprintf '%s\\n' 'api_version = \"ironclaw.runtime/v1\"' > \"$2\"\n",
+    );
+
+    FakeEntrypoint {
+        _temp: temp,
+        bin_dir,
+        home_dir,
+        default_config: "/opt/ironclaw/reborn/config.toml".to_string(),
+        args_file,
+    }
+}
+
+#[cfg(unix)]
+fn write_executable(path: &std::path::Path, content: &str) {
+    std::fs::write(path, content).expect("write executable");
+    let mut permissions = std::fs::metadata(path)
+        .expect("executable metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("executable permissions");
+}
+
 #[test]
 fn runtime_image_declares_and_prepares_ironclaw_home() {
     let dockerfile = runtime_dockerfile();
@@ -67,6 +119,22 @@ fn reborn_dockerfile_keeps_bundled_skills_in_build_context() {
 }
 
 #[test]
+fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
+    let dockerfile = read_repo_file("Dockerfile.reborn");
+
+    assert!(
+        dockerfile.contains(
+            "cargo chef cook \\\n    --profile dist \\\n    --features webui-v2-beta,slack-v2-host-beta"
+        ),
+        "cargo chef cook must use the same Reborn features as the final build"
+    );
+    assert!(
+        dockerfile.contains("IRONCLAW_REBORN_SERVE_HOST=127.0.0.1"),
+        "image default serve host must stay loopback; Railway should override to 0.0.0.0"
+    );
+}
+
+#[test]
 fn reborn_dockerfile_build_is_covered_by_ci() {
     let workflow = read_repo_file(".github/workflows/test.yml");
 
@@ -93,38 +161,17 @@ fn reborn_deployment_docs_keep_webui_sso_separate_from_product_auth() {
 #[test]
 #[cfg(unix)]
 fn reborn_entrypoint_copies_config_and_builds_default_serve_args() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let bin_dir = temp.path().join("bin");
-    let home_dir = temp.path().join("home");
-    let default_config = temp.path().join("default.toml");
-    let args_file = temp.path().join("args.txt");
-    let fake_bin = bin_dir.join("ironclaw-reborn");
-
-    std::fs::create_dir_all(&bin_dir).expect("bin dir");
-    std::fs::write(&default_config, "api_version = \"ironclaw.runtime/v1\"\n")
-        .expect("default config");
-    std::fs::write(
-        &fake_bin,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_REBORN_TEST_ARGS_FILE\"\n",
-    )
-    .expect("fake binary");
-    let mut permissions = std::fs::metadata(&fake_bin)
-        .expect("fake binary metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_bin, permissions).expect("fake binary permissions");
-
-    let path = format!("{}:/usr/bin:/bin", bin_dir.display());
+    let fake = setup_fake_entrypoint();
     let output = Command::new("sh")
         .arg(repo_file("docker/reborn/entrypoint.sh"))
         .env_clear()
-        .env("PATH", &path)
-        .env("IRONCLAW_REBORN_HOME", &home_dir)
-        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &default_config)
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
         .env("IRONCLAW_REBORN_SERVE_HOST", "0.0.0.0")
         .env("PORT", "4321")
         .env("IRONCLAW_REBORN_CONFIRM_HOST_ACCESS", "true")
-        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &args_file)
+        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
         .output()
         .expect("entrypoint should run");
 
@@ -134,11 +181,11 @@ fn reborn_entrypoint_copies_config_and_builds_default_serve_args() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        std::fs::read_to_string(home_dir.join("config.toml")).expect("copied config"),
+        std::fs::read_to_string(fake.home_dir.join("config.toml")).expect("copied config"),
         "api_version = \"ironclaw.runtime/v1\"\n"
     );
     assert_eq!(
-        std::fs::read_to_string(&args_file).expect("captured args"),
+        std::fs::read_to_string(&fake.args_file).expect("captured args"),
         "serve\n--host\n0.0.0.0\n--port\n4321\n--confirm-host-access\n"
     );
 }
@@ -146,36 +193,15 @@ fn reborn_entrypoint_copies_config_and_builds_default_serve_args() {
 #[test]
 #[cfg(unix)]
 fn reborn_entrypoint_passes_explicit_args_through() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let bin_dir = temp.path().join("bin");
-    let home_dir = temp.path().join("home");
-    let default_config = temp.path().join("default.toml");
-    let args_file = temp.path().join("args.txt");
-    let fake_bin = bin_dir.join("ironclaw-reborn");
-
-    std::fs::create_dir_all(&bin_dir).expect("bin dir");
-    std::fs::write(&default_config, "api_version = \"ironclaw.runtime/v1\"\n")
-        .expect("default config");
-    std::fs::write(
-        &fake_bin,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_REBORN_TEST_ARGS_FILE\"\n",
-    )
-    .expect("fake binary");
-    let mut permissions = std::fs::metadata(&fake_bin)
-        .expect("fake binary metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_bin, permissions).expect("fake binary permissions");
-
-    let path = format!("{}:/usr/bin:/bin", bin_dir.display());
+    let fake = setup_fake_entrypoint();
     let output = Command::new("sh")
         .arg(repo_file("docker/reborn/entrypoint.sh"))
         .args(["serve", "--help"])
         .env_clear()
-        .env("PATH", &path)
-        .env("IRONCLAW_REBORN_HOME", &home_dir)
-        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &default_config)
-        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &args_file)
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
         .output()
         .expect("entrypoint should run");
 
@@ -185,7 +211,62 @@ fn reborn_entrypoint_passes_explicit_args_through() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        std::fs::read_to_string(&args_file).expect("captured args"),
+        std::fs::read_to_string(&fake.args_file).expect("captured args"),
         "serve\n--help\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn reborn_entrypoint_preserves_existing_config() {
+    let fake = setup_fake_entrypoint();
+    std::fs::create_dir_all(&fake.home_dir).expect("home dir");
+    std::fs::write(
+        fake.home_dir.join("config.toml"),
+        "api_version = \"custom.local/v1\"\n",
+    )
+    .expect("existing config");
+
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .args(["serve", "--help"])
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(fake.home_dir.join("config.toml")).expect("preserved config"),
+        "api_version = \"custom.local/v1\"\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn reborn_entrypoint_rejects_default_config_outside_opt_ironclaw() {
+    let fake = setup_fake_entrypoint();
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", "/etc/passwd")
+        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(!output.status.success(), "entrypoint should reject path");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_DEFAULT_CONFIG must be under /opt/ironclaw"),
+        "stderr: {stderr}"
     );
 }
