@@ -19,7 +19,7 @@ But the doc has eight concrete gaps that block implementation as written. Most a
 | Area | Verdict |
 |---|---|
 | Single-seam thesis | Sound. `PostCapabilityStage` at the 7→8 seam is structurally feasible — `TurnCompletedStep` is the right in/out type and `ExecutorStage<TurnCompletedStep>` is implementable. |
-| `CompactionPolicy` trait | Sound shape, wrong sig. `BudgetState` type does not exist; signature must accept `&LoopExecutionState` + `&dyn BudgetStrategy` (or a new wrapper). Sizing via `LoopResultRef` requires a store fetch — flagged as perf concern. |
+| `CompactionForceStrategy` trait | Sound shape, wrong sig. `BudgetState` type does not exist; signature must accept `&LoopExecutionState` + `&dyn BudgetStrategy` (or a new wrapper). Sizing via `LoopResultRef` requires a store fetch — flagged as perf concern. |
 | `skip_model_this_iteration` | **WRONG MECHANISM.** PromptStage already returns to `canonical.rs` before ModelStage runs; PromptStage cannot short-circuit ModelStage via a state flag. Flag must land on `PromptStep::Prepared` output (or new variant), AND `canonical.rs` must read it between the match arm and `.stop.observe()`. Doc skipped this. |
 | Background re-enable single gate | Sound. One rejection site in `TryFrom`, confirmed. But `SpawnSubagentArgs` drops `mode` after decode AND the tool JSON schema does not advertise `mode` — both must be patched or model never requests background. |
 | Depth/concurrency policy | **Doc factually wrong.** `SubagentSpawnLimits.max_depth` already exists, defaults to 1. No `max_concurrent_background_children` — that gap is real. |
@@ -30,8 +30,8 @@ But the doc has eight concrete gaps that block implementation as written. Most a
 ### Blocking gaps to close before Step 1 merges
 
 1. **PromptStage cannot short-circuit ModelStage from inside itself.** Real mechanism: add `skip_model_this_iteration: bool` to `PromptStep::Prepared`; thread it through `canonical.rs` to skip the `match` branch's `ModelStage.process(...)` call AND go straight to `.stop.observe(...)`. Spec must document this or step 1 doesn't ship.
-2. **`CompactionPolicy` trait sig.** `BudgetState` doesn't exist. Either introduce it as a tiny wrapper around `BudgetStrategy::iteration_limit` + token snapshot, OR drop the budget arg from v1 and pass `&LoopExecutionState`.
-3. **Unit mismatch.** `observed_prompt_tokens` is `char/4` estimate, not real tokens, not bytes. A v1 `ByteCapPolicy` table introduces a THIRD unit. Either convert byte caps through the same char/4 heuristic, OR explicitly accept the three-unit gap and document the v1 deferral.
+2. **`CompactionForceStrategy` trait sig.** `BudgetState` doesn't exist. Either introduce it as a tiny wrapper around `BudgetStrategy::iteration_limit` + token snapshot, OR drop the budget arg from v1 and pass `&LoopExecutionState`.
+3. **Unit mismatch.** `observed_prompt_tokens` is `char/4` estimate, not real tokens, not bytes. A v1 `ByteCapStrategy` table introduces a THIRD unit. Either convert byte caps through the same char/4 heuristic, OR explicitly accept the three-unit gap and document the v1 deferral.
 4. **CapabilityStage batches calls per turn.** `PostCapabilityStage` fires once per turn after the whole batch. Doc says "single oversize capability result" — must read as "any result in the batch trips the policy."
 
 ### Blocking gaps for Steps 2–5
@@ -326,7 +326,7 @@ Verified against `docs/reborn/contracts/_contract-freeze-index.md`, `events.md`,
 - **`ironclaw_agent_loop` deps unchanged.** No imports from `ironclaw_reborn`, host_runtime, dispatcher, network, secrets, DB backends. `CompactionForceStrategy` trait + `ByteCapStrategy` impl stay crate-private. New file `executor/post_capability.rs` follows "one decision axis per file" rule.
 - **`ironclaw_turns` gains `CompactionInitiator::CapabilityResultOverflow` variant only.** No new ports. Stays neutral host/runner protocol per turns CLAUDE.md.
 - **`ironclaw_loop_support` writer return widened to surface existing `byte_len`.** Adapter glue per crate CLAUDE.md; no new ports, no dispatcher bypass.
-- **`ironclaw_events`, `ironclaw_event_projections`, `ironclaw_product_adapters`:** zero schema changes from WU-A. WU-F adds 3 optional fields to `RunStatusProjection` + `ProductProjectionItem::RunStatus`, all `#[serde(skip_serializing_if = "Option::is_none")]`. JOIN lookup via `TurnCoordinator::get_run_record` per `events-projections.md` §5 (reducer rules: deterministic, side-effect free, rebuildable).
+- **`ironclaw_events`, `ironclaw_event_projections`, `ironclaw_product_adapters`:** zero schema changes from WU-A. WU-F adds 3 optional fields to `RunStatusProjection` + `ProductProjectionItem::RunStatus`, all `#[serde(skip_serializing_if = "Option::is_none")]`. JOIN lookup via `TurnSpawnTreeStateStore::get_run_record(&scope, run_id)` per `events-projections.md` §5 (reducer rules: deterministic, side-effect free, rebuildable).
 - **`ironclaw_reborn_composition`:** `run_status_projection_state` (`projection.rs:967`) + `product_items_for_live_update` (`live_progress.rs:147`) gain the JOIN. Stays facade-shaped per composition CLAUDE.md (no new substrate exposure).
 
 ### Testing discipline per `.claude/rules/testing.md` "Test Through the Caller"

@@ -193,16 +193,19 @@ impl ByteCapStrategy {
     pub fn with_defaults() -> Self {
         let mut caps = BTreeMap::new();
         // spawn_subagent results can carry larger structured payloads.
-        if let Ok(id) = CapabilityId::new("builtin.spawn_subagent") {
-            caps.insert(id, 48_000);
-        }
+        caps.insert(
+            CapabilityId::new("builtin.spawn_subagent").expect("builtin capability id"),
+            48_000,
+        );
         // http + web_fetch occasionally return large pages/JSON.
-        if let Ok(id) = CapabilityId::new("builtin.http") {
-            caps.insert(id, 32_000);
-        }
-        if let Ok(id) = CapabilityId::new("builtin.web_fetch") {
-            caps.insert(id, 32_000);
-        }
+        caps.insert(
+            CapabilityId::new("builtin.http").expect("builtin capability id"),
+            32_000,
+        );
+        caps.insert(
+            CapabilityId::new("builtin.web_fetch").expect("builtin capability id"),
+            32_000,
+        );
         Self {
             caps,
             default_cap: Self::DEFAULT_FALLBACK_CAP_BYTES,
