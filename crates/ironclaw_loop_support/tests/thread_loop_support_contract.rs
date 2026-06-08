@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, CapabilityId, MissionId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelError,
@@ -261,6 +261,98 @@ async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
         .unwrap();
 
     assert_eq!(fixture.thread_service.context_window_loads(), 1);
+}
+
+#[tokio::test]
+async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
+    let fixture = ThreadFixture::new().await;
+    let message_id = ThreadMessageId::new();
+    let mission_a = MissionId::new("mission-cache-a").unwrap();
+    let mission_b = MissionId::new("mission-cache-b").unwrap();
+    let scope_a = ThreadScope {
+        mission_id: Some(mission_a.clone()),
+        ..fixture.thread_scope.clone()
+    };
+    let scope_b = ThreadScope {
+        mission_id: Some(mission_b.clone()),
+        ..fixture.thread_scope.clone()
+    };
+    let scoped_service = Arc::new(StaticContextThreadService::with_scoped_context_messages(
+        vec![
+            (
+                Some(mission_a),
+                ContextMessage {
+                    message_id: Some(message_id),
+                    summary_id: None,
+                    sequence: 1,
+                    kind: MessageKind::User,
+                    tool_result_provider_call: None,
+                    content: "mission a transcript".to_string(),
+                },
+            ),
+            (
+                Some(mission_b),
+                ContextMessage {
+                    message_id: Some(message_id),
+                    summary_id: None,
+                    sequence: 1,
+                    kind: MessageKind::User,
+                    tool_result_provider_call: None,
+                    content: "mission b transcript".to_string(),
+                },
+            ),
+        ],
+    ));
+    let context_window_cache = Arc::new(ThreadContextWindowCache::default());
+    let context_port = Arc::new(
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&scoped_service),
+            scope_a,
+            fixture.run_context.clone(),
+            16,
+        )
+        .with_context_window_cache(Arc::clone(&context_window_cache)),
+    );
+    let prompt_port = HostManagedLoopPromptPort::new(
+        fixture.run_context.clone(),
+        context_port,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+    );
+    let prompt_bundle = prompt_port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(16),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&scoped_service),
+        scope_b,
+        fixture.run_context,
+        Arc::clone(&gateway),
+        16,
+    )
+    .with_context_window_cache(context_window_cache);
+
+    model_port
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: prompt_bundle.surface_version,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(scoped_service.context_window_loads(), 2);
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls[0].messages[0].content, "mission b transcript");
 }
 
 #[tokio::test]
@@ -4011,11 +4103,49 @@ impl SessionThreadService for GatedFinalizeThreadService {
 
 struct StaticContextThreadService {
     context_message: ContextMessage,
+    scoped_context_messages: HashMap<Option<MissionId>, ContextMessage>,
+    context_window_loads: AtomicUsize,
 }
 
 impl StaticContextThreadService {
     fn new(context_message: ContextMessage) -> Self {
-        Self { context_message }
+        Self {
+            context_message,
+            scoped_context_messages: HashMap::new(),
+            context_window_loads: AtomicUsize::new(0),
+        }
+    }
+
+    fn with_scoped_context_messages(
+        scoped_context_messages: Vec<(Option<MissionId>, ContextMessage)>,
+    ) -> Self {
+        let context_message = scoped_context_messages
+            .first()
+            .map(|(_, message)| message.clone())
+            .unwrap_or_else(|| ContextMessage {
+                message_id: Some(ThreadMessageId::new()),
+                summary_id: None,
+                sequence: 1,
+                kind: MessageKind::User,
+                tool_result_provider_call: None,
+                content: String::new(),
+            });
+        Self {
+            context_message,
+            scoped_context_messages: scoped_context_messages.into_iter().collect(),
+            context_window_loads: AtomicUsize::new(0),
+        }
+    }
+
+    fn context_window_loads(&self) -> usize {
+        self.context_window_loads.load(Ordering::SeqCst)
+    }
+
+    fn context_message_for_scope(&self, scope: &ThreadScope) -> ContextMessage {
+        self.scoped_context_messages
+            .get(&scope.mission_id)
+            .unwrap_or(&self.context_message)
+            .clone()
     }
 }
 
@@ -4118,9 +4248,11 @@ impl SessionThreadService for StaticContextThreadService {
         &self,
         request: ironclaw_threads::LoadContextWindowRequest,
     ) -> Result<ContextWindow, SessionThreadError> {
+        self.context_window_loads.fetch_add(1, Ordering::SeqCst);
+        let context_message = self.context_message_for_scope(&request.scope);
         Ok(ContextWindow {
             thread_id: request.thread_id,
-            messages: vec![self.context_message.clone()],
+            messages: vec![context_message],
         })
     }
 
@@ -4128,9 +4260,10 @@ impl SessionThreadService for StaticContextThreadService {
         &self,
         request: LoadContextMessagesRequest,
     ) -> Result<ContextMessages, SessionThreadError> {
+        let context_message = self.context_message_for_scope(&request.scope);
         Ok(ContextMessages {
             thread_id: request.thread_id,
-            messages: vec![self.context_message.clone()],
+            messages: vec![context_message],
         })
     }
 

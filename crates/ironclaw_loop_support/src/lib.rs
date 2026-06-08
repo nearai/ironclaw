@@ -153,15 +153,17 @@ pub struct ThreadContextWindowCache {
 }
 
 struct CachedContextWindow {
+    scope: ThreadScope,
     thread_id: ThreadId,
     max_messages: usize,
     context: ContextWindow,
 }
 
 impl ThreadContextWindowCache {
-    async fn store(&self, max_messages: usize, context: ContextWindow) {
+    async fn store(&self, scope: ThreadScope, max_messages: usize, context: ContextWindow) {
         let mut cached = self.cached.lock().await;
         *cached = Some(CachedContextWindow {
+            scope,
             thread_id: context.thread_id.clone(),
             max_messages,
             context,
@@ -170,12 +172,15 @@ impl ThreadContextWindowCache {
 
     async fn take_matching(
         &self,
+        scope: &ThreadScope,
         thread_id: &ThreadId,
         max_messages: usize,
     ) -> Option<ContextWindow> {
         let mut cached = self.cached.lock().await;
         if cached.as_ref().is_some_and(|entry| {
-            entry.thread_id == *thread_id && entry.max_messages == max_messages
+            entry.scope == *scope
+                && entry.thread_id == *thread_id
+                && entry.max_messages == max_messages
         }) {
             return cached.take().map(|entry| entry.context);
         }
@@ -376,7 +381,9 @@ where
             .await
             .map_err(context_read_error)?;
         if let Some(cache) = self.context_window_cache.as_ref() {
-            cache.store(max_messages, context.clone()).await;
+            cache
+                .store(self.thread_scope.clone(), max_messages, context.clone())
+                .await;
         }
 
         let instruction_snippets = match self.skill_context_source.as_deref() {
@@ -1181,7 +1188,11 @@ where
     ) -> Result<Vec<HostManagedModelMessage>, AgentLoopHostError> {
         let context = if let Some(cache) = self.context_window_cache.as_ref() {
             match cache
-                .take_matching(&self.run_context.thread_id, self.max_messages)
+                .take_matching(
+                    &self.thread_scope,
+                    &self.run_context.thread_id,
+                    self.max_messages,
+                )
                 .await
             {
                 Some(context) => context,
