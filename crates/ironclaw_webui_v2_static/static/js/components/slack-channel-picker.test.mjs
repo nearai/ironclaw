@@ -315,8 +315,16 @@ test("SlackChannelPicker preserves row subjects when subject catalog fails", () 
   vm.runInNewContext(slackChannelPickerSourceForTest(), context);
 
   renderPicker(context, state);
-  const rendered = renderPicker(context, state);
+  let rendered = renderPicker(context, state);
   assert.equal(valuesAfter(rendered, "disabled=").at(-1), false);
+
+  valuesAfter(rendered, "onChange=")[0]({ target: { value: " C0NEW " } });
+  rendered = renderPicker(context, state);
+  assert.equal(valuesAfter(rendered, "disabled=")[1], true);
+  valuesAfter(rendered, "onClick=")[0]();
+  assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
+    { channel_id: "C0RAW", subject_user_id: "user:raw-route-subject" },
+  ]);
 
   valuesAfter(rendered, "onClick=").at(-1)();
 

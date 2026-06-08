@@ -56,7 +56,7 @@ export function SlackChannelPicker({ action }) {
 
   const addChannel = () => {
     const nextId = draftChannelId.trim();
-    if (!nextId) return;
+    if (!nextId || !subjectsQuery.isSuccess) return;
     const subjectUserId = hasRoutableSubjects
       ? draftSubjectUserId || defaultSubjectUserId
       : "";
@@ -88,6 +88,8 @@ export function SlackChannelPicker({ action }) {
   };
   const hasMissingSubject =
     hasRoutableSubjects && channels.some((channel) => !channel.subject_user_id);
+  const hasBlankSubjectDuringCatalogError =
+    subjectsQuery.isError && channels.some((channel) => !channel.subject_user_id);
 
   return html`
     <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
@@ -136,7 +138,7 @@ export function SlackChannelPicker({ action }) {
           size="sm"
           className="shrink-0"
           onClick=${addChannel}
-          disabled=${!draftChannelId.trim() || !subjectsSettled}
+          disabled=${!draftChannelId.trim() || !subjectsQuery.isSuccess}
         >
           ${copy.addLabel}
         <//>
@@ -202,6 +204,7 @@ export function SlackChannelPicker({ action }) {
           disabled=${!channelsQuery.isSuccess ||
           !subjectsSettled ||
           saveMutation.isPending ||
+          hasBlankSubjectDuringCatalogError ||
           hasMissingSubject}
         >
           ${saveMutation.isPending ? copy.savingLabel : copy.submitLabel}
