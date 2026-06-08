@@ -118,7 +118,7 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
             `)
           : html`
               <${EmptyPanel}
-                title={t("job.noActivityTitle")}
+                title=${t("job.noActivityTitle")}
                 description="This job has not written any persisted events for the selected filter."
               />
             `}
@@ -135,7 +135,7 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
                 handleSend(false);
               }
             }}
-            placeholder={t("job.followupPlaceholder")}
+            placeholder=${t("job.followupPlaceholder")}
             className="h-11 rounded-md border border-white/10 bg-iron-950/90 px-3 text-sm text-white outline-none focus:border-signal/45"
           />
           <${Button} variant="secondary" disabled=${isSendingPrompt} onClick=${() => handleSend(true)}>Done<//>

@@ -247,7 +247,7 @@ registerPack("ja", {
   "llm.providerId": "Provider ID",
   "llm.providerName": "Display name",
   "llm.providerUpdated": "Updated provider \"{name}\".",
-  "llm.providers": "LLM providers",
+  "llm.providers": "LLM プロバイダー",
   "llm.providersDesc": "組み込みおよびカスタム推論プロバイダーを管理します。",
   "onboarding.title": "IronClawへようこそ",
   "onboarding.subtitle": "開始するにはAIプロバイダーを選択してください。後で設定から変更や追加が可能です。",

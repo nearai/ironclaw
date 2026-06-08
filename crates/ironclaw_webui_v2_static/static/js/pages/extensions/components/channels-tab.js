@@ -101,7 +101,7 @@ export function ChannelsTab({
         </h3>
         <${BuiltinRow}
           name="Web Gateway"
-          description="Browser-based chat with SSE streaming"
+          description=${t("channels.webGatewayDesc") || "Browser-based chat with SSE streaming"}
           enabled=${true}
           detail=${"SSE: " +
           (status.sse_connections || 0) +
@@ -110,29 +110,29 @@ export function ChannelsTab({
         />
         <${BuiltinRow}
           name="HTTP Webhook"
-          description="Inbound webhook endpoint for external integrations"
+          description=${t("channels.httpWebhookDesc") || "Inbound webhook endpoint for external integrations"}
           enabled=${enabledChannels.includes("http")}
           detail="ENABLE_HTTP=true"
         />
         <${BuiltinRow}
           name="Slack"
-          description="Tenant app channel for DMs and app mentions"
+          description=${t("channels.slackDesc") || "Tenant app channel for DMs and app mentions"}
           enabled=${slackEnabled}
           statusLabel=${slackStatus.label}
           statusTone=${slackStatus.tone}
-          detail="Tenant Slack app install"
+          detail=${t("channels.slackDetail") || "Tenant Slack app install"}
         >
           <${SlackBuiltInConnectAction} slackConnectActions=${slackConnectActions} />
         <//>
         <${BuiltinRow}
           name="CLI"
-          description="Terminal interface with TUI or simple REPL"
+          description=${t("channels.cliDesc") || "Terminal interface with TUI or simple REPL"}
           enabled=${enabledChannels.includes("cli")}
           detail="ironclaw run --cli"
         />
         <${BuiltinRow}
           name="REPL"
-          description="Minimal read-eval-print loop for testing"
+          description=${t("channels.replDesc") || "Minimal read-eval-print loop for testing"}
           enabled=${enabledChannels.includes("repl")}
           detail="ironclaw run --repl"
         />
@@ -144,7 +144,7 @@ export function ChannelsTab({
           <h3
             className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
           >
-            Messaging channels
+            ${t("channels.messaging")}
           </h3>
           <div className="grid grid-cols-1 gap-4">
             ${channels.map(

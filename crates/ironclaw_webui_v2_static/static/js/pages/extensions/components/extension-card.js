@@ -45,7 +45,7 @@ function OverflowMenu({ actions, isBusy }) {
     <div ref=${ref} className="relative shrink-0">
       <button
         type="button"
-        aria-label={t("extensions.moreActions")}
+        aria-label=${t("extensions.moreActions")}
         aria-haspopup="true"
         aria-expanded=${open ? "true" : "false"}
         disabled=${isBusy}
@@ -252,7 +252,7 @@ export function RegistryCard({ entry, onInstall, isBusy }) {
   return html`
     <div className=${CARD}>
       <div className="flex items-start gap-2">
-        <${Badge} tone="muted" label={t("extensions.state.available") || "available"} size="sm" />
+        <${Badge} tone="muted" label=${t("extensions.state.available") || "available"} size="sm" />
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
           ${displayName}
         </span>

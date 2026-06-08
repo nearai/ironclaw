@@ -101,8 +101,8 @@ function ThreadItem({ thread, isActive, presentation, onSelect, onDelete }) {
       html`<button
         type="button"
         onClick=${handleDelete}
-        title={t("common.deleteChat")}
-        aria-label={t("common.deleteChat")}
+        title=${t("common.deleteChat")}
+        aria-label=${t("common.deleteChat")}
         className=${cn(
           "my-1 mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px]",
           "opacity-0 transition group-hover:opacity-100 focus:opacity-100",
@@ -229,7 +229,7 @@ export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) 
           </div>`}
 
           <${ThreadGroup}
-            label={t("common.pinned")}
+            label=${t("common.pinned")}
             items=${pinned}
             activeThreadId=${activeThreadId}
             states=${states}

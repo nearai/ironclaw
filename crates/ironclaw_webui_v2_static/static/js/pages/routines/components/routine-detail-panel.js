@@ -60,7 +60,7 @@ export function RoutineDetailPanel({
   if (error || !routine) {
     return html`
       <${EmptyPanel}
-        title={t("routine.unavailable")}
+        title=${t("routine.unavailable")}
         description=${error?.message || "This routine no longer exists or is outside your access scope."}
       />
     `;
@@ -118,8 +118,8 @@ export function RoutineDetailPanel({
       `}
 
       <div className="mt-6 grid gap-6 xl:grid-cols-2">
-        <${JsonBlock} title={t("routine.triggerPayload")} value=${routine.trigger} />
-        <${JsonBlock} title={t("routine.actionPayload")} value=${routine.action} />
+        <${JsonBlock} title=${t("routine.triggerPayload")} value=${routine.trigger} />
+        <${JsonBlock} title=${t("routine.actionPayload")} value=${routine.action} />
       </div>
 
       <div className="mt-6">

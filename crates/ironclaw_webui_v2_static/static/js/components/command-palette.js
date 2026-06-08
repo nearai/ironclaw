@@ -92,7 +92,7 @@ export function CommandPalette({ open, onClose, threadsState, onNewChat, onToggl
             value=${query}
             onInput=${(e) => setQuery(e.currentTarget.value)}
             onKeyDown=${onKeyDown}
-            placeholder={t("command.placeholder")}
+            placeholder=${t("command.placeholder")}
             className="h-12 w-full border-0 bg-transparent text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)]"
           />
           <kbd className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]">esc</kbd>
