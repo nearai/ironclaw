@@ -810,8 +810,20 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            extension_activate_grant.constraints.network,
-            NetworkPolicy::default()
+            extension_activate_grant
+                .constraints
+                .network
+                .allowed_targets
+                .iter()
+                .map(|target| target.host_pattern.as_str())
+                .collect::<Vec<_>>(),
+            vec!["*"]
+        );
+        assert!(
+            extension_activate_grant
+                .constraints
+                .network
+                .deny_private_ip_ranges
         );
 
         let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);

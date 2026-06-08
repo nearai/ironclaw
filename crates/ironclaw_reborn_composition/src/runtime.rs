@@ -5734,6 +5734,11 @@ mod tests {
             .leases_for_scope(&resource_scope)
             .await;
         assert_eq!(leases.len(), 1);
+        assert_eq!(
+            leases[0].grant.issued_by,
+            Principal::User(actor.user_id.clone()),
+            "product approval service should stamp the approving user on the resume lease"
+        );
         assert!(
             leases[0]
                 .grant

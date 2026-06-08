@@ -177,7 +177,7 @@ network = "default"
 capability = "builtin.extension_activate"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network"]
 mounts = "ambient"
-network = "default"
+network = "local_dev_wildcard"
 
 [[grants]]
 capability = "builtin.extension_remove"

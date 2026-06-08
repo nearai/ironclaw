@@ -522,6 +522,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn network_effect_grants_use_non_empty_network_policy() {
+        let policy = local_dev_capability_policy().expect("policy parses");
+
+        for grant in &policy.grants {
+            if grant.effects.contains(&EffectKind::Network) {
+                assert_ne!(
+                    grant.network,
+                    LocalDevNetworkProfile::Default,
+                    "{} declares network authority but would stage an empty network policy",
+                    grant.capability
+                );
+            }
+        }
+    }
+
     fn assert_trigger_grant(
         policy: &LocalDevCapabilityPolicy,
         capability: &str,

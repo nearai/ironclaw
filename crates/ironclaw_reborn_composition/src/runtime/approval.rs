@@ -45,9 +45,19 @@ impl LocalDevApprovalLeaseTermsProvider {
         gate: &ApprovalGateRecord,
         action: LocalDevApprovalPolicyAction<'_>,
     ) -> Result<LeaseApproval, ProductWorkflowError> {
+        self.extension_lease_terms_for_active_capability(gate, action)
+            .await?
+            .ok_or_else(lease_terms_unavailable)
+    }
+
+    async fn extension_lease_terms_for_active_capability(
+        &self,
+        gate: &ApprovalGateRecord,
+        action: LocalDevApprovalPolicyAction<'_>,
+    ) -> Result<Option<LeaseApproval>, ProductWorkflowError> {
         let capability = action.capability();
         let Principal::Extension(extension_id) = &gate.request().requested_by else {
-            return Err(lease_terms_unavailable());
+            return Ok(None);
         };
         let surface = self
             .extension_surface_source
@@ -57,11 +67,13 @@ impl LocalDevApprovalLeaseTermsProvider {
                 tracing::error!(%error, "local-dev extension approval lease terms are unavailable");
                 lease_terms_unavailable()
             })?;
-        let grant = surface
+        let Some(grant) = surface
             .grants(extension_id)
             .into_iter()
             .find(|grant| grant.capability == *capability)
-            .ok_or_else(lease_terms_unavailable)?;
+        else {
+            return Ok(None);
+        };
         if action.is_spawn_capability()
             && !grant
                 .constraints
@@ -74,7 +86,7 @@ impl LocalDevApprovalLeaseTermsProvider {
             );
             return Err(lease_terms_unavailable());
         }
-        Ok(local_dev_one_shot_lease_approval(grant.constraints))
+        Ok(Some(local_dev_one_shot_lease_approval(grant.constraints)))
     }
 }
 
@@ -88,6 +100,13 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
             .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::UnsupportedAction,
             })?;
+        if action.is_spawn_capability()
+            && let Some(approval) = self
+                .extension_lease_terms_for_active_capability(gate, action)
+                .await?
+        {
+            return Ok(approval);
+        }
         match self.policy.lease_approval_for(
             action,
             &self.workspace_mounts,
@@ -180,6 +199,73 @@ mod tests {
             Vec::<SecretHandle>::new(),
             "test capability has no runtime credential handles"
         );
+    }
+
+    #[tokio::test]
+    async fn extension_spawn_capability_uses_extension_surface_terms_before_default_policy() {
+        let capability = CapabilityId::new("gmail.send_message").expect("capability id");
+        let provider = ExtensionId::new("gmail").expect("provider id");
+        let caller = ExtensionId::new("caller").expect("caller id");
+        let secret = SecretHandle::new("gmail_token").expect("secret handle");
+        let source = LocalDevExtensionSurfaceSource::from_surface(
+            LocalDevExtensionSurface::from_active_capabilities(vec![ActiveExtensionCapability {
+                id: capability.clone(),
+                provider,
+                effects: vec![
+                    EffectKind::SpawnProcess,
+                    EffectKind::Network,
+                    EffectKind::UseSecret,
+                ],
+                runtime_credentials: vec![ironclaw_host_api::RuntimeCredentialRequirement {
+                    handle: secret.clone(),
+                    source: ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle,
+                    provider_scopes: Vec::new(),
+                    audience: ironclaw_host_api::NetworkTargetPattern {
+                        scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+                        host_pattern: "gmail.googleapis.com".to_string(),
+                        port: None,
+                    },
+                    target: ironclaw_host_api::RuntimeCredentialTarget::Header {
+                        name: "authorization".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                    required: true,
+                }],
+            }]),
+        );
+        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
+            Arc::new(local_dev_capability_policy().expect("policy parses")),
+            MountView::default(),
+            MountView::default(),
+            MountView::default(),
+            source,
+        );
+        let request_id = ApprovalRequestId::new();
+        let gate = approval_gate_record(
+            request_id,
+            Principal::Extension(caller),
+            Action::SpawnCapability {
+                capability: capability.clone(),
+                estimated_resources: ResourceEstimate::default(),
+            },
+        );
+
+        let approval = terms_provider
+            .lease_terms_for(&gate)
+            .await
+            .expect("extension spawn lease terms");
+
+        assert_eq!(approval.issued_by, Principal::HostRuntime);
+        assert_eq!(approval.max_invocations, Some(1));
+        assert_eq!(
+            approval.allowed_effects,
+            vec![
+                EffectKind::SpawnProcess,
+                EffectKind::Network,
+                EffectKind::UseSecret
+            ]
+        );
+        assert_eq!(approval.secrets, vec![secret]);
     }
 
     fn approval_gate_record(
