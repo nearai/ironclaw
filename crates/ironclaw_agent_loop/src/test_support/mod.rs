@@ -36,9 +36,8 @@ use ironclaw_turns::{
     },
 };
 
-mod compaction;
-
-pub use compaction::{active_task_preserving_compaction_index, compaction_metadata};
+/// Compaction prompt-index fixtures exposed for crate integration tests.
+pub mod compaction;
 
 use crate::state::{
     CapabilityCallSignature, CheckpointKind, LoopExecutionState, RecoveryAttemptClass,

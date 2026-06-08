@@ -19,7 +19,9 @@ use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
     StopKind, TurnSummary,
 };
-use crate::test_support::{active_task_preserving_compaction_index, compaction_metadata};
+use crate::test_support::compaction::{
+    active_task_preserving_compaction_index, compaction_metadata,
+};
 
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,

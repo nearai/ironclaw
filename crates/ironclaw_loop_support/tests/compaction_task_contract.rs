@@ -5,7 +5,10 @@ use chrono::Utc;
 use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId,
 };
-use ironclaw_loop_support::HostManagedLoopCompactionPort;
+use ironclaw_loop_support::{
+    ACTIVE_TASK_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
+    active_task_compaction_prompt_id,
+};
 use ironclaw_safety::{
     InjectionScanner, InjectionWarning, LeakAction, LeakMatch, LeakScanResult, LeakScanner,
     LeakSeverity, Severity,
@@ -82,7 +85,7 @@ async fn compaction_port_uses_configured_prompt_id_for_inference_identity() {
         fixture.scope.clone(),
         Arc::new(CleanInjectionScanner),
         Arc::new(CleanLeakScanner),
-        "active_task_compaction_summarizer_fresh",
+        active_task_compaction_prompt_id(),
         "active task prompt",
     );
 
@@ -90,10 +93,7 @@ async fn compaction_port_uses_configured_prompt_id_for_inference_identity() {
         .await
         .expect("compaction should succeed");
 
-    assert_eq!(
-        inference.last_prompt_id(),
-        "active_task_compaction_summarizer_fresh"
-    );
+    assert_eq!(inference.last_prompt_id(), ACTIVE_TASK_COMPACTION_PROMPT_ID);
 }
 
 #[tokio::test]

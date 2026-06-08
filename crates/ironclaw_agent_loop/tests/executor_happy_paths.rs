@@ -6,8 +6,8 @@ use ironclaw_agent_loop::{
     state::{CheckpointKind, LoopExecutionState},
     test_support::{
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
-        ScriptedCapabilityOutcome, ScriptedModelResponse, active_task_preserving_compaction_index,
-        capability_descriptor, capability_id, compaction_metadata,
+        ScriptedCapabilityOutcome, ScriptedModelResponse, capability_descriptor, capability_id,
+        compaction::{active_task_preserving_compaction_index, compaction_metadata},
     },
 };
 use ironclaw_turns::{

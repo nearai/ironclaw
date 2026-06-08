@@ -130,10 +130,10 @@ pub(super) fn tail_preserving_user_boundary(
     let mut tail_tokens = 0_u64;
     let mut tail_messages = 0_usize;
     for entry in state.compaction_prompt.message_index.iter().rev() {
-        if is_eligible_user_boundary(entry, state, prompt_fingerprint)
-            && boundary_guard(entry)
-            && tail_tokens >= preserve_tail_tokens
+        if tail_tokens >= preserve_tail_tokens
             && tail_messages >= minimum_tail_messages
+            && is_eligible_user_boundary(entry, state, prompt_fingerprint)
+            && boundary_guard(entry)
         {
             return Some(entry.sequence);
         }
@@ -143,7 +143,7 @@ pub(super) fn tail_preserving_user_boundary(
     None
 }
 
-fn is_eligible_user_boundary(
+pub(super) fn is_eligible_user_boundary(
     entry: &MessageIndexEntry,
     state: &LoopExecutionState,
     prompt_fingerprint: u64,
