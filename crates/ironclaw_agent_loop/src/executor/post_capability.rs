@@ -79,7 +79,6 @@ impl ExecutorStage<TurnCompletedStep> for PostCapabilityStage {
             if let Some(initiator) = self.policy.should_force_compact(&state) {
                 state.compaction_state.force_compact_on_next_iteration = true;
                 state.post_capability_state.skip_model_this_iteration = true;
-                state.post_capability_state.pending_capability_bytes.clear();
 
                 CheckpointStage
                     .emit_progress(
@@ -92,6 +91,13 @@ impl ExecutorStage<TurnCompletedStep> for PostCapabilityStage {
                     .await;
             }
         }
+
+        // Always clear the per-turn byte accumulator regardless of whether the
+        // policy tripped. ByteCapPolicy doc states "during the current turn" —
+        // carrying entries across turns would cause cross-turn accumulation and
+        // false-positive trips on subsequent AssistantReply turns. Map is cheap
+        // to drop and re-populate per turn.
+        state.post_capability_state.pending_capability_bytes.clear();
 
         Ok(TurnCompletedStep::Continue { state, summary })
     }
