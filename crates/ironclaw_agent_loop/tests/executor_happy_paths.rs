@@ -267,6 +267,7 @@ async fn await_dependent_run_blocks_with_dependent_gate_kind() {
         capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::AwaitDependentRun {
             gate_ref: "gate:child-wait".to_string(),
             result_ref: "result:child-wait".to_string(),
+            byte_len: 0,
         }]]),
         single_call_retry_outcomes: VecDeque::new(),
         pending_inputs: VecDeque::new(),
@@ -312,6 +313,7 @@ async fn spawned_child_run_appends_result_ref_and_continues() {
         capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::SpawnedChildRun {
             child_run_id,
             result_ref: "result:child-run".to_string(),
+            byte_len: 0,
         }]]),
         single_call_retry_outcomes: VecDeque::new(),
         pending_inputs: VecDeque::new(),

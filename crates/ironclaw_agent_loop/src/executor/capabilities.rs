@@ -198,6 +198,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     CapabilityOutcome::SpawnedChildRun {
                         result_ref,
                         safe_summary,
+                        byte_len,
                         ..
                     } => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
@@ -207,6 +208,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             &call,
                             result_ref,
                             safe_summary,
+                            byte_len,
                             &mut capability_batch,
                         )
                         .await?;
@@ -215,6 +217,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         gate_ref,
                         result_ref,
                         safe_summary,
+                        byte_len,
                     } if coalesced_gate_step
                         .as_ref()
                         .is_some_and(|(gate, _)| gate == &gate_ref) =>
@@ -225,7 +228,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             safe_summary,
                             progress: CapabilityProgress::MadeProgress,
                             terminate_hint: false,
-                            byte_len: 0,
+                            byte_len,
                         };
                         append_completed_capability_result(
                             ctx.host,
@@ -389,6 +392,7 @@ impl CapabilityStage {
             CapabilityOutcome::SpawnedChildRun {
                 result_ref,
                 safe_summary,
+                byte_len,
                 ..
             } => {
                 append_spawned_child_result(
@@ -397,6 +401,7 @@ impl CapabilityStage {
                     &call,
                     result_ref,
                     safe_summary,
+                    byte_len,
                     capability_batch,
                 )
                 .await?;
@@ -452,13 +457,14 @@ impl CapabilityStage {
                 gate_ref,
                 result_ref,
                 safe_summary,
+                byte_len,
             } => {
                 let resolved_result = CapabilityResultMessage {
                     result_ref,
                     safe_summary,
                     progress: CapabilityProgress::MadeProgress,
                     terminate_hint: false,
-                    byte_len: 0,
+                    byte_len,
                 };
                 AwaitDependentRunGateStage
                     .process(
@@ -706,6 +712,7 @@ async fn append_spawned_child_result(
     call: &CapabilityCallCandidate,
     result_ref: LoopResultRef,
     safe_summary: String,
+    byte_len: u64,
     capability_batch: &mut CapabilityBatchTurnSummary,
 ) -> Result<(), AgentLoopExecutorError> {
     let safe_summary = sanitized_strategy_summary(safe_summary)?.into_inner();
@@ -714,7 +721,7 @@ async fn append_spawned_child_result(
         safe_summary,
         progress: CapabilityProgress::MadeProgress,
         terminate_hint: false,
-        byte_len: 0,
+        byte_len,
     };
     append_completed_capability_result(host, state, call, result, capability_batch).await
 }
@@ -795,6 +802,7 @@ mod tests {
             gate_ref: LoopGateRef::new(gate).unwrap(),
             result_ref: LoopResultRef::new(format!("result:{result}")).unwrap(),
             safe_summary: "summary".to_string(),
+            byte_len: 0,
         }
     }
 

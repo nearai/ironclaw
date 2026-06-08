@@ -149,15 +149,19 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
         child_run_id,
         result_ref: result_ref.clone(),
         safe_summary: "spawned in background".to_string(),
+        byte_len: 0,
     };
     let spawned_json = serde_json::to_value(&spawned).unwrap();
+    // byte_len is serde(default) so it is omitted from serialization when 0
+    // (skip_serializing_if is not set — it will be present with value 0).
     assert_eq!(
         spawned_json,
         serde_json::json!({
             "spawned_child_run": {
                 "child_run_id": child_run_id,
                 "result_ref": result_ref,
-                "safe_summary": "spawned in background"
+                "safe_summary": "spawned in background",
+                "byte_len": 0
             }
         })
     );
@@ -173,6 +177,7 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
         gate_ref: gate_ref.clone(),
         result_ref: result_ref.clone(),
         safe_summary: "waiting on child".to_string(),
+        byte_len: 0,
     };
     let awaiting_json = serde_json::to_value(&awaiting).unwrap();
     assert_eq!(
@@ -181,7 +186,8 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
             "await_dependent_run": {
                 "gate_ref": gate_ref,
                 "result_ref": result_ref,
-                "safe_summary": "waiting on child"
+                "safe_summary": "waiting on child",
+                "byte_len": 0
             }
         })
     );
