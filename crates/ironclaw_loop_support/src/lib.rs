@@ -22,6 +22,7 @@ mod capability_info;
 mod capability_port;
 mod capability_surface_filter;
 mod compaction_task;
+mod context_window_cache;
 mod filesystem_checkpoint_state;
 mod filesystem_skill_bundle_source;
 pub mod identity_context;
@@ -65,6 +66,7 @@ pub use compaction_task::{
     active_task_compaction_prompt_id, default_compaction_prompt_id,
     default_host_managed_loop_compaction_port, host_managed_loop_compaction_port_with_prompt_id,
 };
+pub use context_window_cache::ThreadContextWindowCache;
 pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
 pub use identity_context::{
@@ -119,9 +121,8 @@ pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
-use ironclaw_host_api::ThreadId;
 use ironclaw_threads::{
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextWindow,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
     SummaryArtifact, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
@@ -146,47 +147,6 @@ use ironclaw_turns::{
     },
 };
 use serde::{Deserialize, Serialize};
-
-#[derive(Default)]
-pub struct ThreadContextWindowCache {
-    cached: Mutex<Option<CachedContextWindow>>,
-}
-
-struct CachedContextWindow {
-    scope: ThreadScope,
-    thread_id: ThreadId,
-    max_messages: usize,
-    context: ContextWindow,
-}
-
-impl ThreadContextWindowCache {
-    async fn store(&self, scope: ThreadScope, max_messages: usize, context: ContextWindow) {
-        let mut cached = self.cached.lock().await;
-        *cached = Some(CachedContextWindow {
-            scope,
-            thread_id: context.thread_id.clone(),
-            max_messages,
-            context,
-        });
-    }
-
-    async fn take_matching(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        max_messages: usize,
-    ) -> Option<ContextWindow> {
-        let mut cached = self.cached.lock().await;
-        if cached.as_ref().is_some_and(|entry| {
-            entry.scope == *scope
-                && entry.thread_id == *thread_id
-                && entry.max_messages == max_messages
-        }) {
-            return cached.take().map(|entry| entry.context);
-        }
-        None
-    }
-}
 
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
 const LOOP_SYSTEM_ROLE: &str = "system";
@@ -1186,36 +1146,7 @@ where
         &self,
         requested_messages: Vec<LoopModelMessage>,
     ) -> Result<Vec<HostManagedModelMessage>, AgentLoopHostError> {
-        let context = if let Some(cache) = self.context_window_cache.as_ref() {
-            match cache
-                .take_matching(
-                    &self.thread_scope,
-                    &self.run_context.thread_id,
-                    self.max_messages,
-                )
-                .await
-            {
-                Some(context) => context,
-                None => self
-                    .thread_service
-                    .load_context_window(LoadContextWindowRequest {
-                        scope: self.thread_scope.clone(),
-                        thread_id: self.run_context.thread_id.clone(),
-                        max_messages: self.max_messages,
-                    })
-                    .await
-                    .map_err(context_read_error)?,
-            }
-        } else {
-            self.thread_service
-                .load_context_window(LoadContextWindowRequest {
-                    scope: self.thread_scope.clone(),
-                    thread_id: self.run_context.thread_id.clone(),
-                    max_messages: self.max_messages,
-                })
-                .await
-                .map_err(context_read_error)?
-        };
+        let context = self.load_model_context_window().await?;
 
         if requested_messages.is_empty() {
             let context_messages = prompt_context_budget::select_prompt_context_messages(
@@ -1394,6 +1325,31 @@ where
             });
         }
         Ok(resolved)
+    }
+
+    async fn load_model_context_window(
+        &self,
+    ) -> Result<ironclaw_threads::ContextWindow, AgentLoopHostError> {
+        if let Some(cache) = self.context_window_cache.as_ref()
+            && let Some(context) = cache
+                .take_matching(
+                    &self.thread_scope,
+                    &self.run_context.thread_id,
+                    self.max_messages,
+                )
+                .await
+        {
+            return Ok(context);
+        }
+
+        self.thread_service
+            .load_context_window(LoadContextWindowRequest {
+                scope: self.thread_scope.clone(),
+                thread_id: self.run_context.thread_id.clone(),
+                max_messages: self.max_messages,
+            })
+            .await
+            .map_err(context_read_error)
     }
 
     async fn instruction_snippet_messages_by_ref(
