@@ -238,4 +238,18 @@ mod tests {
         let check = check_providers_file(&path);
         assert_eq!(check.outcome, CheckOutcome::Fail);
     }
+
+    #[test]
+    fn driver_check_failed_status_produces_fail_outcome() {
+        let status = RebornRuntimeComponentStatus::Failed("timeout".to_string());
+        let check = driver_check("test_driver", &status);
+        assert_eq!(check.outcome, CheckOutcome::Fail);
+        assert_eq!(check.category, CheckCategory::Drivers);
+        assert_eq!(check.name, "test_driver");
+        assert!(
+            check.detail.contains("unavailable: timeout"),
+            "detail should contain reason: {}",
+            check.detail
+        );
+    }
 }
