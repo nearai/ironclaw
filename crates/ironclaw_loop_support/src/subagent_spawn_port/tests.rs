@@ -994,6 +994,13 @@ fn default_spawn_args() -> SpawnSubagentArgs {
     }
 }
 
+fn test_flavor_descriptor(id: &str, summary: &str) -> SpawnSubagentFlavorDescriptor {
+    SpawnSubagentFlavorDescriptor {
+        id: SubagentKindId::new(id).expect("test fixture: valid SubagentKindId"),
+        summary: summary.to_string(),
+    }
+}
+
 fn subagent_definition(allow_nesting: bool) -> SubagentDefinition {
     SubagentDefinition {
         subagent_kind: SubagentKindId::new("general").unwrap(),
@@ -2895,14 +2902,8 @@ async fn spawn_subagent_propagates_byte_len_from_result_writer() {
 #[test]
 fn build_spawn_subagent_parameters_schema_enum_and_description() {
     let catalog = vec![
-        SpawnSubagentFlavorDescriptor {
-            id: "general".into(),
-            summary: "summary one".into(),
-        },
-        SpawnSubagentFlavorDescriptor {
-            id: "planner".into(),
-            summary: "summary two".into(),
-        },
+        test_flavor_descriptor("general", "summary one"),
+        test_flavor_descriptor("planner", "summary two"),
     ];
     let schema = build_spawn_subagent_parameters_schema(&catalog);
 
@@ -3013,10 +3014,7 @@ fn build_spawn_subagent_parameters_schema_empty_catalog_has_no_enum() {
 
 #[test]
 fn build_spawn_subagent_parameters_schema_single_entry_catalog() {
-    let catalog = vec![SpawnSubagentFlavorDescriptor {
-        id: "solo".into(),
-        summary: "the only one".into(),
-    }];
+    let catalog = vec![test_flavor_descriptor("solo", "the only one")];
     let schema = build_spawn_subagent_parameters_schema(&catalog);
 
     let enum_vals = schema["properties"]["subagent_type"]["enum"]
@@ -3107,5 +3105,88 @@ async fn spawn_provider_tool_call_registration_accepts_subagent_type_wire_key() 
         child_runs.requests().len(),
         1,
         "exactly one child run must have been submitted"
+    );
+}
+
+// ── C10: deny_unknown_fields rejects unexpected wire fields ───────────────────
+
+#[tokio::test]
+async fn spawn_provider_tool_call_registration_rejects_unknown_fields() {
+    // Verifies that `deny_unknown_fields` on `SpawnSubagentWireArgs` is
+    // enforced end-to-end through `register_provider_tool_call` (which calls
+    // `validate_spawn_provider_tool_call` internally). An extra wire field
+    // that is not part of the schema must yield `InvalidInvocation` with the
+    // existing rejection message.
+    let context = test_run_context("spawn-deny-unknown-fields").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(AuthPassPort),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+    let mut call = spawn_provider_tool_call();
+    call.arguments = json!({
+        "flavor_id": "general",
+        "task": "investigate",
+        "unknown_field": "bogus"
+    });
+
+    let error = port
+        .validate_provider_tool_call(&call)
+        .expect_err("payload with unknown_field must be rejected");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error.safe_summary.contains("invalid spawn_subagent input"),
+        "rejection message must contain 'invalid spawn_subagent input', got: {}",
+        error.safe_summary
+    );
+}
+
+// ── C11: new_with_schema propagates precomputed schema to tool_definition ─────
+
+#[tokio::test]
+async fn new_with_schema_propagates_schema_to_spawn_tool_definition() {
+    // Constructs a port via `new_with_schema` with a recognisable marker schema
+    // and asserts that `spawn_tool_definition` (called via `tool_definitions`)
+    // renders the marker into the resulting `ProviderToolDefinition.parameters`.
+    let context = test_run_context("spawn-new-with-schema").await;
+    let marker_schema = Arc::new(serde_json::json!({
+        "type": "object",
+        "description": "MARKER_SCHEMA_FOR_TEST",
+        "properties": {}
+    }));
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: Arc::new(StaticCoordinator),
+        turn_state_store: Arc::new(StaticTurnStateStore::new(None)),
+        thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
+        goal_store: Arc::new(NoopGoalStore),
+        gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(RegisteringSpawnInputCodec),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new_with_schema(
+        Arc::new(AuthPassPort),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+        Arc::clone(&marker_schema),
+    );
+
+    let definitions = port.tool_definitions().expect("tool definitions");
+    let spawn_def = definitions
+        .iter()
+        .find(|d| d.capability_id.as_str() == DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+        .expect("spawn tool definition must be present");
+
+    assert_eq!(
+        spawn_def.parameters["description"],
+        serde_json::json!("MARKER_SCHEMA_FOR_TEST"),
+        "parameters must carry the marker schema injected via new_with_schema"
     );
 }

@@ -146,7 +146,9 @@ pub fn builtin_flavor_catalog() -> Vec<ironclaw_loop_support::SpawnSubagentFlavo
     BUILTIN_SUBAGENT_FLAVORS
         .iter()
         .map(|f| ironclaw_loop_support::SpawnSubagentFlavorDescriptor {
-            id: f.id.as_str().to_string(),
+            id: ironclaw_loop_support::SubagentKindId::new(f.id.as_str()).expect(
+                "safety: BUILTIN_SUBAGENT_FLAVORS::SubagentFlavorId::as_str() is a compile-time constant valid SubagentKindId by construction",
+            ),
             summary: f.summary.to_string(),
         })
         .collect()
@@ -256,10 +258,10 @@ mod tests {
     fn builtin_flavor_catalog_returns_four_entries_in_registry_order() {
         let catalog = builtin_flavor_catalog();
         assert_eq!(catalog.len(), 4);
-        assert_eq!(catalog[0].id, "general");
-        assert_eq!(catalog[1].id, "explorer");
-        assert_eq!(catalog[2].id, "coder");
-        assert_eq!(catalog[3].id, "planner");
+        assert_eq!(catalog[0].id.as_str(), "general");
+        assert_eq!(catalog[1].id.as_str(), "explorer");
+        assert_eq!(catalog[2].id.as_str(), "coder");
+        assert_eq!(catalog[3].id.as_str(), "planner");
     }
 
     #[test]

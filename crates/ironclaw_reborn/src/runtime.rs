@@ -537,15 +537,17 @@ impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
     ) -> Arc<dyn LoopCapabilityPort> {
-        // Use the precomputed schema (built once in new()) rather than
-        // rebuilding it on every decorate() call.
+        // Arc::clone is a cheap ref-count bump — avoids deep-cloning the JSON
+        // schema tree on every decorate() call (the schema is rendered to a
+        // serde_json::Value only at the single render site in
+        // spawn_tool_definition / spawn_descriptor when the model requests it).
         Arc::new(SubagentSpawnCapabilityPort::new_with_schema(
             inner,
             run_context.clone(),
             self.spawn_id.clone(),
             self.spawn_limits,
             Arc::clone(&self.spawn_deps),
-            (*self.parameters_schema).clone(),
+            Arc::clone(&self.parameters_schema),
         ))
     }
 }

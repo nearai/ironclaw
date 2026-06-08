@@ -46,11 +46,12 @@ pub(crate) const SPAWN_SUBAGENT_DESCRIPTION: &str =
     include_str!("../prompts/spawn_subagent_description.md");
 
 /// A flavor descriptor passed into [`SubagentSpawnCapabilityPort`] at
-/// construction time so the port can build a dynamic schema without depending
-/// on `ironclaw_reborn` (which would create a dependency cycle).
+/// construction time so the port can build a dynamic `subagent_type` enum
+/// schema. Carries a validated [`SubagentKindId`] and a human-readable
+/// description bullet used in the schema's `description` field.
 #[derive(Clone, Debug)]
 pub struct SpawnSubagentFlavorDescriptor {
-    pub id: String,
+    pub id: SubagentKindId,
     pub summary: String,
 }
 
@@ -386,7 +387,7 @@ pub struct SubagentSpawnCapabilityPort {
     spawn_id: CapabilityId,
     limits: SubagentSpawnLimits,
     deps: Arc<SubagentSpawnDeps>,
-    parameters_schema: serde_json::Value,
+    parameters_schema: Arc<serde_json::Value>,
     auth_input_refs: Mutex<HashSet<CapabilityInputRef>>,
     spawned_this_turn: AtomicU32,
 }
@@ -491,7 +492,7 @@ impl SubagentSpawnCapabilityPort {
         deps: Arc<SubagentSpawnDeps>,
         flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
     ) -> Self {
-        let parameters_schema = build_spawn_subagent_parameters_schema(&flavor_catalog);
+        let parameters_schema = Arc::new(build_spawn_subagent_parameters_schema(&flavor_catalog));
         Self {
             inner,
             run_context,
@@ -507,14 +508,16 @@ impl SubagentSpawnCapabilityPort {
     /// Creates a port with a precomputed parameters schema, avoiding the
     /// schema-build cost when the caller already computed it (e.g. the
     /// decorator precomputes once at startup and reuses across `decorate()`
-    /// calls).
+    /// calls). Takes `Arc<serde_json::Value>` so `decorate()` can pass
+    /// `Arc::clone(&self.parameters_schema)` — a cheap ref-count bump — rather
+    /// than deep-cloning the JSON tree on every loop run.
     pub fn new_with_schema(
         inner: Arc<dyn LoopCapabilityPort>,
         run_context: LoopRunContext,
         spawn_id: CapabilityId,
         limits: SubagentSpawnLimits,
         deps: Arc<SubagentSpawnDeps>,
-        parameters_schema: serde_json::Value,
+        parameters_schema: Arc<serde_json::Value>,
     ) -> Self {
         Self {
             inner,
@@ -541,7 +544,7 @@ impl SubagentSpawnCapabilityPort {
             capability_id: self.spawn_id.clone(),
             name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
             description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
-            parameters: self.parameters_schema.clone(),
+            parameters: (*self.parameters_schema).clone(),
         }
     }
 
@@ -553,7 +556,7 @@ impl SubagentSpawnCapabilityPort {
             safe_name: self.spawn_id.as_str().to_string(),
             safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
             concurrency_hint: ConcurrencyHint::Exclusive,
-            parameters_schema: self.parameters_schema.clone(),
+            parameters_schema: (*self.parameters_schema).clone(),
         }
     }
 
