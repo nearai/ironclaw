@@ -852,12 +852,16 @@ Carry-forward API and repository follow-ups from GitHub PR #4537 review:
   `unavailable` while preserving the existing `final_reply_target:
   Option<RebornOutboundDeliveryTargetSummary>` field. A tagged target-state DTO
   is cleaner but should be evaluated as a larger API contract change.
-- Add an atomic update operation to `CommunicationPreferenceRepository` before
-  depending on concurrent preference updates for production behavior. The fix
-  belongs in the repository/store contract so in-memory and filesystem-backed
-  stores re-read and re-apply the update under their own lock/CAS semantics. Do
-  not paper over this with a composition-local facade mutex; that would only
-  serialize one process and one facade instance.
+- Harden `CommunicationPreferenceRepository` read-modify-write semantics before
+  depending on concurrent preference updates for production delivery behavior.
+  PR #4558 added the repository update surface and bounded in-memory retries,
+  but byte-only filesystem roots can still reject `Version`/`Absent` CAS and
+  fall back to `CasExpectation::Any`. The next backend-hardening slice must make
+  communication preference updates fail closed on CAS-less roots, use a scoped
+  backend lock/transaction, or change the filesystem fallback contract so stale
+  preference writes cannot drop another writer's slots. Do not paper over this
+  with a composition-local facade mutex; that would only serialize one process
+  and one facade instance.
 - Decide whether local-dev builds with the `postgres` feature should move
   outbound preferences, and possibly the broader non-libSQL local-dev store
   graph, to filesystem-backed persistence. Do not switch only this one
