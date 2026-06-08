@@ -11,9 +11,9 @@ export function InstalledTab({ extensions, onActivate, onConfigure, onRemove, is
   if (extensions.length === 0) {
     return html`
       <div className="v2-panel rounded-[18px] p-6 sm:p-8">
-        <h3 className="text-lg font-semibold text-white">No extensions installed</h3>
+        <h3 className="text-lg font-semibold text-white">${t("extensions.emptyInstalledTitle")}</h3>
         <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
-          Browse the Registry tab to discover and install WASM tools, channels, and MCP servers.
+          ${t("extensions.emptyInstalledDesc")}
         </p>
       </div>
     `;

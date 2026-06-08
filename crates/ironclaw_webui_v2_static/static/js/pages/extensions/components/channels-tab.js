@@ -84,6 +84,7 @@ export function ChannelsTab({
   onInstall,
   isBusy,
 }) {
+  const t = useT();
   const enabledChannels = status.enabled_channels || [];
   const slackEnabled = isSlackChannelEnabled(enabledChannels);
   const slackConnectActions = findSlackConnectActions(connectableChannels);

@@ -15,10 +15,11 @@ export function McpTab({
   onInstall,
   isBusy,
 }) {
+  const t = useT();
   if (mcpServers.length === 0 && mcpRegistry.length === 0) {
     return html`
       <div className="v2-panel rounded-[18px] p-6 sm:p-8">
-        <h3 className="text-lg font-semibold text-white">No MCP servers</h3>
+        <h3 className="text-lg font-semibold text-white">${t("extensions.emptyMcpTitle")}</h3>
         <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
           MCP servers extend the agent with additional tool capabilities over
           the Model Context Protocol. Install them from the registry.
