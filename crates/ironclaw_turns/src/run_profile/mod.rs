@@ -9,12 +9,14 @@
 //! store is introduced.
 
 mod compaction;
+mod context_budget;
 mod driver;
 mod host;
 mod instruction_bundle;
 mod memory_context;
 mod milestones;
 mod model;
+mod model_observation;
 mod model_work;
 mod policy;
 mod prompt;
@@ -32,6 +34,7 @@ pub use compaction::{
     CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
     LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
 };
+pub use context_budget::PromptContextTokenBudget;
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
     AgentLoopDriverRunRequest,
@@ -83,6 +86,12 @@ pub use model::{
     LoopModelGatewayRequest, LoopModelPolicyGuard, ModelCallOutcome, NoOpBudgetAccountant,
     NoOpPolicyGuard,
 };
+pub use model_observation::{
+    CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputIssueCode, CapabilityInputRepair,
+    CapabilityRecoveryHint, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+    ModelVisibleToolObservation, ObservationTrust, SameCallRetryConstraint, ToolObservationDetail,
+    ToolObservationStatus, ToolRecoveryObservation,
+};
 pub use model_work::{ModelWorkKind, ModelWorkOutcome, ModelWorkRequest, ModelWorkUsage};
 pub use policy::{
     CancellationPolicy, CheckpointPolicy, PersonalContextAuthority, PrivilegedRunProfileDimension,
@@ -101,9 +110,9 @@ pub use resolver::{
     RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,
 };
 pub use skill_context::{
-    InstalledSkillSnapshot, NoopSkillContextSource, SkillContextBudget, SkillContextError,
-    SkillContextService, SkillContextSnippet, SkillContextSource, SkillRunSnapshot,
-    SkillTrustLevel, SkillVisibility, is_skill_snippet_model_message_ref,
+    InstalledSkillSnapshot, NoopSkillContextSource, SkillActivationState, SkillContextBudget,
+    SkillContextError, SkillContextService, SkillContextSnippet, SkillContextSource,
+    SkillRunSnapshot, SkillTrustLevel, SkillVisibility, is_skill_snippet_model_message_ref,
     skill_snippet_model_message_ref,
 };
 pub use snapshot::{PersonalContextPolicy, ResolvedRunProfile};

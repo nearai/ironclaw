@@ -3,7 +3,8 @@ use ironclaw_agent_loop::{
     families,
     state::{
         CapabilityCallSignature, CheckpointKind, CheckpointPayloadError,
-        DeferredCompactionWatermark, LoopExecutionState,
+        DeferredCompactionWatermark, LoopExecutionState, RepeatedCallWarningPhase,
+        RepeatedCallWarningState,
     },
     test_support::{
         LoopExecutionStateBuilder, MockAgentLoopDriverHost, ScenarioScript, capability_id,
@@ -105,6 +106,47 @@ fn recent_call_signatures_survive_serialization() {
             .cloned()
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn repeated_call_warning_state_survives_serialization() {
+    let context = test_run_context("repeated-call-warning-round-trip");
+    let mut state = LoopExecutionState::initial_for_run(&context);
+    let signature = CapabilityCallSignature::from_call(
+        capability_id("demo.echo"),
+        &json!({ "query": "repeat" }),
+    )
+    .expect("signature should build");
+    state.stop_state.repeated_call_warning =
+        Some(RepeatedCallWarningState::rendered(signature.clone()));
+
+    let encoded = serde_json::to_vec(&state).expect("state should serialize");
+    let decoded: LoopExecutionState =
+        serde_json::from_slice(&encoded).expect("state should deserialize");
+
+    let warning = decoded
+        .stop_state
+        .repeated_call_warning
+        .expect("warning should round-trip");
+    assert_eq!(warning.signature, signature);
+    assert_eq!(warning.phase, RepeatedCallWarningPhase::Rendered);
+}
+
+#[test]
+fn old_stop_state_without_repeated_call_warning_loads_with_default() {
+    let context = test_run_context("old-stop-state-repeated-warning-default");
+    let state = LoopExecutionState::initial_for_run(&context);
+    let mut value = serde_json::to_value(&state).expect("state should serialize");
+    value
+        .get_mut("stop_state")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("stop state object")
+        .remove("repeated_call_warning");
+
+    let decoded: LoopExecutionState =
+        serde_json::from_value(value).expect("old state should deserialize");
+
+    assert!(decoded.stop_state.repeated_call_warning.is_none());
 }
 
 #[test]

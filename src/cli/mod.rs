@@ -512,6 +512,7 @@ mod tests {
         let mut normalized = help
             .lines()
             .map(str::trim_end)
+            .map(|line| if line.trim().is_empty() { "" } else { line })
             .collect::<Vec<_>>()
             .join("\n");
         if help.ends_with('\n') {

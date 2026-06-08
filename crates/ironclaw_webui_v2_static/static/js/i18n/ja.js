@@ -49,8 +49,6 @@ registerPack("ja", {
 
   "chat.placeholder": "IronClaw にメッセージ…",
   "chat.send": "送信",
-  "chat.removeImage": "画像を削除",
-  "chat.removeAttachment": "添付を削除",
 
   "chat.conversations": "会話",
   "chat.threads": "{count} スレッド",
@@ -510,7 +508,6 @@ registerPack("ja", {
   "chat.suggestion3Desc": "セットアップ、認証、ペアリング、利用可能な機能を確認します。",
   "chat.heroPlaceholder": "IronClaw に何でも聞いてください。",
   "chat.followUpPlaceholder": "フォローアップ変更を依頼",
-  "chat.attachFiles": "ファイルを添付",
   "chat.modeAutoReview": "自動レビュー",
   "chat.runtimeLocal": "ローカルで作業",
   "chat.statusWorking": "作業中",

@@ -2,12 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { React } from "../../../lib/html.js";
 import {
   createThread as createThreadRequest,
+  deleteThread as deleteThreadRequest,
   listThreads,
 } from "../../../lib/api.js";
 import { queryClient } from "../../../lib/query-client.js";
 
-// v2 has no delete-thread endpoint; the hook intentionally drops the
-// delete affordance until the contract gains one.
 export function useThreads() {
   // No polling: the sidebar refreshes via `queryClient.invalidateQueries`
   // after a local `createThread` succeeds, and the v2 deployment has no
@@ -46,6 +45,17 @@ export function useThreads() {
     return createPromise;
   }, []);
 
+  const handleDeleteThread = React.useCallback(
+    async (threadId) => {
+      await deleteThreadRequest({ threadId });
+      if (activeThreadId === threadId) {
+        setActiveThreadId(null);
+      }
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
+    },
+    [activeThreadId]
+  );
+
   // Normalize v2 SessionThreadRecord → fork's expected shape:
   // - v2 carries `thread_id`; fork's thread-sidebar reads `thread.id`
   // - v2 has no `state`, `turn_count`, `updated_at` fields
@@ -70,5 +80,6 @@ export function useThreads() {
     isLoading: query.isLoading,
     isCreating,
     createThread: handleCreateThread,
+    deleteThread: handleDeleteThread,
   };
 }

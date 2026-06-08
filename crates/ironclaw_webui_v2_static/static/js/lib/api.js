@@ -104,6 +104,10 @@ export async function apiFetch(path, options = {}) {
 
 // --- Threads ---
 
+export function fetchSession() {
+  return apiFetch(`${V2_BASE}/session`);
+}
+
 export function createThread({ clientActionId: clientId, requestedThreadId } = {}) {
   const body = { client_action_id: clientId || clientActionId() };
   if (requestedThreadId) body.requested_thread_id = requestedThreadId;
@@ -118,6 +122,15 @@ export function listThreads({ limit, cursor } = {}) {
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
   return apiFetch(url.pathname + url.search);
+}
+
+export function deleteThread({ threadId } = {}) {
+  if (!threadId) {
+    return Promise.reject(new Error("threadId is required"));
+  }
+  return apiFetch(`${V2_BASE}/threads/${encodeURIComponent(threadId)}`, {
+    method: "DELETE",
+  });
 }
 
 // --- Automations ---

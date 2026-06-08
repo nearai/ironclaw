@@ -4,19 +4,19 @@
 //! needs: the `WebuiAuthenticator` the protected v2 routes use, plus the
 //! optional public login-route mount. `serve.rs` only wires host config
 //! and calls [`build_webui_auth_surface`]; it does not itself open the
-//! user store, run the signed-session builder, or know the `Option`/
-//! provider invariants — those live here, next to the admission adapter
+//! identity resolver, the local trigger-access store, run the
+//! signed-session builder, or know the `Option`/provider invariants —
+//! those live here, next to the admission adapter
 //! ([`crate::commands::user_directory`]) and the startup config
 //! ([`crate::commands::serve_sso`]).
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_reborn_composition::{
-    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
-    PublicRouteMount, WebuiAuthenticator, open_local_trigger_access_store, open_webui_user_store,
+    PublicRouteMount, RebornIdentityResolver, WebuiAuthenticator, open_local_trigger_access_store,
 };
 use ironclaw_reborn_webui_ingress::{SignedSessionLoginConfig, build_signed_session_login};
 use secrecy::SecretString;
@@ -32,7 +32,13 @@ pub(crate) struct WebuiAuthSurface {
     pub(crate) public_mount: Option<PublicRouteMount>,
 }
 
+/// How to seed local-dev trigger-fire access for SSO users on login.
+///
+/// Carries the substrate path of the local trigger-access store plus the
+/// scope an admitted user's access row is seeded under. The store is opened
+/// here (next to the rest of the auth wiring), not by `serve.rs`.
 pub(crate) struct LocalTriggerAccessBootstrapConfig {
+    pub(crate) access_store_path: PathBuf,
     pub(crate) tenant_id: TenantId,
     pub(crate) agent_id: AgentId,
     pub(crate) project_id: Option<ProjectId>,
@@ -40,55 +46,58 @@ pub(crate) struct LocalTriggerAccessBootstrapConfig {
 
 /// Build the auth surface from resolved startup config.
 ///
-/// With no SSO provider configured (`sso_startup` is `None`), the
-/// listener keeps its plain env-bearer authenticator and mounts no public
-/// routes. With providers configured, this opens the reborn-owned user
-/// store on the substrate DB, layers the fail-closed email-domain
-/// admission adapter on top, and hands the result to the ingress
-/// signed-session builder.
+/// With no SSO provider configured (`sso_startup` is `None`), the listener
+/// keeps its plain env-bearer authenticator and mounts no public routes.
+/// With providers configured, this layers the fail-closed email-domain
+/// admission adapter on top of the runtime-owned canonical Reborn identity
+/// resolver and hands the result to the ingress signed-session builder.
+///
+/// `identity_resolver` is the resolver the runtime opened on its own
+/// substrate handle. It is `None` only when the runtime carries no
+/// local-runtime substrate; with SSO configured that is unrecoverable, so
+/// this fails closed rather than minting users against a missing store.
+///
+/// When `local_trigger_access` is present and SSO is configured, admitted
+/// users get a local-dev trigger-access row seeded on each login (via the
+/// admission adapter). There is no startup reconciliation: the bootstrap
+/// only seeds, it does not enumerate or revoke.
 pub(crate) async fn build_webui_auth_surface(
     sso_startup: Option<SsoStartupConfig>,
-    user_store_path: &Path,
+    identity_resolver: Option<Arc<dyn RebornIdentityResolver>>,
     tenant_id: TenantId,
     session_signing_secret: SecretString,
     env_authenticator: Arc<dyn WebuiAuthenticator>,
     local_trigger_access: Option<LocalTriggerAccessBootstrapConfig>,
 ) -> anyhow::Result<WebuiAuthSurface> {
     let Some(sso) = sso_startup else {
-        if let Some(config) = local_trigger_access {
-            reconcile_local_trigger_access(user_store_path, config, Vec::new())
-                .await
-                .context("failed to deactivate local trigger access for disabled SSO")?;
-        }
+        // No SSO providers: keep the env-bearer authenticator and mount no
+        // public routes. There are no SSO logins to seed local trigger
+        // access for, so any bootstrap config is unused on this path.
         return Ok(WebuiAuthSurface {
             authenticator: env_authenticator,
             public_mount: None,
         });
     };
 
-    // Open the reborn-owned user store through the composition facade
-    // (which keeps the libSQL substrate handle private). The host
-    // `WebuiUserDirectory` adapter layers the fail-closed email-domain
-    // admission allowlist on top before any user is created.
-    let user_store = open_webui_user_store(user_store_path)
-        .await
-        .context("failed to initialize WebChat user-identity store")?;
-    let local_trigger_access = if let Some(config) = local_trigger_access {
-        let admitted_user_ids = user_store
-            .list_active_users_by_allowed_email_domains(&sso.allowed_email_domains)
-            .await
-            .context("failed to list admitted WebChat SSO users for local trigger access")?;
-        Some(
-            reconcile_local_trigger_access(user_store_path, config, admitted_user_ids)
-                .await
-                .context("failed to reconcile local trigger access for SSO users")?,
+    // The host `WebuiUserDirectory` adapter layers the fail-closed
+    // email-domain admission allowlist on top of the runtime-owned resolver
+    // before any user is created. No resolver means no durable user source —
+    // fail closed instead of admitting SSO logins against nothing.
+    let identity_resolver = identity_resolver.ok_or_else(|| {
+        anyhow!(
+            "WebChat v2 SSO is configured but the runtime exposes no identity \
+             resolver (no local-runtime substrate); refusing to start"
         )
-    } else {
-        None
-    };
-    let mut user_directory = WebuiUserDirectory::new(user_store, sso.allowed_email_domains);
-    if let Some(local_trigger_access) = local_trigger_access {
-        user_directory = user_directory.with_local_trigger_access(local_trigger_access);
+    })?;
+
+    let mut user_directory = WebuiUserDirectory::new(
+        identity_resolver,
+        tenant_id.clone(),
+        sso.allowed_email_domains,
+    );
+    if let Some(config) = local_trigger_access {
+        user_directory =
+            user_directory.with_local_trigger_access(local_trigger_access_bootstrap(config).await?);
     }
 
     let wiring = build_signed_session_login(SignedSessionLoginConfig {
@@ -111,29 +120,21 @@ pub(crate) async fn build_webui_auth_surface(
     })
 }
 
-async fn reconcile_local_trigger_access(
-    user_store_path: &Path,
+/// Open the local trigger-access store and build the per-login bootstrap the
+/// admission adapter seeds through. Opening lives here so `serve.rs` only
+/// carries the substrate path, never a substrate handle.
+async fn local_trigger_access_bootstrap(
     config: LocalTriggerAccessBootstrapConfig,
-    admitted_user_ids: Vec<ironclaw_reborn_composition::host_api::UserId>,
 ) -> anyhow::Result<LocalTriggerAccessBootstrap> {
     let LocalTriggerAccessBootstrapConfig {
+        access_store_path,
         tenant_id,
         agent_id,
         project_id,
     } = config;
-    let access_store = open_local_trigger_access_store(user_store_path)
+    let access_store = open_local_trigger_access_store(&access_store_path)
         .await
         .context("failed to initialize local trigger access store for SSO")?;
-    access_store
-        .reconcile_local_access(LocalTriggerAccessReconciliation {
-            tenant_id: &tenant_id,
-            user_ids: &admitted_user_ids,
-            agent_id: Some(&agent_id),
-            project_id: project_id.as_ref(),
-            role: LocalTriggerAccessRole::Owner,
-            source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
-        })
-        .await?;
     Ok(LocalTriggerAccessBootstrap::new(
         access_store,
         tenant_id,
@@ -148,21 +149,18 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_reborn_composition::host_api::UserId;
-    use ironclaw_reborn_composition::{ResolveIdentity, TriggerFireAccessChecker};
     use ironclaw_reborn_webui_ingress::{
         OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile,
     };
 
-    struct OneToken;
+    /// Bearer verifier that accepts nothing — stands in for the env-bearer
+    /// authenticator without pulling in its construction requirements.
+    struct RejectingAuth;
 
     #[async_trait]
-    impl WebuiAuthenticator for OneToken {
-        async fn authenticate(&self, token: &str) -> Option<UserId> {
-            if token == "env-token" {
-                Some(UserId::new("env-user").expect("user id"))
-            } else {
-                None
-            }
+    impl WebuiAuthenticator for RejectingAuth {
+        async fn authenticate(&self, _token: &str) -> Option<UserId> {
+            None
         }
     }
 
@@ -194,230 +192,98 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn env_auth_surface_deactivates_sso_local_trigger_access_without_sso() {
+    async fn sso_without_identity_resolver_fails_closed() {
+        // SSO providers configured but the runtime exposes no identity
+        // resolver (no local-runtime substrate). Admitting logins against a
+        // missing user source would silently mint users into nothing, so the
+        // surface must refuse to start rather than fall back or panic.
+        let sso = SsoStartupConfig {
+            providers: Vec::new(),
+            base_url: "https://app.example.com".to_string(),
+            allowed_email_domains: vec!["example.com".to_string()],
+        };
+
+        let result = build_webui_auth_surface(
+            Some(sso),
+            None, // no resolver — the fail-closed branch under test
+            TenantId::new("tenant-host").expect("tenant"),
+            SecretString::from("session-signing-secret".to_string()),
+            Arc::new(RejectingAuth),
+            None,
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("configured SSO with no identity resolver must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("no identity"),
+            "startup error must name the missing identity resolver, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_sso_keeps_env_authenticator_and_mounts_no_public_routes() {
+        // With no SSO configured the surface is the plain env-bearer
+        // authenticator and no public login routes — the absent-resolver
+        // check must not fire on this path, and a bootstrap config is unused.
+        let result = build_webui_auth_surface(
+            None,
+            None,
+            TenantId::new("tenant-host").expect("tenant"),
+            SecretString::from("session-signing-secret".to_string()),
+            Arc::new(RejectingAuth),
+            None,
+        )
+        .await;
+
+        match result {
+            Ok(surface) => assert!(
+                surface.public_mount.is_none(),
+                "no SSO must mount no public login routes"
+            ),
+            Err(error) => panic!("no SSO is a valid configuration, got error: {error}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sso_with_local_trigger_access_bootstrap_builds_surface() {
+        // SSO configured with a local-trigger-access bootstrap: the surface
+        // must open the access store, attach the per-login seeder to the
+        // admission adapter, and mount the public login routes — proving the
+        // bootstrap config is wired through, not silently dropped.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let user_store_path = tmp.path().join("reborn-local-dev.db");
-        let tenant_id = TenantId::new("env-auth-local-access-tenant").expect("tenant id");
-        let agent_id = AgentId::new("env-auth-local-access-agent").expect("agent id");
-        let stale_user_id = UserId::new("env-auth-local-access-stale").expect("user id");
-        let access_store = open_local_trigger_access_store(&user_store_path)
-            .await
-            .expect("open local access store");
-        access_store
-            .seed_local_access(ironclaw_reborn_composition::LocalTriggerAccessSeed {
-                tenant_id: &tenant_id,
-                user_id: &stale_user_id,
-                agent_id: Some(&agent_id),
-                project_id: None,
-                role: LocalTriggerAccessRole::Owner,
-                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
-            })
-            .await
-            .expect("seed stale SSO access");
+        let access_store_path = tmp.path().join("reborn-local-dev.db");
+        let sso = SsoStartupConfig {
+            providers: vec![Arc::new(StubProvider(
+                OAuthProviderName::new("google").expect("provider name"),
+            ))],
+            base_url: "https://app.example".to_string(),
+            allowed_email_domains: vec!["example.com".to_string()],
+        };
 
         let surface = build_webui_auth_surface(
-            None,
-            &user_store_path,
-            tenant_id.clone(),
+            Some(sso),
+            Some(ironclaw_reborn_composition::open_reborn_identity_resolver(
+                &TenantId::new("sso-bootstrap-tenant").expect("tenant"),
+            )),
+            TenantId::new("sso-bootstrap-tenant").expect("tenant"),
             SecretString::from("operator-session-secret".to_string()),
-            Arc::new(OneToken),
+            Arc::new(RejectingAuth),
             Some(LocalTriggerAccessBootstrapConfig {
-                tenant_id: tenant_id.clone(),
-                agent_id: agent_id.clone(),
-                project_id: None,
+                access_store_path,
+                tenant_id: TenantId::new("sso-bootstrap-tenant").expect("tenant"),
+                agent_id: AgentId::new("sso-bootstrap-agent").expect("agent"),
+                project_id: Some(ProjectId::new("sso-bootstrap-project").expect("project")),
             }),
         )
         .await
-        .expect("build env auth surface");
+        .expect("SSO surface with a bootstrap config must build");
 
         assert!(
-            surface
-                .authenticator
-                .authenticate("env-token")
-                .await
-                .is_some(),
-            "env auth remains active when no SSO providers are configured"
-        );
-        assert!(
-            surface.public_mount.is_none(),
-            "no SSO providers means no public login mount"
-        );
-        let denied = access_store
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id,
-                creator_user_id: stale_user_id,
-                agent_id: Some(agent_id),
-                project_id: None,
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check stale access");
-        assert_eq!(
-            denied,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
-                reason: "trigger creator does not have active local access for this scope"
-                    .to_string(),
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn sso_auth_surface_reconciles_existing_admitted_users_for_local_trigger_access() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let user_store_path = tmp.path().join("reborn-local-dev.db");
-        let user_store = open_webui_user_store(&user_store_path)
-            .await
-            .expect("open user store");
-        let access_store = open_local_trigger_access_store(&user_store_path)
-            .await
-            .expect("open local access store");
-        let tenant_id = TenantId::new("sso-auth-surface-tenant").expect("tenant id");
-        let agent_id = AgentId::new("sso-auth-surface-agent").expect("agent id");
-        let project_id = ProjectId::new("sso-auth-surface-project").expect("project id");
-        let admitted_user_id = user_store
-            .resolve_or_create(ResolveIdentity {
-                provider: "google",
-                provider_user_id: "g-admitted",
-                email: Some("alice@example.com"),
-                email_verified: true,
-                display_name: None,
-            })
-            .await
-            .expect("create admitted user");
-        let stale_user_id = UserId::new("sso-auth-surface-stale").expect("stale user id");
-        access_store
-            .seed_local_access(ironclaw_reborn_composition::LocalTriggerAccessSeed {
-                tenant_id: &tenant_id,
-                user_id: &stale_user_id,
-                agent_id: Some(&agent_id),
-                project_id: Some(&project_id),
-                role: LocalTriggerAccessRole::Owner,
-                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
-            })
-            .await
-            .expect("seed stale access");
-
-        let sso = SsoStartupConfig {
-            providers: vec![Arc::new(StubProvider(
-                OAuthProviderName::new("google").expect("provider name"),
-            ))],
-            base_url: "https://app.example".to_string(),
-            allowed_email_domains: vec!["example.com".to_string()],
-        };
-        let _surface = build_webui_auth_surface(
-            Some(sso),
-            &user_store_path,
-            tenant_id.clone(),
-            SecretString::from("operator-session-secret".to_string()),
-            Arc::new(OneToken),
-            Some(LocalTriggerAccessBootstrapConfig {
-                tenant_id: tenant_id.clone(),
-                agent_id: agent_id.clone(),
-                project_id: Some(project_id.clone()),
-            }),
-        )
-        .await
-        .expect("build auth surface");
-
-        let allowed = access_store
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id: tenant_id.clone(),
-                creator_user_id: admitted_user_id,
-                agent_id: Some(agent_id.clone()),
-                project_id: Some(project_id.clone()),
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check admitted access");
-        assert_eq!(
-            allowed,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Allowed
-        );
-
-        let denied = access_store
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id,
-                creator_user_id: stale_user_id,
-                agent_id: Some(agent_id),
-                project_id: Some(project_id),
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check stale access");
-        assert_eq!(
-            denied,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
-                reason: "trigger creator does not have active local access for this scope"
-                    .to_string(),
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn sso_auth_surface_reconciles_empty_admission_for_local_trigger_access() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let user_store_path = tmp.path().join("reborn-local-dev.db");
-        let access_store = open_local_trigger_access_store(&user_store_path)
-            .await
-            .expect("open local access store");
-        let tenant_id = TenantId::new("sso-auth-empty-tenant").expect("tenant id");
-        let agent_id = AgentId::new("sso-auth-empty-agent").expect("agent id");
-        let project_id = ProjectId::new("sso-auth-empty-project").expect("project id");
-        let stale_user_id = UserId::new("sso-auth-empty-stale").expect("stale user id");
-        access_store
-            .seed_local_access(ironclaw_reborn_composition::LocalTriggerAccessSeed {
-                tenant_id: &tenant_id,
-                user_id: &stale_user_id,
-                agent_id: Some(&agent_id),
-                project_id: Some(&project_id),
-                role: LocalTriggerAccessRole::Owner,
-                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
-            })
-            .await
-            .expect("seed stale access");
-
-        let sso = SsoStartupConfig {
-            providers: vec![Arc::new(StubProvider(
-                OAuthProviderName::new("google").expect("provider name"),
-            ))],
-            base_url: "https://app.example".to_string(),
-            allowed_email_domains: vec!["example.com".to_string()],
-        };
-        let _surface = build_webui_auth_surface(
-            Some(sso),
-            &user_store_path,
-            tenant_id.clone(),
-            SecretString::from("operator-session-secret".to_string()),
-            Arc::new(OneToken),
-            Some(LocalTriggerAccessBootstrapConfig {
-                tenant_id: tenant_id.clone(),
-                agent_id: agent_id.clone(),
-                project_id: Some(project_id.clone()),
-            }),
-        )
-        .await
-        .expect("build auth surface");
-
-        let denied = access_store
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id,
-                creator_user_id: stale_user_id,
-                agent_id: Some(agent_id),
-                project_id: Some(project_id),
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check stale access");
-        assert_eq!(
-            denied,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
-                reason: "trigger creator does not have active local access for this scope"
-                    .to_string(),
-            }
+            surface.public_mount.is_some(),
+            "configured SSO must mount the public login routes"
         );
     }
 }

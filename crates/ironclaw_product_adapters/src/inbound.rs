@@ -406,6 +406,48 @@ fn validate_auth_resolution_result(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectionReadPayload {
+    pub thread_id_hint: Option<String>,
+    pub after_cursor: Option<ProjectionCursor>,
+    pub limit: Option<u16>,
+}
+
+impl ProjectionReadPayload {
+    pub fn new(
+        thread_id_hint: Option<String>,
+        after_cursor: Option<ProjectionCursor>,
+        limit: Option<u16>,
+    ) -> Result<Self, ProductAdapterError> {
+        if let Some(hint) = &thread_id_hint {
+            validate_token_string("thread id hint", hint, THREAD_HINT_MAX_BYTES)?;
+        }
+        Ok(Self {
+            thread_id_hint,
+            after_cursor,
+            limit,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct ProjectionReadPayloadWire {
+    thread_id_hint: Option<String>,
+    after_cursor: Option<ProjectionCursor>,
+    limit: Option<u16>,
+}
+
+impl<'de> Deserialize<'de> for ProjectionReadPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ProjectionReadPayloadWire::deserialize(deserializer)?;
+        Self::new(wire.thread_id_hint, wire.after_cursor, wire.limit)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectionSubscriptionPayload {
     pub thread_id_hint: Option<String>,
     pub after_cursor: Option<ProjectionCursor>,
@@ -440,6 +482,12 @@ impl<'de> Deserialize<'de> for ProjectionSubscriptionPayload {
         let wire = ProjectionSubscriptionPayloadWire::deserialize(deserializer)?;
         Self::new(wire.thread_id_hint, wire.after_cursor).map_err(serde::de::Error::custom)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ProductControlActionPayload {
+    CancelRun { run_id: TurnRunId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -501,7 +549,9 @@ pub enum ProductInboundPayload {
     ApprovalResolution(ApprovalResolutionPayload),
     ScopedApprovalResolution(ScopedApprovalResolutionPayload),
     AuthResolution(AuthResolutionPayload),
+    ProjectionRead(ProjectionReadPayload),
     SubscriptionRequest(ProjectionSubscriptionPayload),
+    ControlAction(ProductControlActionPayload),
     LinkedThreadAction(LinkedThreadActionPayload),
     NoOp,
 }

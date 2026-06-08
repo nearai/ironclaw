@@ -20,6 +20,7 @@ use crate::{
 use super::{
     compaction::{CompactionInitiator, LoopCompactionPort},
     instruction_bundle::InstructionBundleFingerprint,
+    model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation},
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
     snapshot::ResolvedRunProfile,
     system_inference::SystemInferenceTaskId,
@@ -718,6 +719,7 @@ pub const LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES: usize = 256 * 1024;
 pub struct LoopContextBundle {
     pub identity_messages: Vec<LoopContextMessage>,
     pub messages: Vec<LoopContextMessage>,
+    pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     pub instruction_snippets: Vec<LoopContextSnippet>,
     pub memory_snippets: Vec<LoopContextSnippet>,
 }
@@ -1548,6 +1550,8 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
 pub struct CapabilityFailure {
     pub error_kind: CapabilityFailureKind,
     pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<CapabilityFailureDetail>,
 }
 
 #[non_exhaustive]
@@ -1736,6 +1740,8 @@ pub struct AppendCapabilityResultRef {
     pub safe_summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_call: Option<ProviderToolCallReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelVisibleToolObservation>,
 }
 
 #[async_trait]

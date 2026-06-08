@@ -2,23 +2,29 @@ use ironclaw_turns::{
     LoopCancelledReasonKind, LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopFailureKind,
     LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureKind,
-        CapabilityInputRef, CapabilityOutcome, CapabilityResultMessage, LoopCancelReasonKind,
-        LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
-        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopInput, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopRunInfoPort,
-        LoopSafeSummary, LoopSummaryArtifactId, ParentLoopOutput, ProcessHandleSummary,
-        ProviderToolCallReplay, VisibleCapabilityRequest,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
+        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
+        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInputRepair, CapabilityOutcome,
+        CapabilityRecoveryHint, CapabilityResultMessage, LoopCancelReasonKind, LoopCheckpointKind,
+        LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
+        LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+        LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
+        ObservationTrust, ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay,
+        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
+        VisibleCapabilityRequest,
     },
 };
 
 use crate::state::{
-    CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind, LoopExecutionState,
-    MessageIndexEntry,
+    CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
+    LoopExecutionState, MessageIndexEntry, RepeatedCallWarningPhase, RepeatedCallWarningState,
 };
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
     StopKind, TurnSummary,
+};
+use crate::test_support::compaction::{
+    active_task_preserving_compaction_index, compaction_metadata,
 };
 
 use super::{
@@ -32,18 +38,6 @@ use super::{
 
 #[allow(dead_code)]
 fn _check(_: &dyn AgentLoopExecutor) {}
-
-fn compaction_metadata(
-    sequence: u64,
-    kind: LoopContextCompactionKind,
-    estimated_tokens: u64,
-) -> LoopContextCompactionMetadata {
-    LoopContextCompactionMetadata {
-        sequence,
-        kind,
-        estimated_tokens,
-    }
-}
 
 mod support;
 use support::*;
@@ -856,7 +850,7 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
         )])
         .with_prompt_compaction_indexes(vec![
             vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
-            vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
+            active_task_preserving_compaction_index(),
             Vec::new(),
         ])
         .with_compaction_result(Ok(LoopCompactionResponse {
@@ -884,7 +878,7 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
     let final_state = final_staged_state(&host);
     assert_eq!(
         final_state.compaction_state.last_compacted_through_seq,
-        Some(1)
+        Some(5)
     );
     assert!(!final_state.compaction_state.force_compact_on_next_iteration);
 }
@@ -1391,6 +1385,11 @@ async fn capability_stage_returns_after_batch_summary() {
     match step {
         TurnCompletedStep::Continue { state, summary } => {
             assert_eq!(state.result_refs, vec![result_ref.clone()]);
+            let signature = CapabilityCallSignature::from_call(
+                capability_id(),
+                &serde_json::json!({ "input_ref": "input:demo" }),
+            )
+            .expect("valid signature");
             assert_eq!(
                 summary,
                 TurnSummary::after_capability_batch(
@@ -1399,12 +1398,51 @@ async fn capability_stage_returns_after_batch_summary() {
                         invocation_count: 1,
                         terminate_hint_count: 0,
                         no_progress_count: 0,
+                        observed_signatures: vec![signature.clone()],
+                        made_progress_signatures: vec![signature],
                     },
                 )
             );
         }
         TurnCompletedStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
     }
+}
+
+#[tokio::test]
+async fn repeated_call_warning_checkpoint_stays_pending_until_model_request() {
+    let host = MockHost::new(vec![reply_response()]);
+    let executor = CanonicalAgentLoopExecutor;
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    let signature = CapabilityCallSignature::from_call(
+        capability_id(),
+        &serde_json::json!({ "input_ref": "input:demo" }),
+    )
+    .expect("valid signature");
+    state.stop_state.repeated_call_warning =
+        Some(RepeatedCallWarningState::pending_render(signature.clone()));
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let prompt_requests = host.prompt_requests();
+    assert_eq!(prompt_requests.len(), 1);
+    assert!(
+        prompt_requests[0].inline_messages.iter().any(|message| {
+            message.safe_body.as_str()
+                == "loop control repeated capability call detected change strategy explain new evidence or answer from current evidence"
+        }),
+        "model prompt should include the warning"
+    );
+    let before_model = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeModel);
+    let warning = before_model
+        .stop_state
+        .repeated_call_warning
+        .expect("warning should be checkpointed");
+    assert_eq!(warning.signature, signature.clone());
+    assert_eq!(warning.phase, RepeatedCallWarningPhase::PendingRender);
 }
 
 #[test]
@@ -1562,6 +1600,8 @@ async fn stop_stage_preserves_ack_and_returns_stop_kind() {
                         invocation_count: 1,
                         terminate_hint_count: 1,
                         no_progress_count: 0,
+                        observed_signatures: Vec::new(),
+                        made_progress_signatures: Vec::new(),
                     },
                 ),
                 pending_input_ack,
@@ -2170,6 +2210,7 @@ async fn retry_uses_single_call_invocation() {
                     ironclaw_turns::run_profile::CapabilityFailure {
                         error_kind,
                         safe_summary: "temporary failure".to_string(),
+                        detail: None,
                     },
                 )],
                 stopped_on_suspension: false,
@@ -2434,6 +2475,69 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
 }
 
 #[tokio::test]
+async fn invalid_provider_tool_failure_appends_structured_model_observation() {
+    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Failed(
+                ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    safe_summary: "provider arguments failed schema validation".to_string(),
+                    detail: Some(CapabilityFailureDetail::InvalidInput {
+                        issues: vec![CapabilityInputIssue {
+                            path: "file_path".to_string(),
+                            code: CapabilityInputIssueCode::MissingRequired,
+                            expected: Some("required field".to_string()),
+                            received: None,
+                            schema_path: Some("required".to_string()),
+                        }],
+                    }),
+                },
+            )],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    let observation = appended[0]
+        .model_observation
+        .as_ref()
+        .expect("structured model observation");
+    assert_eq!(observation.status, ToolObservationStatus::Error);
+    assert_eq!(observation.summary, "Tool input failed schema validation.");
+    assert_eq!(observation.trust, ObservationTrust::UntrustedToolOutput);
+    match &observation.detail {
+        ToolObservationDetail::InvalidInput { issues } => {
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].path, "file_path");
+            assert_eq!(issues[0].code, CapabilityInputIssueCode::MissingRequired);
+        }
+        detail => panic!("expected invalid input detail, got {detail:?}"),
+    }
+    let recovery = observation.recovery.as_ref().expect("recovery detail");
+    assert_eq!(
+        recovery.same_call_retry,
+        SameCallRetryConstraint::RequiresChangedInput
+    );
+    assert_eq!(
+        recovery.recovery_hint,
+        CapabilityRecoveryHint::CorrectArgumentsBeforeRetry
+    );
+    assert_eq!(
+        recovery.repairs,
+        vec![CapabilityInputRepair::ProvideRequiredField {
+            path: "file_path".to_string()
+        }]
+    );
+}
+
+#[tokio::test]
 async fn model_visible_provider_tool_failures_append_failure_tool_result_for_replay() {
     for (error_kind, safe_summary, expected_summary) in [
         (
@@ -2468,6 +2572,7 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
                     ironclaw_turns::run_profile::CapabilityFailure {
                         error_kind,
                         safe_summary: safe_summary.to_string(),
+                        detail: None,
                     },
                 )],
                 stopped_on_suspension: false,
@@ -2515,6 +2620,7 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
                 ironclaw_turns::run_profile::CapabilityFailure {
                     error_kind: CapabilityFailureKind::OutputTooLarge,
                     safe_summary: long_summary,
+                    detail: None,
                 },
             )],
             stopped_on_suspension: false,

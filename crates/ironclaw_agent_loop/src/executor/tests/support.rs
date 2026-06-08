@@ -347,6 +347,7 @@ impl ContextStrategy for NoInlineContextStrategy {
                 capability_view: None,
             },
             emitted_admission_control: false,
+            emitted_repeated_call_warning: false,
         }
     }
 }
@@ -460,6 +461,7 @@ impl ironclaw_turns::run_profile::LoopContextPort for MockHost {
         Ok(LoopContextBundle {
             identity_messages: Vec::new(),
             messages: Vec::new(),
+            compaction_message_index: Vec::new(),
             instruction_snippets: Vec::new(),
             memory_snippets: Vec::new(),
         })

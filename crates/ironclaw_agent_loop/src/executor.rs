@@ -24,9 +24,10 @@ use budget::{BudgetInput, BudgetStage, BudgetStep};
 use capabilities::{CapabilityInput, CapabilityStage};
 use capability_helpers::{
     CapabilitySurfaceIndex, append_capability_error_ref, append_capability_result_ref,
-    append_capability_safe_summary_ref, apply_capability_filter,
+    append_capability_safe_summary_ref, apply_capability_filter, capability_call_signature,
     capability_invocation_from_candidate, capability_is_visible, capability_summary,
-    gate_tool_result_summary, push_call_signature_once, push_completed_result,
+    gate_tool_result_summary, model_visible_capability_failure_observation,
+    push_call_signature_once, push_completed_result,
 };
 #[cfg(test)]
 use capability_helpers::{sanitize_result_ref_suffix, synthetic_provider_error_result_ref};
