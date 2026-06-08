@@ -40,8 +40,8 @@ progress/projection payloads and non-text modality defaults remain deferred.
   capability flags.
 - Composition has a product-surface-neutral outbound preferences facade backed
   by `RebornLocalRuntimeServices::outbound_preferences`.
-- Current default preference storage is still user-scoped through
-  `CommunicationPreferenceRecord { tenant_id, user_id, ... }`.
+- Phase 2 introduces scoped preference storage through `DeliveryDefaultScope`
+  so defaults can be personal or shared-agent scoped.
 
 ## Implementation Snapshot
 
@@ -66,7 +66,7 @@ progress/projection payloads and non-text modality defaults remain deferred.
 
 ## Known Gaps Before Phase 2
 
-- There is no shared-agent default delivery scope yet on `main`.
+- Shared-agent default delivery scope is implemented in Phase 2.
 - There is no durable target-authority resolver for validating a saved Slack
   channel or DM target at trigger-fire time.
 - WebUI v2 still has no outbound preference/target HTTP routes.
@@ -98,6 +98,10 @@ tracked follow-up.
   version overlay so local/dev preference updates do not silently overwrite
   stale writes, but restart-safe or multi-process scoped defaults require a
   real versioned backend lock/transaction.
+- Phase 2 chooses the fail-closed outcome for communication preferences when a
+  filesystem backend cannot preserve versioned CAS. Any byte-only local/dev
+  overlay is a follow-up and must not silently fall back to unconditional
+  writes.
 - Add caller-level tests through the preference repository or product facade,
   not only helper-level tests.
 
@@ -200,6 +204,10 @@ tracked follow-up.
 - Trigger delivery derives `DeliveryDefaultScope` from the persisted run/agent
   ownership record, not from the trigger creator, last editor, last inbound
   sender, or a synthetic user id. Missing or ambiguous ownership fails closed.
+- Communication-preference writes must use versioned compare-and-swap. Byte-only
+  filesystem fallback must fail closed when it cannot preserve `Absent` or
+  `Version` expectations; unconditional `Any` writes are not acceptable for
+  preferences.
 - Preserve outbound ownership: target choice and validation stay under
   `ironclaw_outbound` / `OutboundPolicyService`; product adapters render only
   after policy approval.
@@ -373,8 +381,8 @@ Exit criteria now carried forward:
 
 ### Phase 2 — Scoped Default Model And Repository Contract
 
-Goal: add scoped delivery defaults so background trigger delivery can choose
-between personal DM defaults and shared-agent channel defaults.
+Goal: add scoped delivery defaults and make outbound resolution choose between
+personal DM defaults and shared-agent channel defaults.
 
 Current implementation approach:
 
@@ -383,15 +391,24 @@ Current implementation approach:
   branch as a semantic change, not a direct conflict-marker resolution.
 - Make the versioned scoped repository contract the only supported mutation
   path for this phase.
+- Treat `put_communication_preference` as an insert-only seed/create helper.
+  Existing preference mutation must read the scoped version or ETag and write
+  through the versioned repository contract.
 - Do not preserve `update_communication_preference` as a compatibility adapter.
   The old preference callback API has not launched, so current internal callers
   should migrate directly to read scoped preference, apply the update with the
   observed version or ETag, and write with CAS.
+- Do not add v1 filesystem path dual-read migration in this phase because the
+  outbound preference surface has not launched with durable production rows.
+  The record decoder still accepts legacy `{ tenant_id, user_id }` payloads
+  when such a row is loaded through the current storage path; live migration of
+  old path hashes is unnecessary unless a future rollout identifies launched
+  persisted rows.
 - Any temporary helper used during the phase must be private, must require the
   observed scoped version or ETag, and must be removed before Phase 2 exits.
 - Keep the PR scoped to outbound model, repository/storage behavior,
-  resolution behavior, and caller-level tests. WebUI routes, Slack target
-  authority, and trigger terminal E2E remain later phases.
+  default-resolution behavior, and caller-level tests. WebUI routes, Slack
+  target authority, and trigger terminal E2E remain later phases.
 
 Deliverables:
 
@@ -406,8 +423,8 @@ Deliverables:
 - Scoped preference reads return a version or ETag, and set/clear operations
   require the caller's expected version. Stale same-slot writes return a
   conflict instead of silently overwriting a newer default.
-- Migration or adapter plan for existing user-scoped
-  `CommunicationPreferenceRecord`.
+- Compatibility note for existing user-scoped `CommunicationPreferenceRecord`
+  payloads and whether a path-level migration is required.
 - Resolution tests proving:
   - personal runs use personal defaults
   - shared tenant-agent runs use shared-agent defaults
@@ -421,6 +438,8 @@ Exit criteria:
 
 - Trigger delivery no longer assumes every default is tenant/user scoped.
 - Shared-agent defaults are not faked through a synthetic user id.
+- Outbound resolution consults shared-agent defaults for ownerless shared-agent
+  scopes and personal defaults for explicitly owned scopes.
 - Personal preference behavior remains backward compatible.
 - CAS fallback behavior fails closed when versioned CAS is unsupported;
   unconditional `Any` writes are not an acceptable fallback.

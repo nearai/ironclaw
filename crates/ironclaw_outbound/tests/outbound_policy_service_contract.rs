@@ -870,25 +870,17 @@ struct BackendErrorPreferenceRepository;
 
 #[async_trait]
 impl CommunicationPreferenceRepository for BackendErrorPreferenceRepository {
-    async fn put_communication_preference(
-        &self,
-        _record: CommunicationPreferenceRecord,
-    ) -> Result<(), OutboundError> {
-        Ok(())
-    }
-
     async fn load_communication_preference(
         &self,
         _key: CommunicationPreferenceKey,
-    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
         Err(OutboundError::Backend)
     }
 
-    async fn update_communication_preference(
+    async fn write_communication_preference(
         &self,
-        _key: CommunicationPreferenceKey,
-        _update: CommunicationPreferenceUpdate,
-    ) -> Result<CommunicationPreferenceRecord, OutboundError> {
+        _request: WriteCommunicationPreferenceRequest,
+    ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
         Err(OutboundError::Backend)
     }
 }
@@ -1144,8 +1136,10 @@ fn preference_record(
     auth_prompt_target: Option<&str>,
 ) -> CommunicationPreferenceRecord {
     CommunicationPreferenceRecord {
-        tenant_id: TenantId::new("tenant-a").expect("valid tenant"),
-        user_id: UserId::new("user-a").expect("valid user"),
+        scope: DeliveryDefaultScope::personal(
+            TenantId::new("tenant-a").expect("valid tenant"),
+            UserId::new("user-a").expect("valid user"),
+        ),
         final_reply_target: final_reply_target.map(reply_ref),
         progress_target: progress_target.map(reply_ref),
         approval_prompt_target: approval_prompt_target.map(reply_ref),
@@ -1170,11 +1164,12 @@ fn subscription_id(value: &str) -> ProjectionSubscriptionId {
 }
 
 fn turn_scope(thread: &str) -> TurnScope {
-    TurnScope::new(
+    TurnScope::new_with_owner(
         TenantId::new("tenant-a").expect("valid tenant"),
         Some(AgentId::new("agent-a").expect("valid agent")),
         Some(ProjectId::new("project-a").expect("valid project")),
         thread_id(thread),
+        Some(UserId::new("user-a").expect("valid user")),
     )
 }
 
