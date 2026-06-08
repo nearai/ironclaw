@@ -1322,3 +1322,27 @@ PR body must include, for the designer's onboarding-flow work:
 - Spec link: `docs/superpowers/specs/2026-06-05-trace-commons-agent-onboarding-design.md`.
 
 - [ ] **Step 4: Verify CI passes on the PR.**
+
+---
+
+### Task 11: Credits visibility — console display + agent-queryable balance
+
+**Why:** Once a user opts in, contribution earns credits. They must be able to see in their IronClaw console that credits are accruing and what their current balance is, and the agent must be able to query credit state on demand. This is the payoff side of the opt-in and closes the loop the onboarding flow opens.
+
+**This is mostly a surfacing task — the credit data model already exists** in `crates/ironclaw_reborn_traces/src/contribution.rs`:
+- `CreditSummary` (line 782): `submissions_total/submitted/revoked/expired`, `pending_credit`, `final_credit`, `delayed_credit_delta`, `credit_events_total`, `recent_explanations`.
+- `TraceCreditReport` (line 829) + `trace_credit_summary(records)` (line 6054) / `trace_credit_report(records)` (line 6069) — compute a summary/report from `LocalTraceSubmissionRecord`s.
+- `trace_credit_notice_message(summary)` (line 798) — human-readable one-liner.
+- The local submission records live under the scoped trace-contributions dir (`submissions.json`); find the existing loader the CLI `credit` subcommand uses (`crates/ironclaw_reborn_cli/src/commands/traces/mod.rs`) and reuse it — do NOT re-implement record loading.
+
+**Scope:**
+
+1. **Agent-queryable credits tool** — a third first-party capability `builtin.trace_commons.credits` (sibling to `onboard`/`status` from Task 7, same `trace_commons.rs` module + central-dispatch wiring + prompt doc). Read-only (`EffectKind::ReadFilesystem`, `PermissionMode::Allow`). Resolves the scope from `request.scope.user_id.as_str()`, loads the scoped submission records, runs `trace_credit_summary`/`trace_credit_report`, and returns a structured `Value`: `{ enrolled, pending_credit, final_credit, delayed_credit_delta, submissions_submitted, submissions_total, credit_events_total, recent_explanations, as_of }`. If not enrolled / no records, return a clean `{ enrolled: false }`-style value, not an error. Pure formatter `format_credits(summary, report) -> Value` is unit-tested with hand-built summaries (no disk). Extend the Task 8 onboarding prompt (or add a `trace-commons-credits.md` prompt doc) so the agent knows to call this when the user asks "how are my trace credits doing?".
+
+2. **Console display** — surface accruing credits in the IronClaw web console. Investigate the existing trace settings/console surface first: `src/channels/web/handlers/traces.rs` (the web trace handlers) and the gateway's trace settings UI (search `static/js` for the trace-commons settings panel and the `/api/.../traces` endpoints). Add a credits read endpoint that goes through `ToolDispatcher::dispatch()` for `builtin.trace_commons.credits` (per the "everything goes through tools" rule — do NOT read `state.store`/workspace directly in the handler), and a small console panel showing pending + final balance, submissions count, and the `recent_explanations` ledger. The panel should reflect that credits accrue/settle asynchronously (pending vs. final vs. delayed-ledger) — reuse `trace_credit_notice_message`'s framing so the UI doesn't over-promise. Match the existing settings-panel styling; this is the integration point the designer's onboarding-flow work can build on (note it in the PR contract).
+
+3. **Tests:** unit-test `format_credits` (enrolled-with-credits, enrolled-no-records, not-enrolled); drive the credits capability through `ToolDispatcher::dispatch()` at the integration tier (per the test-through-the-caller rule) asserting the dispatched output shape; if a web endpoint is added, a handler test asserting it routes through dispatch.
+
+**Quality gates:** same as every task — `cargo test`, `cargo clippy -p ironclaw_host_runtime --all-features --tests --examples -- -D warnings`, the web crate's clippy if a handler is added, `cargo fmt`. Commit: `feat(traces): credits visibility — agent-queryable balance and console display`.
+
+**Coordination note:** the *authoritative* credit ledger is server-side (TraceCommons/trace-commons-server, the `near_credit`/credit modules); the local `CreditSummary` is the client's view derived from submission records + server status sync. The console/agent surface shows the local view and should label it as such ("as last synced"). A future server endpoint for the canonical balance can swap in behind the same tool contract — keep the tool output shape stable so the UI doesn't churn.

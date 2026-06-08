@@ -287,7 +287,19 @@ Read-only: reports whether the current scope is enrolled, tenant, auth mode,
 consents, queue depth, last submission. Opt-out remains on the existing CLI
 (`ironclaw traces opt-out`) for now.
 
-Both tools route through `ToolDispatcher::dispatch()` like every other tool
+### 3.4 `trace_commons_credits` (companion tool) + console display
+
+Read-only: the payoff side of opt-in. The agent can query credit state on
+demand ("how are my trace credits doing?"), and the IronClaw web console shows
+that credits are accruing and the current balance. Both read the local
+`CreditSummary`/`TraceCreditReport` (already in `contribution.rs`) derived from
+scoped submission records + server status sync — pending vs. final vs.
+delayed-ledger framing preserved so the surface doesn't over-promise. The
+authoritative ledger is server-side; the local view is labeled "as last
+synced." See plan Task 11 for the build details and the stable tool-output
+contract the designer's onboarding-flow UI builds on.
+
+All tools route through `ToolDispatcher::dispatch()` like every other tool
 (audit trail, safety pipeline).
 
 ## 4. Error handling summary
