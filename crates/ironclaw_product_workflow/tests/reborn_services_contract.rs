@@ -5645,3 +5645,95 @@ async fn list_threads_hides_automation_trigger_threads() {
         "automation trigger threads should be accessible by direct id but hidden from the chat list",
     );
 }
+
+#[tokio::test]
+async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let caller = caller();
+    let automation_thread_id = ThreadId::new("thread-a-automation").expect("automation thread id");
+    let first_visible_thread_id =
+        ThreadId::new("thread-b-visible").expect("first visible thread id");
+    let second_visible_thread_id =
+        ThreadId::new("thread-c-visible").expect("second visible thread id");
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(automation_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Automation run".to_string()),
+            metadata_json: Some(
+                json!({
+                    "source": "automation_trigger",
+                    "trigger_id": "trigger-scheduled-summary",
+                })
+                .to_string(),
+            ),
+        })
+        .await
+        .expect("automation thread");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(first_visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("First visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("first visible thread");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(second_visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Second visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("second visible thread");
+
+    let first_page = services
+        .list_threads(
+            caller.clone(),
+            WebUiListThreadsRequest {
+                limit: Some(1),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("list first visible page");
+    assert_eq!(
+        first_page
+            .threads
+            .iter()
+            .map(|thread| thread.thread_id.clone())
+            .collect::<Vec<_>>(),
+        vec![first_visible_thread_id],
+    );
+    assert_eq!(first_page.next_cursor.as_deref(), Some("thread-b-visible"));
+
+    let second_page = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                limit: Some(1),
+                cursor: first_page.next_cursor,
+            },
+        )
+        .await
+        .expect("list second visible page");
+    assert_eq!(
+        second_page
+            .threads
+            .iter()
+            .map(|thread| thread.thread_id.clone())
+            .collect::<Vec<_>>(),
+        vec![second_visible_thread_id],
+    );
+    assert_eq!(second_page.next_cursor, None);
+}

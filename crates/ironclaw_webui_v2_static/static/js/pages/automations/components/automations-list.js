@@ -5,15 +5,7 @@ import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives
 import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
-import { filterAutomations } from "../lib/automations-presenters.js";
-
-const AUTOMATION_FILTERS = [
-  { value: "all", labelKey: "automations.filter.all" },
-  { value: "active", labelKey: "automations.filter.active" },
-  { value: "running", labelKey: "automations.filter.running" },
-  { value: "failures", labelKey: "automations.filter.failures" },
-  { value: "paused", labelKey: "automations.filter.paused" },
-];
+import { AUTOMATION_FILTERS, filterAutomations } from "../lib/automations-presenters.js";
 
 function MetaItem({ label, value, tone }) {
   return html`
@@ -63,11 +55,6 @@ function RunDots({ runs }) {
 
 function recentRunKey(run) {
   return run.run_id || run.thread_id || run.submitted_at || run.timestamp_source;
-}
-
-function selectAutomationFromButton(event, automationId, onSelectAutomation) {
-  event.stopPropagation();
-  onSelectAutomation(automationId);
 }
 
 function RecentRunRow({ run, onOpenRun }) {
@@ -303,9 +290,8 @@ export function AutomationsList({
                         return html`
                           <tr
                             key=${automation.automation_id}
-                            onClick=${() => onSelectAutomation(automation.automation_id)}
                             className=${cn(
-                              "cursor-pointer border-b border-[var(--v2-panel-border)] last:border-0 hover:bg-white/[0.03]",
+                              "border-b border-[var(--v2-panel-border)] last:border-0 hover:bg-white/[0.03]",
                               selected && "bg-[var(--v2-accent-soft)]/30"
                             )}
                           >
@@ -313,12 +299,7 @@ export function AutomationsList({
                               <button
                                 type="button"
                                 aria-pressed=${selected}
-                                onClick=${(event) =>
-                                  selectAutomationFromButton(
-                                    event,
-                                    automation.automation_id,
-                                    onSelectAutomation
-                                  )}
+                                onClick=${() => onSelectAutomation(automation.automation_id)}
                                 className="block w-full min-w-0 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]"
                               >
                                 <div className="truncate text-sm font-semibold text-iron-100">

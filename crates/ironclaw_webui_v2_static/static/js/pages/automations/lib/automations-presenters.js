@@ -45,12 +45,21 @@ const RUN_STATUS_PRESENTATION = {
   unknown: { label: "Unknown", tone: "muted" },
 };
 
-const AUTOMATION_FILTER_STRATEGIES = {
-  active: isBrowserActive,
-  paused: isBrowserPaused,
-  running: (automation) => automation.has_running_run,
-  failures: (automation) => automation.has_failed_runs,
-};
+export const AUTOMATION_FILTERS = [
+  { value: "all", labelKey: "automations.filter.all", predicate: null },
+  { value: "active", labelKey: "automations.filter.active", predicate: isBrowserActive },
+  {
+    value: "running",
+    labelKey: "automations.filter.running",
+    predicate: (automation) => automation.has_running_run,
+  },
+  {
+    value: "failures",
+    labelKey: "automations.filter.failures",
+    predicate: (automation) => automation.has_failed_runs,
+  },
+  { value: "paused", labelKey: "automations.filter.paused", predicate: isBrowserPaused },
+];
 
 export function normalizeAutomations(response) {
   const automations = Array.isArray(response?.automations)
@@ -63,7 +72,7 @@ export function normalizeAutomations(response) {
 }
 
 export function filterAutomations(automations, filter) {
-  const strategy = AUTOMATION_FILTER_STRATEGIES[filter];
+  const strategy = AUTOMATION_FILTERS.find((item) => item.value === filter)?.predicate;
   return strategy ? automations.filter(strategy) : automations;
 }
 

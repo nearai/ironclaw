@@ -1323,23 +1323,7 @@ impl RebornServicesApi for RebornServices {
             owner_user_id: Some(caller.user_id.clone()),
             mission_id: None,
         };
-        let response = self
-            .thread_service
-            .list_threads_for_scope(ironclaw_threads::ListThreadsForScopeRequest {
-                scope,
-                limit: request.limit,
-                cursor: request.cursor,
-            })
-            .await
-            .map_err(map_thread_error)?;
-        Ok(RebornListThreadsResponse {
-            threads: response
-                .threads
-                .into_iter()
-                .filter(|thread| !is_automation_trigger_thread(thread))
-                .collect(),
-            next_cursor: response.next_cursor,
-        })
+        self.list_visible_threads_for_scope(scope, request).await
     }
 
     async fn list_automations(
@@ -1640,6 +1624,54 @@ impl RebornServicesApi for RebornServices {
 }
 
 impl RebornServices {
+    async fn list_visible_threads_for_scope(
+        &self,
+        scope: ThreadScope,
+        request: WebUiListThreadsRequest,
+    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        let visible_limit = resolve_thread_list_limit(request.limit);
+        let mut cursor = request.cursor;
+        let mut visible_threads = Vec::with_capacity(visible_limit);
+        let mut next_cursor = None;
+
+        while visible_threads.len() < visible_limit {
+            let remaining = visible_limit - visible_threads.len();
+            let response = self
+                .thread_service
+                .list_threads_for_scope(ironclaw_threads::ListThreadsForScopeRequest {
+                    scope: scope.clone(),
+                    limit: Some(remaining as u32),
+                    cursor: cursor.clone(),
+                })
+                .await
+                .map_err(map_thread_error)?;
+            visible_threads.extend(
+                response
+                    .threads
+                    .into_iter()
+                    .filter(|thread| !is_automation_trigger_thread(thread)),
+            );
+            next_cursor = response.next_cursor;
+            let Some(next) = next_cursor.clone() else {
+                break;
+            };
+            if cursor.as_deref() == Some(next.as_str()) {
+                tracing::warn!(
+                    cursor = %next,
+                    "thread listing cursor did not advance while filtering automation threads"
+                );
+                next_cursor = None;
+                break;
+            }
+            cursor = Some(next);
+        }
+
+        Ok(RebornListThreadsResponse {
+            threads: visible_threads,
+            next_cursor,
+        })
+    }
+
     fn thread_operation_lock(&self, scope: &TurnScope) -> Arc<AsyncMutex<()>> {
         let key = thread_operation_key(scope);
         let mut locks = match self.thread_operation_locks.lock() {
@@ -2418,9 +2450,18 @@ pub const AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE: u32 = 100;
 /// thread accumulates an unusual number of summaries.
 const TIMELINE_MAX_SUMMARY_ARTIFACTS: usize = 200;
 
+const THREAD_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
+const THREAD_LIST_MAX_PAGE_SIZE: u32 = 200;
+
 fn clamp_timeline_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(TIMELINE_DEFAULT_PAGE_SIZE);
     let clamped = raw.clamp(1, TIMELINE_MAX_PAGE_SIZE);
+    clamped as usize
+}
+
+fn resolve_thread_list_limit(requested: Option<u32>) -> usize {
+    let raw = requested.unwrap_or(THREAD_LIST_DEFAULT_PAGE_SIZE);
+    let clamped = raw.clamp(1, THREAD_LIST_MAX_PAGE_SIZE);
     clamped as usize
 }
 
