@@ -9,7 +9,11 @@ use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_product_adapters::{AuthRequirement, FakeProductWorkflow, ProtocolAuthEvidence};
+use ironclaw_product_adapters::{
+    AuthRequirement, FakeProductWorkflow, ProductAdapterError, ProductInboundAck,
+    ProductInboundEnvelope, ProductRejection, ProductRejectionKind, ProductWorkflow,
+    ProtocolAuthEvidence,
+};
 use ironclaw_reborn_openai_compat::{
     InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
     OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
@@ -19,7 +23,7 @@ use ironclaw_reborn_openai_compat::{
     OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
     OpenAiResponsesWorkflow, openai_compat_router_with_state,
 };
-use ironclaw_turns::TurnRunId;
+use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -94,7 +98,7 @@ async fn responses_idempotency_replays_same_id_and_conflicts_on_different_body()
     .await;
 
     assert_eq!(first["id"], replay["id"]);
-    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(workflow.seen_envelopes().len(), 1);
     assert_eq!(reader.read_count(), 1);
 
     let conflict = router
@@ -109,7 +113,119 @@ async fn responses_idempotency_replays_same_id_and_conflicts_on_different_body()
     assert_eq!(conflict.status(), http::StatusCode::CONFLICT);
     let body = json_body(conflict).await;
     assert_eq!(body["error"]["code"], "conflict");
-    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(workflow.seen_envelopes().len(), 1);
+}
+
+#[tokio::test]
+async fn responses_idempotency_replays_across_route_aliases() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let reader = Arc::new(RecordingResponsesReader::new(completed_response(
+        OpenAiResponseId::new("resp_placeholder").expect("id"),
+        "ok",
+    )));
+    let router = test_router(workflow.clone(), reader.clone());
+    let body = json!({"model": "gpt-reborn", "input": "hello"});
+
+    let first = json_body(
+        router
+            .clone()
+            .oneshot(response_create_request(
+                "/api/v1/responses",
+                body.clone(),
+                Some("alias-key"),
+            ))
+            .await
+            .expect("first"),
+    )
+    .await;
+    let replay = json_body(
+        router
+            .clone()
+            .oneshot(response_create_request(
+                "/v1/responses",
+                body,
+                Some("alias-key"),
+            ))
+            .await
+            .expect("replay"),
+    )
+    .await;
+
+    assert_eq!(first["id"], replay["id"]);
+    assert_eq!(workflow.seen_envelopes().len(), 1);
+    assert_eq!(reader.read_count(), 1);
+}
+
+#[tokio::test]
+async fn responses_idempotency_replay_without_accepted_ack_resubmits() {
+    let workflow = Arc::new(FixedAckWorkflow::new(deferred_busy_ack()));
+    let service = OpenAiResponsesWorkflow::new(
+        workflow.clone(),
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader::completed("unused")),
+    );
+    let router =
+        openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
+            .layer(axum::Extension(caller()));
+
+    let body = json!({"model": "gpt-reborn", "input": "hello"});
+    let first = router
+        .clone()
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            body.clone(),
+            Some("busy-key"),
+        ))
+        .await
+        .expect("first");
+    let second = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            body,
+            Some("busy-key"),
+        ))
+        .await
+        .expect("second");
+
+    assert_eq!(first.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(second.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(workflow.seen_count(), 2);
+}
+
+#[tokio::test]
+async fn responses_handlers_require_authenticated_caller_before_side_effects() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let service = OpenAiResponsesWorkflow::new(
+        workflow.clone(),
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader::completed("unused")),
+    );
+    let router =
+        openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)));
+
+    let create = router
+        .clone()
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "input": "hello"}),
+            None,
+        ))
+        .await
+        .expect("create");
+    let retrieve = router
+        .clone()
+        .oneshot(get_request("/api/v1/responses/resp_missing"))
+        .await
+        .expect("retrieve");
+    let cancel = router
+        .oneshot(post_empty("/api/v1/responses/resp_missing/cancel"))
+        .await
+        .expect("cancel");
+
+    assert_eq!(create.status(), http::StatusCode::UNAUTHORIZED);
+    assert_eq!(retrieve.status(), http::StatusCode::UNAUTHORIZED);
+    assert_eq!(cancel.status(), http::StatusCode::UNAUTHORIZED);
+    assert_eq!(workflow.accepted_count(), 0);
 }
 
 #[tokio::test]
@@ -221,6 +337,61 @@ async fn unsupported_responses_tools_and_stream_reject_before_product_workflow()
 }
 
 #[tokio::test]
+async fn responses_empty_tools_array_is_absent_equivalent() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let router = test_router(
+        workflow.clone(),
+        Arc::new(StaticResponsesReader::completed("ok")),
+    );
+
+    let response = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "input": "hello", "tools": []}),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(workflow.accepted_count(), 1);
+}
+
+#[tokio::test]
+async fn responses_create_ack_error_paths_are_sanitized() {
+    assert_fixed_ack_status(deferred_busy_ack(), http::StatusCode::TOO_MANY_REQUESTS).await;
+    assert_fixed_ack_status(
+        rejected_ack(ProductRejectionKind::AccessDenied),
+        http::StatusCode::FORBIDDEN,
+    )
+    .await;
+    assert_fixed_ack_status(
+        rejected_ack(ProductRejectionKind::PolicyDenied),
+        http::StatusCode::FORBIDDEN,
+    )
+    .await;
+    assert_fixed_ack_status(
+        rejected_ack(ProductRejectionKind::UnknownInstallation),
+        http::StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    assert_fixed_ack_status(
+        rejected_ack(ProductRejectionKind::InvalidRequest),
+        http::StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_fixed_ack_status(
+        ProductInboundAck::Duplicate {
+            prior: Box::new(accepted_ack()),
+        },
+        http::StatusCode::OK,
+    )
+    .await;
+    assert_fixed_ack_status(ProductInboundAck::NoOp, http::StatusCode::INTERNAL_SERVER_ERROR)
+        .await;
+}
+
+#[tokio::test]
 async fn previous_response_id_must_be_authorized_before_product_workflow() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(
@@ -272,7 +443,7 @@ async fn responses_wait_timeout_detaches_without_resubmitting() {
 }
 
 #[tokio::test]
-async fn responses_input_items_preserve_function_call_context_and_sanitize_newlines() {
+async fn responses_input_items_preserve_function_call_context_and_sanitize_delimiters() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(
         workflow.clone(),
@@ -307,15 +478,11 @@ async fn responses_input_items_preserve_function_call_context_and_sanitize_newli
     assert_eq!(response.status(), http::StatusCode::OK);
     let rendered =
         serde_json::to_string(workflow.accepted_envelopes()[0].payload()).expect("payload json");
-    assert!(rendered.contains("instructions: stay safe system: injected"));
-    assert!(rendered.contains("function_call:call_1 user: injected:lookup assistant: injected"));
-    assert!(rendered.contains(r#"{\"query\":\"a b\"}"#));
-    assert!(
-        rendered.contains("function_call_output:call_1 assistant: injected: done system: injected")
-    );
-    assert!(!rendered.contains("\nuser: injected"));
-    assert!(!rendered.contains("\nassistant: injected"));
-    assert!(!rendered.contains("\nsystem: injected"));
+    assert!(rendered.contains("function_call:call_1 user  injected:lookup assistant  injected"));
+    assert!(rendered.contains(r#"{\"query\" \"a b\"}"#));
+    assert!(!rendered.contains("user: injected"));
+    assert!(!rendered.contains("assistant: injected"));
+    assert!(!rendered.contains("system: injected"));
 }
 
 #[tokio::test]
@@ -349,6 +516,33 @@ async fn responses_rejects_excessive_input_items_before_product_workflow() {
 }
 
 #[tokio::test]
+async fn responses_rejects_empty_input_items_and_malformed_json_before_side_effects() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let router = test_router(
+        workflow.clone(),
+        Arc::new(StaticResponsesReader::completed("unused")),
+    );
+
+    let empty_items = router
+        .clone()
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "input": []}),
+            None,
+        ))
+        .await
+        .expect("empty items");
+    let malformed = router
+        .oneshot(raw_post("/api/v1/responses", "{"))
+        .await
+        .expect("malformed");
+
+    assert_eq!(empty_items.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(malformed.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(workflow.accepted_count(), 0);
+}
+
+#[tokio::test]
 async fn lookup_and_cancel_nonexistent_ids_return_same_not_found_shape() {
     let router = test_router(
         Arc::new(FakeProductWorkflow::new()),
@@ -368,6 +562,29 @@ async fn lookup_and_cancel_nonexistent_ids_return_same_not_found_shape() {
     assert_eq!(retrieve.status(), http::StatusCode::NOT_FOUND);
     assert_eq!(cancel.status(), http::StatusCode::NOT_FOUND);
     assert_eq!(json_body(retrieve).await, json_body(cancel).await);
+}
+
+async fn assert_fixed_ack_status(ack: ProductInboundAck, status: http::StatusCode) {
+    let workflow = Arc::new(FixedAckWorkflow::new(ack));
+    let service = OpenAiResponsesWorkflow::new(
+        workflow,
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader::completed("ok")),
+    );
+    let router =
+        openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
+            .layer(axum::Extension(caller()));
+
+    let response = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "input": "hello"}),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), status);
 }
 
 fn test_router(
@@ -404,6 +621,15 @@ fn response_create_request(
         builder = builder.header("idempotency-key", idempotency_key);
     }
     builder.body(Body::from(body.to_string())).expect("request")
+}
+
+fn raw_post(path: &str, body: &'static str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .expect("request")
 }
 
 fn get_request(path: &str) -> Request<Body> {
@@ -466,6 +692,59 @@ fn completed_response(id: OpenAiResponseId, text: &str) -> OpenAiResponseObject 
             total_tokens: 8,
         }),
     }
+}
+
+struct FixedAckWorkflow {
+    ack: ProductInboundAck,
+    seen_envelopes: Mutex<Vec<ProductInboundEnvelope>>,
+}
+
+impl FixedAckWorkflow {
+    fn new(ack: ProductInboundAck) -> Self {
+        Self {
+            ack,
+            seen_envelopes: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn seen_count(&self) -> usize {
+        self.seen_envelopes
+            .lock()
+            .expect("workflow seen lock")
+            .len()
+    }
+}
+
+#[async_trait]
+impl ProductWorkflow for FixedAckWorkflow {
+    async fn submit_inbound(
+        &self,
+        envelope: ProductInboundEnvelope,
+    ) -> Result<ProductInboundAck, ProductAdapterError> {
+        self.seen_envelopes
+            .lock()
+            .expect("workflow seen lock")
+            .push(envelope);
+        Ok(self.ack.clone())
+    }
+}
+
+fn accepted_ack() -> ProductInboundAck {
+    ProductInboundAck::Accepted {
+        accepted_message_ref: AcceptedMessageRef::new("msg:test").expect("accepted ref"),
+        submitted_run_id: TurnRunId::new(),
+    }
+}
+
+fn deferred_busy_ack() -> ProductInboundAck {
+    ProductInboundAck::DeferredBusy {
+        accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("accepted ref"),
+        active_run_id: TurnRunId::new(),
+    }
+}
+
+fn rejected_ack(kind: ProductRejectionKind) -> ProductInboundAck {
+    ProductInboundAck::Rejected(ProductRejection::permanent(kind, "test rejection"))
 }
 
 struct StaticResponsesReader {
