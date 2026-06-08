@@ -117,7 +117,7 @@ fn check_config_file(path: &std::path::Path) -> DoctorCheck {
 
 fn check_providers_file(path: &std::path::Path) -> DoctorCheck {
     match std::fs::read_to_string(path) {
-        Ok(contents) => match serde_json::from_str::<serde_json::Value>(&contents) {
+        Ok(contents) => match serde_json::from_str::<serde::de::IgnoredAny>(&contents) {
             Ok(_) => DoctorCheck {
                 name: "providers_file".to_string(),
                 category: CheckCategory::Core,
