@@ -820,7 +820,7 @@ read the same communication preference repository used by the default outbound
 preference API. Do not encode WebUI rendering assumptions in this bridge; the
 API must remain usable by any authenticated product surface.
 
-Carry-forward API and repository follow-ups from PR 4537 review:
+Carry-forward API and repository follow-ups from GitHub PR #4537 review:
 
 - Expand `RebornOutboundDeliveryModality` in a dedicated product API follow-up
   before surfacing non-text outbound defaults. The outbound repository already

@@ -295,6 +295,25 @@ mod tests {
         }
     }
 
+    struct FailingTargetInventory;
+
+    #[async_trait]
+    impl OutboundDeliveryTargetInventory for FailingTargetInventory {
+        async fn list_outbound_delivery_targets(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            Err(RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            })
+        }
+    }
+
     struct LoadFailingPreferenceRepository;
 
     #[async_trait]
@@ -486,6 +505,67 @@ mod tests {
             .expect_err("backend write failure");
 
         assert_unavailable_backend_error(error);
+    }
+
+    #[tokio::test]
+    async fn set_preferences_maps_backend_read_error_before_resolving_target() {
+        let inventory = Arc::new(FakeTargetInventory::default());
+        inventory.insert(
+            "user-alpha",
+            target_entry("slack-alpha", "reply:slack-alpha", true),
+        );
+        let facade = RebornOutboundPreferencesFacade::new(
+            Arc::new(LoadFailingPreferenceRepository),
+            inventory,
+        );
+
+        let error = facade
+            .set_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(target_id("slack-alpha")),
+                },
+            )
+            .await
+            .expect_err("backend read failure");
+
+        assert_unavailable_backend_error(error);
+    }
+
+    #[tokio::test]
+    async fn target_inventory_errors_are_propagated_by_get_set_and_list() {
+        let store = Arc::new(InMemoryOutboundStateStore::default());
+        seed_record(
+            store.as_ref(),
+            "tenant-alpha",
+            "user-alpha",
+            Some(reply_ref("reply:slack-alpha")),
+        )
+        .await;
+        let facade = RebornOutboundPreferencesFacade::new(store, Arc::new(FailingTargetInventory));
+
+        let get_error = facade
+            .get_outbound_preferences(caller("tenant-alpha", "user-alpha"))
+            .await
+            .expect_err("get target inventory failure");
+        assert_unavailable_backend_error(get_error);
+
+        let set_error = facade
+            .set_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(target_id("slack-alpha")),
+                },
+            )
+            .await
+            .expect_err("set target inventory failure");
+        assert_unavailable_backend_error(set_error);
+
+        let list_error = facade
+            .list_outbound_delivery_targets(caller("tenant-alpha", "user-alpha"))
+            .await
+            .expect_err("list target inventory failure");
+        assert_unavailable_backend_error(list_error);
     }
 
     #[tokio::test]
