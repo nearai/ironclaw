@@ -119,8 +119,9 @@ pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
+use ironclaw_host_api::ThreadId;
 use ironclaw_threads::{
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextWindow,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
     SummaryArtifact, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
@@ -145,6 +146,43 @@ use ironclaw_turns::{
     },
 };
 use serde::{Deserialize, Serialize};
+
+#[derive(Default)]
+pub struct ThreadContextWindowCache {
+    cached: Mutex<Option<CachedContextWindow>>,
+}
+
+struct CachedContextWindow {
+    thread_id: ThreadId,
+    max_messages: usize,
+    context: ContextWindow,
+}
+
+impl ThreadContextWindowCache {
+    async fn store(&self, max_messages: usize, context: ContextWindow) {
+        let mut cached = self.cached.lock().await;
+        *cached = Some(CachedContextWindow {
+            thread_id: context.thread_id.clone(),
+            max_messages,
+            context,
+        });
+    }
+
+    async fn take_matching(
+        &self,
+        thread_id: &ThreadId,
+        max_messages: usize,
+    ) -> Option<ContextWindow> {
+        let mut cached = self.cached.lock().await;
+        if cached.as_ref().is_some_and(|entry| {
+            entry.thread_id == *thread_id && entry.max_messages == max_messages
+        }) {
+            return cached.take().map(|entry| entry.context);
+        }
+        None
+    }
+}
+
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
 const LOOP_SYSTEM_ROLE: &str = "system";
 
@@ -200,6 +238,7 @@ where
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     identity_budget: IdentityBudget,
     prompt_context_budget: PromptContextTokenBudget,
+    context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     identity_candidates: Arc<IdentityCandidateCache>,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
 }
@@ -266,6 +305,7 @@ where
             identity_context_source: None,
             identity_budget: IdentityBudget::default(),
             prompt_context_budget: PromptContextTokenBudget::default(),
+            context_window_cache: None,
             identity_candidates: Arc::new(IdentityCandidateCache::new()),
             milestone_sink: None,
         }
@@ -291,6 +331,11 @@ where
 
     pub fn with_prompt_context_token_budget(mut self, budget: PromptContextTokenBudget) -> Self {
         self.prompt_context_budget = budget;
+        self
+    }
+
+    pub fn with_context_window_cache(mut self, cache: Arc<ThreadContextWindowCache>) -> Self {
+        self.context_window_cache = Some(cache);
         self
     }
 
@@ -330,6 +375,9 @@ where
             })
             .await
             .map_err(context_read_error)?;
+        if let Some(cache) = self.context_window_cache.as_ref() {
+            cache.store(max_messages, context.clone()).await;
+        }
 
         let instruction_snippets = match self.skill_context_source.as_deref() {
             Some(source) => {
@@ -365,6 +413,11 @@ where
             None => Vec::new(),
         };
 
+        let compaction_message_index = context
+            .messages
+            .iter()
+            .filter_map(context_message_to_compaction_metadata)
+            .collect();
         let messages = prompt_context_budget::select_prompt_context_messages(
             context.messages,
             self.prompt_context_budget,
@@ -376,6 +429,7 @@ where
                 .into_iter()
                 .filter_map(context_message_to_loop_message)
                 .collect(),
+            compaction_message_index,
             instruction_snippets,
             memory_snippets: Vec::new(),
         })
@@ -860,6 +914,7 @@ where
     capabilities: Option<Arc<dyn LoopCapabilityPort>>,
     max_messages: usize,
     prompt_context_budget: PromptContextTokenBudget,
+    context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     prompt_authority: LoopPromptBundleAuthority,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
@@ -887,6 +942,7 @@ where
             capabilities: None,
             max_messages,
             prompt_context_budget: PromptContextTokenBudget::default(),
+            context_window_cache: None,
             prompt_authority: LoopPromptBundleAuthority::shared(),
             milestone_sink: None,
             skill_context_source: None,
@@ -911,6 +967,7 @@ where
             capabilities: None,
             max_messages,
             prompt_context_budget: PromptContextTokenBudget::default(),
+            context_window_cache: None,
             prompt_authority: LoopPromptBundleAuthority::shared(),
             milestone_sink: Some(milestone_sink),
             skill_context_source: None,
@@ -934,6 +991,11 @@ where
 
     pub fn with_prompt_context_token_budget(mut self, budget: PromptContextTokenBudget) -> Self {
         self.prompt_context_budget = budget;
+        self
+    }
+
+    pub fn with_context_window_cache(mut self, cache: Arc<ThreadContextWindowCache>) -> Self {
+        self.context_window_cache = Some(cache);
         self
     }
 
@@ -1117,15 +1179,32 @@ where
         &self,
         requested_messages: Vec<LoopModelMessage>,
     ) -> Result<Vec<HostManagedModelMessage>, AgentLoopHostError> {
-        let context = self
-            .thread_service
-            .load_context_window(LoadContextWindowRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: self.run_context.thread_id.clone(),
-                max_messages: self.max_messages,
-            })
-            .await
-            .map_err(context_read_error)?;
+        let context = if let Some(cache) = self.context_window_cache.as_ref() {
+            match cache
+                .take_matching(&self.run_context.thread_id, self.max_messages)
+                .await
+            {
+                Some(context) => context,
+                None => self
+                    .thread_service
+                    .load_context_window(LoadContextWindowRequest {
+                        scope: self.thread_scope.clone(),
+                        thread_id: self.run_context.thread_id.clone(),
+                        max_messages: self.max_messages,
+                    })
+                    .await
+                    .map_err(context_read_error)?,
+            }
+        } else {
+            self.thread_service
+                .load_context_window(LoadContextWindowRequest {
+                    scope: self.thread_scope.clone(),
+                    thread_id: self.run_context.thread_id.clone(),
+                    max_messages: self.max_messages,
+                })
+                .await
+                .map_err(context_read_error)?
+        };
 
         if requested_messages.is_empty() {
             let context_messages = prompt_context_budget::select_prompt_context_messages(
@@ -1133,7 +1212,7 @@ where
                 self.prompt_context_budget,
             );
             let mut messages = Vec::with_capacity(context_messages.len());
-            for message in context_messages {
+            for (message, _) in context_messages {
                 let Some(content_ref) = message_ref_from_context(&message) else {
                     continue;
                 };
@@ -1643,9 +1722,22 @@ fn history_summaries_by_ref(summaries: Vec<SummaryArtifact>) -> HashMap<String, 
         .collect()
 }
 
-fn context_message_to_loop_message(message: ContextMessage) -> Option<LoopContextMessage> {
+fn context_message_to_compaction_metadata(
+    message: &ContextMessage,
+) -> Option<LoopContextCompactionMetadata> {
+    message_ref_from_context(message)?;
+    Some(LoopContextCompactionMetadata {
+        sequence: message.sequence,
+        kind: compaction_kind_for_message(message.kind),
+        estimated_tokens: estimate_tokens_from_chars(&message.content).as_u64(),
+    })
+}
+
+fn context_message_to_loop_message(
+    selected: prompt_context_budget::SelectedPromptContextMessage,
+) -> Option<LoopContextMessage> {
+    let (message, estimated_tokens) = selected;
     let message_ref = message_ref_from_context(&message)?;
-    let estimated_tokens = estimate_tokens_from_chars(&message.content).as_u64();
     let compaction = Some(LoopContextCompactionMetadata {
         sequence: message.sequence,
         kind: compaction_kind_for_message(message.kind),

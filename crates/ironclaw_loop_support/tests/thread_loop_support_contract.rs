@@ -17,8 +17,8 @@ use ironclaw_loop_support::{
     IdentityApplicability, IdentityBudget, IdentityFileName, PromptContextTokenBudget,
     SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId, SkillBundleSource,
     SkillBundleSourceError, SkillFilePath, SkillSourceKind, ThreadBackedLoopContextPort,
-    ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, build_skill_run_snapshot,
-    identity_message_ref,
+    ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
+    build_skill_run_snapshot, identity_message_ref,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
@@ -48,11 +48,12 @@ use ironclaw_turns::{
         LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneKind, LoopHostMilestoneSink,
         LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView, LoopModelMessage,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
-        LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptPort, LoopRunContext,
-        LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput,
-        PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
-        ProviderToolDefinition, SkillVisibility, ToolObservationDetail, ToolObservationStatus,
-        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust,
+        ParentLoopOutput, PersonalContextPolicy, PromptMode, PromptSkillContextMetadata,
+        ProviderToolCallReference, ProviderToolDefinition, SkillVisibility, ToolObservationDetail,
+        ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 use tracing_test::traced_test;
@@ -111,7 +112,7 @@ async fn thread_context_port_applies_prompt_token_budget_to_scanned_messages() {
         fixture.run_context.clone(),
         16,
     )
-    .with_prompt_context_token_budget(PromptContextTokenBudget::new(4, 0, 0));
+    .with_prompt_context_token_budget(PromptContextTokenBudget::new(6, 0, 0));
 
     let bundle = adapter
         .load_loop_context(LoopContextRequest {
@@ -128,6 +129,14 @@ async fn thread_context_port_applies_prompt_token_budget_to_scanned_messages() {
         .as_ref()
         .expect("budget-admitted message should retain compaction metadata");
     assert_eq!(compaction.sequence, 3);
+    assert_eq!(
+        bundle
+            .compaction_message_index
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
 }
 
 #[tokio::test]
@@ -183,7 +192,7 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
         gateway.clone(),
         16,
     )
-    .with_prompt_context_token_budget(PromptContextTokenBudget::new(4, 0, 0));
+    .with_prompt_context_token_budget(PromptContextTokenBudget::new(6, 0, 0));
     issue_prompt_grant(&fixture.run_context, &[]);
 
     port.stream_model(LoopModelRequest {
@@ -199,6 +208,59 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].messages.len(), 1);
     assert_eq!(calls[0].messages[0].content, "latest short");
+}
+
+#[tokio::test]
+async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
+    let fixture = GatedThreadFixture::new().await;
+    let context_window_cache = Arc::new(ThreadContextWindowCache::default());
+    let context_port = Arc::new(
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            fixture.run_context.clone(),
+            16,
+        )
+        .with_context_window_cache(Arc::clone(&context_window_cache)),
+    );
+    let prompt_port = HostManagedLoopPromptPort::new(
+        fixture.run_context.clone(),
+        context_port,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+    );
+    let prompt_bundle = prompt_port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(16),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    )
+    .with_context_window_cache(context_window_cache);
+
+    model_port
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: prompt_bundle.surface_version,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(fixture.thread_service.context_window_loads(), 1);
 }
 
 #[tokio::test]
@@ -1630,6 +1692,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
                 safe_summary: "user message available".to_string(),
                 compaction: None,
             }],
+            compaction_message_index: Vec::new(),
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "instruction:project".to_string(),
                 model_content: "project instruction summary".to_string(),
@@ -3788,6 +3851,7 @@ impl GatedThreadFixture {
         let gated = Arc::new(GatedFinalizeThreadService {
             inner: Arc::clone(&base.thread_service),
             finalize_entries: AtomicUsize::new(0),
+            context_window_loads: AtomicUsize::new(0),
         });
         Self {
             thread_service: gated,
@@ -3801,6 +3865,13 @@ impl GatedThreadFixture {
 struct GatedFinalizeThreadService {
     inner: Arc<InMemorySessionThreadService>,
     finalize_entries: AtomicUsize,
+    context_window_loads: AtomicUsize,
+}
+
+impl GatedFinalizeThreadService {
+    fn context_window_loads(&self) -> usize {
+        self.context_window_loads.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
@@ -3912,6 +3983,7 @@ impl SessionThreadService for GatedFinalizeThreadService {
         &self,
         request: ironclaw_threads::LoadContextWindowRequest,
     ) -> Result<ContextWindow, SessionThreadError> {
+        self.context_window_loads.fetch_add(1, Ordering::SeqCst);
         self.inner.load_context_window(request).await
     }
 

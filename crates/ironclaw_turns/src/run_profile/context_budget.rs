@@ -4,7 +4,7 @@
 /// Storage still scans transcript context by message count. Host adapters use
 /// this budget after that scan, and compaction strategies use the same budget
 /// shape to decide when the observed prompt is near its context ceiling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct PromptContextTokenBudget {
     pub context_limit_tokens: u64,
     pub reserve_tokens: u64,
@@ -60,5 +60,12 @@ mod tests {
         let budget = PromptContextTokenBudget::new(10, 20, 0);
 
         assert_eq!(budget.visible_transcript_tokens(), 0);
+    }
+
+    #[test]
+    fn visible_transcript_tokens_uses_reserve_when_larger_than_output_budget() {
+        let budget = PromptContextTokenBudget::new(100, 30, 10);
+
+        assert_eq!(budget.visible_transcript_tokens(), 70);
     }
 }

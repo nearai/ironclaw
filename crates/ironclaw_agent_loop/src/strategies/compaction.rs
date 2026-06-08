@@ -228,6 +228,28 @@ mod tests {
     }
 
     #[test]
+    fn can_evaluate_skips_when_visible_threshold_equals_preserve_tail() {
+        let context = crate::test_support::test_run_context("compaction-strategy-equal-tail");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt =
+            CompactionPromptSnapshot::from_message_index(vec![MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 100,
+            }]);
+        let strategy = DefaultCompactionStrategy {
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
+            preserve_tail_tokens: 90,
+            deadline_ms: 1,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Skip
+        );
+    }
+
+    #[test]
     fn evaluate_triggers_at_latest_user_boundary_outside_tail() {
         let context = crate::test_support::test_run_context("compaction-strategy-trigger");
         let mut state = LoopExecutionState::initial_for_run(&context);
@@ -588,5 +610,43 @@ mod tests {
                 deadline_ms: 7,
             }
         );
+    }
+
+    #[test]
+    fn tail_preserving_user_boundary_respects_minimum_tail_message_count() {
+        let context = crate::test_support::test_run_context("compaction-strategy-min-tail");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 4,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+        ]);
+
+        let boundary = tail_preserving_user_boundary(
+            &state,
+            state.compaction_prompt.fingerprint(),
+            1,
+            2,
+            |_| true,
+        );
+
+        assert_eq!(boundary, Some(1));
     }
 }
