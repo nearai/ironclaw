@@ -27,14 +27,51 @@
 use std::sync::Arc;
 
 use ironclaw_attestation::{
-    InMemorySealedGrantStore, InMemorySigningLedger, SealedGrantStore, SigningLedger,
+    AttestedSigningGrant, GrantError, GrantKey, InMemorySealedGrantStore, InMemorySigningLedger,
+    SealedGrantStore, SigningLedger,
 };
 use ironclaw_attested_runtime::{
-    AttestedGateBindingStore, AttestedSignerContinuationDriver, BroadcastOutcome, Broadcaster,
-    ContinuationError, InMemoryAttestedGateBindingStore, ProviderRegistry,
+    AttestedGateBinding, AttestedGateBindingStore, AttestedSignerContinuationDriver, BindingError,
+    BroadcastOutcome, Broadcaster, ContinuationError, InMemoryAttestedGateBindingStore,
+    ProviderRegistry,
 };
 use ironclaw_chain_signing::{CustodialSigner, DenyFirstCustodyPolicy, SecretsKeyStore, ShipGate};
-use ironclaw_signing_provider::SigningContext;
+use ironclaw_signing_provider::{GateRef, SigningContext};
+
+/// Error from [`RebornAttestedComposition::register_attested_gate`]. Distinct
+/// from [`ironclaw_attestation::GrantError`] so the gate-raise caller can tell
+/// a hardening rejection (mismatched gate_ref / duplicate raise) apart from a
+/// grant-store / binding-store backend failure.
+#[derive(Debug)]
+pub enum RegisterAttestedGateError {
+    /// The supplied `gate_ref` did not equal `binding.context.gate_ref`.
+    GateRefMismatch,
+    /// A binding (or sealed grant) already exists for this gate: registration is
+    /// insert-only and the first raise wins.
+    DuplicateBinding,
+    /// The underlying sealed-grant store failed.
+    Grant(GrantError),
+    /// The binding store rejected or could not record the binding (validation
+    /// failure or backend error). Fail closed — the gate is not registered.
+    BindingStore(BindingError),
+}
+
+impl std::fmt::Display for RegisterAttestedGateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GateRefMismatch => {
+                write!(f, "gate_ref does not match binding.context.gate_ref")
+            }
+            Self::DuplicateBinding => {
+                write!(f, "attested gate already registered (insert-only)")
+            }
+            Self::Grant(e) => write!(f, "sealed-grant store failed: {e}"),
+            Self::BindingStore(e) => write!(f, "binding store failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RegisterAttestedGateError {}
 
 /// The custodial signer type, generic over the grant store and ledger backend.
 pub(crate) type ComposedCustodialSigner<G, L> = CustodialSigner<SecretsKeyStore, G, L>;
@@ -43,9 +80,16 @@ pub(crate) type ComposedCustodialSigner<G, L> = CustodialSigner<SecretsKeyStore,
 pub(crate) type ComposedContinuationDriver<B, G, L> =
     AttestedSignerContinuationDriver<B, L, ComposedCustodialSigner<G, L>>;
 
+/// The local-dev / test monomorphization of [`ComposedContinuationDriver`]
+/// (in-memory stores + no-op broadcaster). This is the concrete driver type the
+/// composition-layer continuation port ([`crate::RebornAttestedContinuation`])
+/// holds, matching the [`LocalDevAttestedComposition`] the runtime assembles.
+pub(crate) type LocalDevContinuationDriver =
+    ComposedContinuationDriver<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger>;
+
 /// The local-dev / test monomorphization of [`RebornAttestedComposition`] the
 /// `RebornRuntime` holds (in-memory stores + no-op broadcaster).
-pub(crate) type LocalDevAttestedComposition =
+pub type LocalDevAttestedComposition =
     RebornAttestedComposition<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger>;
 
 /// A dry-run broadcaster that records intent but performs NO network I/O and,
@@ -91,6 +135,7 @@ where
     L: SigningLedger + 'static,
 {
     bindings: Arc<dyn AttestedGateBindingStore>,
+    grants: Arc<G>,
     driver: Arc<ComposedContinuationDriver<B, G, L>>,
 }
 
@@ -125,7 +170,7 @@ where
     ) -> Self {
         let custodial_signer = Arc::new(CustodialSigner::new(
             keystore,
-            grants,
+            Arc::clone(&grants),
             Arc::clone(&ledger),
             ship_gate,
             Arc::new(DenyFirstCustodyPolicy),
@@ -137,7 +182,77 @@ where
             ledger,
             broadcaster,
         ));
-        Self { bindings, driver }
+        Self {
+            bindings,
+            grants,
+            driver,
+        }
+    }
+
+    /// Register an attested gate: seal its one-shot grant and persist its
+    /// authoritative binding. This is the PR11 ingress entry point invoked when
+    /// a gate is raised.
+    ///
+    /// In-memory only (PR11); durable PG / libSQL backends are PR12.
+    ///
+    /// Hardening invariants enforced here:
+    /// - The supplied `gate_ref` MUST equal `binding.context.gate_ref`. A
+    ///   mismatch would let the binding be filed under a key that names a
+    ///   different gate than the one the authoritative context describes — the
+    ///   resume port and driver both look the binding up by `gate_ref`, so a
+    ///   mismatch is a binding-confusion vector. Fail closed.
+    /// - Registration is INSERT-ONLY: an existing binding for the same gate
+    ///   (request id) is never overwritten. The first raise wins; a second raise
+    ///   for the same gate is refused so an attacker cannot redefine the
+    ///   authoritative `(hash, signer, decoded tx)` after the fact (threats
+    ///   #2/#3/#4). The grant seal is likewise one-shot.
+    pub async fn register_attested_gate(
+        &self,
+        gate_ref: GateRef,
+        binding: AttestedGateBinding,
+        created_at_ms: i64,
+        expiry_ms: Option<i64>,
+    ) -> Result<(), RegisterAttestedGateError> {
+        // gate_ref must match the authoritative context's gate_ref.
+        if binding.context.gate_ref.as_str() != gate_ref.as_str() {
+            return Err(RegisterAttestedGateError::GateRefMismatch);
+        }
+
+        // Seal the one-shot grant first. The seal is an atomic CAS
+        // (`AlreadySealed` on a second seal of the same key), so it is the gate
+        // that serializes concurrent raises of the same gate: at most one caller
+        // wins the seal and reaches the binding insert below. A duplicate seal
+        // means the gate was already raised; surface it as a duplicate rather
+        // than proceeding to (re)write the binding.
+        let grant_key = GrantKey::from_context(&binding.context, binding.approved_tx_hash);
+        match self
+            .grants
+            .seal(AttestedSigningGrant::seal(
+                grant_key,
+                created_at_ms,
+                expiry_ms,
+            ))
+            .await
+        {
+            Ok(()) => {}
+            Err(GrantError::AlreadySealed) => {
+                return Err(RegisterAttestedGateError::DuplicateBinding);
+            }
+            Err(other) => return Err(RegisterAttestedGateError::Grant(other)),
+        }
+
+        // Insert-only, ATOMIC + VALIDATED: the store's `put` is insert-only (the
+        // existence check and the insert happen under a single critical section,
+        // closing the check-then-act TOCTOU window) and fully validates the
+        // binding (`gate_ref`/hash/chain/signer self-consistency) before
+        // persisting. An existing binding for this gate fails closed with
+        // `AlreadyExists` — treat it as a duplicate, consistent with the grant
+        // CAS above; any other validation/backend error fails closed too.
+        match self.bindings.put(gate_ref, binding).await {
+            Ok(()) => Ok(()),
+            Err(BindingError::AlreadyExists) => Err(RegisterAttestedGateError::DuplicateBinding),
+            Err(other) => Err(RegisterAttestedGateError::BindingStore(other)),
+        }
     }
 
     /// The authoritative gate-binding store. The PR11 ingress persists a
@@ -362,7 +477,9 @@ mod tests {
         assert!(
             matches!(
                 err,
-                ContinuationError::Ledger(_) | ContinuationError::ChainSigning(_)
+                ContinuationError::Ledger(_)
+                    | ContinuationError::LedgerRowExists { .. }
+                    | ContinuationError::ChainSigning(_)
             ),
             "expected fail-closed replay, got {err:?}"
         );

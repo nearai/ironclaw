@@ -141,6 +141,166 @@ fn resolve_gate_maps_to_canonical_gate_command_without_raw_secret() {
 }
 
 #[test]
+fn resolve_gate_maps_attested_proof_to_canonical_command() {
+    let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+        "client_action_id": "gate-att-1",
+        "thread_id": "thread-alpha",
+        "run_id": run_id(),
+        "gate_ref": "gate-alpha",
+        "resolution": "attested",
+        "attested_proof_kind": "injected_wallet",
+        "attested_approved_tx_hash": "ab".repeat(32),
+        "attested_proof": {
+            "scheme": "solana",
+            "claimed_signer": "deadbeef",
+            "signature": "00".repeat(64),
+            "approved_tx_hash": "ab".repeat(32),
+            "public_key": "11".repeat(32)
+        }
+    }))
+    .expect("request json");
+
+    let command = request.into_command(caller()).expect("valid command");
+    let WebUiInboundCommand::ResolveGate { resolution, .. } = command else {
+        panic!("expected resolve-gate command");
+    };
+    let WebUiGateResolution::Attested {
+        kind,
+        approved_tx_hash_hex,
+        proof_json,
+    } = resolution
+    else {
+        panic!("expected attested resolution");
+    };
+    assert_eq!(
+        kind,
+        ironclaw_product_workflow::AttestedProofKind::InjectedWallet
+    );
+    assert_eq!(approved_tx_hash_hex, "ab".repeat(32));
+    assert!(proof_json.is_object());
+}
+
+#[test]
+fn attested_resolution_normalizes_0x_prefixed_uppercase_hash() {
+    // A documented `0x`-prefixed (and here uppercase) hash must be canonicalized
+    // to the lowercase, prefix-free form the resume port compares against, so an
+    // otherwise-valid proof is not rejected as a binding mismatch.
+    let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+        "client_action_id": "gate-att-0x",
+        "thread_id": "thread-alpha",
+        "run_id": run_id(),
+        "gate_ref": "gate-alpha",
+        "resolution": "attested",
+        "attested_proof_kind": "injected_wallet",
+        "attested_approved_tx_hash": format!("0x{}", "AB".repeat(32)),
+        "attested_proof": {
+            "scheme": "solana",
+            "claimed_signer": "deadbeef",
+            "signature": "00".repeat(64),
+            "approved_tx_hash": "ab".repeat(32),
+            "public_key": "11".repeat(32)
+        }
+    }))
+    .expect("request json");
+
+    let command = request.into_command(caller()).expect("valid command");
+    let WebUiInboundCommand::ResolveGate { resolution, .. } = command else {
+        panic!("expected resolve-gate command");
+    };
+    let WebUiGateResolution::Attested {
+        approved_tx_hash_hex,
+        ..
+    } = resolution
+    else {
+        panic!("expected attested resolution");
+    };
+    assert_eq!(approved_tx_hash_hex, "ab".repeat(32));
+}
+
+#[test]
+fn attested_resolution_rejects_wrong_length_hash() {
+    let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+        "client_action_id": "gate-att-bad",
+        "thread_id": "thread-alpha",
+        "run_id": run_id(),
+        "gate_ref": "gate-alpha",
+        "resolution": "attested",
+        "attested_proof_kind": "injected_wallet",
+        "attested_approved_tx_hash": "abcd",
+        "attested_proof": {"k": "v"}
+    }))
+    .expect("request json");
+
+    let err = request
+        .into_command(caller())
+        .expect_err("short hash must reject");
+    assert_eq!(err.field, "attested_approved_tx_hash");
+    assert_eq!(err.code, WebUiInboundValidationCode::InvalidValue);
+}
+
+#[test]
+fn attested_resolution_rejects_unknown_proof_kind() {
+    let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+        "client_action_id": "gate-att-2",
+        "thread_id": "thread-alpha",
+        "run_id": run_id(),
+        "gate_ref": "gate-alpha",
+        "resolution": "attested",
+        "attested_proof_kind": "bitcoin",
+        "attested_approved_tx_hash": "ab".repeat(32),
+        "attested_proof": {"k": "v"}
+    }))
+    .expect("request json");
+
+    let err = request
+        .into_command(caller())
+        .expect_err("unknown proof kind must reject");
+    assert_eq!(err.field, "attested_proof_kind");
+    assert_eq!(err.code, WebUiInboundValidationCode::InvalidValue);
+}
+
+#[test]
+fn attested_resolution_rejects_non_object_proof() {
+    // `attested_proof` must be a JSON object; array / string / number / bool /
+    // null all fail closed as an InvalidValue on `attested_proof`.
+    for bad in [
+        json!([1, 2, 3]),
+        json!("not-an-object"),
+        json!(42),
+        json!(true),
+        json!(null),
+    ] {
+        let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+            "client_action_id": "gate-att-nonobj",
+            "thread_id": "thread-alpha",
+            "run_id": run_id(),
+            "gate_ref": "gate-alpha",
+            "resolution": "attested",
+            "attested_proof_kind": "injected_wallet",
+            "attested_approved_tx_hash": "ab".repeat(32),
+            "attested_proof": bad.clone(),
+        }))
+        .expect("request json");
+
+        // `null` deserializes to `None` -> MissingField; every other non-object
+        // shape reaches the `is_object()` guard -> InvalidValue. Both fail closed
+        // on the `attested_proof` field.
+        let err = request
+            .into_command(caller())
+            .expect_err("non-object attested_proof must reject");
+        assert_eq!(err.field, "attested_proof", "input: {bad}");
+        assert!(
+            matches!(
+                err.code,
+                WebUiInboundValidationCode::InvalidValue | WebUiInboundValidationCode::MissingField
+            ),
+            "input {bad} produced unexpected code {:?}",
+            err.code
+        );
+    }
+}
+
+#[test]
 fn missing_content_returns_stable_validation_error() {
     let request: WebUiSendMessageRequest = serde_json::from_value(json!({
         "client_action_id": "send-1",
@@ -317,6 +477,7 @@ fn invalid_gate_resolution_returns_stable_validation_error() {
         resolution: Some("not_a_resolution".to_string()),
         always: None,
         credential_ref: None,
+        ..Default::default()
     };
 
     let err = request

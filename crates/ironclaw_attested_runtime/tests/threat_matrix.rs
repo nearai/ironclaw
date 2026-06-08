@@ -457,7 +457,10 @@ async fn threat_1_and_6_custodial_replay_and_broadcast_retry_blocked() {
         .await
         .expect_err("replay/broadcast-retry must fail closed");
     assert!(
-        matches!(err, ContinuationError::Ledger(_)),
+        matches!(
+            err,
+            ContinuationError::Ledger(_) | ContinuationError::LedgerRowExists { .. }
+        ),
         "expected ledger guard rejection, got {err:?}"
     );
     // TRUE idempotency: the replay produced ZERO additional broadcast calls.
@@ -594,6 +597,14 @@ async fn driver_rechecks_inconsistent_binding() {
     );
 }
 
+// Note: the "approve-A / sign-B" caller-tx WYSIWYS threat is now structurally
+// impossible and so has no dedicated test here: the driver NEVER accepts a
+// caller-supplied signable transaction — it reconstructs the signable purely
+// from the authoritative `binding.decoded` (the same decoded tx the approved
+// hash was computed over). The equivalent attack surface (a tampered binding)
+// is covered by `threat_3_inconsistent_binding_write_rejected` and
+// `driver_rechecks_inconsistent_binding`.
+
 // ── Threat #5: EVM `from` spoof caught via ecrecover binding ──────────────
 
 #[tokio::test]
@@ -682,7 +693,10 @@ async fn threat_7_double_broadcast_blocked_by_ledger_state() {
         .await
         .expect_err("double-broadcast after recovery must fail closed");
     assert!(
-        matches!(err, ContinuationError::Ledger(_)),
+        matches!(
+            err,
+            ContinuationError::Ledger(_) | ContinuationError::LedgerRowExists { .. }
+        ),
         "expected ledger guard rejection, got {err:?}"
     );
     // Ledger never regressed out of BroadcastSubmitted.
@@ -781,7 +795,10 @@ async fn retry_after_broadcast_failure_does_not_double_broadcast() {
         .await
         .expect_err("retry after a failed broadcast must fail closed");
     assert!(
-        matches!(err, ContinuationError::Ledger(_)),
+        matches!(
+            err,
+            ContinuationError::Ledger(_) | ContinuationError::LedgerRowExists { .. }
+        ),
         "expected ledger guard rejection on retry, got {err:?}"
     );
     assert_eq!(
@@ -1128,13 +1145,14 @@ async fn put_external_binding(
         .expect("external binding insert succeeds");
 }
 
-/// Verify-before-advance: when the external-wallet provider REJECTS the proof,
+/// Verify-before-resume: when the external-wallet provider REJECTS the proof,
 /// the ledger must NOT be stranded at `Signing`. Because the continuation is
 /// one-shot per gate_ref, a row left at the in-flight `Signing` state could
-/// never be re-entered and would be stuck permanently. The fix verifies the
-/// proof BEFORE advancing the ledger, so a rejected proof leaves the row at
-/// `Approved` (the row `create`d, never advanced), and the broadcaster is never
-/// called.
+/// never be re-entered and would be stuck permanently. The split driver
+/// verifies + claims the grant BEFORE creating the ledger row, so a rejected
+/// proof leaves NO ledger row at all (cleaner than a row stranded at any
+/// non-terminal state), and the broadcaster is never called. A follow-up VALID
+/// proof for the same gate is therefore still drivable.
 #[tokio::test]
 async fn external_wallet_verify_failure_does_not_strand_ledger_at_signing() {
     let ctx = signing_context(&hex::encode([0x31u8; 20]));
@@ -1154,12 +1172,13 @@ async fn external_wallet_verify_failure_does_not_strand_ledger_at_signing() {
         matches!(err, ContinuationError::ProofRejected(_)),
         "expected ProofRejected, got {err:?}"
     );
-    // The ledger must be at `Approved` (created, never advanced to `Signing`),
-    // NOT stranded at the in-flight `Signing` state.
+    // Verify-before-resume: a rejected proof must leave NO ledger row at all
+    // (the row is only created after verify + grant claim succeed), so it can
+    // never be stranded at an in-flight state.
     assert_eq!(
-        ledger.state(&gate).await.unwrap(),
-        SigningLedgerState::Approved,
-        "rejected proof must leave the ledger at Approved, never stranded at Signing"
+        ledger.state(&gate).await,
+        Err(ironclaw_attestation::LedgerError::NotFound),
+        "rejected proof must not create a ledger row at all"
     );
     assert_eq!(broadcaster.count(), 0, "broadcaster must not be called");
 }
@@ -1210,10 +1229,12 @@ async fn external_wallet_unregistered_provider_is_provider_mismatch() {
         matches!(err, ContinuationError::ProviderMismatch { .. }),
         "expected ProviderMismatch, got {err:?}"
     );
+    // Verify-before-resume: a provider mismatch is detected before any ledger
+    // row is created, so no row exists.
     assert_eq!(
-        ledger.state(&gate).await.unwrap(),
-        SigningLedgerState::Approved,
-        "provider mismatch must leave the ledger at Approved"
+        ledger.state(&gate).await,
+        Err(ironclaw_attestation::LedgerError::NotFound),
+        "provider mismatch must not create a ledger row"
     );
     assert_eq!(broadcaster.count(), 0);
 }

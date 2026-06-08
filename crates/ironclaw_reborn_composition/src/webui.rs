@@ -6,7 +6,7 @@ use ironclaw_product_workflow::{
     RebornServicesErrorCode, RebornServicesErrorKind,
 };
 
-use crate::{RebornBuildError, RebornReadiness, RebornRuntime};
+use crate::{RebornAttestedContinuation, RebornBuildError, RebornReadiness, RebornRuntime};
 
 /// WebUI-facing Reborn service bundle for host composition.
 ///
@@ -38,6 +38,19 @@ impl std::fmt::Debug for RebornWebuiBundle {
 /// host runtime or route server. It reuses the runtime's existing task-level
 /// composition and attaches the runtime-owned projection stream unless the
 /// caller supplies a custom stream.
+///
+/// Attested-signing production invariant: the attested-continuation port wired
+/// below is built over `runtime.attested_signing()`, which is the runtime's
+/// concrete `LocalDevAttestedComposition`. `RebornRuntime` can only be produced
+/// by `build_reborn_runtime`, which rejects every non-local-dev profile, so
+/// this path cannot silently take the in-memory composition in a production
+/// deployment — there is no production `RebornRuntime` to pass here yet. Wiring
+/// the durable (`Postgres*`/`LibSql*`) composition (assembled by
+/// `attested_durable::assemble_*`) requires first erasing
+/// `RebornRuntime.attested_signing` behind a trait/enum; that is the dedicated
+/// production-runtime follow-up slice. Do not relax the `build_reborn_runtime`
+/// profile guard without that erasure, or this seam would become silently
+/// in-memory in production.
 pub fn build_webui_services(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
@@ -79,6 +92,15 @@ pub fn build_webui_services(
         );
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
+
+    // Attested-signing continuation port (PR11): wire the WebUI `resolve_gate`
+    // attested path to the runtime's signer-continuation driver + shared gate
+    // binding store. The facade stays crypto-free; this port (in the composition
+    // layer, over `ironclaw_attested_runtime`) does the decode + driver
+    // dispatch. The same driver/binding/ledger the resume port reads is reused.
+    api = api.with_attested_continuation(Arc::new(RebornAttestedContinuation::new(
+        runtime.attested_signing(),
+    )));
 
     Ok(RebornWebuiBundle {
         api: Arc::new(api),

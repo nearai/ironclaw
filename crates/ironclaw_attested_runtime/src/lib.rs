@@ -60,7 +60,7 @@ pub use binding::{
 pub use driver::{
     AttestedSignerContinuationDriver, BroadcastDisposition, BroadcastOutcome, Broadcaster,
     ContinuationError, CustodialSignerLike, EvmSignable, ProviderRegistry, RebuildError,
-    SignerContinuationOutcome,
+    SignerContinuationOutcome, VerifiedContinuation,
 };
 pub use port::{
     InMemoryResumeGuard, ResumeGuard, RuntimeAttestedResumePort, approved_tx_hash_ref_hex,

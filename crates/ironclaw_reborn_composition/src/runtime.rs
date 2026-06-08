@@ -31,10 +31,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use ironclaw_attestation::InMemorySealedGrantStore;
-use ironclaw_attested_runtime::{
-    CustodialMainnetShipGate, InMemoryAttestedGateBindingStore, ProviderRegistry,
-};
+use crate::attested::LocalDevAttestedComposition;
+use crate::attested_config::AttestedProvidersConfig;
+use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
+use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
+use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
+use ironclaw_attestation::{InMemorySealedGrantStore, SealedGrantStore};
+use ironclaw_attested_runtime::{CustodialMainnetShipGate, InMemoryAttestedGateBindingStore};
 use ironclaw_chain_signing::SecretsKeyStore;
 use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_filesystem::LocalFilesystem;
@@ -72,11 +75,6 @@ use ironclaw_turns::{
     TurnScope, TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext, PromptMode},
 };
-
-use crate::attested::LocalDevAttestedComposition;
-use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
-use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
-use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
 
 mod local_dev;
 mod skills;
@@ -939,16 +937,25 @@ fn build_attested_composition(
     let ship_gate = CustodialMainnetShipGate::from_env().build_chain_ship_gate(None);
 
     let grants = Arc::new(InMemorySealedGrantStore::new());
-    // Provider-registration seam: local-dev wires no external-wallet providers
-    // (custodial-only). PR13's `AttestedProvidersConfig` layers on this to
-    // register WalletConnect / Injected / NEAR providers over the SAME shared
-    // `grants` store the driver uses (shared one-shot CAS, threat #1).
+    // Register the external-wallet providers over the SAME sealed-grant store
+    // the custodial signer uses, so the one-shot grant CAS (threat #1) is
+    // authoritative across every path. The injected-wallet provider
+    // (`window.ethereum` / `window.solana`) is always registered (it is
+    // stateless: recovers the signer from the proof and claims the grant). The
+    // NEAR-redirect and WalletConnect providers are registered only when their
+    // ceremony config is present in the environment (fail-closed: absent config
+    // leaves the provider unregistered, so its wire variant decodes, reaches the
+    // driver, and fails closed as `ProviderMismatch` — see `attested_config`).
+    // Present-but-invalid config (placeholder/empty secret, malformed URL or
+    // project id) is a hard error here: fail closed at startup rather than
+    // register a weakened verifier.
+    let providers = AttestedProvidersConfig::from_env()
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("attested provider config: {error}"),
+        })?
+        .build_provider_registry(Arc::clone(&grants) as Arc<dyn SealedGrantStore>);
     Ok(LocalDevAttestedComposition::new_in_memory(
-        bindings,
-        keystore,
-        ship_gate,
-        grants,
-        ProviderRegistry::new(),
+        bindings, keystore, ship_gate, grants, providers,
     ))
 }
 
