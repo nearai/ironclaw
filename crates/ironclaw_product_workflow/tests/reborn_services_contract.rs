@@ -5497,3 +5497,58 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
     );
     assert_eq!(json["retryable"], true);
 }
+
+#[tokio::test]
+async fn list_threads_hides_automation_trigger_threads() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let caller = caller();
+    let visible_thread_id = ThreadId::new("thread-visible").expect("visible thread id");
+    let automation_thread_id = ThreadId::new("thread-automation").expect("automation thread id");
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("visible thread");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(automation_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Automation run".to_string()),
+            metadata_json: Some(
+                json!({
+                    "source": "automation_trigger",
+                    "trigger_id": "trigger-scheduled-summary",
+                })
+                .to_string(),
+            ),
+        })
+        .await
+        .expect("automation thread");
+
+    let response = services
+        .list_threads(caller, WebUiListThreadsRequest::default())
+        .await
+        .expect("list threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(thread_ids, vec![visible_thread_id]);
+    assert!(
+        !thread_ids.contains(&automation_thread_id),
+        "automation trigger threads should be accessible by direct id but hidden from the chat list",
+    );
+}

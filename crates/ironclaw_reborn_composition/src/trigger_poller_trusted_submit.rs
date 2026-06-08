@@ -193,6 +193,7 @@ where
         let accepted = record_trigger_prompt(
             Arc::clone(&self.thread_service),
             &resolution,
+            fire.identity.trigger_id(),
             &fire.prompt,
             fire.identity.external_event_id().as_str(),
             &self.default_agent_id,
@@ -269,6 +270,7 @@ fn trigger_resolve_request(
 async fn record_trigger_prompt(
     thread_service: Arc<dyn CanonicalSessionThreadService>,
     resolution: &ConversationBindingResolution,
+    trigger_id: TriggerId,
     prompt: &str,
     external_event_id: &str,
     default_agent_id: &AgentId,
@@ -292,7 +294,7 @@ async fn record_trigger_prompt(
             thread_id: Some(resolution.turn_scope.thread_id.clone()),
             created_by_actor_id: resolution.actor.user_id.as_str().to_string(),
             title: None,
-            metadata_json: None,
+            metadata_json: Some(trigger_thread_metadata_json(trigger_id)),
         })
         .await
         .map_err(|error| InboundTurnError::DurableState {
@@ -322,6 +324,14 @@ async fn record_trigger_prompt(
         .map_err(|error| InboundTurnError::DurableState {
             reason: format!("trigger prompt thread record failed: {error}"),
         })
+}
+
+fn trigger_thread_metadata_json(trigger_id: TriggerId) -> String {
+    serde_json::json!({
+        "source": "automation_trigger",
+        "trigger_id": trigger_id.to_string(),
+    })
+    .to_string()
 }
 
 fn trigger_authorization_error(error: TriggerFireAuthError) -> TriggerError {
@@ -1505,6 +1515,7 @@ mod tests {
         record_trigger_prompt(
             thread_service.clone(),
             &resolution,
+            TriggerId::new(),
             "summarize unread mail",
             "event-trigger-hook",
             &agent_id,
@@ -1515,6 +1526,7 @@ mod tests {
         record_trigger_prompt(
             thread_service.clone(),
             &resolution,
+            TriggerId::new(),
             "summarize unread mail",
             "event-trigger-hook",
             &agent_id,
@@ -1653,6 +1665,15 @@ mod tests {
             .threads
             .first()
             .expect("worker path records trigger prompt");
+        let metadata: serde_json::Value = serde_json::from_str(
+            thread
+                .metadata_json
+                .as_deref()
+                .expect("trigger thread metadata"),
+        )
+        .expect("trigger thread metadata json");
+        assert_eq!(metadata["source"], "automation_trigger");
+        assert_eq!(metadata["trigger_id"], trigger_id.to_string());
         let history = thread_service
             .list_thread_history(ThreadHistoryRequest {
                 scope: expected_scope,

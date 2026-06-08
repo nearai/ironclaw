@@ -22,8 +22,8 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
-    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService,
-    ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -1332,7 +1332,11 @@ impl RebornServicesApi for RebornServices {
             .await
             .map_err(map_thread_error)?;
         Ok(RebornListThreadsResponse {
-            threads: response.threads,
+            threads: response
+                .threads
+                .into_iter()
+                .filter(|thread| !is_automation_trigger_thread(thread))
+                .collect(),
             next_cursor: response.next_cursor,
         })
     }
@@ -1700,6 +1704,16 @@ impl RebornServices {
 
 fn automation_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(true)
+}
+
+fn is_automation_trigger_thread(thread: &SessionThreadRecord) -> bool {
+    thread
+        .metadata_json
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+        .is_some_and(|metadata| {
+            metadata.get("source").and_then(serde_json::Value::as_str) == Some("automation_trigger")
+        })
 }
 
 fn outbound_preferences_unavailable() -> RebornServicesError {
