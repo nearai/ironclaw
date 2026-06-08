@@ -179,14 +179,18 @@ pairing paths directly.
 
 When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
 `GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` and
-`GET|PUT /api/webchat/v2/channels/slack/allowed` inside the same bearer auth
-layer. The low-level `routes` API accepts `channel_id` plus `subject_user_id`;
-the WebUI v2 channel picker uses the admin-managed `allowed` API and supplies
-only `channel_ids`; the host deterministically assigns each selected channel
-its own tenant-scoped Slack channel subject before writing routes. Tenant,
-adapter installation, and Slack team always come from host configuration. These
-routes write to Slack host state so runtime assignments are durable and are
-resolved before static TOML `channel_routes` fallback. In
+`GET|PUT /api/webchat/v2/channels/slack/allowed` plus
+`GET /api/webchat/v2/channels/slack/subjects` inside the same bearer auth
+layer. The low-level `routes` API accepts `channel_id` plus
+`subject_user_id`; the WebUI v2 channel picker uses the admin-managed
+`allowed` API, reads the `subjects` catalog for routable team subjects, and
+can save either legacy `channel_ids` or explicit per-channel
+`{ channel_id, subject_user_id }` assignments. Missing explicit subjects are
+deterministically assigned tenant-scoped Slack channel subjects, while existing
+generated/current route subjects may be preserved for their same channel.
+Tenant, adapter installation, and Slack team always come from host
+configuration. These routes write to Slack host state so runtime assignments
+are durable and are resolved before static TOML `channel_routes` fallback. In
 admin-managed host-beta mode, new shared Slack conversations without a dynamic
 or static channel route fail closed instead of falling back to the installation
 default subject.
