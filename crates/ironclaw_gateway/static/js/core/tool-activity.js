@@ -48,6 +48,11 @@ function getToolActivityGroupStatus(entries) {
   return lastEntry && lastEntry.status === 'fail' ? 'fail' : 'success';
 }
 
+function isSubtleToolFailure(entries, index) {
+  const entry = entries[index];
+  return !!(entry && entry.status === 'fail' && index !== entries.length - 1);
+}
+
 function createToolActivitySummary(toolCount, totalDurationMs, includeDuration, status) {
   const toolWord = toolCount === 1 ? 'tool' : 'tools';
   const summary = document.createElement('button');
@@ -203,7 +208,6 @@ function createActivityGroupFromEntries(entries, options) {
   const hasTerminalError = groupStatus === 'fail';
   const group = document.createElement('div');
   group.className = 'activity-group' + (hasTerminalError ? '' : ' collapsed');
-  group.setAttribute('data-status', groupStatus);
 
   let totalDurationMs = 0;
   let hasDuration = false;
@@ -233,7 +237,7 @@ function createActivityGroupFromEntries(entries, options) {
     const rendered = createToolActivityCard(entry, {
       showDuration: !!options.showCardDurations,
       expandErrors: options.expandErrors !== false,
-      subtleFailure: entry.status === 'fail' && index !== entries.length - 1,
+      subtleFailure: isSubtleToolFailure(entries, index),
     });
     cardsContainer.appendChild(rendered.card);
   });
@@ -435,33 +439,30 @@ function createToolActivityController(options) {
     removeThinking();
     if (!activeGroup) return;
 
-    for (const rendered of activeEntries) {
-      clearTimer(rendered);
-      if (rendered.entry.duration_ms === null) {
-        rendered.entry.duration_ms = Date.now() - rendered.entry.started_at_ms;
-      }
-      applyToolActivityCardState(rendered, {
-        showDuration: true,
-        expandErrors: true,
-      });
-    }
-
     if (activeEntries.length === 0) {
       activeGroup.remove();
       reset(false);
       return;
     }
 
+    for (const rendered of activeEntries) {
+      clearTimer(rendered);
+      if (rendered.entry.duration_ms === null) {
+        rendered.entry.duration_ms = Date.now() - rendered.entry.started_at_ms;
+      }
+    }
+
     const totalDurationMs = activeEntries.reduce((sum, rendered) => {
       return sum + (typeof rendered.entry.duration_ms === 'number' ? rendered.entry.duration_ms : 0);
     }, 0);
 
-    const groupStatus = getToolActivityGroupStatus(activeEntries.map((rendered) => rendered.entry));
+    const finalizedEntries = activeEntries.map((rendered) => rendered.entry);
+    const groupStatus = getToolActivityGroupStatus(finalizedEntries);
     activeEntries.forEach((rendered, index) => {
       applyToolActivityCardState(rendered, {
         showDuration: true,
         expandErrors: true,
-        subtleFailure: rendered.entry.status === 'fail' && index !== activeEntries.length - 1,
+        subtleFailure: isSubtleToolFailure(finalizedEntries, index),
       });
     });
 
@@ -482,7 +483,6 @@ function createToolActivityController(options) {
 
     activeGroup.innerHTML = '';
     activeGroup.classList.add('collapsed');
-    activeGroup.setAttribute('data-status', groupStatus);
     activeGroup.appendChild(summary);
     activeGroup.appendChild(cardsContainer);
 
