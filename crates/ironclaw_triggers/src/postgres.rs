@@ -955,7 +955,7 @@ struct SuccessfulFireResultUpdate<'a> {
 }
 
 async fn upsert_run_history(
-    client: &(impl GenericClient + Sync),
+    client: &impl GenericClient,
     run: &TriggerRunRecord,
 ) -> Result<(), TriggerError> {
     let run_id = run.run_id.as_ref().map(ToString::to_string);
@@ -993,7 +993,7 @@ async fn upsert_run_history(
 }
 
 async fn complete_run_history(
-    client: &(impl GenericClient + Sync),
+    client: &impl GenericClient,
     tenant_id: &TenantId,
     trigger_id: TriggerId,
     fire_slot: Timestamp,
@@ -1036,7 +1036,7 @@ async fn complete_run_history(
 }
 
 async fn prune_run_history(
-    client: &(impl GenericClient + Sync),
+    client: &impl GenericClient,
     tenant_id: &TenantId,
     trigger_id: TriggerId,
 ) -> Result<(), TriggerError> {

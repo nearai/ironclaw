@@ -641,18 +641,13 @@ pub enum RebornAutomationRunStatus {
 }
 
 /// Browser-visible status for an individual automation run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornAutomationRecentRunStatus {
     Running,
     Ok,
+    #[default]
     Error,
-}
-
-impl Default for RebornAutomationRecentRunStatus {
-    fn default() -> Self {
-        Self::Error
-    }
 }
 
 impl<'de> Deserialize<'de> for RebornAutomationRecentRunStatus {

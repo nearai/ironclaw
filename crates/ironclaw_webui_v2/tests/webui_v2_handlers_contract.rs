@@ -658,8 +658,10 @@ fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomat
         last_run_at: None,
         last_status: None,
         recent_runs: vec![RebornAutomationRecentRunInfo {
-            run_id: Some("run-listed".to_string()),
-            thread_id: "thread-listed".to_string(),
+            run_id: Some(
+                TurnRunId::parse("11111111-1111-1111-1111-111111111111").expect("valid run id"),
+            ),
+            thread_id: ThreadId::new("thread-listed").expect("valid thread id"),
             fire_slot: None,
             status: RebornAutomationRecentRunStatus::Running,
             submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
