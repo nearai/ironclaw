@@ -348,7 +348,39 @@ async fn skills_install_and_list_are_scoped_to_authenticated_user() {
             .skills
             .iter()
             .any(|skill| skill.name == "alice-skill"),
-        "shared owner registry must not discover another user's scoped skill"
+        "owner registry must not discover another user's scoped skill"
+    );
+
+    let mut owner_headers = HeaderMap::new();
+    owner_headers.insert("x-confirm-action", "true".parse().expect("header value"));
+    let Json(owner_install) = super::skills_install_handler(
+        State(Arc::clone(&state)),
+        regular_user("owner-user"),
+        owner_headers,
+        Json(crate::channels::web::types::SkillInstallRequest {
+            name: "owner-skill".to_string(),
+            slug: None,
+            url: None,
+            content: Some(
+                "---\nname: owner-skill\ndescription: Owner only\n---\n\nOwner prompt.\n"
+                    .to_string(),
+            ),
+        }),
+    )
+    .await
+    .expect("install owner skill");
+    assert!(owner_install.success);
+
+    let Json(owner_list) =
+        super::skills_list_handler(State(Arc::clone(&state)), regular_user("owner-user"))
+            .await
+            .expect("list owner skills after owner install");
+    assert!(
+        owner_list
+            .skills
+            .iter()
+            .any(|skill| skill.name == "owner-skill"),
+        "owner installs must land in the same scoped registry owner turns read"
     );
 
     let registry = state.skill_registry.as_ref().expect("registry");
@@ -356,6 +388,10 @@ async fn skills_install_and_list_are_scoped_to_authenticated_user() {
     assert!(
         guard.find_by_name("alice-skill").is_none(),
         "self-service install must not mutate the shared registry"
+    );
+    assert!(
+        guard.find_by_name("owner-skill").is_none(),
+        "owner self-service install in multi-tenant mode must not mutate the shared registry"
     );
 }
 

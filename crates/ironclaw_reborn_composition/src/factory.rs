@@ -45,8 +45,8 @@ use ironclaw_host_api::{
     EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, RuntimeHttpEgress,
     UserId, VirtualPath,
 };
-#[cfg(feature = "libsql")]
-use ironclaw_host_api::{MountAlias, MountGrant};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_api::{HostApiError, MountAlias, MountGrant, ResourceScope};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
     HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
@@ -2496,6 +2496,28 @@ where
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_skill_management_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
+    MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/skills")?,
+            VirtualPath::new(format!(
+                "/tenants/{}/users/{}/skills",
+                scope.tenant_id.as_str(),
+                scope.user_id.as_str()
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/system/skills")?,
+            VirtualPath::new("/system/skills")?,
+            MountPermissions::read_only(),
+        ),
+    ])
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn build_backend_production<F>(
     context: RebornProductionBuildContext,
     stores: ProductionStoreBundle<F>,
@@ -2517,8 +2539,12 @@ where
         reason: error.to_string(),
     })?;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
-    let skill_management =
-        build_local_skill_management_port(owner_user_id, Arc::clone(&stores.filesystem))?;
+    let skill_management_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
+    let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
+        owner_user_id,
+        skill_management_filesystem,
+        Arc::new(production_skill_management_mount_view),
+    ));
     let trigger_create_hook = Arc::new(ScopedFilesystemTriggerCreatorPairingHook::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
@@ -3785,6 +3811,37 @@ mod tests {
         assert!(!registry.contains_handler(
             &ironclaw_host_api::CapabilityId::new(SKILL_ACTIVATE_CAPABILITY_ID).unwrap()
         ));
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[test]
+    fn production_skill_management_mounts_use_production_namespace() {
+        let scope = ResourceScope {
+            tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+            user_id: UserId::new("alice").expect("user"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+
+        let mounts = production_skill_management_mount_view(&scope).expect("mount view");
+        let skills_mount = mounts
+            .mounts
+            .iter()
+            .find(|mount| mount.alias.as_str() == "/skills")
+            .expect("skills mount");
+        assert_eq!(
+            skills_mount.target.as_str(),
+            "/tenants/tenant-alpha/users/alice/skills"
+        );
+        let system_mount = mounts
+            .mounts
+            .iter()
+            .find(|mount| mount.alias.as_str() == "/system/skills")
+            .expect("system skills mount");
+        assert_eq!(system_mount.target.as_str(), "/system/skills");
     }
 
     #[test]

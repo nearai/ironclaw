@@ -45,7 +45,7 @@ pub(super) async fn scoped_skill_registry(
         "Skills system not enabled".to_string(),
     ))?);
 
-    if !state.multi_tenant_mode || user.user_id == state.owner_id {
+    if !state.multi_tenant_mode {
         return Ok(ScopedSkillRegistry::Shared(registry));
     }
 

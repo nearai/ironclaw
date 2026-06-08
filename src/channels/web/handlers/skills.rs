@@ -109,7 +109,7 @@ async fn skill_mutation_guard(
     state: &GatewayState,
     user: &crate::channels::web::auth::UserIdentity,
 ) -> Result<tokio::sync::OwnedMutexGuard<()>, (StatusCode, String)> {
-    let lock_key = if !state.multi_tenant_mode || user.user_id == state.owner_id {
+    let lock_key = if !state.multi_tenant_mode {
         "shared".to_string()
     } else {
         format!("user:{}", user.user_id)
