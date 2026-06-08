@@ -56,6 +56,7 @@ where
             result_ref: result_ref.as_str().to_string(),
             safe_summary: ToolResultSafeSummary::new("tool completed").expect("safe summary"),
             provider_call: None,
+            model_observation: None,
         })
         .await
         .expect("tool result reference")

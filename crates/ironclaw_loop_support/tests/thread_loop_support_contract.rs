@@ -38,9 +38,9 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
         AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, HostManagedLoopPromptPort,
+        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInputIssue,
+        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
@@ -48,9 +48,10 @@ use ironclaw_turns::{
         LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView, LoopModelMessage,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
         LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptPort, LoopRunContext,
-        LoopTranscriptPort, ParentLoopOutput, PersonalContextPolicy, PromptMode,
-        PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolDefinition,
-        SkillVisibility, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput,
+        PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
+        ProviderToolDefinition, SkillVisibility, ToolObservationDetail, ToolObservationStatus,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tracing_test::traced_test;
@@ -2039,6 +2040,7 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
                 reasoning: Some("provider reasoning".to_string()),
                 signature: Some("sig-1".to_string()),
             }),
+            model_observation: None,
         })
         .await
         .unwrap();
@@ -2047,6 +2049,7 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
             result_ref: result_ref.clone(),
             safe_summary: "retry summary ignored".to_string(),
             provider_call: None,
+            model_observation: None,
         })
         .await
         .unwrap();
@@ -2115,6 +2118,115 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
 }
 
 #[tokio::test]
+async fn transcript_port_appends_model_observation_in_tool_result_reference_envelope() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+    let result_ref = LoopResultRef::new("result:model-observation-tool").unwrap();
+    let observation = ModelVisibleToolObservation {
+        schema_version: 1,
+        status: ToolObservationStatus::Error,
+        summary: "Tool input failed schema validation.".to_string(),
+        detail: ToolObservationDetail::InvalidInput {
+            issues: vec![CapabilityInputIssue {
+                path: "file_path".to_string(),
+                code: CapabilityInputIssueCode::MissingRequired,
+                expected: Some("required field".to_string()),
+                received: None,
+                schema_path: Some("required".to_string()),
+            }],
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: result_ref.clone(),
+            safe_summary: "tool failed".to_string(),
+            provider_call: None,
+            model_observation: Some(observation.clone()),
+        })
+        .await
+        .unwrap();
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let record = history
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::ToolResultReference)
+        .expect("tool result reference");
+    let envelope = ToolResultReferenceEnvelope::from_json_str(record.content.as_deref().unwrap())
+        .expect("valid tool result reference envelope");
+
+    assert_eq!(envelope.result_ref, result_ref.as_str());
+    assert_eq!(
+        envelope.model_observation,
+        Some(serde_json::to_value(observation).unwrap())
+    );
+}
+
+#[tokio::test]
+async fn transcript_port_drops_invalid_model_observation_without_failing_append() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+    let result_ref = LoopResultRef::new("result:invalid-model-observation-tool").unwrap();
+    let observation = ModelVisibleToolObservation {
+        schema_version: 999,
+        status: ToolObservationStatus::Error,
+        summary: "Tool input failed schema validation.".to_string(),
+        detail: ToolObservationDetail::InvalidInput { issues: Vec::new() },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: result_ref.clone(),
+            safe_summary: "tool failed".to_string(),
+            provider_call: None,
+            model_observation: Some(observation),
+        })
+        .await
+        .expect("invalid model observation should not fail append");
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let record = history
+        .messages
+        .iter()
+        .find(|message| message.tool_result_ref.as_deref() == Some(result_ref.as_str()))
+        .expect("tool result reference message");
+    let envelope = ToolResultReferenceEnvelope::from_json_str(record.content.as_deref().unwrap())
+        .expect("valid tool result reference envelope");
+
+    assert_eq!(envelope.safe_summary.as_str(), "tool failed");
+    assert!(envelope.model_observation.is_none());
+}
+
+#[tokio::test]
 async fn transcript_port_rejects_unsafe_tool_result_summary() {
     let fixture = ThreadFixture::new().await;
     let adapter = ThreadBackedLoopTranscriptPort::new(
@@ -2128,6 +2240,7 @@ async fn transcript_port_rejects_unsafe_tool_result_summary() {
             result_ref: LoopResultRef::new("result:unsafe-tool").unwrap(),
             safe_summary: "raw tool input includes secret".to_string(),
             provider_call: None,
+            model_observation: None,
         })
         .await
         .unwrap_err();
@@ -2598,6 +2711,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
                 reasoning: Some("provider call reasoning".to_string()),
                 signature: Some("sig-1".to_string()),
             }),
+            model_observation: None,
         })
         .await
         .unwrap();
@@ -2700,6 +2814,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
         version: 1,
         result_ref: "result:round-trip".to_string(),
         safe_summary: ToolResultSafeSummary::new("tool result content").unwrap(),
+        model_observation: None,
     };
     let envelope_content = serde_json::to_string(&envelope).unwrap();
     let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {

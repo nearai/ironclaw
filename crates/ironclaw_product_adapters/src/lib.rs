@@ -44,9 +44,10 @@ pub use identity::{AdapterInstallationId, ProductAdapterId, ProductSurfaceKind};
 pub use inbound::{
     ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
     InboundCommandPayload, InboundRetryDisposition, LinkedThreadActionPayload,
-    ParsedProductInbound, ProductCommandResultPayload, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
-    ProductSlashCommandParseError, ProductTriggerReason, ProjectionSubscriptionPayload,
+    ParsedProductInbound, ProductCommandResultPayload, ProductControlActionPayload,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
+    ProductRejectionDisposition, ProductRejectionKind, ProductSlashCommandParseError,
+    ProductTriggerReason, ProjectionReadPayload, ProjectionSubscriptionPayload,
     ScopedApprovalResolutionPayload, TrustedInboundContext, UserMessagePayload,
     parse_product_slash_command,
 };
@@ -61,6 +62,9 @@ pub use outbound::{
     ProductRenderOutcome, ProductSynchronousResponse, ProductWorkSummaryPhase, ProgressKind,
     ProgressUpdateView, ProjectionCursor,
 };
-pub use projection::{ProjectionStream, ProjectionSubscriptionRequest};
+pub use projection::{
+    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
+    ProjectionReadRequest, ProjectionStream, ProjectionSubscriptionRequest,
+};
 pub use redaction::{REDACTED_PLACEHOLDER, RedactedDebug, RedactedString};
 pub use workflow::ProductWorkflow;

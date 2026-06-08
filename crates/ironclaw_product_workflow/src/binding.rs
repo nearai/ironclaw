@@ -148,7 +148,9 @@ pub fn route_kind_for_inbound_payload(
             .source_trigger
             .map(route_kind_for_trigger)
             .unwrap_or(ProductConversationRouteKind::Direct),
-        ProductInboundPayload::SubscriptionRequest(_)
+        ProductInboundPayload::ProjectionRead(_)
+        | ProductInboundPayload::SubscriptionRequest(_)
+        | ProductInboundPayload::ControlAction(_)
         | ProductInboundPayload::LinkedThreadAction(_)
         | ProductInboundPayload::NoOp => ProductConversationRouteKind::Direct,
     }

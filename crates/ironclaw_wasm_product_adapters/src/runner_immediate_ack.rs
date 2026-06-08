@@ -95,7 +95,7 @@ impl NativeProductAdapterRunner {
             // resource owner to abort. Workflows that open DB/network resources
             // must make their own futures cancellation-safe at await points.
             let workflow_result =
-                tokio::time::timeout(workflow_timeout, workflow.accept_inbound(workflow_envelope))
+                tokio::time::timeout(workflow_timeout, workflow.submit_inbound(workflow_envelope))
                     .await;
             match workflow_result {
                 Ok(Ok(ack)) => {
@@ -252,7 +252,7 @@ mod tests {
 
     #[async_trait]
     impl ironclaw_product_adapters::ProductWorkflow for AckWorkflow {
-        async fn accept_inbound(
+        async fn submit_inbound(
             &self,
             _envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {
@@ -278,7 +278,7 @@ mod tests {
 
     #[async_trait]
     impl ironclaw_product_adapters::ProductWorkflow for BlockingWorkflow {
-        async fn accept_inbound(
+        async fn submit_inbound(
             &self,
             _envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {

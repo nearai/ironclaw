@@ -2,13 +2,16 @@ use ironclaw_turns::{
     LoopCancelledReasonKind, LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopFailureKind,
     LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureKind,
-        CapabilityInputRef, CapabilityOutcome, CapabilityResultMessage, LoopCancelReasonKind,
-        LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
+        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
+        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInputRepair, CapabilityOutcome,
+        CapabilityRecoveryHint, CapabilityResultMessage, LoopCancelReasonKind, LoopCheckpointKind,
+        LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
         LoopContextCompactionKind, LoopContextCompactionMetadata, LoopInput, LoopInputAckToken,
         LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopRunInfoPort,
-        LoopSafeSummary, LoopSummaryArtifactId, ParentLoopOutput, ProcessHandleSummary,
-        ProviderToolCallReplay, VisibleCapabilityRequest,
+        LoopSafeSummary, LoopSummaryArtifactId, ObservationTrust, ParentLoopOutput,
+        ProcessHandleSummary, ProviderToolCallReplay, SameCallRetryConstraint,
+        ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest,
     },
 };
 
@@ -2216,6 +2219,7 @@ async fn retry_uses_single_call_invocation() {
                     ironclaw_turns::run_profile::CapabilityFailure {
                         error_kind,
                         safe_summary: "temporary failure".to_string(),
+                        detail: None,
                     },
                 )],
                 stopped_on_suspension: false,
@@ -2480,6 +2484,69 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
 }
 
 #[tokio::test]
+async fn invalid_provider_tool_failure_appends_structured_model_observation() {
+    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Failed(
+                ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    safe_summary: "provider arguments failed schema validation".to_string(),
+                    detail: Some(CapabilityFailureDetail::InvalidInput {
+                        issues: vec![CapabilityInputIssue {
+                            path: "file_path".to_string(),
+                            code: CapabilityInputIssueCode::MissingRequired,
+                            expected: Some("required field".to_string()),
+                            received: None,
+                            schema_path: Some("required".to_string()),
+                        }],
+                    }),
+                },
+            )],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    let observation = appended[0]
+        .model_observation
+        .as_ref()
+        .expect("structured model observation");
+    assert_eq!(observation.status, ToolObservationStatus::Error);
+    assert_eq!(observation.summary, "Tool input failed schema validation.");
+    assert_eq!(observation.trust, ObservationTrust::UntrustedToolOutput);
+    match &observation.detail {
+        ToolObservationDetail::InvalidInput { issues } => {
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].path, "file_path");
+            assert_eq!(issues[0].code, CapabilityInputIssueCode::MissingRequired);
+        }
+        detail => panic!("expected invalid input detail, got {detail:?}"),
+    }
+    let recovery = observation.recovery.as_ref().expect("recovery detail");
+    assert_eq!(
+        recovery.same_call_retry,
+        SameCallRetryConstraint::RequiresChangedInput
+    );
+    assert_eq!(
+        recovery.recovery_hint,
+        CapabilityRecoveryHint::CorrectArgumentsBeforeRetry
+    );
+    assert_eq!(
+        recovery.repairs,
+        vec![CapabilityInputRepair::ProvideRequiredField {
+            path: "file_path".to_string()
+        }]
+    );
+}
+
+#[tokio::test]
 async fn model_visible_provider_tool_failures_append_failure_tool_result_for_replay() {
     for (error_kind, safe_summary, expected_summary) in [
         (
@@ -2514,6 +2581,7 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
                     ironclaw_turns::run_profile::CapabilityFailure {
                         error_kind,
                         safe_summary: safe_summary.to_string(),
+                        detail: None,
                     },
                 )],
                 stopped_on_suspension: false,
@@ -2561,6 +2629,7 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
                 ironclaw_turns::run_profile::CapabilityFailure {
                     error_kind: CapabilityFailureKind::OutputTooLarge,
                     safe_summary: long_summary,
+                    detail: None,
                 },
             )],
             stopped_on_suspension: false,

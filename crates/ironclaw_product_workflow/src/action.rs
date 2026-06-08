@@ -185,7 +185,9 @@ pub enum ActionDispatchKind {
     ApprovalResolution { gate_ref: LoopGateRef },
     ScopedApprovalResolution,
     AuthResolution { auth_request_ref: AuthRequestRef },
+    ProjectionRead,
     ProjectionSubscription,
+    ControlAction,
     LinkedThreadAction { action_id: LinkedThreadActionId },
     Rejected { kind: ProductRejectionKind },
     NoOp,
@@ -214,7 +216,9 @@ impl ActionDispatchKind {
                 auth_request_ref: AuthRequestRef::new(res.auth_request_ref.clone())
                     .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
             }),
+            ProductInboundPayload::ProjectionRead(_) => Ok(Self::ProjectionRead),
             ProductInboundPayload::SubscriptionRequest(_) => Ok(Self::ProjectionSubscription),
+            ProductInboundPayload::ControlAction(_) => Ok(Self::ControlAction),
             ProductInboundPayload::LinkedThreadAction(lta) => Ok(Self::LinkedThreadAction {
                 action_id: LinkedThreadActionId::new(lta.action_id.clone())
                     .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
