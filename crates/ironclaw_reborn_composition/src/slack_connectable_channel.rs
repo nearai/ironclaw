@@ -88,8 +88,8 @@ fn slack_admin_managed_channel_connectable_channel() -> RebornConnectableChannel
         display_name: "Slack".to_string(),
         strategy: RebornChannelConnectStrategy::AdminManagedChannels,
         action: RebornChannelConnectAction {
-            title: "Slack channel access".to_string(),
-            instructions: "Choose the Slack channels this tenant app is allowed to answer in."
+            title: "Slack team agents".to_string(),
+            instructions: "Map Slack channels to the team agents that should answer there."
                 .to_string(),
             input_placeholder: "C0123456789".to_string(),
             submit_label: "Save channels".to_string(),

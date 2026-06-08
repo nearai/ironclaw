@@ -72,20 +72,41 @@ fn display_name_for_subject_user_id(subject_user_id: &UserId) -> String {
         .as_str()
         .strip_prefix("user:")
         .unwrap_or(subject_user_id.as_str());
-    let words = raw
+    let mut words = raw
         .replace([':', '_', '-'], " ")
         .split_whitespace()
-        .map(|word| {
+        .filter(|word| !word.eq_ignore_ascii_case("user"))
+        .map(display_name_word)
+        .collect::<Vec<_>>();
+    if words.len() > 1
+        && words
+            .last()
+            .is_some_and(|word| word.eq_ignore_ascii_case("Agent"))
+    {
+        words.pop();
+        if words
+            .last()
+            .is_some_and(|word| word.eq_ignore_ascii_case("Team"))
+        {
+            words.pop();
+        }
+    }
+    if words.is_empty() {
+        subject_user_id.to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
+fn display_name_word(word: &str) -> String {
+    match word.to_ascii_lowercase().as_str() {
+        "ai" | "hr" | "it" | "ml" | "qa" | "sre" => word.to_ascii_uppercase(),
+        _ => {
             let mut chars = word.chars();
             match chars.next() {
                 Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
                 None => String::new(),
             }
-        })
-        .collect::<Vec<_>>();
-    if words.is_empty() {
-        subject_user_id.to_string()
-    } else {
-        words.join(" ")
+        }
     }
 }

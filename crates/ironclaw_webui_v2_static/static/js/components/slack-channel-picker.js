@@ -29,6 +29,7 @@ export function SlackChannelPicker({ action }) {
     queryFn: listSlackRoutableSubjects,
   });
   const subjects = subjectsQuery.data?.subjects || [];
+  const subjectOptions = subjectOptionsForChannel(subjects);
   const subjectsSettled = subjectsQuery.isSuccess || subjectsQuery.isError;
   const hasRoutableSubjects = subjects.length > 0;
 
@@ -75,7 +76,7 @@ export function SlackChannelPicker({ action }) {
   };
 
   const saveChannels = () => {
-    saveMutation.mutate({ channels });
+    saveMutation.mutate({ channels: persistedSlackChannels(channels) });
   };
   const hasBlankSubjectDuringCatalogError =
     subjectsQuery.isError && channels.some((channel) => !channel.subject_user_id);
@@ -116,7 +117,7 @@ export function SlackChannelPicker({ action }) {
           html`<option value="">${copy.noSubjectsLabel}</option>`}
           ${hasRoutableSubjects &&
           html`<option value="">${copy.autoSubjectLabel}</option>`}
-          ${subjects.map(
+          ${subjectOptions.map(
             (subject) => html`
               <option key=${subject.subject_user_id} value=${subject.subject_user_id}>
                 ${subject.display_name}
@@ -149,8 +150,14 @@ export function SlackChannelPicker({ action }) {
               key=${channel.channel_id}
               className="flex min-h-10 items-center justify-between gap-3 border-t border-white/[0.05] px-3 first:border-t-0"
             >
-              <span className="min-w-0 truncate font-mono text-xs text-iron-200">
-                ${channel.channel_id}
+              <span className="min-w-0">
+                <span className="block truncate text-xs text-iron-200">
+                  ${slackChannelDisplayName(channel)}
+                </span>
+                ${slackChannelDisplayName(channel) !== channel.channel_id &&
+                html`<span className="block truncate font-mono text-[10px] text-iron-600">
+                  ${channel.channel_id}
+                </span>`}
               </span>
               <div className="flex shrink-0 items-center gap-2">
                 ${hasRoutableSubjects
@@ -172,7 +179,9 @@ export function SlackChannelPicker({ action }) {
                     </select>
                   `
                   : html`<span className="max-w-40 truncate text-xs text-iron-500">
-                    ${channel.subject_user_id || copy.autoSubjectLabel}
+                    ${channel.subject_user_id
+                      ? subjectDisplayName(channel.subject_user_id)
+                      : copy.autoSubjectLabel}
                   </span>`}
                 <input
                   type="checkbox"
@@ -223,14 +232,14 @@ function subjectOptionsForChannel(subjects = [], channel = {}) {
     if (!subjectUserId) continue;
     bySubjectUserId.set(subjectUserId, {
       subject_user_id: subjectUserId,
-      display_name: subject.display_name || subjectUserId,
+      display_name: subject.display_name || subjectDisplayName(subjectUserId),
     });
   }
   const subjectUserId = String(channel.subject_user_id || "").trim();
   if (subjectUserId && !bySubjectUserId.has(subjectUserId)) {
     bySubjectUserId.set(subjectUserId, {
       subject_user_id: subjectUserId,
-      display_name: subjectUserId,
+      display_name: subjectDisplayName(subjectUserId),
     });
   }
   return Array.from(bySubjectUserId.values()).sort((left, right) =>
@@ -244,14 +253,62 @@ function normalizeSlackChannels(channels = []) {
   for (const channel of channels) {
     const channelId = String(channel.channel_id || "").trim();
     if (!channelId) continue;
-    byChannelId.set(channelId, {
+    const normalized = {
       channel_id: channelId,
       subject_user_id: String(channel.subject_user_id || "").trim(),
-    });
+    };
+    const displayName = String(
+      channel.display_name || channel.channel_name || channel.name || "",
+    ).trim();
+    if (displayName) {
+      normalized.display_name = displayName;
+    }
+    byChannelId.set(channelId, normalized);
   }
   return normalizeSlackChannelIds(Array.from(byChannelId.keys())).map((channelId) =>
     byChannelId.get(channelId),
   );
+}
+
+function persistedSlackChannels(channels = []) {
+  return channels.map((channel) => ({
+    channel_id: channel.channel_id,
+    subject_user_id: channel.subject_user_id,
+  }));
+}
+
+function slackChannelDisplayName(channel = {}) {
+  const channelId = String(channel.channel_id || "").trim();
+  const rawName = String(
+    channel.display_name || channel.channel_name || channel.name || "",
+  ).trim();
+  if (!rawName) return channelId;
+  return rawName.startsWith("#") ? rawName : `#${rawName}`;
+}
+
+function subjectDisplayName(subjectUserId) {
+  const raw = String(subjectUserId || "").trim().replace(/^user:/, "");
+  const words = raw
+    .replace(/[:_-]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((word) => word.toLowerCase() !== "user")
+    .map(subjectDisplayNameWord);
+  if (words.length > 1 && words[words.length - 1].toLowerCase() === "agent") {
+    words.pop();
+    if (words[words.length - 1]?.toLowerCase() === "team") {
+      words.pop();
+    }
+  }
+  return words.length ? words.join(" ") : String(subjectUserId || "");
+}
+
+function subjectDisplayNameWord(word) {
+  const lower = word.toLowerCase();
+  if (["ai", "hr", "it", "ml", "qa", "sre"].includes(lower)) {
+    return lower.toUpperCase();
+  }
+  return word.charAt(0).toUpperCase() + word.slice(1);
 }
 
 function slackChannelPickerCopy(action, t) {

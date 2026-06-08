@@ -22,7 +22,7 @@ function slackChannelPickerSourceForTest() {
     }
     lines.push(line.replace("export function SlackChannelPicker", "function SlackChannelPicker"));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackChannelPicker, subjectOptionsForChannel };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackChannelPicker, subjectOptionsForChannel, slackChannelDisplayName, subjectDisplayName };`;
 }
 
 function createReactStub(state) {
@@ -89,7 +89,7 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
     data: {
       team_id: "T0HOST",
       channels: [
-        { channel_id: " C0OPS ", subject_user_id: "user:ops-team-agent" },
+        { channel_id: " C0OPS ", subject_user_id: "user:ops-team-agent", name: "ops" },
         { channel_id: "C0ENG", subject_user_id: "user:eng-team-agent" },
       ],
     },
@@ -101,8 +101,8 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
     data: {
       team_id: "T0HOST",
       subjects: [
-        { subject_user_id: "user:eng-team-agent", display_name: "Eng agent" },
-        { subject_user_id: "user:ops-team-agent", display_name: "Ops agent" },
+        { subject_user_id: "user:eng-team-agent", display_name: "Eng" },
+        { subject_user_id: "user:ops-team-agent", display_name: "Ops" },
       ],
     },
     isLoading: false,
@@ -133,13 +133,13 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
     slackChannelPickerError: () => "error",
     useT: () => (key, params = {}) =>
       ({
-        "channels.slackAccessTitle": "Slack channel access",
+        "channels.slackAccessTitle": "Slack team agents",
         "channels.slackAccessInstructions":
-          "Choose the Slack channels this tenant app may answer in.",
+          "Map Slack channels to the team agents that should answer there.",
         "channels.slackAccessAdd": "Add",
         "channels.slackAccessLoading": "Loading Slack channels...",
         "channels.slackAccessEmpty": "No Slack channels allowed yet.",
-        "channels.slackAccessAllow": `Allow ${params.channelId}`,
+        "channels.slackAccessAllow": `Remove ${params.channelId}`,
         "channels.slackAccessAutoSubject": "Auto-generated team subject",
         "channels.slackAccessNoSubjects": "No team agents available",
         "channels.slackAccessSave": "Save channels",
@@ -168,7 +168,7 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   let rendered = renderPicker(context, state);
   assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
     { channel_id: "C0ENG", subject_user_id: "user:eng-team-agent" },
-    { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent" },
+    { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent", display_name: "ops" },
   ]);
 
   valuesAfter(rendered, "onChange=")[0]({ target: { value: " C0NEW " } });
@@ -177,7 +177,7 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
     { channel_id: "C0ENG", subject_user_id: "user:eng-team-agent" },
     { channel_id: "C0NEW", subject_user_id: "" },
-    { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent" },
+    { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent", display_name: "ops" },
   ]);
 
   rendered = renderPicker(context, state);
@@ -189,7 +189,7 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   }
   assert.deepEqual(JSON.parse(JSON.stringify(state.values[2])), [
     { channel_id: "C0NEW", subject_user_id: "" },
-    { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent" },
+    { channel_id: "C0OPS", subject_user_id: "user:ops-team-agent", display_name: "ops" },
   ]);
 
   rendered = renderPicker(context, state);
@@ -213,7 +213,30 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   assert.equal(valuesAfter(rendered, "disabled=").at(-1), true);
 });
 
-test("subjectOptionsForChannel keeps current route subjects row-scoped", () => {
+test("SlackChannelPicker can render friendly channel names when present", () => {
+  const context = {
+    globalThis: {},
+    html,
+  };
+  vm.runInNewContext(slackChannelPickerSourceForTest(), context);
+
+  assert.equal(
+    context.globalThis.__testExports.slackChannelDisplayName({
+      channel_id: "C0PRODUCT",
+      name: "product",
+    }),
+    "#product",
+  );
+  assert.equal(
+    context.globalThis.__testExports.slackChannelDisplayName({
+      channel_id: "C0FINANCE",
+      display_name: "#finance",
+    }),
+    "#finance",
+  );
+});
+
+test("subjectOptionsForChannel keeps current route subjects row-scoped with friendly labels", () => {
   const context = {
     globalThis: {},
     html,
@@ -221,7 +244,7 @@ test("subjectOptionsForChannel keeps current route subjects row-scoped", () => {
   vm.runInNewContext(slackChannelPickerSourceForTest(), context);
 
   const subjects = [
-    { subject_user_id: "user:eng-team-agent", display_name: "Eng agent" },
+    { subject_user_id: "user:eng-team-agent", display_name: "Eng" },
   ];
   const rawRowOptions = context.globalThis.__testExports.subjectOptionsForChannel(subjects, {
     channel_id: "C0RAW",
@@ -237,8 +260,20 @@ test("subjectOptionsForChannel keeps current route subjects row-scoped", () => {
     ["user:eng-team-agent", "user:raw-route-subject"],
   );
   assert.deepEqual(
+    JSON.parse(JSON.stringify(rawRowOptions.map((subject) => subject.display_name))),
+    ["Eng", "Raw Route Subject"],
+  );
+  assert.deepEqual(
     JSON.parse(JSON.stringify(otherRowOptions.map((subject) => subject.subject_user_id))),
     ["user:eng-team-agent"],
+  );
+  assert.equal(
+    context.globalThis.__testExports.subjectDisplayName("user:hr-team-agent"),
+    "HR",
+  );
+  assert.equal(
+    context.globalThis.__testExports.subjectDisplayName("user:product-team-agent"),
+    "Product",
   );
 });
 
@@ -283,13 +318,13 @@ test("SlackChannelPicker preserves row subjects when subject catalog fails", () 
     slackChannelPickerError: (error) => error.message,
     useT: () => (key, params = {}) =>
       ({
-        "channels.slackAccessTitle": "Slack channel access",
+        "channels.slackAccessTitle": "Slack team agents",
         "channels.slackAccessInstructions":
-          "Choose the Slack channels this tenant app may answer in.",
+          "Map Slack channels to the team agents that should answer there.",
         "channels.slackAccessAdd": "Add",
         "channels.slackAccessLoading": "Loading Slack channels...",
         "channels.slackAccessEmpty": "No Slack channels allowed yet.",
-        "channels.slackAccessAllow": `Allow ${params.channelId}`,
+        "channels.slackAccessAllow": `Remove ${params.channelId}`,
         "channels.slackAccessAutoSubject": "Auto-generated team subject",
         "channels.slackAccessNoSubjects": "No team agents available",
         "channels.slackAccessSave": "Save channels",
