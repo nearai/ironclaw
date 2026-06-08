@@ -57,10 +57,6 @@ pub enum RebornConfigSeedOutcome {
 pub fn seed_default_config_file_if_missing(
     path: &Path,
 ) -> Result<RebornConfigSeedOutcome, RebornConfigSeedError> {
-    if path.exists() {
-        return Ok(RebornConfigSeedOutcome::AlreadyPresent);
-    }
-
     let text = first_run_config_toml();
     RebornConfigFile::parse_text(&text, path).map_err(|source| {
         RebornConfigSeedError::Validate {

@@ -18,7 +18,7 @@ use ironclaw_reborn_composition::{
 use ironclaw_reborn_composition::{
     build_slack_host_beta_mounts, build_webui_services_with_slack_host_beta_mounts,
 };
-use ironclaw_reborn_config::IdentitySection;
+use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, RebornWebuiServeOptions, serve_webui_v2,
 };
@@ -333,7 +333,8 @@ impl ServeCommand {
                 "binding WebChat v2 listener on a non-loopback interface",
             );
         }
-        context.seed_config_if_missing()?;
+        seed_default_config_file_if_missing(&context.boot_config().home().config_file_path())
+            .map_err(anyhow::Error::from)?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()

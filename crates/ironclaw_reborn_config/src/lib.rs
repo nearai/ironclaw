@@ -5,7 +5,7 @@
 //! `ironclaw-reborn` binary and later Reborn runtime composition without pulling
 //! in the v1 root application.
 //!
-//! Three layers of boot-time input live here:
+//! Four boot-time surfaces live here:
 //!
 //! - [`RebornBootConfig`] — home + profile resolved from env vars at
 //!   process start. The original API; unchanged.
@@ -18,6 +18,8 @@
 //!   [`RebornHome::providers_file_path`]; loading the file goes through
 //!   `ironclaw_llm::ProviderRegistry` in the composition root (this
 //!   crate has no workspace deps, per boundary rules).
+//! - [`seed_default_config_file_if_missing`] — first-run seeding for the
+//!   sparse runtime `config.toml` written by stateful Reborn commands.
 
 mod boot;
 mod budget;

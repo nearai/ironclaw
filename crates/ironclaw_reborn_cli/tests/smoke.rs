@@ -1256,7 +1256,7 @@ fn repl_help_mentions_composed_runtime() {
 }
 
 #[test]
-fn repl_exit_command_exits_cleanly_without_touching_v1_state() {
+fn repl_exit_command_seeds_reborn_config() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     let home_dir = temp.path().join("home");
@@ -1302,6 +1302,25 @@ fn repl_exit_command_exits_cleanly_without_touching_v1_state() {
     assert!(
         !v1_base_dir.exists(),
         "repl should not create explicit v1 base directories"
+    );
+    let config_path = reborn_home.join("config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap_or_else(|err| {
+        panic!(
+            "first stateful repl start should seed {}: {err}",
+            config_path.display()
+        )
+    });
+    assert!(
+        config.contains("api_version = \"ironclaw.runtime/v1\""),
+        "seeded config should stamp api_version: {config}"
+    );
+    assert!(
+        config.contains("profile = \"local-dev\""),
+        "seeded config should record default profile: {config}"
+    );
+    assert!(
+        !config.contains("[llm.default]"),
+        "first-run seed must preserve no-LLM behavior: {config}"
     );
 }
 
@@ -1526,11 +1545,12 @@ fn run_help_command_prints_repl_commands_and_exits_on_quit() {
 #[test]
 fn repl_piped_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
 
     let mut child = Command::new(reborn_bin())
         .arg("repl")
         .env_clear()
-        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1557,6 +1577,25 @@ fn repl_piped_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     assert!(
         stderr.contains("reborn run did not produce an assistant reply"),
         "stderr: {stderr}"
+    );
+    let config_path = reborn_home.join("config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap_or_else(|err| {
+        panic!(
+            "first real repl input should seed {}: {err}",
+            config_path.display()
+        )
+    });
+    assert!(
+        config.contains("api_version = \"ironclaw.runtime/v1\""),
+        "seeded config should stamp api_version: {config}"
+    );
+    assert!(
+        config.contains("profile = \"local-dev\""),
+        "seeded config should record default profile: {config}"
+    );
+    assert!(
+        !config.contains("[llm.default]"),
+        "first-run seed must preserve no-LLM behavior: {config}"
     );
 }
 
