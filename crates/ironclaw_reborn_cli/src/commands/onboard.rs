@@ -34,7 +34,7 @@ impl OnboardCommand {
         let marker_path = onboarding_marker_path(home);
 
         if self.dry_run {
-            print_dry_run(home, &marker_path, self.import_history);
+            print_dry_run(home, &marker_path, self.force, self.import_history);
             return Ok(());
         }
 
@@ -45,16 +45,8 @@ impl OnboardCommand {
         println!("IronClaw Reborn onboarding");
         println!("reborn_home: {}", home.path().display());
         println!("home_source: {}", home.source_label());
-        println!(
-            "config.toml: {} ({})",
-            outcome.config.path.display(),
-            outcome.config.action
-        );
-        println!(
-            "providers.json: {} ({})",
-            outcome.providers.path.display(),
-            outcome.providers.action
-        );
+        println!("{}", outcome.config.display_line());
+        println!("{}", outcome.providers.display_line());
         println!(
             "onboarding_marker: {} ({})",
             marker_path.display(),
@@ -85,7 +77,7 @@ pub(crate) fn onboarding_marker_path(home: &RebornHome) -> PathBuf {
     home.path().join(ONBOARDING_MARKER_FILE)
 }
 
-fn print_dry_run(home: &RebornHome, marker_path: &Path, import_history: bool) {
+fn print_dry_run(home: &RebornHome, marker_path: &Path, force: bool, import_history: bool) {
     println!("IronClaw Reborn onboarding dry run");
     println!("reborn_home: {}", home.path().display());
     println!("home_source: {}", home.source_label());
@@ -98,7 +90,12 @@ fn print_dry_run(home: &RebornHome, marker_path: &Path, import_history: bool) {
         "would_write_or_preserve: {}",
         home.providers_file_path().display()
     );
-    println!("would_write: {}", marker_path.display());
+    let marker_action = if marker_path.exists() && !force {
+        "would_preserve"
+    } else {
+        "would_write"
+    };
+    println!("{marker_action}: {}", marker_path.display());
     println!("import_history_requested: {import_history}");
     println!("v1_state: not-used");
 }

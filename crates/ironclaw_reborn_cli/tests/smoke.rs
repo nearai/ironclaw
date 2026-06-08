@@ -10,7 +10,17 @@ fn reborn_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ironclaw-reborn")
 }
 
-fn assert_stdout_action(stdout: &str, label: &str, action: &str) {
+fn assert_stdout_file_action(stdout: &str, file_name: &str, action: &str) {
+    let prefix = format!("{action}: ");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with(&prefix) && line.ends_with(file_name)),
+        "stdout should contain {action}: <path> ending in {file_name}: {stdout}"
+    );
+}
+
+fn assert_stdout_labeled_action(stdout: &str, label: &str, action: &str) {
     let suffix = format!(" ({action})");
     assert!(
         stdout
@@ -1813,6 +1823,9 @@ fn config_init_writes_both_files() {
         reborn_home.join("providers.json").exists(),
         "providers.json missing"
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_stdout_file_action(&stdout, "config.toml", "wrote");
+    assert_stdout_file_action(&stdout, "providers.json", "wrote");
     let config_text =
         std::fs::read_to_string(reborn_home.join("config.toml")).expect("config.toml readable");
     assert!(
@@ -1982,6 +1995,35 @@ fn onboard_dry_run_is_read_only() {
 }
 
 #[test]
+fn onboard_dry_run_reports_existing_marker_as_preserved() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("mkdir");
+    let marker_path = reborn_home.join(".onboard-completed.json");
+    std::fs::write(&marker_path, "custom marker\n").expect("write marker");
+
+    let output = Command::new(reborn_bin())
+        .args(["onboard", "--dry-run"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard --dry-run should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("would_preserve: {}", marker_path.display())),
+        "stdout: {stdout}"
+    );
+    let marker_text = std::fs::read_to_string(marker_path).expect("read marker");
+    assert_eq!(marker_text, "custom marker\n");
+}
+
+#[test]
 fn onboard_import_history_records_pending_step() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
@@ -2035,8 +2077,9 @@ fn onboard_preserves_existing_config_without_force() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_stdout_action(&stdout, "config.toml:", "preserved");
-    assert_stdout_action(&stdout, "onboarding_marker:", "preserved");
+    assert_stdout_file_action(&stdout, "config.toml", "preserved");
+    assert_stdout_file_action(&stdout, "providers.json", "wrote");
+    assert_stdout_labeled_action(&stdout, "onboarding_marker:", "preserved");
     let config_text =
         std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
     assert_eq!(config_text, "custom config\n");
@@ -2080,9 +2123,9 @@ fn onboard_with_force_overwrites_existing_files_and_marker() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_stdout_action(&stdout, "config.toml:", "overwrote");
-    assert_stdout_action(&stdout, "providers.json:", "overwrote");
-    assert_stdout_action(&stdout, "onboarding_marker:", "overwrote");
+    assert_stdout_file_action(&stdout, "config.toml", "overwrote");
+    assert_stdout_file_action(&stdout, "providers.json", "overwrote");
+    assert_stdout_labeled_action(&stdout, "onboarding_marker:", "overwrote");
 
     let config_text =
         std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");

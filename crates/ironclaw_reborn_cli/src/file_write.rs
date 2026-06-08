@@ -66,3 +66,25 @@ pub(crate) fn write_atomic(
     }
     Ok(action)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::write_atomic;
+
+    #[test]
+    fn write_atomic_bails_when_file_exists_and_force_false() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, "original\n").expect("seed file");
+
+        let error = write_atomic(&path, "replacement\n", false, "config.toml")
+            .expect_err("existing file should require --force");
+
+        assert!(
+            error.to_string().contains("pass --force to overwrite"),
+            "error should explain force requirement: {error}"
+        );
+        let contents = std::fs::read_to_string(path).expect("read file");
+        assert_eq!(contents, "original\n");
+    }
+}

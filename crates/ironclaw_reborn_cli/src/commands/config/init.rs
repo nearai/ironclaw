@@ -27,16 +27,8 @@ impl ConfigInitCommand {
         let outcome =
             write_default_config_files(home, self.force, ExistingConfigPolicy::FailIfPresent)?;
 
-        println!(
-            "{}: {}",
-            outcome.config.action,
-            outcome.config.path.display()
-        );
-        println!(
-            "{}: {}",
-            outcome.providers.action,
-            outcome.providers.path.display()
-        );
+        println!("{}", outcome.config.display_line());
+        println!("{}", outcome.providers.display_line());
         println!();
         println!("edit them, then run `ironclaw-reborn run`.");
         Ok(())
@@ -61,6 +53,12 @@ pub(crate) struct ConfigFileWrite {
     pub(crate) action: FileWriteAction,
 }
 
+impl ConfigFileWrite {
+    pub(crate) fn display_line(&self) -> String {
+        format!("{}: {}", self.action, self.path.display())
+    }
+}
+
 pub(crate) fn write_default_config_files(
     home: &RebornHome,
     force: bool,
@@ -79,20 +77,33 @@ pub(crate) fn write_default_config_files(
         ])?;
     }
 
-    let config = write_config_file(
-        &config_path,
-        &config_stub(),
-        force,
-        existing_policy,
-        "config.toml",
-    )?;
-    let providers = write_config_file(
-        &providers_path,
-        PROVIDERS_STUB,
-        force,
-        existing_policy,
-        "providers.json",
-    )?;
+    let config =
+        if existing_policy == ExistingConfigPolicy::Preserve && config_path.exists() && !force {
+            ConfigFileWrite {
+                path: config_path,
+                action: FileWriteAction::Preserved,
+            }
+        } else {
+            let action = write_atomic(&config_path, &config_stub(), force, "config.toml")?;
+            ConfigFileWrite {
+                path: config_path,
+                action,
+            }
+        };
+
+    let providers =
+        if existing_policy == ExistingConfigPolicy::Preserve && providers_path.exists() && !force {
+            ConfigFileWrite {
+                path: providers_path,
+                action: FileWriteAction::Preserved,
+            }
+        } else {
+            let action = write_atomic(&providers_path, PROVIDERS_STUB, force, "providers.json")?;
+            ConfigFileWrite {
+                path: providers_path,
+                action,
+            }
+        };
 
     Ok(ConfigFilesWriteOutcome { config, providers })
 }
@@ -108,37 +119,6 @@ fn preflight_targets<const N: usize>(targets: [(&Path, &'static str); N]) -> any
     } else {
         anyhow::bail!("{}; pass --force to overwrite", existing.join("; "))
     }
-}
-
-fn write_config_file(
-    path: &Path,
-    contents: &str,
-    force: bool,
-    existing_policy: ExistingConfigPolicy,
-    label: &'static str,
-) -> anyhow::Result<ConfigFileWrite> {
-    if path.exists() && !force {
-        match existing_policy {
-            ExistingConfigPolicy::FailIfPresent => {
-                anyhow::bail!(
-                    "{label} already exists at {}; pass --force to overwrite",
-                    path.display()
-                );
-            }
-            ExistingConfigPolicy::Preserve => {
-                return Ok(ConfigFileWrite {
-                    path: path.to_path_buf(),
-                    action: FileWriteAction::Preserved,
-                });
-            }
-        }
-    }
-
-    let action = write_atomic(path, contents, force, label)?;
-    Ok(ConfigFileWrite {
-        path: path.to_path_buf(),
-        action,
-    })
 }
 
 /// Build the commented stub TOML with the current API version baked in.
