@@ -2522,10 +2522,10 @@ mod tests {
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
         LifecycleReadinessBlocker, RebornExtensionCredentialSetup, RebornServicesErrorCode,
-        RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-        WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
-        WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-        approval_gate_ref,
+        RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
+        RebornSubmitTurnResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
+        WebUiListAutomationsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+        WebUiSetupExtensionRequest, approval_gate_ref,
     };
     use ironclaw_run_state::ApprovalRequestStore;
     use ironclaw_skills::SkillTrust;
@@ -4725,12 +4725,72 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    #[tokio::test]
+    async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui outbound ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-outbound-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-outbound-tenant".to_string(),
+            agent_id: "runtime-webui-outbound-agent".to_string(),
+            source_binding_id: "runtime-webui-outbound-source".to_string(),
+            reply_target_binding_id: "runtime-webui-outbound-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-outbound-tenant").unwrap(),
+            UserId::new("runtime-webui-outbound-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-outbound-agent").unwrap()),
+            None,
+        );
+
+        let cleared = bundle
+            .api
+            .set_outbound_preferences(
+                caller.clone(),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: None,
+                },
+            )
+            .await
+            .expect("outbound preference clear uses composed facade");
+        assert!(cleared.final_reply_target.is_none());
+
+        let targets = bundle
+            .api
+            .list_outbound_delivery_targets(caller)
+            .await
+            .expect("outbound target listing uses composed facade");
+        assert!(targets.targets.is_empty());
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
     #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn webui_route_rejects_list_automations_without_agent_binding() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
-        use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
+        use ironclaw_webui_v2::{
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State,
+            webui_v2_router,
+        };
         use tower::ServiceExt;
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -4766,8 +4826,12 @@ mod tests {
             None,
             None,
         );
-        let router = webui_v2_router(WebUiV2State::new(bundle.api))
-            .layer(axum::Extension(caller_without_agent));
+        let router = webui_v2_router(WebUiV2State::new(
+            bundle.api,
+            WebUiV2Capabilities::default(),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(caller_without_agent));
 
         let response = router
             .oneshot(

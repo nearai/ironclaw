@@ -22,7 +22,7 @@ use ironclaw_host_api::{TenantId, UserId};
 /// Default concurrent SSE streams per (tenant, user). Sized to cover a
 /// normal browser tab plus brief reconnect overlap; sustained abuse hits
 /// the cap and gets 429.
-pub(crate) const DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER: usize = 3;
+pub const DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER: usize = 3;
 
 /// Maximum lifetime of a single SSE stream before the handler closes it
 /// cleanly so the browser can reconnect with `Last-Event-ID`. Bounds
@@ -62,7 +62,7 @@ impl SseCapacity {
         // Reject before touching the HashMap so a configured cap of 0
         // (SSE disabled) does not leak a zero-count entry per rejected
         // open. With the insert-before-check order we used to use, every
-        // 429 under a `with_sse_concurrency_limit(_, 0)` deployment would
+        // 429 under a configured cap of 0 would
         // store the caller's `(tenant, user)` key indefinitely.
         if self.max_per_caller == 0 {
             return None;

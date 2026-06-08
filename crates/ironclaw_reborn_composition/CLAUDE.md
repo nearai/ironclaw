@@ -263,6 +263,7 @@ rows are inventoried here, not implemented in the current PR.
 |---|---|---|---|
 | Send message | `POST /api/chat/send` | `POST /api/webchat/v2/threads/{thread_id}/messages` | Mapped |
 | Create thread | `POST /api/chat/thread/new` | `POST /api/webchat/v2/threads` | Mapped |
+| Session/profile capabilities | `GET /api/profile` | `GET /api/webchat/v2/session` | Mapped to authenticated tenant/user plus server-issued WebUI capabilities; `operator_webui_config` follows `allows_operator_webui_config` |
 | List threads | `GET /api/chat/threads` | `GET /api/webchat/v2/threads` | Mapped |
 | Delete thread | (none) | `DELETE /api/webchat/v2/threads/{thread_id}` | Mapped |
 | Read history / timeline | `GET /api/chat/history` | `GET /api/webchat/v2/threads/{thread_id}/timeline` | Mapped |

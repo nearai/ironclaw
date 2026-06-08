@@ -180,6 +180,56 @@ mod tests {
     }
 
     #[test]
+    fn auth_session_assets_use_server_capabilities_for_admin_status() {
+        let api = asset_text("js/lib/api.js");
+        assert!(api.contains("fetchSession"));
+        assert!(api.contains("/session"));
+
+        let auth = asset_text("js/app/auth.js");
+        assert!(auth.contains("fetchSession()"));
+        assert!(auth.contains("operator_webui_config"));
+        assert!(auth.contains("err?.status === 401 || err?.status === 403"));
+        assert!(auth.contains("Your session expired. Please sign in again."));
+        assert!(auth.contains("setIsSessionChecking(Boolean(nextToken))"));
+        assert!(auth.contains("setIsSessionChecking(true);"));
+        assert!(auth.contains("isAdmin: Boolean(session?.capabilities?.operator_webui_config)"));
+        assert!(!auth.contains("isAdmin: false"));
+
+        let sidebar_nav = asset_text("js/components/sidebar-nav.js");
+        assert!(sidebar_nav.contains("isAdmin = false"));
+        assert!(sidebar_nav.contains("[\"users\", \"inference\"].includes(subRoute.id)"));
+
+        let settings_page = asset_text("js/pages/settings/settings-page.js");
+        assert!(settings_page.contains("isAdmin = false"));
+        assert!(settings_page.contains("const defaultTabIsVisible = tabContentHas(defaultTab)"));
+        assert!(settings_page.contains("const redirectTab = defaultTabIsVisible"));
+        assert!(settings_page.contains("isOperatorTab(tab)"));
+
+        let settings_tabs = asset_text("js/pages/settings/components/settings-tabs.js");
+        assert!(settings_tabs.contains("isAdmin = false"));
+        assert!(!settings_tabs.contains("isAdmin = true"));
+        assert!(settings_tabs.contains("tab.id !== \"inference\""));
+
+        let layout = asset_text("js/layout/gateway-layout.js");
+        assert!(layout.contains("enabled: isAdmin"));
+        assert!(layout.contains("const needsOnboarding ="));
+        assert!(layout.contains("isAdmin && !llmProviders.isLoading"));
+
+        let app = asset_text("js/app/app.js");
+        assert!(app.contains("isChecking=${auth.isChecking}"));
+
+        let providers = asset_text("js/pages/settings/hooks/useLlmProviders.js");
+        assert!(providers.contains("const hasActiveProvider = Boolean("));
+        assert!(!providers.contains("!enabled || Boolean"));
+
+        let onboarding = asset_text("js/pages/onboarding/onboarding-page.js");
+        assert!(onboarding.contains("isChecking = false"));
+        assert!(onboarding.contains("if (isChecking) return null;"));
+        assert!(onboarding.contains("if (!isAdmin)"));
+        assert!(onboarding.contains("OperatorOnboardingPage"));
+    }
+
+    #[test]
     fn chat_projection_text_preserves_pending_gate() {
         let events = asset_text("js/pages/chat/lib/useChatEvents.js");
         let text_branch = events

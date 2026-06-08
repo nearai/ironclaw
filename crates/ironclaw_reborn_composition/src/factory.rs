@@ -54,6 +54,11 @@ use ironclaw_host_runtime::{
 };
 #[cfg(feature = "libsql")]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
+use ironclaw_outbound::CommunicationPreferenceRepository;
+#[cfg(feature = "libsql")]
+use ironclaw_outbound::FilesystemOutboundStateStore;
+#[cfg(not(feature = "libsql"))]
+use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -343,6 +348,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
+    pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     pub(crate) trigger_conversation_services: InMemoryConversationServices,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -947,11 +953,13 @@ fn build_local_dev_store_graph(
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
+    let outbound_preferences = local_dev_outbound_preferences(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
+        outbound_preferences,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1052,11 +1060,13 @@ fn build_local_dev_store_graph(
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let trigger_conversation_services = local_dev_trigger_conversation_services();
+    let outbound_preferences = local_dev_outbound_preferences(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
+        outbound_preferences,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1622,6 +1632,22 @@ fn local_dev_scoped_filesystem(
     filesystem: Arc<LocalDevRootFilesystem>,
 ) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
     crate::wrap_scoped(filesystem)
+}
+
+#[cfg(feature = "libsql")]
+fn local_dev_outbound_preferences(
+    filesystem: Arc<LocalDevRootFilesystem>,
+) -> Arc<dyn CommunicationPreferenceRepository> {
+    Arc::new(FilesystemOutboundStateStore::new(
+        local_dev_scoped_filesystem(filesystem),
+    ))
+}
+
+#[cfg(not(feature = "libsql"))]
+fn local_dev_outbound_preferences(
+    _filesystem: Arc<LocalDevRootFilesystem>,
+) -> Arc<dyn CommunicationPreferenceRepository> {
+    Arc::new(InMemoryOutboundStateStore::default())
 }
 
 #[cfg(all(
@@ -2764,6 +2790,7 @@ mod tests {
             capability_leases: Arc::clone(&base_runtime.capability_leases),
             turn_state: Arc::clone(&base_runtime.turn_state),
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
+            outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
             trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
             #[cfg(any(feature = "libsql", feature = "postgres"))]

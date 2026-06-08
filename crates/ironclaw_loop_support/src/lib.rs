@@ -60,7 +60,9 @@ pub use capability_surface_filter::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
 };
 pub use compaction_task::{
-    HostManagedLoopCompactionPort, default_host_managed_loop_compaction_port,
+    ACTIVE_TASK_COMPACTION_PROMPT_ID, DEFAULT_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
+    active_task_compaction_prompt_id, default_compaction_prompt_id,
+    default_host_managed_loop_compaction_port, host_managed_loop_compaction_port_with_prompt_id,
 };
 pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
@@ -98,6 +100,13 @@ pub use subagent_spawn_port::{
     SubagentThreadMetadata,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub const COMPACTION_SYSTEM_PROMPT: &str =
+    include_str!("../prompts/compaction_summarizer_fresh.md");
+pub const ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT: &str = concat!(
+    include_str!("../prompts/compaction_summarizer_fresh.md"),
+    "\n\n",
+    include_str!("../prompts/active_task_compaction_append.md"),
+);
 pub const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/failure_explanation.md");
 pub use token_estimator::{

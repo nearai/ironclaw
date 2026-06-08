@@ -48,8 +48,8 @@ use ironclaw_auth::GoogleOAuthRouteConfig;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui_v2::{
-    WebUiV2RouteOptions, WebUiV2State, is_webui_v2_llm_config_route_id,
-    webui_v2_router_with_options,
+    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
+    is_webui_v2_llm_config_route_id, webui_v2_router_with_options,
 };
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -587,9 +587,14 @@ pub fn webui_v2_app_with_lifecycle(
     } else {
         WebUiV2RouteOptions::without_llm_config_routes()
     };
-    let v2_inner: Router<()> =
-        webui_v2_router_with_options(WebUiV2State::new(bundle.api.clone()), route_options)
-            .with_state(());
+    let v2_state = WebUiV2State::new(
+        bundle.api.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: mount_operator_routes,
+        },
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    );
+    let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
     let mut public_inner: Option<Router> = None;

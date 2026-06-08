@@ -408,10 +408,7 @@ fn validate_model_observation_value(value: &serde_json::Value) -> Result<(), Str
 }
 
 fn validate_model_observation_text(value: &str) -> Result<(), String> {
-    if value
-        .chars()
-        .any(|character| is_disallowed_control_character(character))
-    {
+    if value.chars().any(is_disallowed_control_character) {
         return Err("model observation must not contain NUL/control characters".to_string());
     }
     let lower = value.to_ascii_lowercase();
