@@ -1,4 +1,4 @@
-Use `github.create_branch` to create a branch from another branch, tag ref, or full commit SHA.
+Use `github.create_branch` to create a branch from another branch or tag ref.
 
 Use the exact JSON field names from this capability schema. If the user provides a GitHub URL, extract the owner and repo fields plus the schema-specific number, path, or ref key; for pull-request tools, use `pr_number`; for issue tools, use `issue_number`.
 

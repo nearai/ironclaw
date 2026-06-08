@@ -304,7 +304,7 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.create_branch",
             "create-branch",
-            json!({"owner": "nearai", "repo": "ironclaw", "branch": "feature/matrix", "from_ref": "abc123def4567890abc123def4567890abc123de"}),
+            json!({"owner": "nearai", "repo": "ironclaw", "branch": "feature/matrix", "from_ref": "main"}),
         ),
         call(
             "github.get_file_content",
@@ -465,6 +465,7 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
         get(
             "https://api.github.com/repos/nearai/ironclaw/branches?per_page=13&protected=true&page=2",
         ),
+        get("https://api.github.com/repos/nearai/ironclaw/git/ref/heads/main"),
         request(
             "POST",
             "https://api.github.com/repos/nearai/ironclaw/git/refs",

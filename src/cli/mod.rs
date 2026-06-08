@@ -511,7 +511,6 @@ mod tests {
     fn normalize_help_snapshot(help: String) -> String {
         let mut normalized = help
             .lines()
-            .map(str::trim_end)
             .map(|line| if line.trim().is_empty() { "" } else { line })
             .collect::<Vec<_>>()
             .join("\n");
