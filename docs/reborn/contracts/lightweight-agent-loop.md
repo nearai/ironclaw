@@ -118,6 +118,14 @@ while run is active:
     stop
 ```
 
+Capability-result transcript records carry a strict safe summary for portable
+metadata, logs, checkpoints, and fallback replay. When the host has richer
+model-facing recovery information, it may attach a bounded
+`ModelVisibleToolObservation` side channel to the tool-result reference. That
+observation is model-visible untrusted tool output, not a replacement for
+`LoopSafeSummary`, and must be validated/redacted before it can be replayed to
+the model.
+
 Equivalent pseudocode:
 
 ```rust

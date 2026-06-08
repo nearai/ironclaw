@@ -12,14 +12,13 @@ use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
 
 const MAX_CONCURRENT_SKILL_BUNDLE_CONTEXT_READS: usize = 8;
 const MAX_VISIBLE_SKILL_BUNDLE_CONTEXT_CANDIDATES: usize = 100;
-const MAX_SKILL_BUNDLE_CONTEXT_FILE_BYTES: usize = 256 * 1024;
 
 /// Adapts portable skill bundles into model-context candidates.
 ///
 /// This adapter is intentionally policy-thin: it requires host-supplied trust
-/// and visibility metadata from [`crate::SkillBundleDescriptor`], reads raw `SKILL.md`
-/// content only for visible bundles, and leaves final snapshot trust/visibility
-/// enforcement to [`crate::build_skill_run_snapshot`].
+/// and visibility metadata from [`crate::SkillBundleDescriptor`], prefers safe
+/// descriptor discovery metadata for visible bundles, and leaves final snapshot
+/// trust/visibility enforcement to [`crate::build_skill_run_snapshot`].
 pub struct SkillBundleContextSource<S>
 where
     S: SkillBundleSource + ?Sized,
@@ -75,8 +74,7 @@ where
 
         stream::iter(descriptors.into_iter().enumerate())
             .map(|(index, descriptor)| async move {
-                self.load_descriptor_context_candidate(run_context, index, descriptor)
-                    .await
+                self.load_descriptor_context_candidate(index, descriptor)
             })
             .buffered(MAX_CONCURRENT_SKILL_BUNDLE_CONTEXT_READS)
             .try_collect()
@@ -88,9 +86,8 @@ impl<S> SkillBundleContextSource<S>
 where
     S: SkillBundleSource + ?Sized,
 {
-    async fn load_descriptor_context_candidate(
+    fn load_descriptor_context_candidate(
         &self,
-        run_context: &LoopRunContext,
         index: usize,
         descriptor: SkillBundleDescriptor,
     ) -> Result<HostSkillContextCandidate, HostSkillContextBuildError> {
@@ -105,17 +102,13 @@ where
                 .with_ordering_key(ordering_key));
         }
 
-        let skill_md = self
-            .bundle_source
-            .read_skill_bundle_file(run_context, descriptor.id(), descriptor.skill_md_path())
-            .await
-            .map_err(skill_bundle_source_error_to_context_error)?;
-        validate_skill_md_size(&skill_md)?;
-        let skill_md =
-            String::from_utf8(skill_md).map_err(|_| HostSkillContextBuildError::ParseFailed)?;
-
-        Ok(HostSkillContextCandidate::new(skill_md, trust, visibility)
-            .with_ordering_key(ordering_key))
+        Ok(HostSkillContextCandidate::discoverable(
+            descriptor.id().name(),
+            descriptor.description(),
+            trust,
+            visibility,
+        )
+        .with_ordering_key(ordering_key))
     }
 }
 
@@ -180,14 +173,6 @@ fn validate_visible_descriptor_count(
     Ok(())
 }
 
-fn validate_skill_md_size(skill_md: &[u8]) -> Result<(), HostSkillContextBuildError> {
-    if skill_md.len() > MAX_SKILL_BUNDLE_CONTEXT_FILE_BYTES {
-        return Err(HostSkillContextBuildError::ContextBudgetExceeded);
-    }
-
-    Ok(())
-}
-
 fn descriptor_context_ordering_key(index: usize) -> String {
     format!("{index:016}")
 }
@@ -211,10 +196,6 @@ mod tests {
         SkillBundleDescriptor, SkillFilePath, skill_context::build_skill_instruction_snippets,
     };
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
-
-    fn skill_md(name: &str, description: &str, prompt: &str) -> Vec<u8> {
-        format!("---\nname: {name}\ndescription: {description}\n---\n{prompt}\n").into_bytes()
-    }
 
     async fn run_context() -> LoopRunContext {
         let scope = TurnScope::new(
@@ -240,6 +221,7 @@ mod tests {
             crate::SkillBundleId::new(source_kind, name).unwrap(),
             trust,
             visibility,
+            format!("{name} description"),
         )
     }
 
@@ -265,43 +247,6 @@ mod tests {
 
         fn with_list_error(mut self, error: SkillBundleSourceError) -> Self {
             self.list_error = Some(error);
-            self
-        }
-
-        fn with_skill_md(
-            self,
-            source_kind: crate::SkillSourceKind,
-            name: &str,
-            body: Vec<u8>,
-        ) -> Self {
-            self.with_file(source_kind, name, "SKILL.md", body)
-        }
-
-        fn with_file(
-            self,
-            source_kind: crate::SkillSourceKind,
-            name: &str,
-            path: &str,
-            body: Vec<u8>,
-        ) -> Self {
-            self.files
-                .lock()
-                .unwrap()
-                .insert(format!("{source_kind}:{name}:{path}"), body);
-            self
-        }
-
-        fn with_read_error(
-            self,
-            source_kind: crate::SkillSourceKind,
-            name: &str,
-            path: &str,
-            error: SkillBundleSourceError,
-        ) -> Self {
-            self.read_errors
-                .lock()
-                .unwrap()
-                .insert(format!("{source_kind}:{name}:{path}"), error);
             self
         }
 
@@ -356,50 +301,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_maps_file_not_found_read_error() {
-        let source = Arc::new(StaticSkillBundleSource::new(vec![descriptor(
-            crate::SkillSourceKind::User,
-            "alpha",
-            Some(SkillTrust::Trusted),
-            Some(SkillVisibility::Visible),
-        )]));
-        let adapter = SkillBundleContextSource::new(source);
-
-        let error = adapter
-            .load_skill_context_candidates(&run_context().await)
-            .await
-            .unwrap_err();
-
-        assert_eq!(error, HostSkillContextBuildError::SourceUnavailable);
-    }
-
-    #[tokio::test]
-    async fn adapter_maps_bundle_not_found_read_error() {
-        let source = Arc::new(
-            StaticSkillBundleSource::new(vec![descriptor(
-                crate::SkillSourceKind::User,
-                "alpha",
-                Some(SkillTrust::Trusted),
-                Some(SkillVisibility::Visible),
-            )])
-            .with_read_error(
-                crate::SkillSourceKind::User,
-                "alpha",
-                "SKILL.md",
-                SkillBundleSourceError::BundleNotFound,
-            ),
-        );
-        let adapter = SkillBundleContextSource::new(source);
-
-        let error = adapter
-            .load_skill_context_candidates(&run_context().await)
-            .await
-            .unwrap_err();
-
-        assert_eq!(error, HostSkillContextBuildError::SourceUnavailable);
-    }
-
-    #[tokio::test]
     async fn adapter_rejects_too_many_visible_bundles_without_reads() {
         let descriptors = (0..=MAX_VISIBLE_SKILL_BUNDLE_CONTEXT_CANDIDATES)
             .map(|index| {
@@ -424,79 +325,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_rejects_oversized_visible_skill_md() {
-        let source = Arc::new(
-            StaticSkillBundleSource::new(vec![descriptor(
-                crate::SkillSourceKind::User,
-                "alpha",
-                Some(SkillTrust::Trusted),
-                Some(SkillVisibility::Visible),
-            )])
-            .with_skill_md(
-                crate::SkillSourceKind::User,
-                "alpha",
-                vec![b'a'; MAX_SKILL_BUNDLE_CONTEXT_FILE_BYTES + 1],
-            ),
-        );
-        let adapter = SkillBundleContextSource::new(source);
+    async fn adapter_maps_budget_source_errors_from_bundle_listing() {
+        for source_error in [
+            SkillBundleSourceError::ContentTooLarge,
+            SkillBundleSourceError::BundleScanLimitExceeded,
+        ] {
+            let source =
+                Arc::new(StaticSkillBundleSource::default().with_list_error(source_error.clone()));
+            let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
-        let error = adapter
-            .load_skill_context_candidates(&run_context().await)
-            .await
-            .unwrap_err();
+            let error = adapter
+                .load_skill_context_candidates(&run_context().await)
+                .await
+                .unwrap_err();
 
-        assert_eq!(error, HostSkillContextBuildError::ContextBudgetExceeded);
+            assert_eq!(
+                error,
+                HostSkillContextBuildError::ContextBudgetExceeded,
+                "{source_error:?} must map to budget exceeded"
+            );
+            assert!(source.reads().is_empty());
+        }
     }
 
     #[tokio::test]
-    async fn adapter_reads_visible_trusted_bundle_into_model_snippet() {
-        let source = Arc::new(
-            StaticSkillBundleSource::new(vec![descriptor(
+    async fn adapter_reads_visible_trusted_bundle_as_discoverable_model_snippet() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            descriptor(
                 crate::SkillSourceKind::System,
                 "alpha",
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
-            )])
-            .with_skill_md(
-                crate::SkillSourceKind::System,
-                "alpha",
-                skill_md("alpha", "safe alpha description", "trusted alpha prompt"),
-            ),
-        );
-        let adapter = SkillBundleContextSource::new(source);
+            )
+            .with_description("safe alpha description"),
+        ]));
+        let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
         let snippets = build_skill_instruction_snippets(&adapter, &run_context().await)
             .await
             .unwrap();
 
+        assert!(source.reads().is_empty());
         assert_eq!(snippets.len(), 1);
         assert_eq!(snippets[0].snippet_ref, "skill:alpha");
         assert!(snippets[0].safe_summary.contains("safe alpha description"));
         assert!(!snippets[0].safe_summary.contains("trusted alpha prompt"));
         assert!(snippets[0].model_content.contains("safe alpha description"));
-        assert!(snippets[0].model_content.contains("trusted alpha prompt"));
+        assert!(!snippets[0].model_content.contains("trusted alpha prompt"));
     }
 
     #[tokio::test]
     async fn adapter_keeps_installed_bundle_prompt_out_of_model_snippet() {
-        let source = Arc::new(
-            StaticSkillBundleSource::new(vec![descriptor(
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            descriptor(
                 crate::SkillSourceKind::User,
                 "alpha",
                 Some(SkillTrust::Installed),
                 Some(SkillVisibility::Visible),
-            )])
-            .with_skill_md(
-                crate::SkillSourceKind::User,
-                "alpha",
-                skill_md(
-                    "alpha",
-                    "safe installed description",
-                    "RAW_INSTALLED_PROMPT_SENTINEL",
-                ),
-            ),
-        );
-        let adapter = SkillBundleContextSource::new(source);
+            )
+            .with_description("safe installed description"),
+        ]));
+        let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
         let snippets = build_skill_instruction_snippets(&adapter, &run_context().await)
             .await
@@ -513,6 +402,7 @@ mod tests {
                 .model_content
                 .contains("RAW_INSTALLED_PROMPT_SENTINEL")
         );
+        assert!(source.reads().is_empty());
     }
 
     #[tokio::test]
@@ -581,27 +471,21 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_validates_all_policy_metadata_before_reading_visible_bundles() {
-        let source = Arc::new(
-            StaticSkillBundleSource::new(vec![
-                descriptor(
-                    crate::SkillSourceKind::System,
-                    "alpha",
-                    Some(SkillTrust::Trusted),
-                    Some(SkillVisibility::Visible),
-                ),
-                descriptor(
-                    crate::SkillSourceKind::User,
-                    "bravo",
-                    Some(SkillTrust::Trusted),
-                    None,
-                ),
-            ])
-            .with_skill_md(
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            descriptor(
                 crate::SkillSourceKind::System,
                 "alpha",
-                skill_md("alpha", "alpha description", "alpha prompt"),
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Visible),
+            )
+            .with_description("alpha description"),
+            descriptor(
+                crate::SkillSourceKind::User,
+                "bravo",
+                Some(SkillTrust::Trusted),
+                None,
             ),
-        );
+        ]));
         let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
         let error = adapter
@@ -615,32 +499,22 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_sorts_candidates_by_bundle_descriptor_ordering_key() {
-        let source = Arc::new(
-            StaticSkillBundleSource::new(vec![
-                descriptor(
-                    crate::SkillSourceKind::User,
-                    "bravo",
-                    Some(SkillTrust::Trusted),
-                    Some(SkillVisibility::Visible),
-                ),
-                descriptor(
-                    crate::SkillSourceKind::System,
-                    "alpha",
-                    Some(SkillTrust::Trusted),
-                    Some(SkillVisibility::Visible),
-                ),
-            ])
-            .with_skill_md(
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            descriptor(
                 crate::SkillSourceKind::User,
                 "bravo",
-                skill_md("bravo", "bravo description", "bravo prompt"),
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Visible),
             )
-            .with_skill_md(
+            .with_description("bravo description"),
+            descriptor(
                 crate::SkillSourceKind::System,
                 "alpha",
-                skill_md("alpha", "alpha description", "alpha prompt"),
-            ),
-        );
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Visible),
+            )
+            .with_description("alpha description"),
+        ]));
         let adapter = SkillBundleContextSource::new(source);
 
         let candidates = adapter
@@ -665,29 +539,18 @@ mod tests {
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
         )
-        .with_skill_md_path(SkillFilePath::new("nested/SKILL.md").unwrap());
-        let source = Arc::new(
-            StaticSkillBundleSource::new(vec![
-                nested_descriptor,
-                descriptor(
-                    crate::SkillSourceKind::User,
-                    "alpha",
-                    Some(SkillTrust::Trusted),
-                    Some(SkillVisibility::Visible),
-                ),
-            ])
-            .with_skill_md(
+        .with_skill_md_path(SkillFilePath::new("nested/SKILL.md").unwrap())
+        .with_description("nested description");
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            nested_descriptor,
+            descriptor(
                 crate::SkillSourceKind::User,
                 "alpha",
-                skill_md("alpha", "root description", "root prompt"),
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Visible),
             )
-            .with_file(
-                crate::SkillSourceKind::User,
-                "alpha",
-                "nested/SKILL.md",
-                skill_md("alpha", "nested description", "nested prompt"),
-            ),
-        );
+            .with_description("root description"),
+        ]));
         let adapter = SkillBundleContextSource::new(source);
 
         let candidates = adapter
@@ -698,14 +561,21 @@ mod tests {
             .iter()
             .map(|candidate| candidate.ordering_key.as_deref().unwrap())
             .collect::<Vec<_>>();
-        let skill_md = candidates
+        let descriptions = candidates
             .iter()
-            .map(|candidate| candidate.skill_md.as_deref().unwrap())
+            .map(|candidate| {
+                let (_, description) = candidate.discoverable_metadata().unwrap();
+                description
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(ordering_keys, vec!["0000000000000000", "0000000000000001"]);
-        assert!(skill_md[0].contains("root description"));
-        assert!(skill_md[1].contains("nested description"));
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.loaded_skill_md().is_none())
+        );
+        assert_eq!(descriptions, vec!["root description", "nested description"]);
     }
 
     #[tokio::test]
@@ -735,7 +605,7 @@ mod tests {
         assert!(
             candidates
                 .iter()
-                .all(|candidate| candidate.skill_md.is_none())
+                .all(HostSkillContextCandidate::is_unavailable)
         );
         assert_eq!(candidates[0].trust, Some(SkillTrust::Trusted));
         assert_eq!(candidates[0].visibility, Some(SkillVisibility::Hidden));
@@ -820,78 +690,5 @@ mod tests {
 
             assert_eq!(error, HostSkillContextBuildError::ParseFailed);
         }
-    }
-
-    #[tokio::test]
-    async fn adapter_maps_visible_bundle_read_permission_errors() {
-        let source = Arc::new(
-            StaticSkillBundleSource::new(vec![descriptor(
-                crate::SkillSourceKind::User,
-                "alpha",
-                Some(SkillTrust::Trusted),
-                Some(SkillVisibility::Visible),
-            )])
-            .with_read_error(
-                crate::SkillSourceKind::User,
-                "alpha",
-                "SKILL.md",
-                SkillBundleSourceError::PermissionDenied,
-            ),
-        );
-        let adapter = SkillBundleContextSource::new(source);
-
-        let error = adapter
-            .load_skill_context_candidates(&run_context().await)
-            .await
-            .unwrap_err();
-
-        assert_eq!(error, HostSkillContextBuildError::SourceUnavailable);
-    }
-
-    #[tokio::test]
-    async fn adapter_maps_content_too_large_read_errors() {
-        let source = Arc::new(
-            StaticSkillBundleSource::new(vec![descriptor(
-                crate::SkillSourceKind::User,
-                "alpha",
-                Some(SkillTrust::Trusted),
-                Some(SkillVisibility::Visible),
-            )])
-            .with_read_error(
-                crate::SkillSourceKind::User,
-                "alpha",
-                "SKILL.md",
-                SkillBundleSourceError::ContentTooLarge,
-            ),
-        );
-        let adapter = SkillBundleContextSource::new(source);
-
-        let error = adapter
-            .load_skill_context_candidates(&run_context().await)
-            .await
-            .unwrap_err();
-
-        assert_eq!(error, HostSkillContextBuildError::ContextBudgetExceeded);
-    }
-
-    #[tokio::test]
-    async fn adapter_rejects_invalid_utf8_skill_md() {
-        let source = Arc::new(
-            StaticSkillBundleSource::new(vec![descriptor(
-                crate::SkillSourceKind::User,
-                "alpha",
-                Some(SkillTrust::Trusted),
-                Some(SkillVisibility::Visible),
-            )])
-            .with_skill_md(crate::SkillSourceKind::User, "alpha", vec![0xff, 0xfe]),
-        );
-        let adapter = SkillBundleContextSource::new(source);
-
-        let error = adapter
-            .load_skill_context_candidates(&run_context().await)
-            .await
-            .unwrap_err();
-
-        assert_eq!(error, HostSkillContextBuildError::ParseFailed);
     }
 }

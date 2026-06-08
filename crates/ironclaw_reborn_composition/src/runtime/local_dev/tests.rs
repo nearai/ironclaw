@@ -958,8 +958,7 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert!(
             selected[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("UNIT_ACTIVATE_SENTINEL")
         );
@@ -1761,6 +1760,7 @@ mod tests {
                     result_ref: "result:missing-typed-content".to_string(),
                     safe_summary: ToolResultSafeSummary::new("tool result available")
                         .expect("safe summary"),
+                    model_observation: None,
                 })
                 .expect("envelope serializes"),
                 content_ref: LoopMessageRef::new("msg:missing-typed-content").expect("content ref"),

@@ -4,7 +4,6 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ScopedPath, TenantId};
 use ironclaw_loop_support::{
     FilesystemSkillBundleRoot, FilesystemSkillBundleSource, HostSkillContextSource,
-    SkillBundleContextSource,
 };
 
 use crate::{
@@ -103,7 +102,6 @@ where
     F: RootFilesystem + 'static,
 {
     bundle_source: Arc<FilesystemSkillBundleSource<F>>,
-    context_source: Arc<SkillBundleContextSource<FilesystemSkillBundleSource<F>>>,
     default_selectable_runtime: FirstPartySelectableSkillsRuntime<F>,
 }
 
@@ -196,7 +194,6 @@ where
                     FirstPartySkillsExtensionError::InvalidBundleSource(error.to_string())
                 })?,
         );
-        let context_source = Arc::new(SkillBundleContextSource::new(Arc::clone(&bundle_source)));
         let default_selectable_context_source = Arc::new(SelectableSkillContextSource::new(
             Arc::clone(&bundle_source),
             SkillActivationSelectorConfig::default(),
@@ -210,7 +207,6 @@ where
         );
         Ok(Self {
             bundle_source,
-            context_source,
             default_selectable_runtime,
         })
     }
@@ -219,12 +215,8 @@ where
         Arc::clone(&self.bundle_source)
     }
 
-    pub fn context_source(&self) -> Arc<SkillBundleContextSource<FilesystemSkillBundleSource<F>>> {
-        Arc::clone(&self.context_source)
-    }
-
     pub fn host_skill_context_source(&self) -> Arc<dyn HostSkillContextSource> {
-        self.context_source.clone()
+        self.default_selectable_runtime.host_skill_context_source()
     }
 
     pub fn selectable_skill_context_source(
@@ -306,13 +298,15 @@ mod tests {
         AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
         VirtualPath,
     };
-    use ironclaw_loop_support::{SkillBundleSource, build_skill_run_snapshot};
+    use ironclaw_loop_support::{
+        SkillBundleContextSource, SkillBundleSource, build_skill_run_snapshot,
+    };
     use ironclaw_skills::SkillTrust;
     use ironclaw_turns::{
-        TurnActor, TurnId, TurnRunId, TurnScope,
+        AcceptedMessageRef, TurnActor, TurnId, TurnRunId, TurnScope,
         run_profile::{
             InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest,
-            RunProfileResolver, SkillTrustLevel, SkillVisibility,
+            RunProfileResolver, SkillActivationState, SkillTrustLevel, SkillVisibility,
         },
     };
 
@@ -408,7 +402,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extension_exposes_skill_context_from_only_configured_skill_roots() {
+    async fn extension_exposes_discoverable_context_from_only_configured_skill_roots() {
         let root = Arc::new(InMemoryBackend::default());
         write_file(
             &root,
@@ -447,8 +441,8 @@ mod tests {
         )
         .unwrap();
 
-        let candidates = extension
-            .host_skill_context_source()
+        let context_source = SkillBundleContextSource::new(extension.bundle_source());
+        let candidates = context_source
             .load_skill_context_candidates(&run_context().await)
             .await
             .unwrap();
@@ -460,21 +454,84 @@ mod tests {
             entry.name == "system-helper"
                 && entry.trust == SkillTrustLevel::Trusted
                 && entry.visibility == SkillVisibility::Visible
-                && entry
-                    .prompt_content
-                    .as_deref()
-                    .is_some_and(|content| content.contains("SYSTEM_HELPER_PROMPT_SENTINEL"))
+                && entry.activation_state == SkillActivationState::Discoverable
+                && entry.prompt_content.is_none()
+                && entry.safe_description == "system helper description"
         }));
         assert!(entries.iter().any(|entry| {
             entry.name == "user-helper"
                 && entry.trust == SkillTrustLevel::Trusted
                 && entry.visibility == SkillVisibility::Visible
-                && entry
-                    .prompt_content
-                    .as_deref()
-                    .is_some_and(|content| content.contains("USER_HELPER_PROMPT_SENTINEL"))
+                && entry.activation_state == SkillActivationState::Discoverable
+                && entry.prompt_content.is_none()
+                && entry.safe_description == "user helper description"
         }));
         assert!(!entries.iter().any(|entry| entry.name == "workspace-helper"));
+    }
+
+    #[tokio::test]
+    async fn extension_host_context_loads_prompt_only_after_activation() {
+        let root = Arc::new(InMemoryBackend::default());
+        write_file(
+            &root,
+            "/system/skills/system-helper/SKILL.md",
+            skill_md(
+                "system-helper",
+                "system helper description",
+                "SYSTEM_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .await;
+        write_file(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/user-helper/SKILL.md",
+            skill_md(
+                "user-helper",
+                "user helper description",
+                "USER_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .await;
+        let extension = FirstPartySkillsExtension::new(
+            scoped_filesystem(root),
+            FirstPartySkillsExtensionHandles::without_tenant_shared().unwrap(),
+            TenantId::new("tenant-a").unwrap(),
+        )
+        .unwrap();
+        let context = run_context()
+            .await
+            .with_accepted_message_ref(AcceptedMessageRef::new("accepted-system-helper").unwrap());
+        let activation_source =
+            extension.selectable_skill_context_source(SkillActivationSelectorConfig::default());
+        activation_source
+            .record_user_message(
+                context.scope.clone(),
+                context.accepted_message_ref.clone().unwrap(),
+                "$system-helper",
+            )
+            .unwrap();
+
+        let candidates = extension
+            .host_skill_context_source()
+            .load_skill_context_candidates(&context)
+            .await
+            .unwrap();
+        let snapshot = build_skill_run_snapshot(candidates).unwrap();
+        let entries = &snapshot.entries;
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.name, "system-helper");
+        assert_eq!(entry.trust, SkillTrustLevel::Trusted);
+        assert_eq!(entry.visibility, SkillVisibility::Visible);
+        assert_eq!(entry.activation_state, SkillActivationState::Loaded);
+        assert!(
+            entry
+                .prompt_content
+                .as_deref()
+                .is_some_and(|content| content.contains("SYSTEM_HELPER_PROMPT_SENTINEL"))
+        );
+        assert!(!entries.iter().any(|entry| entry.name == "user-helper"));
     }
 
     #[tokio::test]

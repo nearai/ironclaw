@@ -27,8 +27,55 @@ export function registerPack(lang, translations) {
   packs[lang] = translations;
 }
 
-function translate(lang, key, params = {}) {
-  const text = packs[lang]?.[key] || packs["en"]?.[key] || key;
+// Lazy loaders for every non-default locale. `en` is bundled eagerly in
+// main.js as the fallback (see `translate`), so it has no loader. Each
+// module calls `registerPack` as an import side effect, populating
+// `packs[lang]`. Literal import paths keep the assets statically
+// discoverable. Loaded packs are cached in `packs`, so each fires once.
+const loaders = {
+  es: () => import("../i18n/es.js"),
+  fr: () => import("../i18n/fr.js"),
+  de: () => import("../i18n/de.js"),
+  "pt-BR": () => import("../i18n/pt-BR.js"),
+  ja: () => import("../i18n/ja.js"),
+  ar: () => import("../i18n/ar.js"),
+  hi: () => import("../i18n/hi.js"),
+  uk: () => import("../i18n/uk.js"),
+  "zh-CN": () => import("../i18n/zh-CN.js"),
+  ko: () => import("../i18n/ko.js"),
+};
+
+const pending = {};
+
+// Loads and returns the translations pack for `lang` on demand.
+// Resolves the pack object once available, or null for a locale with no
+// loader and no prior registration. The in-flight promise is cached in
+// `pending` and cleared once it settles either way: on success
+// `packs[lang]` short-circuits above, and on failure dropping it lets a
+// later attempt retry instead of caching a permanent miss. Private —
+// the provider owns the only language transition that consumes it.
+function ensurePack(lang) {
+  if (packs[lang]) return Promise.resolve(packs[lang]);
+  const loader = loaders[lang];
+  if (!loader) return Promise.resolve(null);
+  if (!pending[lang]) {
+    pending[lang] = loader()
+      .then(() => {
+        delete pending[lang];
+        return packs[lang] || null;
+      })
+      .catch(() => {
+        delete pending[lang];
+        return null;
+      });
+  }
+  return pending[lang];
+}
+
+// Resolves a key against the active pack, falling back to the eagerly
+// bundled English pack and finally the raw key.
+function translate(pack, key, params = {}) {
+  const text = pack?.[key] || packs["en"]?.[key] || key;
   if (!params || typeof text !== "string") return text;
   return text.replace(/\{(\w+)\}/g, (match, k) => (params[k] !== undefined ? params[k] : match));
 }
@@ -36,29 +83,60 @@ function translate(lang, key, params = {}) {
 const I18nContext = React.createContext({
   lang: "en",
   setLang: () => {},
-  t: (key, params) => translate("en", key, params),
+  t: (key, params) => translate(packs["en"], key, params),
 });
 
 export function I18nProvider({ children }) {
   const [lang, setLangState] = React.useState(detectLanguage);
+  // The translations committed for the active language. Held in state
+  // (rather than read live from the module `packs` registry) so an async
+  // pack load re-renders consumers naturally — no separate version
+  // counter. `null` means "fall back to English" until the pack lands.
+  const [pack, setPack] = React.useState(() => packs[lang] || null);
+  // The most recently requested language. A pack load that resolves
+  // after a newer request is discarded, so out-of-order imports never
+  // commit a stale language.
+  const activeLangRef = React.useRef(lang);
 
+  // The single language transition: stamp the request, ensure its pack
+  // is loaded, then commit (state + persistence) only if the pack is
+  // available AND it is still the latest request when the load resolves.
+  // Deferring the commit until the pack lands avoids flashing the English
+  // fallback for an already-chosen language; the staleness guard makes
+  // out-of-order resolution a no-op; an unknown/failed locale (`loaded`
+  // null) never commits, leaving the current language in place.
   const setLang = React.useCallback((next) => {
-    if (!packs[next]) return;
-    setLangState(next);
-    try {
-      localStorage.setItem(STORAGE_KEY, next);
-    } catch (_) {}
-    document.documentElement.lang = next;
+    activeLangRef.current = next;
+    ensurePack(next).then((loaded) => {
+      if (!loaded || activeLangRef.current !== next) return;
+      setLangState(next);
+      setPack(loaded);
+      try {
+        localStorage.setItem(STORAGE_KEY, next);
+      } catch (_) {}
+    });
   }, []);
 
+  // The initially-detected language may not be bundled (only `en` is);
+  // load its pack on mount and commit it once available, without
+  // re-persisting the auto-detected default. `document.documentElement.lang`
+  // tracks the committed language on every change.
   React.useEffect(() => {
+    let cancelled = false;
+    if (!packs[lang]) {
+      ensurePack(lang).then((loaded) => {
+        if (!cancelled && loaded && activeLangRef.current === lang) {
+          setPack(loaded);
+        }
+      });
+    }
     document.documentElement.lang = lang;
+    return () => {
+      cancelled = true;
+    };
   }, [lang]);
 
-  const t = React.useCallback(
-    (key, params) => translate(lang, key, params),
-    [lang]
-  );
+  const t = React.useCallback((key, params) => translate(pack, key, params), [pack]);
 
   const ctx = React.useMemo(() => ({ lang, setLang, t }), [lang, setLang, t]);
 

@@ -421,6 +421,16 @@ registerPack("en", {
   "channels.active": "active",
   "channels.inactive": "inactive",
   "channels.available": "available",
+  "channels.slackAccessTitle": "Slack channel access",
+  "channels.slackAccessInstructions": "Choose the Slack channels this tenant app may answer in.",
+  "channels.slackAccessAdd": "Add",
+  "channels.slackAccessLoading": "Loading Slack channels...",
+  "channels.slackAccessEmpty": "No Slack channels allowed yet.",
+  "channels.slackAccessAllow": "Allow {channelId}",
+  "channels.slackAccessSave": "Save channels",
+  "channels.slackAccessSaving": "Saving...",
+  "channels.slackAccessSuccess": "Slack channels saved.",
+  "channels.slackAccessError": "Slack channel update failed.",
 
   // Settings — tools tab
   "tools.permissions": "Tool permissions",

@@ -14,7 +14,7 @@ import { ToastViewport } from "../components/toast-viewport.js";
 import { React } from "../lib/html.js";
 import { cn } from "../utils/cn.js";
 
-export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
+export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onSignOut }) {
   const t = useT();
   const { theme, toggleTheme } = useInterfaceTheme();
   const statusQuery = useGatewayStatus(token);
@@ -31,8 +31,13 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
   // keys off the honest `hasActiveProvider` (a persisted selection).
   const location = useLocation();
   const navigate = useNavigate();
-  const llmProviders = useLlmProviders({ settings: {}, gatewayStatus: status });
-  const needsOnboarding = !llmProviders.isLoading && !llmProviders.hasActiveProvider;
+  const llmProviders = useLlmProviders({
+    settings: {},
+    gatewayStatus: status,
+    enabled: isAdmin,
+  });
+  const needsOnboarding =
+    isAdmin && !llmProviders.isLoading && !llmProviders.hasActiveProvider;
   const onboardingExempt =
     location.pathname === "/welcome" || location.pathname.startsWith("/settings");
 
@@ -120,6 +125,7 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
               gatewayStatus: status,
               gatewayStatusQuery: statusQuery,
               currentUser: profile,
+              isChecking,
               isAdmin,
               threadsState,
             }}
