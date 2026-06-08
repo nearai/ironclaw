@@ -306,7 +306,7 @@ export function AutomationsList({
                             key=${automation.automation_id}
                             tabIndex=${0}
                             role="button"
-                            aria-selected=${selected}
+                            aria-pressed=${selected}
                             onClick=${() => onSelectAutomation(automation.automation_id)}
                             onKeyDown=${(event) =>
                               automationRowKeyDown(
