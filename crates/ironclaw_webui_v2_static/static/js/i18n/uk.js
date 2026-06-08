@@ -49,8 +49,6 @@ registerPack("uk", {
 
   "chat.placeholder": "Напишіть IronClaw…",
   "chat.send": "Надіслати повідомлення",
-  "chat.removeImage": "Видалити зображення",
-  "chat.removeAttachment": "Видалити вкладення",
 
   "chat.conversations": "Розмови",
   "chat.threads": "{count} тредів",
@@ -511,7 +509,6 @@ registerPack("uk", {
   "chat.suggestion3Desc": "Перевірити налаштування, автентифікацію, спарювання та доступні можливості.",
   "chat.heroPlaceholder": "Запитайте IronClaw про що завгодно.",
   "chat.followUpPlaceholder": "Попросіть подальші зміни",
-  "chat.attachFiles": "Прикріпити файли",
   "chat.modeAutoReview": "Авторевʼю",
   "chat.runtimeLocal": "Працювати локально",
   "chat.statusWorking": "Працює",

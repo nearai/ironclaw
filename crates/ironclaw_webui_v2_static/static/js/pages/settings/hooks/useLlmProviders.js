@@ -19,21 +19,24 @@ import { isProviderConfigRouteUnavailable } from "../../../lib/onboarding-gate.j
 // selection, `builtin`, and `api_key_set`. Overrides are no longer a separate
 // client-side merge — the backend resolves them — so `builtinOverrides` is kept
 // as an empty object purely for the shared helper signatures.
-export function useLlmProviders({ settings: _settings, gatewayStatus }) {
+export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = true }) {
   const queryClient = useQueryClient();
   const providersQuery = useQuery({
     queryKey: ["llm-providers"],
     queryFn: fetchLlmProviders,
+    enabled,
     staleTime: 60_000,
   });
 
-  const snapshot = providersQuery.data || { providers: [], active: null };
+  const snapshot = enabled
+    ? providersQuery.data || { providers: [], active: null }
+    : { providers: [], active: null };
   // A 404 means the operator LLM-config route is unmounted (multi-user /
   // SSO auth): the provider is configured operator-side at boot, not via
   // this UI, so callers must not treat the missing snapshot as "no LLM".
-  const providerConfigUnavailable = isProviderConfigRouteUnavailable(
-    providersQuery.error
-  );
+  // Only meaningful when the query actually ran (`enabled`).
+  const providerConfigUnavailable =
+    enabled && isProviderConfigRouteUnavailable(providersQuery.error);
   const builtinOverrides = {};
   // Map the wire view onto the field names the components/helpers expect.
   const allProviders = (snapshot.providers || []).map((provider) => ({
@@ -44,9 +47,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus }) {
   // Whether the backend has a usable active provider. Prefer the persisted
   // operator snapshot, but also honor runtime/env-configured LLMs surfaced by
   // gateway status so first-run onboarding does not mask an already-live model.
-  const hasActiveProvider = Boolean(
-    snapshot.active?.provider_id || gatewayStatus?.llm_backend
-  );
+  const hasActiveProvider = Boolean(snapshot.active?.provider_id || gatewayStatus?.llm_backend);
   const activeProviderId =
     snapshot.active?.provider_id || gatewayStatus?.llm_backend || "nearai";
   const selectedModel = snapshot.active?.model || gatewayStatus?.llm_model || "";

@@ -1,4 +1,4 @@
-import { Navigate, Outlet, useLocation } from "react-router";
+import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
 import { useInterfaceTheme } from "../design-system/theme.js";
 import { useGatewayStatus } from "../hooks/useGatewayStatus.js";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders.js";
@@ -6,6 +6,7 @@ import { shouldRouteToOnboarding } from "../lib/onboarding-gate.js";
 import { useSidebar } from "../hooks/useSidebar.js";
 import { html } from "../lib/html.js";
 import { useT } from "../lib/i18n.js";
+import { toast } from "../lib/toast.js";
 import { useThreads } from "../pages/chat/hooks/useThreads.js";
 import { Sidebar } from "../components/sidebar.js";
 import { PageHeader } from "../components/page-header.js";
@@ -14,7 +15,7 @@ import { ToastViewport } from "../components/toast-viewport.js";
 import { React } from "../lib/html.js";
 import { cn } from "../utils/cn.js";
 
-export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
+export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onSignOut }) {
   const t = useT();
   const { theme, toggleTheme } = useInterfaceTheme();
   const statusQuery = useGatewayStatus(token);
@@ -30,16 +31,25 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
   // avoid a redirect loop. Defaults are not treated as "configured" — the gate
   // keys off the honest `hasActiveProvider` (a persisted selection).
   const location = useLocation();
-  const llmProviders = useLlmProviders({ settings: {}, gatewayStatus: status });
-  // Skip onboarding when the operator LLM-config route is gated (multi-user /
-  // SSO 404s `/llm/providers`): the provider is configured operator-side at
-  // boot, `/welcome` can't reach the gated config UI, and a 404 must not be
-  // read as "no LLM" — otherwise SSO users get trapped on `/welcome`.
-  const needsOnboarding = shouldRouteToOnboarding({
-    isLoading: llmProviders.isLoading,
-    hasActiveProvider: llmProviders.hasActiveProvider,
-    providerConfigUnavailable: llmProviders.providerConfigUnavailable,
+  const navigate = useNavigate();
+  const llmProviders = useLlmProviders({
+    settings: {},
+    gatewayStatus: status,
+    enabled: isAdmin,
   });
+  // Onboarding is admin-only; non-admins never see the first-run gate.
+  // Even for an admin, skip onboarding when the operator LLM-config route
+  // is gated (multi-user / SSO 404s `/llm/providers`): the provider is
+  // configured operator-side at boot, `/welcome` can't reach the gated
+  // config UI, and a 404 must not be read as "no LLM" — otherwise an admin
+  // SSO user gets trapped on `/welcome`.
+  const needsOnboarding =
+    isAdmin &&
+    shouldRouteToOnboarding({
+      isLoading: llmProviders.isLoading,
+      hasActiveProvider: llmProviders.hasActiveProvider,
+      providerConfigUnavailable: llmProviders.providerConfigUnavailable,
+    });
   const onboardingExempt =
     location.pathname === "/welcome" || location.pathname.startsWith("/settings");
 
@@ -54,10 +64,22 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
-  // v2 has no DELETE thread endpoint, so the sidebar renders no
-  // delete affordance (SidebarThreads conditionally renders the
-  // trash button on `onDelete`).
 
+  const handleDeleteThread = React.useCallback(
+    async (threadId) => {
+      const wasActive = threadsState.activeThreadId === threadId;
+      try {
+        await threadsState.deleteThread(threadId);
+        if (wasActive) {
+          navigate("/chat", { replace: true });
+        }
+      } catch (error) {
+        console.error("Failed to delete thread:", error);
+        toast(error?.message || "Unable to delete thread", { tone: "error" });
+      }
+    },
+    [navigate, threadsState]
+  );
   if (needsOnboarding && !onboardingExempt) {
     return html`<${Navigate} to="/welcome" replace />`;
   }
@@ -88,6 +110,7 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
           onClose=${sidebar.close}
           onNewChat=${sidebar.newChat}
           onSelectThread=${sidebar.selectThread}
+          onDeleteThread=${handleDeleteThread}
         />
       </div>
 
@@ -114,6 +137,7 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
               gatewayStatus: status,
               gatewayStatusQuery: statusQuery,
               currentUser: profile,
+              isChecking,
               isAdmin,
               threadsState,
             }}

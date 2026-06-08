@@ -60,7 +60,9 @@ pub use capability_surface_filter::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
 };
 pub use compaction_task::{
-    HostManagedLoopCompactionPort, default_host_managed_loop_compaction_port,
+    ACTIVE_TASK_COMPACTION_PROMPT_ID, DEFAULT_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
+    active_task_compaction_prompt_id, default_compaction_prompt_id,
+    default_host_managed_loop_compaction_port, host_managed_loop_compaction_port_with_prompt_id,
 };
 pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
@@ -98,6 +100,13 @@ pub use subagent_spawn_port::{
     SubagentThreadMetadata,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub const COMPACTION_SYSTEM_PROMPT: &str =
+    include_str!("../prompts/compaction_summarizer_fresh.md");
+pub const ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT: &str = concat!(
+    include_str!("../prompts/compaction_summarizer_fresh.md"),
+    "\n\n",
+    include_str!("../prompts/active_task_compaction_append.md"),
+);
 pub const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/failure_explanation.md");
 pub use token_estimator::{
@@ -633,6 +642,27 @@ where
                     "tool result reference summary is not safe",
                 )
             })?;
+        let model_observation = request
+            .model_observation
+            .and_then(|observation| match observation.validate() {
+                Ok(()) => match serde_json::to_value(observation) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        tracing::warn!(
+                            reason = %error,
+                            "dropping unserializable model-visible tool observation and preserving safe summary"
+                        );
+                        None
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        reason = %error,
+                        "dropping invalid model-visible tool observation and preserving safe summary"
+                    );
+                    None
+                }
+            });
         let record = self
             .thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
@@ -641,6 +671,7 @@ where
                 turn_run_id: self.run_context.run_id.to_string(),
                 result_ref: request.result_ref.as_str().to_string(),
                 safe_summary,
+                model_observation,
                 provider_call: request
                     .provider_call
                     .map(provider_call_reference_to_envelope),
@@ -1703,8 +1734,8 @@ fn tool_result_content_for_context_message(
     if message.kind != MessageKind::ToolResultReference {
         return Ok(None);
     }
-    let envelope: ToolResultReferenceEnvelope =
-        serde_json::from_str(&message.content).map_err(|error| {
+    let envelope =
+        ToolResultReferenceEnvelope::from_json_str(&message.content).map_err(|error| {
             raw_agent_loop_host_error(
                 "model_context",
                 "decode_tool_result_reference",

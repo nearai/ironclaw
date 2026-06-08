@@ -7,27 +7,16 @@ use ironclaw_agent_loop::{
     test_support::{
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
         ScriptedCapabilityOutcome, ScriptedModelResponse, capability_descriptor, capability_id,
+        compaction::{active_task_preserving_compaction_index, compaction_metadata},
     },
 };
 use ironclaw_turns::{
     LoopBlockedKind, LoopExit, LoopFailureKind, TurnRunId,
     run_profile::{
-        ConcurrencyHint, LoopCompactionResponse, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopProgressEvent, LoopRunInfoPort, LoopSummaryArtifactId,
+        ConcurrencyHint, LoopCompactionResponse, LoopContextCompactionKind, LoopProgressEvent,
+        LoopRunInfoPort, LoopSummaryArtifactId,
     },
 };
-
-fn compaction_metadata(
-    sequence: u64,
-    kind: LoopContextCompactionKind,
-    estimated_tokens: u64,
-) -> LoopContextCompactionMetadata {
-    LoopContextCompactionMetadata {
-        sequence,
-        kind,
-        estimated_tokens,
-    }
-}
 
 #[tokio::test]
 async fn reply_only_completes() {
@@ -55,11 +44,7 @@ async fn reply_only_completes() {
 async fn compaction_failure_returns_failed_exit() {
     let (host, _) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::reply_only("hi"))
-        .prompt_compaction_index(vec![compaction_metadata(
-            1,
-            LoopContextCompactionKind::User,
-            10,
-        )])
+        .prompt_compaction_index(active_task_preserving_compaction_index())
         .build();
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.compaction_state.force_compact_on_next_iteration = true;
@@ -83,10 +68,7 @@ async fn compaction_success_updates_state_and_emits_progress() {
     let (host, _) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::reply_only("hi"))
         .prompt_compaction_indexes(vec![
-            vec![
-                compaction_metadata(1, LoopContextCompactionKind::User, 10),
-                compaction_metadata(2, LoopContextCompactionKind::Assistant, 10),
-            ],
+            active_task_preserving_compaction_index(),
             vec![compaction_metadata(
                 2,
                 LoopContextCompactionKind::Assistant,

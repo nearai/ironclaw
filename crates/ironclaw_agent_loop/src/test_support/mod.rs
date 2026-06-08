@@ -36,6 +36,9 @@ use ironclaw_turns::{
     },
 };
 
+/// Compaction prompt-index fixtures exposed for crate integration tests.
+pub mod compaction;
+
 use crate::state::{
     CapabilityCallSignature, CheckpointKind, LoopExecutionState, RecoveryAttemptClass,
     RecoveryStrategyState,
@@ -1084,6 +1087,7 @@ fn scripted_capability_outcome(
             Ok(CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind,
                 safe_summary: "failed".to_string(),
+                detail: None,
             }))
         }
     }

@@ -16,9 +16,11 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
     AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound,
-    ProductAdapterError, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
-    ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind, ProjectionCursor,
+    ProductAdapterError, ProductAdapterId, ProductControlActionPayload, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
+    ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
+    ProductRejectionDisposition, ProductRejectionKind, ProductTriggerReason, ProductWorkflow,
+    ProductWorkflowRejectionKind, ProjectionCursor, ProjectionReadPayload,
     ProjectionSubscriptionPayload, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
     TrustedInboundContext, UserMessagePayload,
 };
@@ -45,8 +47,8 @@ use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetRunStateRequest, LoopGateRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
-    TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
 fn sample_envelope(event_suffix: &str) -> ProductInboundEnvelope {
@@ -1602,6 +1604,33 @@ async fn noop_returns_noop_ack() {
 }
 
 #[tokio::test]
+async fn typed_cancel_control_action_uses_submit_door_without_command_text() {
+    let (workflow, inbound, ledger) = build_workflow();
+    let envelope = sample_envelope_with_payload(
+        "typed-cancel-control",
+        ProductInboundPayload::ControlAction(ProductControlActionPayload::CancelRun {
+            run_id: TurnRunId::new(),
+        }),
+    );
+
+    let ack = workflow
+        .submit_inbound(envelope)
+        .await
+        .expect("typed control action returns product-safe ack");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Rejected(ProductRejection {
+            kind: ProductRejectionKind::InvalidRequest,
+            disposition: ProductRejectionDisposition::Permanent,
+            ..
+        })
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
 async fn subscription_request_via_accept_inbound_rejects_before_mutating_ledger() {
     let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
     let envelope = sample_envelope_with_payload(
@@ -1633,6 +1662,139 @@ async fn subscription_request_via_accept_inbound_rejects_before_mutating_ledger(
 }
 
 #[tokio::test]
+async fn subscription_request_via_submit_inbound_rejects_before_mutating_ledger() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let envelope = sample_envelope_with_payload(
+        "projection-subscribe-wrong-submit-door",
+        ProductInboundPayload::SubscriptionRequest(
+            ProjectionSubscriptionPayload::new(None, None).expect("valid subscription"),
+        ),
+    );
+
+    let err = workflow.submit_inbound(envelope).await.expect_err(
+        "projection subscriptions use the subscribe projection door, not submit_inbound",
+    );
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            ..
+        }
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(binding_service.resolve_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
+async fn projection_read_via_submit_inbound_rejects_before_mutating_ledger() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let envelope = sample_envelope_with_payload(
+        "projection-read-wrong-entrypoint",
+        ProductInboundPayload::ProjectionRead(
+            ProjectionReadPayload::new(None, None, Some(25)).expect("valid read"),
+        ),
+    );
+
+    let err = workflow
+        .submit_inbound(envelope)
+        .await
+        .expect_err("projection reads use the read projection door, not submit_inbound");
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            ..
+        }
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(binding_service.resolve_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
+async fn projection_read_resolves_external_refs_through_read_door() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let binding = fake_binding();
+    let cursor = ProjectionCursor::new("cursor:projection-read-1").expect("valid cursor");
+    let envelope = sample_envelope_with_payload(
+        "projection-read-1",
+        ProductInboundPayload::ProjectionRead(
+            ProjectionReadPayload::new(
+                Some(binding.thread_id.as_str().to_string()),
+                Some(cursor.clone()),
+                Some(50),
+            )
+            .expect("valid read"),
+        ),
+    );
+    binding_service.program_binding(envelope.source_binding_key(), binding.clone());
+    let input = ProductProjectionReadInput::from_inbound_envelope(&envelope).expect("read input");
+
+    let read = workflow
+        .read_projection(input)
+        .await
+        .expect("projection read");
+
+    assert_eq!(read.actor.user_id, binding.actor_user_id);
+    assert_eq!(read.scope.tenant_id, binding.tenant_id);
+    assert_eq!(read.scope.agent_id, binding.agent_id);
+    assert_eq!(read.scope.project_id, binding.project_id);
+    assert_eq!(read.scope.thread_id, binding.thread_id);
+    assert_eq!(read.after_cursor, Some(cursor));
+    assert_eq!(read.limit, Some(50));
+    assert_eq!(binding_service.resolve_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
+async fn projection_read_accepts_canonical_subject_without_inbound_envelope() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let binding = fake_binding();
+    let actor = TurnActor::new(binding.actor_user_id.clone());
+    let scope = TurnScope::new(
+        binding.tenant_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+    );
+    let cursor = ProjectionCursor::new("cursor:canonical-read").expect("valid cursor");
+
+    let read = workflow
+        .read_projection(ProductProjectionReadInput::new(
+            ProductProjectionSubject::canonical(actor.clone(), scope.clone()),
+            Some(binding.thread_id.as_str().to_string()),
+            Some(cursor.clone()),
+            Some(10),
+        ))
+        .await
+        .expect("canonical projection read");
+
+    assert_eq!(read.actor, actor);
+    assert_eq!(read.scope, scope);
+    assert_eq!(read.after_cursor, Some(cursor));
+    assert_eq!(read.limit, Some(10));
+    assert_eq!(binding_service.resolve_count(), 0);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
 async fn projection_subscription_resolves_through_binding_service() {
     let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
     let binding = fake_binding();
@@ -1649,8 +1811,10 @@ async fn projection_subscription_resolves_through_binding_service() {
     );
     binding_service.program_binding(envelope.source_binding_key(), binding.clone());
 
+    let input =
+        ProductProjectionSubscribeInput::from_inbound_envelope(&envelope).expect("subscribe input");
     let subscription = workflow
-        .resolve_projection_subscription(envelope)
+        .subscribe_projection(input)
         .await
         .expect("projection subscription");
 
@@ -1661,6 +1825,38 @@ async fn projection_subscription_resolves_through_binding_service() {
     assert_eq!(subscription.scope.thread_id, binding.thread_id);
     assert_eq!(subscription.after_cursor, Some(cursor));
     assert_eq!(binding_service.resolve_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
+async fn projection_subscription_accepts_canonical_subject_without_inbound_envelope() {
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let binding = fake_binding();
+    let actor = TurnActor::new(binding.actor_user_id.clone());
+    let scope = TurnScope::new(
+        binding.tenant_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+    );
+    let cursor = ProjectionCursor::new("cursor:canonical-subscribe").expect("valid cursor");
+
+    let subscription = workflow
+        .subscribe_projection(ProductProjectionSubscribeInput::new(
+            ProductProjectionSubject::canonical(actor.clone(), scope.clone()),
+            Some(binding.thread_id.as_str().to_string()),
+            Some(cursor.clone()),
+        ))
+        .await
+        .expect("canonical projection subscription");
+
+    assert_eq!(subscription.actor, actor);
+    assert_eq!(subscription.scope, scope);
+    assert_eq!(subscription.after_cursor, Some(cursor));
+    assert_eq!(binding_service.resolve_count(), 0);
     assert_eq!(inbound.accepted_count(), 0);
     assert_eq!(ledger.settled_count(), 0);
     assert_eq!(ledger.in_flight_count(), 0);
@@ -2811,6 +3007,211 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
             .map(UserId::as_str),
         Some("user:eng-team")
     );
+}
+
+#[tokio::test]
+async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
+    let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
+    let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
+    let installation_id =
+        ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            tenant_id.clone(),
+            adapter_kind,
+            installation_id,
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations.clone();
+    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
+        conversations;
+    let subject_resolver = Arc::new(RecordingSubjectRouteResolver::default());
+    let actor_resolver = Arc::new(RecordingProductActorUserResolver::new([(
+        ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+        UserId::new("user:alice").expect("user"),
+    )]));
+    let scope = ProductInstallationScope::with_default_scope(
+        tenant_id,
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_default_subject_user_id(UserId::new("user:default-team").expect("default subject"))
+    .with_conversation_subject_route(
+        ProductConversationRouteKey::new(Some("T-team".to_string()), "C-static".to_string())
+            .expect("static route key"),
+        UserId::new("user:static-team").expect("static route subject"),
+    )
+    .with_conversation_subject_route_resolver(subject_resolver.clone())
+    .without_default_subject_for_unrouted_shared_conversations()
+    .with_actor_user_resolver(actor_resolver.clone(), actor_pairings);
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        scope,
+    )]);
+    let binding = ProductConversationBindingService::new(conversation_port.clone(), resolver);
+
+    let unrouted = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-default-disabled").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-ops", Some("thread-1"), Some("msg-1"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello unrouted", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+    let error = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&unrouted))
+        .await
+        .expect_err("unrouted shared binding must not fall back to default subject");
+    assert!(matches!(
+        error,
+        ProductWorkflowError::BindingRequired { reason }
+            if reason == "shared product route requires a configured subject user"
+    ));
+    assert!(
+        actor_resolver.calls().is_empty(),
+        "unrouted shared route must fail before actor resolver side effects"
+    );
+
+    let static_route = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-static-with-default-disabled").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-static", Some("thread-1"), Some("msg-2"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello static", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+    let resolved_static = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&static_route))
+        .await
+        .expect("static shared route still resolves without default fallback");
+    assert_eq!(
+        resolved_static.subject_user_id.as_ref().map(UserId::as_str),
+        Some("user:static-team")
+    );
+
+    subject_resolver.set_subject(UserId::new("user:dynamic-team").expect("dynamic route subject"));
+    let dynamic_route = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-with-default-disabled").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-dyn", Some("thread-1"), Some("msg-3"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello dynamic", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+    let resolved_dynamic = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&dynamic_route))
+        .await
+        .expect("dynamic shared route still resolves without default fallback");
+    assert_eq!(
+        resolved_dynamic
+            .subject_user_id
+            .as_ref()
+            .map(UserId::as_str),
+        Some("user:dynamic-team")
+    );
+
+    subject_resolver.set_subject(UserId::new("user:reassigned-team").expect("route subject"));
+    let reassigned_dynamic_route = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-with-default-disabled-reassigned").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-dyn", Some("thread-1"), Some("msg-4"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "hello reassigned dynamic",
+                vec![],
+                ProductTriggerReason::BotMention,
+            )
+            .expect("message"),
+        ),
+    );
+    let reassigned_error = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(
+            &reassigned_dynamic_route,
+        ))
+        .await
+        .expect_err("existing shared binding must not switch subjects without rebinding");
+    assert!(matches!(
+        reassigned_error,
+        ProductWorkflowError::BindingAccessDenied
+    ));
+
+    subject_resolver.clear_subject();
+    let deleted_dynamic_route = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-with-default-disabled-deleted").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-dyn", Some("thread-1"), Some("msg-5"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "hello deleted dynamic",
+                vec![],
+                ProductTriggerReason::BotMention,
+            )
+            .expect("message"),
+        ),
+    );
+    let error = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&deleted_dynamic_route))
+        .await
+        .expect_err("existing shared binding must stop resolving after route removal");
+    assert!(matches!(
+        error,
+        ProductWorkflowError::BindingRequired { reason }
+            if reason == "shared product route requires a configured subject user"
+    ));
+
+    let deleted_dynamic_route_lookup = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-with-default-disabled-deleted-lookup")
+            .expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-dyn", Some("thread-1"), Some("msg-6"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "lookup deleted dynamic",
+                vec![],
+                ProductTriggerReason::BotMention,
+            )
+            .expect("message"),
+        ),
+    );
+    let lookup_error = binding
+        .lookup_binding(ResolveBindingRequest::from_envelope(
+            &deleted_dynamic_route_lookup,
+        ))
+        .await
+        .expect_err("existing shared binding lookup must stop after route removal");
+    assert!(matches!(
+        lookup_error,
+        ProductWorkflowError::BindingRequired { reason }
+            if reason == "shared product route requires a configured subject user"
+    ));
 }
 
 #[tokio::test]
