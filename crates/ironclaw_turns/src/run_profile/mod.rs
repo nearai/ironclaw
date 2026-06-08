@@ -15,6 +15,7 @@ mod instruction_bundle;
 mod memory_context;
 mod milestones;
 mod model;
+mod model_observation;
 mod model_work;
 mod policy;
 mod prompt;
@@ -82,6 +83,12 @@ pub use model::{
     HostManagedLoopModelPort, LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
     LoopModelGatewayRequest, LoopModelPolicyGuard, ModelCallOutcome, NoOpBudgetAccountant,
     NoOpPolicyGuard,
+};
+pub use model_observation::{
+    CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputIssueCode, CapabilityInputRepair,
+    CapabilityRecoveryHint, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+    ModelVisibleToolObservation, ObservationTrust, SameCallRetryConstraint, ToolObservationDetail,
+    ToolObservationStatus, ToolRecoveryObservation,
 };
 pub use model_work::{ModelWorkKind, ModelWorkOutcome, ModelWorkRequest, ModelWorkUsage};
 pub use policy::{

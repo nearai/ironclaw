@@ -26,11 +26,12 @@ use ironclaw_product_workflow::{
     LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectionCursor,
     RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
@@ -39,9 +40,28 @@ use ironclaw_product_workflow::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::WebUiV2HttpError;
-use crate::router::WebUiV2State;
+use crate::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WebUiV2SessionResponse {
+    pub tenant_id: String,
+    pub user_id: String,
+    pub capabilities: WebUiV2Capabilities,
+}
+
+/// `GET /api/webchat/v2/session`
+pub async fn get_session(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Json<WebUiV2SessionResponse> {
+    Json(WebUiV2SessionResponse {
+        tenant_id: caller.tenant_id.to_string(),
+        user_id: caller.user_id.to_string(),
+        capabilities: state.capabilities(),
+    })
+}
 
 /// `POST /api/webchat/v2/threads`
 ///
@@ -52,6 +72,19 @@ pub async fn create_thread(
     Json(body): Json<WebUiCreateThreadRequest>,
 ) -> Result<Json<RebornCreateThreadResponse>, WebUiV2HttpError> {
     let response = state.services().create_thread(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/threads/{thread_id}`
+pub async fn delete_thread(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(thread_id): Path<String>,
+) -> Result<Json<RebornDeleteThreadResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .delete_thread(caller, RebornDeleteThreadRequest { thread_id })
+        .await?;
     Ok(Json(response))
 }
 

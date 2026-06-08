@@ -78,6 +78,7 @@ function AuthenticatedLayout({ auth }) {
       <${GatewayLayout}
         token=${auth.token}
         profile=${auth.profile}
+        isChecking=${auth.isChecking}
         isAdmin=${auth.isAdmin}
         onSignOut=${auth.signOut}
       />

@@ -15,9 +15,11 @@ import { useSettings } from "./hooks/useSettings.js";
 
 export function SettingsPage() {
   const t = useT();
-  const { tab = "inference" } = useParams();
+  const { tab: requestedTab } = useParams();
   const navigate = useNavigate();
-  const { gatewayStatus, gatewayStatusQuery, isAdmin = true } = useOutletContext();
+  const { gatewayStatus, gatewayStatusQuery, isAdmin = false } = useOutletContext();
+  const defaultTab = isAdmin ? "inference" : "language";
+  const tab = requestedTab || defaultTab;
   const {
     settings,
     query,
@@ -33,10 +35,6 @@ export function SettingsPage() {
   React.useEffect(() => {
     setSearchQuery("");
   }, [tab]);
-
-  const handleBack = React.useCallback(() => {
-    navigate("/settings/inference");
-  }, [navigate]);
 
   const isLoading = query.isLoading;
 
@@ -70,8 +68,18 @@ export function SettingsPage() {
     language: html`<${LanguageTab} searchQuery=${searchQuery} />`,
   };
 
-  if (!tabContent[tab] || (!isAdmin && tab === "users")) {
-    return html`<${Navigate} to="/settings/inference" replace />`;
+  const isOperatorTab = (id) => id === "users" || id === "inference";
+  const tabContentHas = (id) => Object.prototype.hasOwnProperty.call(tabContent, id);
+  const visibleTabIds = Object.keys(tabContent).filter((id) => isAdmin || !isOperatorTab(id));
+  const defaultTabIsVisible = tabContentHas(defaultTab) && visibleTabIds.includes(defaultTab);
+  const redirectTab = defaultTabIsVisible ? defaultTab : visibleTabIds[0] || "language";
+
+  const handleBack = React.useCallback(() => {
+    navigate(`/settings/${redirectTab}`);
+  }, [redirectTab, navigate]);
+
+  if (!tabContentHas(tab) || (!isAdmin && isOperatorTab(tab))) {
+    return html`<${Navigate} to=${`/settings/${redirectTab}`} replace />`;
   }
 
   return html`
