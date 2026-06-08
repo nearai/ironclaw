@@ -471,7 +471,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
         let CapabilityResultWrite {
             run_context,
             input_ref,
@@ -512,7 +512,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             self.display_previews
                 .attach_timeline_message_id(invocation_id, message_id);
         }
-        Ok(result_ref)
+        Ok((result_ref, output_bytes))
     }
 
     async fn update_capability_result(
@@ -520,7 +520,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
         output: serde_json::Value,
-    ) -> Result<(), AgentLoopHostError> {
+    ) -> Result<u64, AgentLoopHostError> {
         ensure_local_dev_ref_scope("result", result_ref.as_str(), run_context)?;
         let bytes = staged_value_bytes(&output)?;
         let mut results = self.results.lock().map_err(|_| capability_io_error())?;
@@ -543,7 +543,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             ));
         }
         results.insert_measured(result_ref.as_str().to_string(), output, bytes);
-        Ok(())
+        Ok(bytes as u64)
     }
 
     async fn delete_capability_result(

@@ -1417,11 +1417,22 @@ pub enum CapabilityOutcome {
         gate_ref: LoopGateRef,
         result_ref: LoopResultRef,
         safe_summary: String,
+        /// Size in bytes of the payload staged at `result_ref` time
+        /// (i.e. the serialized capability output, not the size of this struct).
+        /// Propagated from LoopCapabilityResultWriter::write_capability_result.
+        /// Used by ByteCapStrategy to evaluate per-capability byte caps.
+        #[serde(default)]
+        byte_len: u64,
     },
     SpawnedChildRun {
         child_run_id: TurnRunId,
         result_ref: LoopResultRef,
         safe_summary: String,
+        /// Size in bytes of the payload staged at `result_ref` time
+        /// (i.e. the serialized capability output, not the size of this struct).
+        /// Same semantics as AwaitDependentRun.byte_len.
+        #[serde(default)]
+        byte_len: u64,
     },
     Denied(CapabilityDenied),
     Failed(CapabilityFailure),
@@ -1455,6 +1466,9 @@ pub struct CapabilityResultMessage {
     /// with older hosts.
     #[serde(default)]
     pub terminate_hint: bool,
+    /// Serialized output size in bytes — pure metadata, no PII.
+    #[serde(default)]
+    pub byte_len: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
