@@ -179,9 +179,12 @@ impl<'a> PromptPlanningPipeline<'a> {
             return Ok(PromptStep::Exit(exit));
         }
 
-        // NEW: skip_model_this_iteration short-circuit
-        // PostCapabilityStage flipped this flag last turn after CompactionPolicy
-        // tripped. Force the compaction here and skip the model call entirely.
+        // PostCapabilityStage set skip_model_this_iteration after a byte-cap
+        // trip on the prior turn. Compact here and short-circuit before
+        // building the prompt bundle — no surface filter, no prompt assembly,
+        // no model call this iteration. PromptStep::SkipModel signals
+        // canonical.rs to route past Model/Capability/PostCapability straight
+        // to stop.observe().
         if self.state.post_capability_state.skip_model_this_iteration {
             self.state.post_capability_state.skip_model_this_iteration = false;
             let compaction = PromptCompactionStep::new(self.ctx, &mut self.pending_input_ack)

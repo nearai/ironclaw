@@ -306,8 +306,6 @@ impl DefaultExecutorPipeline {
                     // the synthetic summary through stop.observe + stop.decide
                     // so noprogress detection sees the turn (without counting it
                     // as AfterCapabilityBatch evidence).
-                    //
-                    // TODO: caller-level test covered by Step 9.
                     let skipped_state = *skipped_state;
                     let summary = crate::strategies::TurnSummary::compaction_only();
 

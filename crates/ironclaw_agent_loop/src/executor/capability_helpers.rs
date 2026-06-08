@@ -374,13 +374,18 @@ pub(super) fn push_completed_result(
     result: CapabilityResultMessage,
 ) {
     state.recovery_state = state.recovery_state.cleared_attempts();
-    let cap = capability_id.clone();
-    state
+    if let Some(n) = state
         .post_capability_state
         .pending_capability_bytes
-        .entry(cap)
-        .and_modify(|n| *n = n.saturating_add(result.byte_len))
-        .or_insert(result.byte_len);
+        .get_mut(capability_id)
+    {
+        *n = n.saturating_add(result.byte_len);
+    } else {
+        state
+            .post_capability_state
+            .pending_capability_bytes
+            .insert(capability_id.clone(), result.byte_len);
+    }
     state.result_refs.push(result.result_ref);
 }
 

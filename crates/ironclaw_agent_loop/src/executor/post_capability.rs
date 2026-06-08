@@ -72,20 +72,25 @@ impl ExecutorStage<TurnCompletedStep> for PostCapabilityStage {
         };
 
         // R1: proactive compaction policy check.
-        if let Some(initiator) = self.policy.should_force_compact(&state) {
-            state.compaction_state.force_compact_on_next_iteration = true;
-            state.post_capability_state.skip_model_this_iteration = true;
-            state.post_capability_state.pending_capability_bytes.clear();
+        // Only consult policy if any capability bytes accumulated this turn.
+        // AssistantReply turns reach here with an empty map and gain nothing
+        // from the policy scan + Arc<dyn> virtual dispatch.
+        if !state.post_capability_state.pending_capability_bytes.is_empty() {
+            if let Some(initiator) = self.policy.should_force_compact(&state) {
+                state.compaction_state.force_compact_on_next_iteration = true;
+                state.post_capability_state.skip_model_this_iteration = true;
+                state.post_capability_state.pending_capability_bytes.clear();
 
-            CheckpointStage
-                .emit_progress(
-                    ctx,
-                    LoopProgressEvent::CompactionStarted {
-                        task_id: SystemInferenceTaskId::new(),
-                        initiator,
-                    },
-                )
-                .await;
+                CheckpointStage
+                    .emit_progress(
+                        ctx,
+                        LoopProgressEvent::CompactionStarted {
+                            task_id: SystemInferenceTaskId::new(),
+                            initiator,
+                        },
+                    )
+                    .await;
+            }
         }
 
         Ok(TurnCompletedStep::Continue { state, summary })
