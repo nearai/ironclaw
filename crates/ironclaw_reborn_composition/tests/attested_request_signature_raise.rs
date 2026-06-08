@@ -188,8 +188,7 @@ async fn custodial_request_signature_raises_gate_and_existing_resolve_path_conti
     let signing_gate_ref = SigningGateRef::new(gate_ref_str);
     let binding = composition
         .bindings()
-        .get(&signing_gate_ref)
-        .await
+        .get_sync(&signing_gate_ref)
         .expect("authoritative binding persisted on raise");
     // The persisted decoded tx is exactly what resolve recomputes the hash from.
     assert_eq!(binding.decoded, decoded);
@@ -345,8 +344,7 @@ async fn signing_context_uses_user_id_when_no_project_or_agent() {
     let signing_gate_ref = SigningGateRef::new(format!("gate:attested-{}", gate.gate_id.as_str()));
     let binding = composition
         .bindings()
-        .get(&signing_gate_ref)
-        .await
+        .get_sync(&signing_gate_ref)
         .expect("binding persisted on raise");
     // Both fall back to the user id when project/agent are absent.
     assert_eq!(binding.context.scope.as_str(), user_id);
@@ -543,8 +541,7 @@ async fn concurrent_register_of_same_gate_serializes_to_one_winner() {
     let gate_ref = SigningGateRef::new(format!("gate:attested-{}", gate.gate_id.as_str()));
     let binding = seed
         .bindings()
-        .get(&gate_ref)
-        .await
+        .get_sync(&gate_ref)
         .expect("seed binding persisted");
 
     // Fresh composition that has never seen this gate. Two concurrent

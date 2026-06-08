@@ -24,7 +24,7 @@ use alloy_consensus::TxEip1559;
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 
 use ironclaw_attestation::RenderingSchemaVersion;
-use ironclaw_attested_runtime::{AttestedGateBinding, ContinuationError};
+use ironclaw_attested_runtime::{AttestedGateBinding, BindingKey, ContinuationError};
 use ironclaw_attested_store::ChainRpcEndpoints;
 use ironclaw_chain_signing::{ChainKeyId, SecretsKeyStore};
 use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
@@ -298,7 +298,13 @@ async fn durable_libsql_binding_survives_reassembly() {
     )
     .await
     .expect("second assembly");
-    let recovered = composition.bindings().get(&gate_ref).await;
+    let recovered = composition
+        .bindings()
+        .get(&BindingKey::new(
+            SigningTenantId::new(TENANT),
+            gate_ref.clone(),
+        ))
+        .await;
     assert!(
         recovered.is_some(),
         "durable binding must survive a process restart / re-assembly"
@@ -429,5 +435,14 @@ async fn durable_postgres_assembles_and_runs_migrations() {
         .register_attested_gate(gate_ref.clone(), binding, 0, None)
         .await
         .expect("binding write round-trips (migrations present)");
-    assert!(composition.bindings().get(&gate_ref).await.is_some());
+    assert!(
+        composition
+            .bindings()
+            .get(&BindingKey::new(
+                SigningTenantId::new(TENANT),
+                gate_ref.clone()
+            ))
+            .await
+            .is_some()
+    );
 }

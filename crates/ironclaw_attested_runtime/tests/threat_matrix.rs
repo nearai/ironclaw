@@ -31,7 +31,7 @@ use ironclaw_attestation::{
     SigningLedgerState,
 };
 use ironclaw_attested_runtime::{
-    AttestedGateBinding, AttestedGateBindingStore, AttestedSignerContinuationDriver,
+    AttestedGateBinding, AttestedGateBindingStore, AttestedSignerContinuationDriver, BindingKey,
     ContinuationError, CustodialMainnetShipGate, InMemoryAttestedGateBindingStore,
     InMemoryResumeGuard, ProviderRegistry, ResumeGuard, RuntimeAttestedResumePort, SyncBindingRead,
     approved_tx_hash_ref_hex,
@@ -384,7 +384,7 @@ async fn put_binding_res(
 ) -> Result<(), ironclaw_attested_runtime::BindingError> {
     bindings
         .put(
-            SigningGateRef::new(GATE),
+            BindingKey::new(ctx.tenant.clone(), SigningGateRef::new(GATE)),
             AttestedGateBinding {
                 provider_id: ProviderId::Custodial,
                 context: ctx.clone(),
@@ -483,8 +483,14 @@ async fn threat_1_sealed_grant_one_shot_claim() {
     let grants = InMemorySealedGrantStore::new();
     seal_grant(&grants, &ctx, hash).await;
     let key = GrantKey::from_context(&ctx, hash);
-    grants.claim(&key).await.expect("first claim wins");
-    let err = grants.claim(&key).await.expect_err("second claim fails");
+    grants
+        .claim(&key, ironclaw_attestation::now_unix_millis())
+        .await
+        .expect("first claim wins");
+    let err = grants
+        .claim(&key, ironclaw_attestation::now_unix_millis())
+        .await
+        .expect_err("second claim fails");
     assert_eq!(err, ironclaw_attestation::GrantError::AlreadyClaimed);
     let _ = keystore; // keep the bound key alive for parity with other cases
 }
@@ -539,12 +545,15 @@ async fn driver_rechecks_inconsistent_binding() {
     impl AttestedGateBindingStore for InconsistentStore {
         async fn put(
             &self,
-            _gate_ref: SigningGateRef,
+            _key: ironclaw_attested_runtime::BindingKey,
             _binding: AttestedGateBinding,
         ) -> Result<(), ironclaw_attested_runtime::BindingError> {
             Ok(())
         }
-        async fn get(&self, _gate_ref: &SigningGateRef) -> Option<AttestedGateBinding> {
+        async fn get(
+            &self,
+            _key: &ironclaw_attested_runtime::BindingKey,
+        ) -> Option<AttestedGateBinding> {
             Some(self.0.clone())
         }
     }
@@ -995,6 +1004,7 @@ async fn binding_write_rejects_chain_mismatch() {
 
     // The decoded tx is on eip155:11155111 (testnet); bind a MAINNET chain. The
     // store must reject this so a testnet/mainnet smuggle never persists.
+    let tenant = ctx.tenant.clone();
     let binding = AttestedGateBinding {
         provider_id: ProviderId::Custodial,
         context: ctx,
@@ -1006,7 +1016,7 @@ async fn binding_write_rejects_chain_mismatch() {
     };
     let bindings = InMemoryAttestedGateBindingStore::new();
     let err = bindings
-        .put(SigningGateRef::new(GATE), binding)
+        .put(BindingKey::new(tenant, SigningGateRef::new(GATE)), binding)
         .await
         .expect_err("chain mismatch must be rejected");
     assert_eq!(err, ironclaw_attested_runtime::BindingError::ChainMismatch);
@@ -1130,7 +1140,7 @@ async fn put_external_binding(
 ) {
     bindings
         .put(
-            SigningGateRef::new(GATE),
+            BindingKey::new(ctx.tenant.clone(), SigningGateRef::new(GATE)),
             AttestedGateBinding {
                 provider_id,
                 context: ctx.clone(),
@@ -1260,12 +1270,15 @@ async fn driver_rejects_binding_chain_mismatch() {
     impl AttestedGateBindingStore for ChainMismatchStore {
         async fn put(
             &self,
-            _gate_ref: SigningGateRef,
+            _key: ironclaw_attested_runtime::BindingKey,
             _binding: AttestedGateBinding,
         ) -> Result<(), ironclaw_attested_runtime::BindingError> {
             Ok(())
         }
-        async fn get(&self, _gate_ref: &SigningGateRef) -> Option<AttestedGateBinding> {
+        async fn get(
+            &self,
+            _key: &ironclaw_attested_runtime::BindingKey,
+        ) -> Option<AttestedGateBinding> {
             Some(self.0.clone())
         }
     }

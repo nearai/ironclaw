@@ -6,12 +6,21 @@
 //! UPDATE attested_sealed_grants
 //!    SET status = 'claimed', claimed_at_ms = $now
 //!  WHERE key_hash = $key AND status = 'sealed'
+//!    AND (expiry_ms IS NULL OR expiry_ms > $now)
 //! ```
 //!
 //! Exactly one concurrent claimer can match `status = 'sealed'` and flip the
 //! row; the row count is the verdict. We never read-then-write, so a
 //! `Stuck -> InProgress` job recovery that double-claims still resolves to one
 //! winner. Rows are never deleted — a claim stamps `claimed_at_ms` in place.
+//!
+//! Expiry is enforced in the same CAS: a still-`sealed` row whose `expiry_ms`
+//! has passed (`expiry_ms <= $now`) is NOT flipped, leaving it `sealed` (never
+//! consumed, never deleted). When the CAS matches nothing the backend
+//! disambiguates `NotFound` (no row), `AlreadyClaimed` (row is `claimed`), and
+//! `Expired` (row is still `sealed` but past `expiry_ms`). `$now` is the runtime
+//! clock supplied by the caller — the store never reads the wall clock, so
+//! resume stays deterministic and expiry is testable.
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use async_trait::async_trait;
@@ -42,14 +51,6 @@ CREATE TABLE IF NOT EXISTS attested_sealed_grants (
     expiry_ms         BIGINT,
     claimed_at_ms     BIGINT
 );";
-
-#[cfg(any(feature = "postgres", feature = "libsql"))]
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or(0)
-}
 
 // ---------------------------------------------------------------------------
 // PostgreSQL
@@ -127,18 +128,20 @@ mod postgres {
             Ok(())
         }
 
-        async fn claim(&self, key: &GrantKey) -> Result<ClaimedGrant, GrantError> {
+        async fn claim(&self, key: &GrantKey, now_ms: i64) -> Result<ClaimedGrant, GrantError> {
             let client = self.client().await?;
             let key_hash = grant_key_hash(key);
-            // Atomic one-shot CAS + read-back of created_at in a single
-            // statement. RETURNING avoids a read-then-write race entirely.
+            // Atomic one-shot CAS + expiry guard + read-back of created_at in a
+            // single statement. RETURNING avoids a read-then-write race entirely.
+            // An expired (or claimed) row matches nothing and is left untouched.
             let claimed = client
                 .query_opt(
                     "UPDATE attested_sealed_grants \
                      SET status = 'claimed', claimed_at_ms = $2 \
                      WHERE key_hash = $1 AND status = 'sealed' \
+                       AND (expiry_ms IS NULL OR expiry_ms > $2) \
                      RETURNING created_at_ms",
-                    &[&key_hash, &now_ms()],
+                    &[&key_hash, &now_ms],
                 )
                 .await
                 .map_err(|error| backend(&error))?;
@@ -151,18 +154,30 @@ mod postgres {
                 });
             }
 
-            // The CAS matched nothing: either the row never existed (NotFound)
-            // or it was already claimed (AlreadyClaimed). Disambiguate.
+            // The CAS matched nothing: the row never existed (NotFound), was
+            // already claimed (AlreadyClaimed), or is still sealed but past its
+            // expiry (Expired — distinct, and never consumed). Disambiguate from
+            // the persisted status + expiry.
             let existing = client
                 .query_opt(
-                    "SELECT status FROM attested_sealed_grants WHERE key_hash = $1",
+                    "SELECT status, expiry_ms FROM attested_sealed_grants WHERE key_hash = $1",
                     &[&key_hash],
                 )
                 .await
                 .map_err(|error| backend(&error))?;
             match existing {
                 None => Err(GrantError::NotFound),
-                Some(_) => Err(GrantError::AlreadyClaimed),
+                Some(row) => {
+                    let status: String = row.get(0);
+                    let expiry_ms: Option<i64> = row.get(1);
+                    if status == "sealed"
+                        && let Some(expiry_ms) = expiry_ms
+                        && now_ms >= expiry_ms
+                    {
+                        return Err(GrantError::Expired { expiry_ms, now_ms });
+                    }
+                    Err(GrantError::AlreadyClaimed)
+                }
             }
         }
     }
@@ -249,16 +264,19 @@ mod libsql_backend {
             Ok(())
         }
 
-        async fn claim(&self, key: &GrantKey) -> Result<ClaimedGrant, GrantError> {
+        async fn claim(&self, key: &GrantKey, now_ms: i64) -> Result<ClaimedGrant, GrantError> {
             let conn = self.connect().await?;
             let key_hash = grant_key_hash(key);
-            // Atomic one-shot CAS: only a row still 'sealed' is flipped.
+            // Atomic one-shot CAS + expiry guard: only a row still 'sealed' AND
+            // not past its expiry is flipped. An expired row matches nothing and
+            // is left 'sealed' (never consumed, never deleted).
             let updated = conn
                 .execute(
                     "UPDATE attested_sealed_grants \
                      SET status = 'claimed', claimed_at_ms = ?2 \
-                     WHERE key_hash = ?1 AND status = 'sealed'",
-                    libsql::params![key_hash.clone(), now_ms()],
+                     WHERE key_hash = ?1 AND status = 'sealed' \
+                       AND (expiry_ms IS NULL OR expiry_ms > ?2)",
+                    libsql::params![key_hash.clone(), now_ms],
                 )
                 .await
                 .map_err(|error| backend(&error))?;
@@ -282,17 +300,28 @@ mod libsql_backend {
                 });
             }
 
-            // CAS matched nothing: disambiguate NotFound vs AlreadyClaimed.
+            // CAS matched nothing: disambiguate NotFound, AlreadyClaimed, and
+            // Expired (still 'sealed' but past expiry — never consumed).
             let mut rows = conn
                 .query(
-                    "SELECT status FROM attested_sealed_grants WHERE key_hash = ?1",
+                    "SELECT status, expiry_ms FROM attested_sealed_grants WHERE key_hash = ?1",
                     libsql::params![key_hash],
                 )
                 .await
                 .map_err(|error| backend(&error))?;
             match rows.next().await.map_err(|error| backend(&error))? {
                 None => Err(GrantError::NotFound),
-                Some(_) => Err(GrantError::AlreadyClaimed),
+                Some(row) => {
+                    let status = row.get::<String>(0).map_err(|error| backend(&error))?;
+                    let expiry_ms = row.get::<Option<i64>>(1).map_err(|error| backend(&error))?;
+                    if status == "sealed"
+                        && let Some(expiry_ms) = expiry_ms
+                        && now_ms >= expiry_ms
+                    {
+                        return Err(GrantError::Expired { expiry_ms, now_ms });
+                    }
+                    Err(GrantError::AlreadyClaimed)
+                }
             }
         }
     }

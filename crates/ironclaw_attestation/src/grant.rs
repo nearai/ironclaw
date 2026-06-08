@@ -96,9 +96,12 @@ pub struct AttestedSigningGrant {
     /// Creation timestamp (unix millis), set by the sealer. Opaque clock at
     /// this layer; the durable backends carry the same value.
     pub created_at_ms: i64,
-    /// Optional expiry (unix millis). `None` means no expiry. Enforcement of
-    /// expiry on claim is a durable-backend concern noted for later PRs; the
-    /// field is carried now so the wire shape is stable.
+    /// Optional expiry (unix millis). `None` means no expiry. Enforced uniformly
+    /// on [`SealedGrantStore::claim`] across the in-memory reference and both
+    /// durable backends: a grant whose `expiry_ms` is `Some(exp)` with
+    /// `now_ms >= exp` is rejected with [`GrantError::Expired`] and is NEVER
+    /// consumed (it stays `Sealed`, not deleted). Defense-in-depth over the
+    /// one-shot CAS: a sealed-but-never-claimed grant cannot be claimed forever.
     pub expiry_ms: Option<i64>,
 }
 
@@ -142,6 +145,18 @@ pub enum GrantError {
     #[error("grant already claimed (one-shot)")]
     AlreadyClaimed,
 
+    /// `claim` was attempted at or after the sealed grant's `expiry_ms`. The
+    /// grant is NOT consumed (it stays `Sealed`) and is NOT deleted — expiry
+    /// fails closed, leaving the row in place for audit. Distinct from
+    /// [`GrantError::NotFound`]: the grant exists, it is simply past its window.
+    #[error("grant expired (expiry {expiry_ms}, now {now_ms})")]
+    Expired {
+        /// The grant's sealed expiry (unix millis).
+        expiry_ms: i64,
+        /// The runtime clock value the claim was evaluated against (unix millis).
+        now_ms: i64,
+    },
+
     /// A backend-internal failure with an opaque description.
     #[error("grant store error: {reason}")]
     Backend {
@@ -165,10 +180,18 @@ pub trait SealedGrantStore: Send + Sync {
 
     /// Atomically claim a sealed grant exactly once.
     ///
-    /// * First claim of a sealed key -> `Ok(ClaimedGrant)`, key now `Claimed`.
+    /// * First claim of a sealed, unexpired key -> `Ok(ClaimedGrant)`, key now
+    ///   `Claimed`.
     /// * Any later claim of that key -> `Err(GrantError::AlreadyClaimed)`.
     /// * Claim of a never-sealed (or mismatched) key -> `Err(GrantError::NotFound)`.
-    async fn claim(&self, key: &GrantKey) -> Result<ClaimedGrant, GrantError>;
+    /// * Claim of a sealed key whose `expiry_ms` is `Some(exp)` with
+    ///   `now_ms >= exp` -> `Err(GrantError::Expired { .. })`, WITHOUT consuming
+    ///   or deleting the grant (it stays `Sealed`).
+    ///
+    /// `now_ms` is the runtime clock supplied by the caller (the same source the
+    /// driver uses). The store NEVER reads the clock itself — passing it in keeps
+    /// resume deterministic and the expiry check unit-testable.
+    async fn claim(&self, key: &GrantKey, now_ms: i64) -> Result<ClaimedGrant, GrantError>;
 }
 
 /// In-memory [`SealedGrantStore`].
@@ -201,7 +224,7 @@ impl SealedGrantStore for InMemorySealedGrantStore {
         Ok(())
     }
 
-    async fn claim(&self, key: &GrantKey) -> Result<ClaimedGrant, GrantError> {
+    async fn claim(&self, key: &GrantKey, now_ms: i64) -> Result<ClaimedGrant, GrantError> {
         let mut grants = self.grants.lock().map_err(|e| GrantError::Backend {
             reason: e.to_string(),
         })?;
@@ -212,6 +235,14 @@ impl SealedGrantStore for InMemorySealedGrantStore {
         match grant.status {
             GrantStatus::Claimed => Err(GrantError::AlreadyClaimed),
             GrantStatus::Sealed => {
+                // Expiry check BEFORE the CAS: an expired grant fails closed and
+                // is NOT consumed (status stays `Sealed`, row is not deleted —
+                // "LLM data is never deleted"; expiry only marks, never burns).
+                if let Some(expiry_ms) = grant.expiry_ms
+                    && now_ms >= expiry_ms
+                {
+                    return Err(GrantError::Expired { expiry_ms, now_ms });
+                }
                 grant.status = GrantStatus::Claimed;
                 Ok(ClaimedGrant {
                     key: grant.key.clone(),
@@ -253,13 +284,20 @@ pub mod contract {
         }
     }
 
+    /// A fixed "now" used by the cases that do not exercise expiry. Far below any
+    /// expiry the tests seal, so an unexpired grant always claims.
+    const NOW: i64 = 1_000;
+
     pub async fn seal_then_claim_succeeds<S: SealedGrantStore>(store: S) {
         let k = key(1);
         store
             .seal(AttestedSigningGrant::seal(k.clone(), 1_000, None))
             .await
             .expect("seal must succeed");
-        let claimed = store.claim(&k).await.expect("first claim must succeed");
+        let claimed = store
+            .claim(&k, NOW)
+            .await
+            .expect("first claim must succeed");
         assert_eq!(claimed.key, k);
         assert_eq!(claimed.created_at_ms, 1_000);
     }
@@ -270,12 +308,48 @@ pub mod contract {
             .seal(AttestedSigningGrant::seal(k.clone(), 0, None))
             .await
             .expect("seal");
-        store.claim(&k).await.expect("first claim");
-        assert_eq!(store.claim(&k).await, Err(GrantError::AlreadyClaimed));
+        store.claim(&k, NOW).await.expect("first claim");
+        assert_eq!(store.claim(&k, NOW).await, Err(GrantError::AlreadyClaimed));
     }
 
     pub async fn claim_unsealed_is_not_found<S: SealedGrantStore>(store: S) {
-        assert_eq!(store.claim(&key(3)).await, Err(GrantError::NotFound));
+        assert_eq!(store.claim(&key(3), NOW).await, Err(GrantError::NotFound));
+    }
+
+    /// A sealed grant whose `expiry_ms` is in the past is rejected with
+    /// [`GrantError::Expired`] and is NEVER consumed: the grant stays `Sealed`,
+    /// so a subsequent claim with a clock BEFORE the expiry still succeeds (the
+    /// expired claim did not burn the one-shot). Runs against every backend.
+    pub async fn claim_expired_grant_is_rejected<S: SealedGrantStore>(store: S) {
+        let k = key(8);
+        let expiry = 5_000;
+        store
+            .seal(AttestedSigningGrant::seal(k.clone(), 0, Some(expiry)))
+            .await
+            .expect("seal");
+        // now == expiry is already expired (inclusive lower bound).
+        assert_eq!(
+            store.claim(&k, expiry).await,
+            Err(GrantError::Expired {
+                expiry_ms: expiry,
+                now_ms: expiry,
+            })
+        );
+        // And a clock strictly past expiry is also rejected.
+        assert_eq!(
+            store.claim(&k, expiry + 1).await,
+            Err(GrantError::Expired {
+                expiry_ms: expiry,
+                now_ms: expiry + 1,
+            })
+        );
+        // The expired claim did NOT consume the grant: a claim with a clock
+        // before expiry still wins the one-shot CAS.
+        let claimed = store
+            .claim(&k, expiry - 1)
+            .await
+            .expect("an unexpired claim of the still-sealed grant must succeed");
+        assert_eq!(claimed.key, k);
     }
 
     pub async fn claim_mismatched_component_is_not_found<S: SealedGrantStore>(store: S) {
@@ -286,11 +360,17 @@ pub mod contract {
             .expect("seal");
         let mut mismatched = sealed.clone();
         mismatched.user = UserId::new("someone-else");
-        assert_eq!(store.claim(&mismatched).await, Err(GrantError::NotFound));
+        assert_eq!(
+            store.claim(&mismatched, NOW).await,
+            Err(GrantError::NotFound)
+        );
         // Differing only by the approved hash is also a different grant.
         let mut hash_mismatch = sealed;
         hash_mismatch.approved_tx_hash = ApprovedTxHash::from_bytes([99; 32]);
-        assert_eq!(store.claim(&hash_mismatch).await, Err(GrantError::NotFound));
+        assert_eq!(
+            store.claim(&hash_mismatch, NOW).await,
+            Err(GrantError::NotFound)
+        );
     }
 
     /// Seal one grant, then attempt a claim that differs by EACH individual
@@ -358,7 +438,7 @@ pub mod contract {
                 "probe for `{component}` must actually change the key"
             );
             assert_eq!(
-                store.claim(&probe).await,
+                store.claim(&probe, NOW).await,
                 Err(GrantError::NotFound),
                 "claim differing only by `{component}` must be a distinct (unsealed) grant"
             );
@@ -366,7 +446,7 @@ pub mod contract {
 
         // The original grant is still untouched and claimable exactly once.
         store
-            .claim(&sealed)
+            .claim(&sealed, NOW)
             .await
             .expect("the sealed grant itself must still be claimable");
     }
@@ -398,7 +478,7 @@ pub mod contract {
         for _ in 0..32 {
             let store = Arc::clone(&store);
             let k = k.clone();
-            handles.push(tokio::spawn(async move { store.claim(&k).await }));
+            handles.push(tokio::spawn(async move { store.claim(&k, NOW).await }));
         }
 
         let mut ok = 0usize;
@@ -430,6 +510,10 @@ pub mod contract {
                 #[tokio::test]
                 async fn claim_unsealed_is_not_found() {
                     $crate::grant::contract::claim_unsealed_is_not_found($factory()).await;
+                }
+                #[tokio::test]
+                async fn claim_expired_grant_is_rejected() {
+                    $crate::grant::contract::claim_expired_grant_is_rejected($factory()).await;
                 }
                 #[tokio::test]
                 async fn claim_mismatched_component_is_not_found() {
@@ -508,7 +592,7 @@ mod tests {
 
         let key = super::contract::key(1);
         assert!(matches!(
-            store.claim(&key).await,
+            store.claim(&key, 0).await,
             Err(GrantError::Backend { .. })
         ));
         let grant = AttestedSigningGrant::seal(key, 1, None);

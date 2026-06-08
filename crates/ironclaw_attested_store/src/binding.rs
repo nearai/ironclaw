@@ -27,44 +27,72 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use ironclaw_attested_runtime::{
-    AttestedGateBinding, AttestedGateBindingStore, BindingError, SyncBindingRead, validate_binding,
+    AttestedGateBinding, AttestedGateBindingStore, BindingError, BindingKey, SyncBindingRead,
+    validate_binding_key,
 };
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-use ironclaw_signing_provider::GateRef;
+use ironclaw_signing_provider::{GateRef, TenantId};
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use crate::error::StoreError;
 
+// The primary key is the tenant-qualified `(tenant, gate_ref)` pair, mirroring
+// the grant + ledger tenant-first keying. A binding can never collide across
+// tenants, and the insert-only CAS is per `(tenant, gate_ref)`.
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS attested_gate_bindings (
-    gate_ref     TEXT PRIMARY KEY,
-    binding_json TEXT NOT NULL
+    tenant       TEXT NOT NULL,
+    gate_ref     TEXT NOT NULL,
+    binding_json TEXT NOT NULL,
+    PRIMARY KEY (tenant, gate_ref)
 );";
 
 /// The write-through cache shared by both backends.
+///
+/// The primary map is keyed by the tenant-qualified [`BindingKey`] for the async
+/// `get`/`put`; a secondary `gate_ref -> BindingKey` index serves the sync resume
+/// read, which carries no tenant.
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 #[derive(Default)]
 struct BindingCache {
-    inner: Mutex<HashMap<GateRef, AttestedGateBinding>>,
+    inner: Mutex<HashMap<BindingKey, AttestedGateBinding>>,
+    by_gate_ref: Mutex<HashMap<GateRef, BindingKey>>,
 }
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 impl BindingCache {
-    fn insert(&self, gate_ref: GateRef, binding: AttestedGateBinding) {
+    fn insert(&self, key: BindingKey, binding: AttestedGateBinding) {
+        if let Ok(mut index) = self.by_gate_ref.lock() {
+            index.insert(key.gate_ref.clone(), key.clone());
+        }
         if let Ok(mut map) = self.inner.lock() {
-            map.insert(gate_ref, binding);
+            map.insert(key, binding);
         }
     }
 
-    fn get(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding> {
+    /// Tenant-qualified read for the async path.
+    fn get(&self, key: &BindingKey) -> Option<AttestedGateBinding> {
         match self.inner.lock() {
-            Ok(map) => map.get(gate_ref).cloned(),
+            Ok(map) => map.get(key).cloned(),
             Err(_) => {
                 tracing::error!("binding cache lock poisoned");
                 None
             }
         }
+    }
+
+    /// gate_ref-only read for the sync resume path: resolve the gate_ref to its
+    /// owning [`BindingKey`] via the index, then read.
+    fn get_by_gate_ref(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding> {
+        let key = match self.by_gate_ref.lock() {
+            Ok(index) => index.get(gate_ref).cloned()?,
+            Err(_) => {
+                tracing::error!("binding cache gate_ref index lock poisoned");
+                return None;
+            }
+        };
+        self.get(&key)
     }
 }
 
@@ -107,17 +135,21 @@ mod postgres {
             let client = self.client().await?;
             let rows = client
                 .query(
-                    "SELECT gate_ref, binding_json FROM attested_gate_bindings",
+                    "SELECT tenant, gate_ref, binding_json FROM attested_gate_bindings",
                     &[],
                 )
                 .await
                 .map_err(StoreError::backend)?;
             for row in rows {
-                let gate_ref: String = row.get(0);
-                let json: String = row.get(1);
+                let tenant: String = row.get(0);
+                let gate_ref: String = row.get(1);
+                let json: String = row.get(2);
                 let binding: AttestedGateBinding =
                     serde_json::from_str(&json).map_err(StoreError::backend)?;
-                self.cache.insert(GateRef::new(gate_ref), binding);
+                self.cache.insert(
+                    BindingKey::new(TenantId::new(tenant), GateRef::new(gate_ref)),
+                    binding,
+                );
             }
             Ok(())
         }
@@ -129,7 +161,7 @@ mod postgres {
 
     impl SyncBindingRead for PostgresAttestedGateBindingStore {
         fn get_sync(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding> {
-            self.cache.get(gate_ref)
+            self.cache.get_by_gate_ref(gate_ref)
         }
     }
 
@@ -137,12 +169,12 @@ mod postgres {
     impl AttestedGateBindingStore for PostgresAttestedGateBindingStore {
         async fn put(
             &self,
-            gate_ref: GateRef,
+            key: BindingKey,
             binding: AttestedGateBinding,
         ) -> Result<(), BindingError> {
-            // Validate before any I/O so a malformed/self-contradictory binding
-            // never reaches the table or the resume cache.
-            validate_binding(&gate_ref, &binding)?;
+            // Validate (gate_ref + tenant + self-consistency) before any I/O so a
+            // malformed/mis-tenanted binding never reaches the table or cache.
+            validate_binding_key(&key, &binding)?;
             let json = serde_json::to_string(&binding).map_err(|error| {
                 tracing::error!(%error, "failed to serialize attested gate binding");
                 BindingError::Poisoned
@@ -151,17 +183,17 @@ mod postgres {
                 tracing::error!(%error, "failed to acquire connection for binding put");
                 BindingError::Poisoned
             })?;
-            // Insert-only per gate_ref: a binding is immutable once written. A
-            // conflicting write (a re-put after approval) is REJECTED, not
-            // silently applied — the approved binding must never change under
+            // Insert-only per (tenant, gate_ref): a binding is immutable once
+            // written. A conflicting write (a re-put after approval) is REJECTED,
+            // not silently applied — the approved binding must never change under
             // the resume path. `DO NOTHING` + the affected-row count is the
             // DB-level guard (no SELECT-then-INSERT race).
             let inserted = client
                 .execute(
-                    "INSERT INTO attested_gate_bindings (gate_ref, binding_json) \
-                     VALUES ($1, $2) \
-                     ON CONFLICT (gate_ref) DO NOTHING",
-                    &[&gate_ref.as_str(), &json],
+                    "INSERT INTO attested_gate_bindings (tenant, gate_ref, binding_json) \
+                     VALUES ($1, $2, $3) \
+                     ON CONFLICT (tenant, gate_ref) DO NOTHING",
+                    &[&key.tenant.as_str(), &key.gate_ref.as_str(), &json],
                 )
                 .await
                 .map_err(|error| {
@@ -170,18 +202,19 @@ mod postgres {
                 })?;
             if inserted == 0 {
                 tracing::error!(
-                    gate_ref = %gate_ref.as_str(),
+                    tenant = %key.tenant.as_str(),
+                    gate_ref = %key.gate_ref.as_str(),
                     "rejected attempt to overwrite an existing immutable gate binding"
                 );
                 return Err(BindingError::AlreadyExists);
             }
             // Write-through only after the durable insert succeeds.
-            self.cache.insert(gate_ref, binding);
+            self.cache.insert(key, binding);
             Ok(())
         }
 
-        async fn get(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding> {
-            self.cache.get(gate_ref)
+        async fn get(&self, key: &BindingKey) -> Option<AttestedGateBinding> {
+            self.cache.get(key)
         }
     }
 }
@@ -228,17 +261,21 @@ mod libsql_backend {
             let conn = self.connect_db().await?;
             let mut rows = conn
                 .query(
-                    "SELECT gate_ref, binding_json FROM attested_gate_bindings",
+                    "SELECT tenant, gate_ref, binding_json FROM attested_gate_bindings",
                     (),
                 )
                 .await
                 .map_err(StoreError::backend)?;
             while let Some(row) = rows.next().await.map_err(StoreError::backend)? {
-                let gate_ref: String = row.get(0).map_err(StoreError::backend)?;
-                let json: String = row.get(1).map_err(StoreError::backend)?;
+                let tenant: String = row.get(0).map_err(StoreError::backend)?;
+                let gate_ref: String = row.get(1).map_err(StoreError::backend)?;
+                let json: String = row.get(2).map_err(StoreError::backend)?;
                 let binding: AttestedGateBinding =
                     serde_json::from_str(&json).map_err(StoreError::backend)?;
-                self.cache.insert(GateRef::new(gate_ref), binding);
+                self.cache.insert(
+                    BindingKey::new(TenantId::new(tenant), GateRef::new(gate_ref)),
+                    binding,
+                );
             }
             Ok(())
         }
@@ -254,7 +291,7 @@ mod libsql_backend {
 
     impl SyncBindingRead for LibSqlAttestedGateBindingStore {
         fn get_sync(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding> {
-            self.cache.get(gate_ref)
+            self.cache.get_by_gate_ref(gate_ref)
         }
     }
 
@@ -262,12 +299,12 @@ mod libsql_backend {
     impl AttestedGateBindingStore for LibSqlAttestedGateBindingStore {
         async fn put(
             &self,
-            gate_ref: GateRef,
+            key: BindingKey,
             binding: AttestedGateBinding,
         ) -> Result<(), BindingError> {
-            // Validate before any I/O so a malformed/self-contradictory binding
-            // never reaches the table or the resume cache.
-            validate_binding(&gate_ref, &binding)?;
+            // Validate (gate_ref + tenant + self-consistency) before any I/O so a
+            // malformed/mis-tenanted binding never reaches the table or cache.
+            validate_binding_key(&key, &binding)?;
             let json = serde_json::to_string(&binding).map_err(|error| {
                 tracing::error!(%error, "failed to serialize attested gate binding");
                 BindingError::Poisoned
@@ -276,16 +313,16 @@ mod libsql_backend {
                 tracing::error!(%error, "failed to open libsql connection for binding put");
                 BindingError::Poisoned
             })?;
-            // Insert-only per gate_ref: a binding is immutable once written. A
-            // conflicting re-put is REJECTED at the DB level (`DO NOTHING` +
-            // affected-row count), never silently overwriting the approved
-            // binding under the resume path.
+            // Insert-only per (tenant, gate_ref): a binding is immutable once
+            // written. A conflicting re-put is REJECTED at the DB level
+            // (`DO NOTHING` + affected-row count), never silently overwriting the
+            // approved binding under the resume path.
             let inserted = conn
                 .execute(
-                    "INSERT INTO attested_gate_bindings (gate_ref, binding_json) \
-                     VALUES (?1, ?2) \
-                     ON CONFLICT (gate_ref) DO NOTHING",
-                    libsql::params![gate_ref.as_str(), json],
+                    "INSERT INTO attested_gate_bindings (tenant, gate_ref, binding_json) \
+                     VALUES (?1, ?2, ?3) \
+                     ON CONFLICT (tenant, gate_ref) DO NOTHING",
+                    libsql::params![key.tenant.as_str(), key.gate_ref.as_str(), json],
                 )
                 .await
                 .map_err(|error| {
@@ -294,17 +331,18 @@ mod libsql_backend {
                 })?;
             if inserted == 0 {
                 tracing::error!(
-                    gate_ref = %gate_ref.as_str(),
+                    tenant = %key.tenant.as_str(),
+                    gate_ref = %key.gate_ref.as_str(),
                     "rejected attempt to overwrite an existing immutable gate binding"
                 );
                 return Err(BindingError::AlreadyExists);
             }
-            self.cache.insert(gate_ref, binding);
+            self.cache.insert(key, binding);
             Ok(())
         }
 
-        async fn get(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding> {
-            self.cache.get(gate_ref)
+        async fn get(&self, key: &BindingKey) -> Option<AttestedGateBinding> {
+            self.cache.get(key)
         }
     }
 }

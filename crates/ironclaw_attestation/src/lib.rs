@@ -86,3 +86,18 @@ pub use approved_tx_hash::compute_approved_tx_hash;
 // Re-export the binding hash type so downstream PRs import it from the
 // attestation crate alongside the functions that produce it.
 pub use ironclaw_signing_provider::{APPROVED_TX_HASH_LEN, ApprovedTxHash};
+
+/// The runtime wall clock as unix milliseconds.
+///
+/// The single source production callers pass into
+/// [`SealedGrantStore::claim`] so the store never reads the clock itself
+/// (deterministic resume + testable expiry). Tests pass an explicit `now_ms`
+/// instead of calling this. Returns `0` for a clock before the unix epoch
+/// (which would otherwise be undefined), so an expiry check degrades to
+/// "never expired" rather than panicking.
+pub fn now_unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
