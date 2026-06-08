@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
@@ -129,6 +130,23 @@ impl ScopedLifecycleInstallationStore for FilesystemScopedLifecycleInstallationS
         if !existing.installation.can_be_mutated_by(&request.actor) {
             return Err(ProductWorkflowError::BindingAccessDenied);
         }
+        let mut tombstone = existing.installation.clone();
+        tombstone.enabled = false;
+        tombstone.updated_by = request.actor;
+        tombstone.updated_at = Utc::now();
+        self.filesystem
+            .put(
+                &existing.path,
+                entry_for_scoped_lifecycle_installation(&tombstone)?,
+                CasExpectation::Version(existing.version),
+            )
+            .await
+            .map_err(|error| match error {
+                FilesystemError::VersionMismatch { .. } => {
+                    scoped_lifecycle_transient("scoped lifecycle installation delete conflict")
+                }
+                error => scoped_lifecycle_filesystem_error("mark installation deleted", error),
+            })?;
         match self.filesystem.delete(&existing.path).await {
             Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
             Err(error) => Err(scoped_lifecycle_filesystem_error(
@@ -521,19 +539,36 @@ mod tests {
 
     struct CapturingFilesystem {
         entry: Mutex<Option<VersionedEntry>>,
+        put_error: Mutex<Option<FilesystemError>>,
         observed_cas: Mutex<Vec<CasExpectation>>,
+        delete_count: Mutex<usize>,
     }
 
     impl CapturingFilesystem {
         fn new(entry: Option<VersionedEntry>) -> Self {
             Self {
                 entry: Mutex::new(entry),
+                put_error: Mutex::new(None),
                 observed_cas: Mutex::new(Vec::new()),
+                delete_count: Mutex::new(0),
+            }
+        }
+
+        fn with_put_error(entry: Option<VersionedEntry>, error: FilesystemError) -> Self {
+            Self {
+                entry: Mutex::new(entry),
+                put_error: Mutex::new(Some(error)),
+                observed_cas: Mutex::new(Vec::new()),
+                delete_count: Mutex::new(0),
             }
         }
 
         async fn observed_cas(&self) -> Vec<CasExpectation> {
             self.observed_cas.lock().await.clone()
+        }
+
+        async fn delete_count(&self) -> usize {
+            *self.delete_count.lock().await
         }
     }
 
@@ -546,6 +581,9 @@ mod tests {
             cas: CasExpectation,
         ) -> Result<RecordVersion, FilesystemError> {
             self.observed_cas.lock().await.push(cas);
+            if let Some(error) = self.put_error.lock().await.take() {
+                return Err(error);
+            }
             Ok(match cas {
                 CasExpectation::Version(version) => version.next(),
                 CasExpectation::Absent | CasExpectation::Any => RecordVersion::from_backend(1),
@@ -573,6 +611,11 @@ mod tests {
             _page: Page,
         ) -> Result<Vec<VersionedEntry>, FilesystemError> {
             Ok(self.entry.lock().await.iter().cloned().collect())
+        }
+
+        async fn delete(&self, _path: &VirtualPath) -> Result<(), FilesystemError> {
+            *self.delete_count.lock().await += 1;
+            Ok(())
         }
 
         async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
@@ -648,6 +691,89 @@ mod tests {
             filesystem.observed_cas().await,
             vec![CasExpectation::Version(version)]
         );
+    }
+
+    #[tokio::test]
+    async fn delete_uses_version_cas_before_removing_installation() {
+        let admin = admin_actor();
+        let existing = ScopedLifecycleInstallation::admin_shared(
+            install_id(),
+            package("github"),
+            admin.clone(),
+            Utc::now(),
+        )
+        .expect("admin shared install");
+        let version = RecordVersion::from_backend(7);
+        let entry = VersionedEntry {
+            path: VirtualPath::new("/engine/product_workflow/scoped_lifecycle/test/existing.json")
+                .expect("valid path"),
+            entry: entry_for_scoped_lifecycle_installation(&existing).expect("serialize entry"),
+            version,
+        };
+        let filesystem = Arc::new(CapturingFilesystem::new(Some(entry)));
+        let store =
+            FilesystemScopedLifecycleInstallationStore::with_root(filesystem.clone(), test_root());
+
+        store
+            .delete_installation(DeleteScopedLifecycleInstallationRequest {
+                actor: admin,
+                tenant_id: existing.tenant_id().clone(),
+                installation_id: existing.installation_id.clone(),
+            })
+            .await
+            .expect("delete installation");
+
+        assert_eq!(
+            filesystem.observed_cas().await,
+            vec![CasExpectation::Version(version)]
+        );
+        assert_eq!(filesystem.delete_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_does_not_remove_when_loaded_version_changed() {
+        let admin = admin_actor();
+        let existing = ScopedLifecycleInstallation::admin_shared(
+            install_id(),
+            package("github"),
+            admin.clone(),
+            Utc::now(),
+        )
+        .expect("admin shared install");
+        let version = RecordVersion::from_backend(7);
+        let path = VirtualPath::new("/engine/product_workflow/scoped_lifecycle/test/existing.json")
+            .expect("valid path");
+        let entry = VersionedEntry {
+            path: path.clone(),
+            entry: entry_for_scoped_lifecycle_installation(&existing).expect("serialize entry"),
+            version,
+        };
+        let filesystem = Arc::new(CapturingFilesystem::with_put_error(
+            Some(entry),
+            FilesystemError::VersionMismatch {
+                path,
+                expected: Some(version),
+                found: Some(version.next()),
+            },
+        ));
+        let store =
+            FilesystemScopedLifecycleInstallationStore::with_root(filesystem.clone(), test_root());
+
+        let error = store
+            .delete_installation(DeleteScopedLifecycleInstallationRequest {
+                actor: admin,
+                tenant_id: existing.tenant_id().clone(),
+                installation_id: existing.installation_id.clone(),
+            })
+            .await
+            .expect_err("stale delete must fail before physical delete");
+
+        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+        assert_eq!(
+            filesystem.observed_cas().await,
+            vec![CasExpectation::Version(version)]
+        );
+        assert_eq!(filesystem.delete_count().await, 0);
     }
 
     fn test_root() -> VirtualPath {
