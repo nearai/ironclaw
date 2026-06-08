@@ -56,9 +56,7 @@ pub(super) enum PromptStep {
     /// model call this iteration. canonical.rs bypasses ModelStage +
     /// CapabilityStage + PostCapabilityStage and routes directly to
     /// StopStage.observe().
-    // Boxed to avoid a large_enum_variant warning; the field is unused
-    // until Step 7 wires the canonical.rs arm.
-    #[allow(dead_code)]
+    // Boxed to avoid a large_enum_variant warning.
     SkipModel(Box<LoopExecutionState>),
 }
 
