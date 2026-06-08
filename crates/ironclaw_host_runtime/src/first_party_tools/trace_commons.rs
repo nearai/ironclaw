@@ -7,19 +7,34 @@
 //! All three are model-visible; the agent-facing guidance lives in the
 //! prompt_doc_ref files (prompts/builtin/trace-commons-{onboard,status,credits}.md).
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
-use ironclaw_host_api::{EffectKind, PermissionMode, ResourceEstimate, ResourceProfile};
+use ironclaw_host_api::{
+    CapabilityId, EffectKind, NetworkMethod, NetworkPolicy, PermissionMode, ResourceEstimate,
+    ResourceProfile, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind,
+};
 use ironclaw_reborn_traces::contribution::{
     StandingTraceContributionPolicy, TraceCreditReport, TraceUploadAuthMode,
     read_trace_policy_for_scope,
 };
 use ironclaw_reborn_traces::onboarding::{
-    OnboardConsents, OnboardError, OnboardOutcome, protocol::OnboardErrorCode,
+    OnboardConsents, OnboardError, OnboardHttpResponse, OnboardOutcome, OnboardingHttpSink,
+    protocol::OnboardErrorCode,
 };
 use serde_json::{Value, json};
 
 use crate::FirstPartyCapabilityError;
 use crate::FirstPartyCapabilityRequest;
+
+/// Maximum onboarding response body accepted (64 KiB), mirroring the cap the
+/// onboarding module enforces for its default sink.
+const ONBOARD_MAX_RESPONSE_BODY: u64 = 64 * 1024;
+/// Onboarding POST timeout in milliseconds (10s), mirroring the onboarding
+/// module's `ONBOARD_TIMEOUT_SECS`.
+const ONBOARD_TIMEOUT_MS: u32 = 10_000;
 
 use super::{
     FIRST_PARTY_DEFAULT_OUTPUT_BYTES, first_party_capability_manifest, input_error,
@@ -118,6 +133,78 @@ fn parse_onboard_input(input: &Value) -> Result<OnboardToolInput, FirstPartyCapa
     })
 }
 
+// ── Host network-egress onboarding sink ───────────────────────────────────────
+
+/// [`OnboardingHttpSink`] implementation that routes the onboarding POST through
+/// the host runtime's network-egress policy, so the agent-invoked onboard tool
+/// cannot reach private/internal destinations outside the deployment's outbound
+/// allowlist. Mirrors `http::dispatch`'s `RuntimeHttpEgressRequest` construction.
+struct HostEgressOnboardingSink {
+    egress: Arc<dyn RuntimeHttpEgress>,
+    scope: ResourceScope,
+    capability_id: CapabilityId,
+}
+
+#[async_trait]
+impl OnboardingHttpSink for HostEgressOnboardingSink {
+    async fn post_onboard(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+    ) -> Result<OnboardHttpResponse, OnboardError> {
+        let request = RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: self.scope.clone(),
+            capability_id: self.capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: url.to_string(),
+            headers: vec![
+                ("accept".to_string(), "application/json".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+            ],
+            body,
+            // First-party network policy is staged in HostHttpEgressService from
+            // the grant obligation for this scope/capability; this request field
+            // is the ignored fallback on that path (matches http::dispatch).
+            network_policy: NetworkPolicy::default(),
+            credential_injections: Vec::new(),
+            response_body_limit: Some(ONBOARD_MAX_RESPONSE_BODY),
+            timeout_ms: Some(ONBOARD_TIMEOUT_MS),
+        };
+        let egress = self.egress.clone();
+        let response = tokio::task::spawn_blocking(move || egress.execute(request))
+            .await
+            .map_err(|error| {
+                if error.is_panic() {
+                    tracing::error!("trace_commons onboarding egress worker panicked");
+                }
+                OnboardError::Network {
+                    reason: "onboarding egress worker failed".to_string(),
+                }
+            })?
+            .map_err(map_egress_error)?;
+        Ok(OnboardHttpResponse {
+            status: response.status,
+            body: response.body,
+        })
+    }
+}
+
+/// Map a host egress error to an `OnboardError`, without leaking
+/// credential/secret detail into the reason string.
+fn map_egress_error(error: RuntimeHttpEgressError) -> OnboardError {
+    use ironclaw_host_api::RuntimeHttpEgressReasonCode as Code;
+    let reason = error.stable_runtime_reason().to_string();
+    match error.reason_code() {
+        Code::CredentialUnavailable | Code::RequestDenied | Code::NetworkError => {
+            OnboardError::Network { reason }
+        }
+        Code::ResponseError | Code::ResponseBodyLimitExceeded => {
+            OnboardError::MalformedResponse { reason }
+        }
+    }
+}
+
 // ── Onboard dispatch ──────────────────────────────────────────────────────────
 
 pub(super) async fn dispatch_onboard(
@@ -138,9 +225,28 @@ pub(super) async fn dispatch_onboard(
         }));
     }
 
+    // The agent onboard path MUST route through host network egress — it must
+    // never silently fall back to a direct client (mirrors http::dispatch).
+    let egress = request
+        .services
+        .runtime_http_egress
+        .as_ref()
+        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::NetworkDenied))?
+        .clone();
+
     let scope = request.scope.user_id.as_str().to_string();
-    match ironclaw_reborn_traces::onboarding::onboard(&scope, &input.invite_url, input.consents)
-        .await
+    let host_sink = HostEgressOnboardingSink {
+        egress,
+        scope: request.scope.clone(),
+        capability_id: request.capability_id.clone(),
+    };
+    match ironclaw_reborn_traces::onboarding::onboard(
+        &scope,
+        &input.invite_url,
+        input.consents,
+        &host_sink,
+    )
+    .await
     {
         Ok(outcome) => Ok(onboard_success_value(&outcome, &input.consents)),
         Err(e) => Ok(onboard_error_value(&e)),

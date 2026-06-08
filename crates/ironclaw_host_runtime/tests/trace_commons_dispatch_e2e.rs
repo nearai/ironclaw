@@ -232,15 +232,36 @@ fn execution_context_read_only(capability: &str) -> ExecutionContext {
     execution_context_with_network(capability, NetworkPolicy::default())
 }
 
-/// Network policy that allows all outbound including loopback HTTP.
+/// Network policy that allows loopback HTTP to the mock issuer.
+///
+/// The real `PolicyNetworkHttpEgress` does exact-host matching (a bare `"*"`
+/// host pattern does NOT wildcard-match), so we allowlist `127.0.0.1`
+/// explicitly and opt out of the private-IP block so the agent onboard POST can
+/// reach the loopback mock.
 fn allow_all_network_policy() -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
             scheme: None,
-            host_pattern: "*".to_string(),
+            host_pattern: "127.0.0.1".to_string(),
             port: None,
         }],
         deny_private_ip_ranges: false,
+        max_egress_bytes: None,
+    }
+}
+
+/// Production-default network policy: private/loopback IP ranges are denied.
+/// Allowlists `127.0.0.1` by host pattern, but the private-IP block must still
+/// reject the loopback destination — demonstrating #4560: the agent cannot
+/// reach private destinations through onboarding once the policy is enforced.
+fn deny_private_ip_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "127.0.0.1".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
         max_egress_bytes: None,
     }
 }
@@ -420,6 +441,70 @@ async fn onboard_then_status_through_dispatch() {
         status_result["include_message_text"],
         json!(true),
         "status include_message_text must reflect consents"
+    );
+}
+
+/// #4560: with the production-default network policy (private/loopback IP
+/// ranges denied), the agent onboard POST to a 127.0.0.1 invite must be blocked
+/// by the host network-egress policy — the tool reports a network failure and
+/// does NOT enroll. This is the regression test demonstrating the fix: the agent
+/// can no longer reach private destinations through onboarding.
+#[tokio::test]
+async fn onboard_private_ip_blocked_by_network_policy() {
+    // Base dir is already set process-wide (shared with the first test).
+    let (addr, received) = spawn_mock_issuer(
+        |addr| {
+            json!({
+                "schema_version": "trace_commons.onboard_response.v1",
+                "tenant_id": "tenant-blocked",
+                "ingest_url": "https://ingest.example.com",
+                "issuer_url": format!("http://127.0.0.1:{}", addr.port()),
+                "audience": "trace-commons-ingest",
+                "device_key_id": ECHO_DEVICE_KEY_ID,
+            })
+        },
+        axum::http::StatusCode::OK,
+    )
+    .await;
+
+    let invite_url = format!("http://127.0.0.1:{}/onboard#INVE2E003", addr.port());
+    let rt = runtime();
+
+    let result = invoke_with_context(
+        &rt,
+        TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+        json!({
+            "invite_url": invite_url,
+            "include_message_text": false,
+            "include_tool_payloads": false,
+            "confirmed": true,
+        }),
+        execution_context_with_network(
+            TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+            deny_private_ip_network_policy(),
+        ),
+    )
+    .await
+    .expect("onboard dispatch returns an Ok envelope even when egress is blocked");
+
+    assert_ne!(
+        result["enrolled"],
+        json!(true),
+        "onboard must NOT enroll when the network policy blocks the private-IP destination"
+    );
+    assert_eq!(
+        result["error_code"],
+        json!("Network"),
+        "blocked egress must surface as a network failure (invite not consumed)"
+    );
+
+    // The policy blocks before any bytes reach the wire: the mock must see no
+    // request body parsed (the egress denies the private-IP target pre-flight).
+    let requests = received.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        0,
+        "no onboarding POST may reach the private-IP destination once the policy denies it"
     );
 }
 

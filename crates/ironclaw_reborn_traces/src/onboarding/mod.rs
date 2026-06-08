@@ -1,8 +1,13 @@
 //! Trace Commons agent onboarding orchestration (spec §2.3).
 //!
 //! Entry points:
-//! - [`onboard`] — public, resolves the scoped dir then calls [`onboard_at_dir`].
-//! - [`onboard_at_dir`] — dir-parameterised core; unit-testable with tempdirs.
+//! - [`onboard`] — public, resolves the scoped dir then calls
+//!   [`onboard_at_dir_with_sink`] with the caller-supplied HTTP sink.
+//! - [`onboard_at_dir`] — dir-parameterised core using the default reqwest sink;
+//!   unit-testable with tempdirs.
+//! - [`onboard_at_dir_with_sink`] — dir-parameterised core with an injectable
+//!   [`OnboardingHttpSink`], so host callers can route the POST through their
+//!   own network-egress policy.
 
 pub mod device_key;
 pub mod invite;
@@ -10,6 +15,7 @@ pub mod protocol;
 
 use std::path::Path;
 
+use async_trait::async_trait;
 use thiserror::Error;
 
 pub use device_key::{DeviceKeyError, DeviceKeypair};
@@ -78,6 +84,89 @@ pub enum OnboardError {
     Persist { reason: String },
 }
 
+// ── HTTP sink seam ───────────────────────────────────────────────────────────
+
+/// Raw HTTP response from the onboarding POST: status code + bounded body.
+///
+/// Implementations return the status and body even for non-2xx responses — the
+/// onboarding module parses 4xx bodies for the typed invite-rejection code.
+#[derive(Debug, Clone)]
+pub struct OnboardHttpResponse {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+/// Injectable HTTP transport for the onboarding POST.
+///
+/// This trait references only `reborn_traces`/std types so the crate stays
+/// independent of `ironclaw_host_api`. The default implementation
+/// ([`DefaultOnboardingHttpSink`]) uses a direct `reqwest` client; host callers
+/// supply an implementation that routes through the runtime network-egress
+/// policy so the agent-invoked tool cannot reach private/internal destinations.
+#[async_trait]
+pub trait OnboardingHttpSink: Send + Sync {
+    /// POST `body` (already-serialized JSON) to `url` with
+    /// `Accept: application/json`, returning the raw status + bounded body.
+    ///
+    /// Implementations MUST enforce: no redirect following, a connect/total
+    /// timeout (`ONBOARD_TIMEOUT_SECS`), and a `MAX_RESPONSE_BODY` (64 KiB)
+    /// response-body cap (returning [`OnboardError::MalformedResponse`] on
+    /// overflow, [`OnboardError::Network`] on transport/policy failure). They
+    /// MUST return the status + body even for non-2xx responses.
+    async fn post_onboard(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+    ) -> Result<OnboardHttpResponse, OnboardError>;
+}
+
+/// Default direct-`reqwest` sink: no host network-egress policy.
+///
+/// Used by [`onboard_at_dir`] (CLI/test path). It allows loopback HTTP, which
+/// the onboarding unit tests rely on.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DefaultOnboardingHttpSink;
+
+#[async_trait]
+impl OnboardingHttpSink for DefaultOnboardingHttpSink {
+    async fn post_onboard(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+    ) -> Result<OnboardHttpResponse, OnboardError> {
+        use reqwest::redirect::Policy;
+        use std::time::Duration;
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(ONBOARD_TIMEOUT_SECS))
+            .connect_timeout(Duration::from_secs(ONBOARD_TIMEOUT_SECS).min(Duration::from_secs(3)))
+            .redirect(Policy::none())
+            .user_agent("ironclaw-trace-commons-onboard/0.1")
+            .build()
+            .map_err(|e| OnboardError::Network {
+                reason: format!("failed to build HTTP client: {e}"),
+            })?;
+
+        let resp = client
+            .post(url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .body(body)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .map_err(|e| OnboardError::Network {
+                reason: e.to_string(),
+            })?;
+
+        let status = resp.status().as_u16();
+        // Read the body with the MAX_RESPONSE_BODY cap enforced DURING chunked
+        // reading so a hostile server cannot force a large allocation by
+        // streaming an oversized body.
+        let body = read_bounded_response(resp).await?;
+        Ok(OnboardHttpResponse { status, body })
+    }
+}
+
 // ── Public entry points ─────────────────────────────────────────────────────
 
 /// Public entry: resolves the scoped trace-contribution dir, then runs the
@@ -93,16 +182,32 @@ pub async fn onboard(
     scope: &str,
     invite_url: &str,
     consents: OnboardConsents,
+    sink: &dyn OnboardingHttpSink,
 ) -> Result<OnboardOutcome, OnboardError> {
     let dir = trace_contribution_dir_for_scope(Some(scope));
-    onboard_at_dir(&dir, invite_url, consents).await
+    onboard_at_dir_with_sink(&dir, invite_url, consents, sink).await
 }
 
-/// Dir-parameterised core — unit-testable with tempdirs.
+/// Dir-parameterised core using the default direct-`reqwest` sink —
+/// unit-testable with tempdirs (loopback mocks). Thin wrapper around
+/// [`onboard_at_dir_with_sink`].
 pub async fn onboard_at_dir(
     dir: &Path,
     invite_url: &str,
     consents: OnboardConsents,
+) -> Result<OnboardOutcome, OnboardError> {
+    onboard_at_dir_with_sink(dir, invite_url, consents, &DefaultOnboardingHttpSink).await
+}
+
+/// Dir-parameterised core with an injectable HTTP sink. The sink performs the
+/// onboarding POST (transport + policy); serialization, status→error-code
+/// parsing, terminal-key-discard, trust-anchoring, and policy write all stay
+/// here.
+pub async fn onboard_at_dir_with_sink(
+    dir: &Path,
+    invite_url: &str,
+    consents: OnboardConsents,
+    sink: &dyn OnboardingHttpSink,
 ) -> Result<OnboardOutcome, OnboardError> {
     // Step 1: Parse the invite URL (trust root).
     let invite = ParsedInvite::parse(invite_url)?;
@@ -112,7 +217,7 @@ pub async fn onboard_at_dir(
 
     // Step 3: POST to the onboard endpoint. Terminal invite rejections discard
     // the pending key inside this call; transient failures keep it for retry.
-    let response_bytes = post_onboard_request(dir, &invite, &pending).await?;
+    let response_bytes = post_onboard_request(dir, &invite, &pending, sink).await?;
 
     // Step 4: Parse + schema-validate the response body.
     let response = parse_onboard_response(response_bytes)?;
@@ -178,27 +283,16 @@ pub async fn onboard_at_dir(
 
 // ── Private helpers ─────────────────────────────────────────────────────────
 
-/// POST the onboard request and return the raw response bytes.
-/// Handles HTTP-level errors, terminal invite rejections (discard pending key),
-/// and transient errors (keep pending key for retry).
+/// Serialize the onboard request, POST it through `sink`, and return the raw
+/// response bytes. Handles terminal invite rejections (discard pending key) and
+/// transient errors (keep pending key for retry). Transport/policy/body-cap
+/// enforcement lives in the sink; status→error-code mapping stays here.
 async fn post_onboard_request(
     dir: &Path,
     invite: &ParsedInvite,
     pending: &DeviceKeypair,
+    sink: &dyn OnboardingHttpSink,
 ) -> Result<Vec<u8>, OnboardError> {
-    use reqwest::redirect::Policy;
-    use std::time::Duration;
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(ONBOARD_TIMEOUT_SECS))
-        .connect_timeout(Duration::from_secs(ONBOARD_TIMEOUT_SECS).min(Duration::from_secs(3)))
-        .redirect(Policy::none())
-        .user_agent("ironclaw-trace-commons-onboard/0.1")
-        .build()
-        .map_err(|e| OnboardError::Network {
-            reason: format!("failed to build HTTP client: {e}"),
-        })?;
-
     let request_body = OnboardRequest {
         schema_version: ONBOARD_REQUEST_SCHEMA_VERSION,
         invite_code: invite.code.clone(),
@@ -208,26 +302,15 @@ async fn post_onboard_request(
             version: env!("CARGO_PKG_VERSION").into(),
         },
     };
+    let body = serde_json::to_vec(&request_body).map_err(|e| OnboardError::Network {
+        reason: format!("failed to serialize onboard request: {e}"),
+    })?;
 
-    let resp = client
-        .post(invite.onboard_endpoint())
-        .header(reqwest::header::ACCEPT, "application/json")
-        .json(&request_body)
-        .send()
-        .await
-        .map_err(|e| OnboardError::Network {
-            reason: e.to_string(),
-        })?;
+    let response = sink.post_onboard(&invite.onboard_endpoint(), body).await?;
+    let status = response.status;
+    let body_bytes = response.body;
 
-    let status = resp.status();
-
-    // Read the body with the MAX_RESPONSE_BODY cap enforced DURING chunked
-    // reading (mirrors `read_bounded_trace_upload_claim_response`), so a
-    // hostile server cannot force a large allocation by streaming an
-    // oversized body.
-    let body_bytes = read_bounded_response(resp).await?;
-
-    if !status.is_success() {
+    if !(200..300).contains(&status) {
         // Try to parse a typed error code from the body.
         let error_code = serde_json::from_slice::<serde_json::Value>(&body_bytes)
             .ok()
@@ -236,7 +319,7 @@ async fn post_onboard_request(
 
         let code = match (status, error_code) {
             (_, Some(code)) => code,
-            (s, None) if s.as_u16() == 429 => OnboardErrorCode::OnboardRateLimited,
+            (429, None) => OnboardErrorCode::OnboardRateLimited,
             _ => {
                 // Transient — keep pending key for retry.
                 return Err(OnboardError::Network {
@@ -1038,5 +1121,112 @@ mod tests {
             "expected MalformedResponse, got: {err}"
         );
         assert!(!dir.path().join("policy.json").exists());
+    }
+
+    // ── Fake-sink tests (no network) ──────────────────────────────────────────
+
+    /// A no-network sink that returns a canned status + body and records the
+    /// posted URL — proves the seam works without reqwest/loopback.
+    struct FakeSink {
+        status: u16,
+        body: Vec<u8>,
+        posted_url: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl OnboardingHttpSink for FakeSink {
+        async fn post_onboard(
+            &self,
+            url: &str,
+            _body: Vec<u8>,
+        ) -> Result<OnboardHttpResponse, OnboardError> {
+            *self.posted_url.lock().unwrap() = Some(url.to_string());
+            Ok(OnboardHttpResponse {
+                status: self.status,
+                body: self.body.clone(),
+            })
+        }
+    }
+
+    /// Build the canned 200 onboard response body that the client will accept,
+    /// echoing the device_key_id derived from the request's pending public key.
+    fn canned_ok_body(dir: &Path, invite_url: &str) -> Vec<u8> {
+        // Stage the pending key the same way onboard_at_dir will, so we can
+        // derive the device_key_id the client will cross-check against.
+        let invite = ParsedInvite::parse(invite_url).unwrap();
+        let pending = DeviceKeypair::load_or_generate_pending(dir, &invite.invite_hash()).unwrap();
+        let device_key_id = derive_device_key_id(&pending.public_key_b64).unwrap();
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": "trace_commons.onboard_response.v1",
+            "tenant_id": "tenant-fake",
+            "ingest_url": "https://ingest.example.com",
+            "issuer_url": invite.origin,
+            "audience": "trace-commons-ingest",
+            "device_key_id": device_key_id,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn fake_sink_200_writes_policy_through_seam() {
+        let dir = tempfile::tempdir().unwrap();
+        // Use a loopback-shaped invite URL so origin anchoring passes; no server
+        // is bound — the fake sink never touches the network.
+        let invite_url = "http://127.0.0.1:7/onboard#INVFAKE01";
+        let body = canned_ok_body(dir.path(), invite_url);
+        let posted_url = Arc::new(Mutex::new(None));
+        let sink = FakeSink {
+            status: 200,
+            body,
+            posted_url: Arc::clone(&posted_url),
+        };
+
+        let outcome =
+            onboard_at_dir_with_sink(dir.path(), invite_url, OnboardConsents::default(), &sink)
+                .await
+                .expect("fake-sink onboard succeeds");
+
+        assert_eq!(outcome.tenant_id, "tenant-fake");
+        assert!(
+            dir.path().join("policy.json").exists(),
+            "policy.json must be written through the sink seam"
+        );
+        assert_eq!(
+            posted_url.lock().unwrap().as_deref(),
+            Some("http://127.0.0.1:7/v1/onboard"),
+            "sink must be posted the onboard endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_sink_403_invite_not_valid_discards_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let invite_url = "http://127.0.0.1:7/onboard#INVFAKE02";
+        let sink = FakeSink {
+            status: 403,
+            body: serde_json::to_vec(&serde_json::json!({ "error": "InviteNotValid" })).unwrap(),
+            posted_url: Arc::new(Mutex::new(None)),
+        };
+
+        let err =
+            onboard_at_dir_with_sink(dir.path(), invite_url, OnboardConsents::default(), &sink)
+                .await
+                .expect_err("4xx invite rejection must fail through the sink");
+
+        assert!(
+            matches!(
+                err,
+                OnboardError::InviteRejected(OnboardErrorCode::InviteNotValid)
+            ),
+            "expected InviteRejected(InviteNotValid), got: {err}"
+        );
+        let invite = ParsedInvite::parse(invite_url).unwrap();
+        let pending = dir
+            .path()
+            .join(format!("device_keys/pending/{}.json", invite.invite_hash()));
+        assert!(
+            !pending.exists(),
+            "pending key must be discarded on InviteNotValid through the sink"
+        );
     }
 }
