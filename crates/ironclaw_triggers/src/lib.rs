@@ -1433,8 +1433,16 @@ impl InMemoryTriggerRepository {
         submitted_at: Timestamp,
     ) -> Result<(), TriggerError> {
         let mut state = self.lock_state()?;
+        let key = TriggerRunRepositoryKey::new(tenant_id, trigger_id, fire_slot);
+        if state
+            .runs
+            .get(&key)
+            .is_some_and(|run| run.completed_at.is_some())
+        {
+            return Ok(());
+        }
         state.runs.insert(
-            TriggerRunRepositoryKey::new(tenant_id, trigger_id, fire_slot),
+            key,
             TriggerRunRecord::running(
                 tenant_id.clone(),
                 trigger_id,
@@ -2265,6 +2273,45 @@ mod tests {
             .await
             .expect("list due");
         assert_eq!(due_records.len(), MAX_DUE_TRIGGER_POLL_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_running_history_does_not_overwrite_terminal_history() {
+        let repo = InMemoryTriggerRepository::default();
+        let tenant_id = tenant("tenant-a");
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+        let completed_at = fire_slot + chrono::Duration::seconds(30);
+        let later_submitted_at = fire_slot + chrono::Duration::seconds(45);
+
+        repo.complete_run_history(
+            &tenant_id,
+            trigger_id,
+            fire_slot,
+            Some(run_id),
+            TriggerRunHistoryStatus::Ok,
+            completed_at,
+        )
+        .expect("seed terminal history");
+
+        repo.upsert_running_run_history(
+            &tenant_id,
+            trigger_id,
+            fire_slot,
+            run_id,
+            later_submitted_at,
+        )
+        .expect("late running upsert is ignored");
+
+        let runs = repo
+            .list_trigger_run_history(tenant_id, trigger_id, 10)
+            .await
+            .expect("list run history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, TriggerRunHistoryStatus::Ok);
+        assert_eq!(runs[0].submitted_at, completed_at);
+        assert_eq!(runs[0].completed_at, Some(completed_at));
     }
 
     #[test]
