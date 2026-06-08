@@ -217,6 +217,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             safe_summary: "stub capability completed".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len: 0,
         }))
     }
 
@@ -288,6 +289,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             safe_summary: "stub capability completed".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len: 0,
         }))
     }
 
