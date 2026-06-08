@@ -469,6 +469,7 @@ async fn local_dev_adapter_invokes_builtin_echo_through_host_runtime_port() {
             surface_version: surface.version,
             capability_id: capability_id.clone(),
             input_ref,
+            approval_resume: None,
         })
         .await
         .unwrap();
@@ -583,12 +584,14 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
             surface_version: surface.version,
             capability_id: capability_id.clone(),
             input_ref,
+            approval_resume: None,
         })
         .await
         .unwrap();
     let CapabilityOutcome::ApprovalRequired {
         gate_ref,
         safe_summary,
+        ..
     } = outcome
     else {
         panic!("expected approval gate for builtin shell outcome, got {outcome:?}");
@@ -667,6 +670,7 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
             surface_version: surface.version,
             capability_id,
             input_ref,
+            approval_resume: None,
         })
         .await
         .unwrap();
@@ -796,6 +800,7 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
             surface_version: candidate.surface_version,
             capability_id,
             input_ref: candidate.input_ref,
+            approval_resume: None,
         })
         .await
         .unwrap();
@@ -1035,6 +1040,7 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
             surface_version: surface.version,
             capability_id,
             input_ref,
+            approval_resume: None,
         })
         .await
         .unwrap();

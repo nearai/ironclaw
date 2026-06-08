@@ -17,9 +17,10 @@ pub use slots::{
     ReplyAdmissionStrategyState, StopStrategyState,
 };
 
+use ironclaw_host_api::{ApprovalRequestId, CapabilityId, InvocationId};
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, LoopResultRef,
-    run_profile::{CapabilitySurfaceVersion, LoopInputCursor, LoopRunContext},
+    run_profile::{CapabilityInputRef, CapabilitySurfaceVersion, LoopInputCursor, LoopRunContext},
 };
 
 /// Initial checkpoint payload schema reserved for the default Reborn loop.
@@ -79,6 +80,17 @@ pub struct LoopExecutionState {
     pub reply_admission_state: ReplyAdmissionStrategyState,
     pub stop_state: StopStrategyState,
     pub gate_state: GateStrategyState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_approval_resume: Option<PendingApprovalResume>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingApprovalResume {
+    pub gate_ref: LoopGateRef,
+    pub capability_id: CapabilityId,
+    pub approval_request_id: ApprovalRequestId,
+    pub invocation_id: InvocationId,
+    pub input_ref: CapabilityInputRef,
 }
 
 impl LoopExecutionState {
@@ -112,6 +124,7 @@ impl LoopExecutionState {
             reply_admission_state: ReplyAdmissionStrategyState::default(),
             stop_state: StopStrategyState::default(),
             gate_state: GateStrategyState::default(),
+            pending_approval_resume: None,
         }
     }
 

@@ -6,7 +6,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
+    ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, RuntimeCredentialAuthRequirement,
+    RuntimeKind, ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -1380,6 +1381,15 @@ pub struct CapabilityInvocation {
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_resume: Option<CapabilityApprovalResume>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityApprovalResume {
+    pub approval_request_id: ApprovalRequestId,
+    pub invocation_id: InvocationId,
+    pub input_ref: CapabilityInputRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1401,6 +1411,8 @@ pub enum CapabilityOutcome {
     ApprovalRequired {
         gate_ref: LoopGateRef,
         safe_summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_resume: Option<CapabilityApprovalResume>,
     },
     AuthRequired {
         gate_ref: LoopGateRef,

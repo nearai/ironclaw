@@ -128,13 +128,25 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             )
             .await;
 
+        let mut pending_approval_resume = state.pending_approval_resume.clone();
         let batch = ctx
             .host
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: visible_calls
                     .iter()
                     .cloned()
-                    .map(capability_invocation_from_candidate)
+                    .map(|call| {
+                        let resume = pending_approval_resume
+                            .take_if(|resume| resume.capability_id == call.capability_id)
+                            .map(
+                                |resume| ironclaw_turns::run_profile::CapabilityApprovalResume {
+                                    approval_request_id: resume.approval_request_id,
+                                    invocation_id: resume.invocation_id,
+                                    input_ref: resume.input_ref,
+                                },
+                            );
+                        capability_invocation_from_candidate(call, resume)
+                    })
                     .collect(),
                 stop_on_first_suspension,
             })
@@ -272,6 +284,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             kind: GateKind::AwaitDependentRun,
                             gate_ref: shared_gate_ref,
                             credential_requirements: Vec::new(),
+                            approval_resume: None,
                         },
                     )
                     .await?
@@ -379,6 +392,7 @@ impl CapabilityStage {
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         match outcome {
             CapabilityOutcome::Completed(result) => {
+                clear_matching_pending_approval_resume(&mut state, &call);
                 append_completed_capability_result(
                     ctx.host,
                     &mut state,
@@ -395,6 +409,7 @@ impl CapabilityStage {
                 byte_len,
                 ..
             } => {
+                clear_matching_pending_approval_resume(&mut state, &call);
                 append_spawned_child_result(
                     ctx.host,
                     &mut state,
@@ -407,7 +422,11 @@ impl CapabilityStage {
                 .await?;
                 Ok(BatchStep::Continue(Box::new(state)))
             }
-            CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
+            CapabilityOutcome::ApprovalRequired {
+                gate_ref,
+                approval_resume,
+                ..
+            } => {
                 GateStage
                     .process(
                         ctx,
@@ -417,6 +436,7 @@ impl CapabilityStage {
                             kind: GateKind::Approval,
                             gate_ref,
                             credential_requirements: Vec::new(),
+                            approval_resume,
                         },
                     )
                     .await
@@ -435,6 +455,7 @@ impl CapabilityStage {
                             kind: GateKind::Auth,
                             gate_ref,
                             credential_requirements,
+                            approval_resume: None,
                         },
                     )
                     .await
@@ -449,6 +470,7 @@ impl CapabilityStage {
                             kind: GateKind::Resource,
                             gate_ref,
                             credential_requirements: Vec::new(),
+                            approval_resume: None,
                         },
                     )
                     .await
@@ -611,7 +633,7 @@ impl CapabilityStage {
                         .await;
                     let retry = ctx
                         .host
-                        .invoke_capability(capability_invocation_from_candidate(call.clone()))
+                        .invoke_capability(capability_invocation_from_candidate(call.clone(), None))
                         .await
                         .map_err(capability_host_error)?;
                     match retry {
@@ -703,6 +725,19 @@ impl CapabilityStage {
             checked.state,
             Some(checked.checkpoint_id),
         )?))
+    }
+}
+
+fn clear_matching_pending_approval_resume(
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+) {
+    if state
+        .pending_approval_resume
+        .as_ref()
+        .is_some_and(|resume| resume.capability_id == call.capability_id)
+    {
+        state.pending_approval_resume = None;
     }
 }
 
@@ -857,6 +892,7 @@ mod tests {
             CapabilityOutcome::ApprovalRequired {
                 gate_ref: LoopGateRef::new("gate:approval").unwrap(),
                 safe_summary: "approval".to_string(),
+                approval_resume: None,
             },
         ];
         assert!(shared_await_dependent_gate(&calls, &outcomes).is_none());

@@ -1,12 +1,13 @@
+use ironclaw_host_api::{ApprovalRequestId, InvocationId};
 use ironclaw_turns::{
     LoopCancelledReasonKind, LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopFailureKind,
     LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
-        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInputRepair, CapabilityOutcome,
-        CapabilityRecoveryHint, CapabilityResultMessage, LoopCancelReasonKind, LoopCheckpointKind,
-        LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
+        CapabilityCallCandidate, CapabilityFailureDetail, CapabilityFailureKind,
+        CapabilityInputIssue, CapabilityInputIssueCode, CapabilityInputRef, CapabilityInputRepair,
+        CapabilityOutcome, CapabilityRecoveryHint, CapabilityResultMessage, LoopCancelReasonKind,
+        LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
         LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
         LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
         ObservationTrust, ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay,
@@ -1705,6 +1706,7 @@ async fn gate_blocks_with_before_block_checkpoint() {
             outcomes: vec![CapabilityOutcome::ApprovalRequired {
                 gate_ref: LoopGateRef::new("gate:approval").expect("valid"),
                 safe_summary: "approval required".to_string(),
+                approval_resume: None,
             }],
             stopped_on_suspension: true,
         },
@@ -1757,6 +1759,90 @@ async fn gate_blocks_with_before_block_checkpoint() {
 }
 
 #[tokio::test]
+async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
+    let original_input_ref = CapabilityInputRef::new("input:demo").expect("valid");
+    let replayed_input_ref = CapabilityInputRef::new("input:replayed").expect("valid");
+    let approval_resume = CapabilityApprovalResume {
+        approval_request_id: ApprovalRequestId::new(),
+        invocation_id: InvocationId::new(),
+        input_ref: original_input_ref.clone(),
+    };
+    let completed_ref = LoopResultRef::new("result:approval-resumed").expect("valid");
+    let mut replayed_response = calls_response();
+    if let ParentLoopOutput::CapabilityCalls(calls) = &mut replayed_response.output {
+        calls[0].input_ref = replayed_input_ref.clone();
+    } else {
+        panic!("expected capability calls fixture");
+    }
+    let host = MockHost::new(vec![calls_response(), replayed_response]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:approval").expect("valid"),
+                safe_summary: "approval required".to_string(),
+                approval_resume: Some(approval_resume.clone()),
+            }],
+            stopped_on_suspension: true,
+        },
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: completed_ref.clone(),
+                safe_summary: "approval resumed".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: true,
+                byte_len: 0,
+            })],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let first_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("first execute blocks");
+
+    assert!(matches!(first_exit, LoopExit::Blocked(_)));
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    let pending_resume = before_block_state
+        .pending_approval_resume
+        .as_ref()
+        .expect("blocked checkpoint carries pending approval resume");
+    assert_eq!(
+        pending_resume.approval_request_id,
+        approval_resume.approval_request_id
+    );
+    assert_eq!(pending_resume.invocation_id, approval_resume.invocation_id);
+
+    let second_exit = executor
+        .execute_family(&crate::families::default(), &host, before_block_state)
+        .await
+        .expect("second execute resumes");
+
+    assert!(matches!(second_exit, LoopExit::Completed(_)));
+    let batch_invocations = host.batch_invocations();
+    assert_eq!(batch_invocations.len(), 2);
+    assert_eq!(batch_invocations[0].invocations[0].approval_resume, None);
+    assert_eq!(
+        batch_invocations[1].invocations[0].approval_resume,
+        Some(approval_resume)
+    );
+    assert_eq!(
+        batch_invocations[1].invocations[0].input_ref,
+        replayed_input_ref
+    );
+    assert_eq!(
+        batch_invocations[1].invocations[0]
+            .approval_resume
+            .as_ref()
+            .expect("resume metadata")
+            .input_ref,
+        original_input_ref
+    );
+    assert_eq!(final_staged_state(&host).result_refs, vec![completed_ref]);
+}
+
+#[tokio::test]
 async fn gate_stage_skips_and_continues_records_skipped_summary() {
     let family = family_with_gate_outcome(GateOutcome::SkipAndContinue {
         gate: empty_gate_state(),
@@ -1782,6 +1868,7 @@ async fn gate_stage_skips_and_continues_records_skipped_summary() {
                 kind: GateKind::Auth,
                 gate_ref,
                 credential_requirements: Vec::new(),
+                approval_resume: None,
             },
         )
         .await
@@ -1825,6 +1912,7 @@ async fn gate_stage_aborts_returns_failed_exit() {
                 kind: GateKind::Auth,
                 gate_ref,
                 credential_requirements: Vec::new(),
+                approval_resume: None,
             },
         )
         .await
@@ -1852,6 +1940,7 @@ async fn parallel_batch_records_completed_results_before_blocking_on_suspension(
                 CapabilityOutcome::ApprovalRequired {
                     gate_ref: LoopGateRef::new("gate:approval").expect("valid"), // safety: test-only fixture
                     safe_summary: "approval required".to_string(),
+                    approval_resume: None,
                 },
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: completed_ref.clone(),

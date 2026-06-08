@@ -3055,6 +3055,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             return Ok(CapabilityOutcome::ApprovalRequired {
                 gate_ref: LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
                 safe_summary: "test approval required".to_string(),
+                approval_resume: None,
             });
         }
         if matches!(self.mode, CapabilityMode::SpawnAuthThenApprovalThenEcho) {
@@ -3064,6 +3065,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                     return Ok(CapabilityOutcome::ApprovalRequired {
                         gate_ref: LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
                         safe_summary: "test approval required".to_string(),
+                        approval_resume: None,
                     });
                 }
                 _ => {}
