@@ -546,12 +546,7 @@ async fn executor_proactive_byte_cap_drives_full_compaction_cycle() {
     let progress_events = host.progress_events();
     let compaction_started_events: Vec<_> = progress_events
         .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                LoopProgressEvent::CompactionStarted { .. }
-            )
-        })
+        .filter(|event| matches!(event, LoopProgressEvent::CompactionStarted { .. }))
         .collect();
     assert_eq!(
         compaction_started_events.len(),
@@ -577,12 +572,9 @@ async fn executor_proactive_byte_cap_drives_full_compaction_cycle() {
     // The initiator-emission / flag-clearing verification is also covered by the
     // F12 unit-level test in src/executor/tests.rs which inspects checkpoint state
     // directly.)
-    let compaction_completed = progress_events.iter().any(|event| {
-        matches!(
-            event,
-            LoopProgressEvent::CompactionCompleted { .. }
-        )
-    });
+    let compaction_completed = progress_events
+        .iter()
+        .any(|event| matches!(event, LoopProgressEvent::CompactionCompleted { .. }));
     assert!(
         compaction_completed,
         "CompactionCompleted must be emitted after successful compaction on the SkipModel iteration"

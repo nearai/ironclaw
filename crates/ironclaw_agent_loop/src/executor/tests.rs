@@ -3304,10 +3304,7 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
                  PromptCompactionStep could consume it"
             );
         }
-        other => panic!(
-            "expected CompactionStarted event, got {:?}",
-            other
-        ),
+        other => panic!("expected CompactionStarted event, got {:?}", other),
     }
 
     // Final state: all compaction flags must be cleared (consumed by
@@ -3318,7 +3315,10 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
         "force_compact_on_next_iteration must be cleared after compaction fires"
     );
     assert!(
-        final_state.compaction_state.force_compact_initiator.is_none(),
+        final_state
+            .compaction_state
+            .force_compact_initiator
+            .is_none(),
         "force_compact_initiator must be consumed/cleared by PromptCompactionStep"
     );
     // Three iterations completed (capability turn + SkipModel turn + reply turn).

@@ -518,13 +518,24 @@ where
             self.gate_store
                 .mark_terminal_result_written(&record.gate_ref, record.child_run_id)
                 .map_err(map_host_error)?;
-            self.gate_store
-                .record_terminal_byte_len(
-                    &record.gate_ref,
-                    record.child_run_id,
+            if let Err(error) = self.gate_store.record_terminal_byte_len(
+                &record.gate_ref,
+                record.child_run_id,
+                terminal_byte_len,
+            ) {
+                // Best-effort accounting: byte_len feeds ByteCapStrategy observability,
+                // not durability. A failure here must not block update_parent_result_reference
+                // or downstream delivery. Log at debug; the byte_len stays 0 on the gate
+                // state, which means ByteCapStrategy will miss this particular trip but
+                // the loop still functions correctly.
+                tracing::debug!(
+                    gate_ref = ?record.gate_ref,
+                    child_run_id = %record.child_run_id,
                     terminal_byte_len,
-                )
-                .map_err(map_host_error)?;
+                    error = %map_host_error(error),
+                    "failed to record terminal byte_len on gate state — accounting lost, delivery unaffected"
+                );
+            }
         }
         self.update_parent_result_reference(record, event, result_ref, safe_summary)
             .await?;
@@ -1318,7 +1329,9 @@ mod tests {
             output: serde_json::Value,
         ) -> Result<u64, AgentLoopHostError> {
             assert_eq!(result_ref, &self.result_ref);
-            let byte_len = serde_json::to_vec(&output).map(|v| v.len() as u64).unwrap_or(0);
+            let byte_len = serde_json::to_vec(&output)
+                .map(|v| v.len() as u64)
+                .unwrap_or(0);
             self.writes.lock().unwrap().push(output);
             Ok(byte_len)
         }
@@ -1371,7 +1384,9 @@ mod tests {
                     "injected result write failure",
                 ));
             }
-            let byte_len = serde_json::to_vec(&output).map(|v| v.len() as u64).unwrap_or(0);
+            let byte_len = serde_json::to_vec(&output)
+                .map(|v| v.len() as u64)
+                .unwrap_or(0);
             self.writes.lock().unwrap().push(output);
             Ok(byte_len)
         }
@@ -4317,7 +4332,10 @@ mod tests {
 
     impl FixedBytelenResultWriter {
         fn new(result_ref: LoopResultRef, byte_len: u64) -> Self {
-            Self { result_ref, byte_len }
+            Self {
+                result_ref,
+                byte_len,
+            }
         }
     }
 
