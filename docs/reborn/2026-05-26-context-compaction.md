@@ -2,13 +2,13 @@
 
 **Status:** Design spec — pending implementation
 **Date:** 2026-05-26
-**Revised:** 2026-05-26 (revision 2 — post pass-2 review; closes pass-2 compile-blockers, scope creep on calibration, forward refs)
+**Revised:** 2026-06-08 (revision 3 — prompt scan cap is 128; loop-support applies transcript token budgeting after scan)
 **Branch scope:** `reborn-integration` — all touched crates are Reborn-owned
 **Depends on:** [`contracts/turns-agent-loop.md`](contracts/turns-agent-loop.md), [`contracts/agent-loop-protocol.md`](contracts/agent-loop-protocol.md), [`contracts/lightweight-agent-loop.md`](contracts/lightweight-agent-loop.md), [`contracts/kernel-boundary.md`](contracts/kernel-boundary.md), [`contracts/events-projections.md`](contracts/events-projections.md), `crates/ironclaw_agent_loop/CLAUDE.md`, `crates/ironclaw_agent_loop/src/strategies/CLAUDE.md`, `crates/ironclaw_loop_support/CLAUDE.md`, `crates/ironclaw_threads/CLAUDE.md`, `crates/ironclaw_turns/CLAUDE.md`, `crates/ironclaw_safety/AGENTS.md`, `.claude/rules/architecture.md`, `.claude/rules/types.md`, `.claude/rules/safety-and-sandbox.md`, `.claude/rules/error-handling.md`, `.claude/rules/database.md`, `.claude/rules/doc-hygiene.md`
 
 ## 1. Purpose
 
-The Reborn loop has no operational context compaction today. `LoadContextWindowRequest` uses a fixed message-count cap (default 16). `SummaryArtifact` storage exists but has no production producer. The recovery strategy decides `RetryAlteration::ShrinkContext { drop_messages: 4 }` on `ModelErrorClass::ContextOverflow`, but the executor's `honor_retry_alteration` does not act on it — long sessions either fail at the provider edge or never approach realistic context utilization.
+At original drafting, the Reborn loop had no operational context compaction. `LoadContextWindowRequest` used a fixed message-count cap (default 16). Current Reborn defaults scan up to 128 transcript messages and apply an estimated-token transcript budget in the loop-support adapter before prompt materialization; `LoadContextWindowRequest.max_messages` remains the storage scan cap, not a token contract. `SummaryArtifact` storage exists but has no production producer. The recovery strategy decides `RetryAlteration::ShrinkContext { drop_messages: 4 }` on `ModelErrorClass::ContextOverflow`, but the executor's `honor_retry_alteration` does not act on it — long sessions either fail at the provider edge or never approach realistic context utilization.
 
 This spec defines the userland design for periodic, pre-emptive transcript compaction plus a persistent thread-level Goal artifact. It also establishes a reusable port pattern for system-triggered LLM inference (compaction, goal refresh, future error classification, memory consolidation, etc.) without introducing a new run type, new loop family, or new turn-coordinator surface.
 

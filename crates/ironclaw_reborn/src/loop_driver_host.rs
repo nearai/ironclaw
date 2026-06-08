@@ -23,8 +23,9 @@ use ironclaw_loop_support::{
     HostSkillContextSource, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
     ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
     RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
-    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
-    active_task_compaction_prompt_id, host_managed_loop_compaction_port_with_prompt_id,
+    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
+    TurnStateRunCancellationFactory, active_task_compaction_prompt_id,
+    host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -1356,12 +1357,14 @@ where
 
         let max_messages = self.config.max_messages.max(1);
         let run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
+        let context_window_cache = Arc::new(ThreadContextWindowCache::default());
         let mut context_adapter = ThreadBackedLoopContextPort::new(
             Arc::clone(&self.thread_service),
             effective_scope.clone(),
             run_context.clone(),
             max_messages,
-        );
+        )
+        .with_context_window_cache(Arc::clone(&context_window_cache));
         if let Some(source) = self.skill_context_source.as_ref() {
             context_adapter = context_adapter.with_skill_context_source(source.clone());
         }
@@ -1556,6 +1559,7 @@ where
             instruction_materialization_store: Some(Arc::clone(&instruction_materialization_store)),
             capabilities: Some(Arc::clone(&capabilities)),
             prompt_authority,
+            context_window_cache: Some(context_window_cache),
         });
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
