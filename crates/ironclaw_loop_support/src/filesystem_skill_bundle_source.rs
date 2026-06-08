@@ -12,9 +12,8 @@ use parking_lot::Mutex;
 use tracing::debug;
 
 use crate::{
-    SkillBundleDescriptor, SkillBundleDiscoveryMetadata, SkillBundleId, SkillBundleProvenance,
-    SkillBundleSource, SkillBundleSourceError, SkillFilePath, SkillSourceKind,
-    sort_skill_bundle_descriptors,
+    SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
+    SkillBundleSourceError, SkillFilePath, SkillSourceKind, sort_skill_bundle_descriptors,
 };
 
 const DEFAULT_MAX_BUNDLE_FILE_BYTES: usize = 256 * 1024;
@@ -213,11 +212,11 @@ where
                 }
             };
             let skill_md_path = bundle_scoped_path(root.root(), &bundle_id, &skill_md_file)?;
-            let discovery_metadata = match self
+            let description = match self
                 .validate_bundle_manifest(scope, &skill_md_path, &bundle_id)
                 .await
             {
-                Ok(discovery_metadata) => discovery_metadata,
+                Ok(description) => description,
                 Err(error) if is_skippable_manifest_error(&error) => {
                     debug!(
                         bundle_id = %bundle_id,
@@ -236,7 +235,7 @@ where
                     bundle_id,
                     trust,
                     root.visibility().copied(),
-                    discovery_metadata,
+                    description,
                 )
                 .with_provenance(SkillBundleProvenance::new(root.source_kind())),
             );
@@ -250,7 +249,7 @@ where
         scope: &ResourceScope,
         skill_md_path: &ScopedPath,
         bundle_id: &SkillBundleId,
-    ) -> Result<SkillBundleDiscoveryMetadata, SkillBundleSourceError> {
+    ) -> Result<String, SkillBundleSourceError> {
         let skill_md = self
             .read_bounded(scope, skill_md_path, self.max_skill_md_bytes)
             .await?;
@@ -261,9 +260,11 @@ where
         if parsed.manifest.name != bundle_id.name() {
             return Err(SkillBundleSourceError::InvalidSkillBundle);
         }
-        Ok(SkillBundleDiscoveryMetadata::new(
-            parsed.manifest.description,
-        ))
+        let description = parsed.manifest.description;
+        if description.trim().is_empty() {
+            return Err(SkillBundleSourceError::InvalidSkillBundle);
+        }
+        Ok(description)
     }
 
     async fn bundle_trust(
@@ -642,7 +643,7 @@ mod tests {
         assert_eq!(descriptors[0].visibility(), Some(&SkillVisibility::Visible));
         let descriptions = descriptors
             .iter()
-            .map(|descriptor| descriptor.discovery_metadata().description())
+            .map(SkillBundleDescriptor::description)
             .collect::<Vec<_>>();
         assert_eq!(
             descriptions,
@@ -782,6 +783,39 @@ mod tests {
             .await
             .unwrap();
         assert!(descriptors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_skips_empty_skill_descriptions() {
+        let (root, source) = mounted_source();
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/empty-description/SKILL.md",
+            skill_md("empty-description", ""),
+        )
+        .await;
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/blank-description/SKILL.md",
+            skill_md("blank-description", "   "),
+        )
+        .await;
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/valid-skill/SKILL.md",
+            skill_md("valid-skill", "Valid skill"),
+        )
+        .await;
+
+        let descriptors = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap();
+        let ids = descriptors
+            .iter()
+            .map(|descriptor| descriptor.id().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["user:valid-skill"]);
     }
 
     #[tokio::test]

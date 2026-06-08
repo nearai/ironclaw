@@ -38,6 +38,10 @@ pub enum HostSkillContextCandidatePayload {
         safe_description: String,
     },
     /// Policy metadata for a skill that is not model-visible.
+    ///
+    /// Host sources should only emit this with non-visible visibility states.
+    /// A visible unavailable candidate violates the host-source contract and
+    /// fails closed during snapshot construction.
     Unavailable,
 }
 
@@ -56,7 +60,7 @@ pub struct HostSkillContextCandidate {
 }
 
 impl HostSkillContextCandidate {
-    pub fn new(
+    pub fn loaded(
         skill_md: impl Into<String>,
         trust: Option<SkillTrust>,
         visibility: Option<SkillVisibility>,

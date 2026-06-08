@@ -3763,7 +3763,7 @@ mod tests {
             requests: Arc::clone(&requests),
         });
         let skill_source = Arc::new(StaticSkillContextSource::new(vec![
-            HostSkillContextCandidate::new(
+            HostSkillContextCandidate::loaded(
                 skill_md(
                     "review-helper",
                     "review helper description",
@@ -3848,7 +3848,7 @@ mod tests {
             requests: Arc::clone(&requests),
         });
         let skill_source = Arc::new(StaticSkillContextSource::new(vec![
-            HostSkillContextCandidate::new(
+            HostSkillContextCandidate::loaded(
                 skill_md(
                     "configured-helper",
                     "configured helper description",

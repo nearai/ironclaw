@@ -191,25 +191,7 @@ pub struct SkillBundleDescriptor {
     trust: Option<SkillTrust>,
     visibility: Option<SkillVisibility>,
     provenance: SkillBundleProvenance,
-    discovery_metadata: SkillBundleDiscoveryMetadata,
-}
-
-/// Safe manifest metadata that can be shown before a skill is loaded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkillBundleDiscoveryMetadata {
     description: String,
-}
-
-impl SkillBundleDiscoveryMetadata {
-    pub fn new(description: impl Into<String>) -> Self {
-        Self {
-            description: description.into(),
-        }
-    }
-
-    pub fn description(&self) -> &str {
-        &self.description
-    }
 }
 
 impl SkillBundleDescriptor {
@@ -218,7 +200,7 @@ impl SkillBundleDescriptor {
         id: SkillBundleId,
         trust: Option<SkillTrust>,
         visibility: Option<SkillVisibility>,
-        discovery_metadata: SkillBundleDiscoveryMetadata,
+        description: impl Into<String>,
     ) -> Self {
         Self {
             provenance: SkillBundleProvenance::new(id.source_kind()),
@@ -226,7 +208,7 @@ impl SkillBundleDescriptor {
             skill_md_path: SkillFilePath::skill_md(),
             trust,
             visibility,
-            discovery_metadata,
+            description: description.into(),
         }
     }
 
@@ -248,10 +230,10 @@ impl SkillBundleDescriptor {
         self
     }
 
-    /// Attaches safe manifest metadata that may be shown before prompt loading.
+    /// Attaches the safe manifest description that may be shown before prompt loading.
     #[must_use]
-    pub fn with_discovery_metadata(mut self, metadata: SkillBundleDiscoveryMetadata) -> Self {
-        self.discovery_metadata = metadata;
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
         self
     }
 
@@ -280,9 +262,9 @@ impl SkillBundleDescriptor {
         &self.provenance
     }
 
-    /// Returns safe discovery metadata supplied by the host source.
-    pub fn discovery_metadata(&self) -> &SkillBundleDiscoveryMetadata {
-        &self.discovery_metadata
+    /// Returns the safe manifest description supplied by the host source.
+    pub fn description(&self) -> &str {
+        &self.description
     }
 
     /// Returns the deterministic ordering key used by [`Ord`].
@@ -359,7 +341,7 @@ mod tests {
             id(source_kind, name),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
-            SkillBundleDiscoveryMetadata::new(format!("{name} description")),
+            format!("{name} description"),
         )
     }
 
@@ -424,7 +406,7 @@ mod tests {
             id(SkillSourceKind::User, "code-review"),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
-            SkillBundleDiscoveryMetadata::new("code-review description"),
+            "code-review description",
         )
         .with_skill_md_path(SkillFilePath::new("nested/SKILL.md").unwrap())
         .with_provenance(

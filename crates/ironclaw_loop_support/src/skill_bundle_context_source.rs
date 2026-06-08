@@ -74,8 +74,7 @@ where
 
         stream::iter(descriptors.into_iter().enumerate())
             .map(|(index, descriptor)| async move {
-                self.load_descriptor_context_candidate(run_context, index, descriptor)
-                    .await
+                self.load_descriptor_context_candidate(index, descriptor)
             })
             .buffered(MAX_CONCURRENT_SKILL_BUNDLE_CONTEXT_READS)
             .try_collect()
@@ -87,9 +86,8 @@ impl<S> SkillBundleContextSource<S>
 where
     S: SkillBundleSource + ?Sized,
 {
-    async fn load_descriptor_context_candidate(
+    fn load_descriptor_context_candidate(
         &self,
-        _run_context: &LoopRunContext,
         index: usize,
         descriptor: SkillBundleDescriptor,
     ) -> Result<HostSkillContextCandidate, HostSkillContextBuildError> {
@@ -104,11 +102,9 @@ where
                 .with_ordering_key(ordering_key));
         }
 
-        let discovery_metadata = descriptor.discovery_metadata();
-
         Ok(HostSkillContextCandidate::discoverable(
             descriptor.id().name(),
-            discovery_metadata.description(),
+            descriptor.description(),
             trust,
             visibility,
         )
@@ -197,8 +193,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        SkillBundleDescriptor, SkillBundleDiscoveryMetadata, SkillFilePath,
-        skill_context::build_skill_instruction_snippets,
+        SkillBundleDescriptor, SkillFilePath, skill_context::build_skill_instruction_snippets,
     };
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
 
@@ -226,7 +221,7 @@ mod tests {
             crate::SkillBundleId::new(source_kind, name).unwrap(),
             trust,
             visibility,
-            SkillBundleDiscoveryMetadata::new(format!("{name} description")),
+            format!("{name} description"),
         )
     }
 
@@ -330,6 +325,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adapter_maps_budget_source_errors_from_bundle_listing() {
+        for source_error in [
+            SkillBundleSourceError::ContentTooLarge,
+            SkillBundleSourceError::BundleScanLimitExceeded,
+        ] {
+            let source =
+                Arc::new(StaticSkillBundleSource::default().with_list_error(source_error.clone()));
+            let adapter = SkillBundleContextSource::new(Arc::clone(&source));
+
+            let error = adapter
+                .load_skill_context_candidates(&run_context().await)
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                error,
+                HostSkillContextBuildError::ContextBudgetExceeded,
+                "{source_error:?} must map to budget exceeded"
+            );
+            assert!(source.reads().is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn adapter_reads_visible_trusted_bundle_as_discoverable_model_snippet() {
         let source = Arc::new(StaticSkillBundleSource::new(vec![
             descriptor(
@@ -338,7 +357,7 @@ mod tests {
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
             )
-            .with_discovery_metadata(SkillBundleDiscoveryMetadata::new("safe alpha description")),
+            .with_description("safe alpha description"),
         ]));
         let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
@@ -364,9 +383,7 @@ mod tests {
                 Some(SkillTrust::Installed),
                 Some(SkillVisibility::Visible),
             )
-            .with_discovery_metadata(SkillBundleDiscoveryMetadata::new(
-                "safe installed description",
-            )),
+            .with_description("safe installed description"),
         ]));
         let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
@@ -461,7 +478,7 @@ mod tests {
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
             )
-            .with_discovery_metadata(SkillBundleDiscoveryMetadata::new("alpha description")),
+            .with_description("alpha description"),
             descriptor(
                 crate::SkillSourceKind::User,
                 "bravo",
@@ -489,14 +506,14 @@ mod tests {
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
             )
-            .with_discovery_metadata(SkillBundleDiscoveryMetadata::new("bravo description")),
+            .with_description("bravo description"),
             descriptor(
                 crate::SkillSourceKind::System,
                 "alpha",
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
             )
-            .with_discovery_metadata(SkillBundleDiscoveryMetadata::new("alpha description")),
+            .with_description("alpha description"),
         ]));
         let adapter = SkillBundleContextSource::new(source);
 
@@ -523,7 +540,7 @@ mod tests {
             Some(SkillVisibility::Visible),
         )
         .with_skill_md_path(SkillFilePath::new("nested/SKILL.md").unwrap())
-        .with_discovery_metadata(SkillBundleDiscoveryMetadata::new("nested description"));
+        .with_description("nested description");
         let source = Arc::new(StaticSkillBundleSource::new(vec![
             nested_descriptor,
             descriptor(
@@ -532,7 +549,7 @@ mod tests {
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
             )
-            .with_discovery_metadata(SkillBundleDiscoveryMetadata::new("root description")),
+            .with_description("root description"),
         ]));
         let adapter = SkillBundleContextSource::new(source);
 

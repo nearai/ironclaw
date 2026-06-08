@@ -12,10 +12,9 @@ use ironclaw_loop_support::{
     HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     IdentityApplicability, IdentityBudget, IdentityFileName, SkillBundleContextSource,
-    SkillBundleDescriptor, SkillBundleDiscoveryMetadata, SkillBundleId, SkillBundleSource,
-    SkillBundleSourceError, SkillFilePath, SkillSourceKind, ThreadBackedLoopContextPort,
-    ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, build_skill_run_snapshot,
-    identity_message_ref,
+    SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath,
+    SkillSourceKind, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ThreadBackedLoopTranscriptPort, build_skill_run_snapshot, identity_message_ref,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
@@ -243,7 +242,7 @@ async fn thread_context_port_preserves_summary_replacements_as_system_messages()
 async fn thread_context_port_builds_skill_instruction_snippets_from_real_skill_md() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticSkillContextSource::new(vec![
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md(
                 "alpha",
                 "safe alpha description",
@@ -291,14 +290,14 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
         )
-        .with_discovery_metadata(SkillBundleDiscoveryMetadata::new("safe alpha description")),
+        .with_description("safe alpha description"),
         skill_bundle_descriptor(
             SkillSourceKind::User,
             "bravo",
             Some(SkillTrust::Installed),
             Some(SkillVisibility::Visible),
         )
-        .with_discovery_metadata(SkillBundleDiscoveryMetadata::new("safe bravo description")),
+        .with_description("safe bravo description"),
     ]));
     let source = Arc::new(SkillBundleContextSource::new(Arc::clone(&bundle_source)));
     let adapter = ThreadBackedLoopContextPort::new(
@@ -1109,17 +1108,17 @@ async fn model_port_preserves_capability_info_for_filtered_capability_view() {
 async fn thread_context_port_filters_skill_visibility_and_installed_prompt_content() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticSkillContextSource::new(vec![
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md("alpha", "installed description", "installed prompt secret"),
             Some(SkillTrust::Installed),
             Some(SkillVisibility::Visible),
         ),
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md("hidden", "hidden description", "hidden prompt"),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Hidden),
         ),
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md("denied", "denied description", "denied prompt"),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Denied),
@@ -1166,7 +1165,7 @@ async fn thread_context_port_filters_skill_visibility_and_installed_prompt_conte
 
 #[test]
 fn skill_snapshot_builder_drops_installed_prompt_content_before_snapshot_storage() {
-    let snapshot = build_skill_run_snapshot(vec![HostSkillContextCandidate::new(
+    let snapshot = build_skill_run_snapshot(vec![HostSkillContextCandidate::loaded(
         skill_md(
             "alpha",
             "installed description",
@@ -1192,7 +1191,7 @@ fn skill_snapshot_builder_drops_installed_prompt_content_before_snapshot_storage
 async fn thread_context_port_ignores_malformed_hidden_skill_content() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticSkillContextSource::new(vec![
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             "not valid SKILL.md",
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Hidden),
@@ -1201,7 +1200,7 @@ async fn thread_context_port_ignores_malformed_hidden_skill_content() {
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Denied),
         ),
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md("alpha", "visible description", "visible prompt"),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
@@ -1266,7 +1265,7 @@ async fn thread_context_port_fails_closed_when_visible_skill_content_is_missing(
 async fn thread_context_port_fails_closed_when_skill_policy_data_is_missing() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticSkillContextSource::new(vec![
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md(
                 "alpha",
                 "safe alpha description",
@@ -1301,7 +1300,7 @@ async fn thread_context_port_fails_closed_when_skill_policy_data_is_missing() {
 async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticSkillContextSource::new(vec![
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md(
                 "alpha",
                 "safe alpha description",
@@ -1385,13 +1384,13 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
 async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticSkillContextSource::new(vec![
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md("zeta", "safe zeta description", "Use zeta prompt content."),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
         )
         .with_ordering_key("0000000000000000"),
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md(
                 "alpha",
                 "safe alpha description",
@@ -1603,7 +1602,7 @@ async fn model_port_rejects_policy_denied_identity_ref_before_gateway_call() {
 async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_payload() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticSkillContextSource::new(vec![
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md(
                 "alpha",
                 "installed alpha description",
@@ -1663,12 +1662,12 @@ async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_paylo
 async fn prompt_port_records_multiple_active_skill_metadata_in_prompt_order() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticSkillContextSource::new(vec![
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md("bravo", "trusted bravo description", "trusted prompt"),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
         ),
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md("alpha", "installed alpha description", "installed prompt"),
             Some(SkillTrust::Installed),
             Some(SkillVisibility::Visible),
@@ -1728,13 +1727,13 @@ async fn prompt_port_records_multiple_active_skill_metadata_in_prompt_order() {
 async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticSkillContextSource::new(vec![
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md("alpha", "first description", "first prompt"),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
         )
         .with_ordering_key("alpha-1"),
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md("alpha", "second description", "second prompt"),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
@@ -1803,7 +1802,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
 async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_build() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(MutableSkillContextSource::new(vec![
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md("alpha", "original description", "original prompt"),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
@@ -1836,7 +1835,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
         .await
         .unwrap();
 
-    source.set(vec![HostSkillContextCandidate::new(
+    source.set(vec![HostSkillContextCandidate::loaded(
         skill_md("alpha", "changed description", "changed prompt"),
         Some(SkillTrust::Trusted),
         Some(SkillVisibility::Visible),
@@ -3343,7 +3342,7 @@ fn skill_bundle_descriptor(
         SkillBundleId::new(source_kind, name).unwrap(),
         trust,
         visibility,
-        SkillBundleDiscoveryMetadata::new(format!("{name} description")),
+        format!("{name} description"),
     )
 }
 

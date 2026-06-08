@@ -4,7 +4,6 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ScopedPath, TenantId};
 use ironclaw_loop_support::{
     FilesystemSkillBundleRoot, FilesystemSkillBundleSource, HostSkillContextSource,
-    SkillBundleContextSource,
 };
 
 use crate::{
@@ -103,7 +102,6 @@ where
     F: RootFilesystem + 'static,
 {
     bundle_source: Arc<FilesystemSkillBundleSource<F>>,
-    context_source: Arc<SkillBundleContextSource<FilesystemSkillBundleSource<F>>>,
     default_selectable_runtime: FirstPartySelectableSkillsRuntime<F>,
 }
 
@@ -196,7 +194,6 @@ where
                     FirstPartySkillsExtensionError::InvalidBundleSource(error.to_string())
                 })?,
         );
-        let context_source = Arc::new(SkillBundleContextSource::new(Arc::clone(&bundle_source)));
         let default_selectable_context_source = Arc::new(SelectableSkillContextSource::new(
             Arc::clone(&bundle_source),
             SkillActivationSelectorConfig::default(),
@@ -210,17 +207,12 @@ where
         );
         Ok(Self {
             bundle_source,
-            context_source,
             default_selectable_runtime,
         })
     }
 
     pub fn bundle_source(&self) -> Arc<FilesystemSkillBundleSource<F>> {
         Arc::clone(&self.bundle_source)
-    }
-
-    pub fn context_source(&self) -> Arc<SkillBundleContextSource<FilesystemSkillBundleSource<F>>> {
-        Arc::clone(&self.context_source)
     }
 
     pub fn host_skill_context_source(&self) -> Arc<dyn HostSkillContextSource> {
@@ -306,7 +298,9 @@ mod tests {
         AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
         VirtualPath,
     };
-    use ironclaw_loop_support::{SkillBundleSource, build_skill_run_snapshot};
+    use ironclaw_loop_support::{
+        SkillBundleContextSource, SkillBundleSource, build_skill_run_snapshot,
+    };
     use ironclaw_skills::SkillTrust;
     use ironclaw_turns::{
         AcceptedMessageRef, TurnActor, TurnId, TurnRunId, TurnScope,
@@ -447,8 +441,8 @@ mod tests {
         )
         .unwrap();
 
-        let candidates = extension
-            .context_source()
+        let context_source = SkillBundleContextSource::new(extension.bundle_source());
+        let candidates = context_source
             .load_skill_context_candidates(&run_context().await)
             .await
             .unwrap();
