@@ -227,7 +227,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
                 safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
                 safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
                 concurrency_hint: ConcurrencyHint::Exclusive,
-                parameters_schema: spawn_subagent_parameters_schema(),
+                parameters_schema: build_spawn_subagent_parameters_schema(&[]),
             }],
         })
     }
@@ -294,7 +294,7 @@ impl LoopCapabilityPort for StrictSpawnAuthPort {
                 safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
                 safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
                 concurrency_hint: ConcurrencyHint::Exclusive,
-                parameters_schema: spawn_subagent_parameters_schema(),
+                parameters_schema: build_spawn_subagent_parameters_schema(&[]),
             }],
         })
     }
@@ -939,7 +939,7 @@ fn spawn_tool_definition() -> ProviderToolDefinition {
         capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
         description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
-        parameters: spawn_subagent_parameters_schema(),
+        parameters: build_spawn_subagent_parameters_schema(&[]),
     }
 }
 
@@ -1061,6 +1061,7 @@ async fn spawn_test_port(
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         limits,
         deps,
+        Vec::new(),
     );
     port.auth_input_refs.lock().unwrap().insert(input_ref());
     port
@@ -1094,6 +1095,7 @@ fn spawn_test_port_with_inner(
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         SubagentSpawnLimits::default(),
         deps,
+        Vec::new(),
     )
 }
 
@@ -1134,6 +1136,7 @@ fn spawn_test_port_with_codec_and_recorders(
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         SubagentSpawnLimits::default(),
         deps,
+        Vec::new(),
     );
     port.auth_input_refs.lock().unwrap().insert(input_ref());
     SpawnPortWithRecorders {
@@ -1274,7 +1277,7 @@ async fn spawn_tool_definition_is_present_in_structured_tools() {
     assert_eq!(definition.name, SPAWN_SUBAGENT_PROVIDER_TOOL_NAME);
     assert_eq!(
         definition.parameters["required"],
-        json!(["flavor_id", "task"])
+        json!(["subagent_type", "task"])
     );
     assert_eq!(
         definition.parameters["properties"]["task"]["maxLength"],
@@ -1542,6 +1545,7 @@ async fn spawn_provider_tool_call_registration_does_not_require_inner_spawn_name
             spawn_input_codec: Arc::new(RegisteringSpawnInputCodec),
             result_writer: Arc::new(NoopResultWriter),
         }),
+        Vec::new(),
     );
 
     let candidate = port
@@ -1716,6 +1720,7 @@ async fn invoke_spawn_rejects_when_authorization_input_ref_is_missing() {
             }),
             result_writer: Arc::new(NoopResultWriter),
         }),
+        Vec::new(),
     );
 
     assert_eq!(
@@ -1757,6 +1762,7 @@ async fn invoke_spawn_submits_child_run_through_spawn_tree_port() {
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         SubagentSpawnLimits::default(),
         deps,
+        Vec::new(),
     );
     port.auth_input_refs.lock().unwrap().insert(input_ref());
 
@@ -1834,6 +1840,7 @@ async fn invoke_capability_batch_handles_mixed_spawn_and_non_spawn_invocations()
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         SubagentSpawnLimits::default(),
         deps,
+        Vec::new(),
     );
     port.auth_input_refs.lock().unwrap().insert(input_ref());
 
@@ -1901,6 +1908,7 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
             ..SubagentSpawnLimits::default()
         },
         deps,
+        Vec::new(),
     );
     port.auth_input_refs.lock().unwrap().insert(input_ref());
 
@@ -1986,6 +1994,7 @@ async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested(
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         SubagentSpawnLimits::default(),
         deps,
+        Vec::new(),
     );
     port.auth_input_refs.lock().unwrap().insert(input_ref());
 
@@ -2062,6 +2071,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         SubagentSpawnLimits::default(),
         deps,
+        Vec::new(),
     );
     let input_ref_a = CapabilityInputRef::new("input:spawn-a").unwrap();
     let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
@@ -2140,6 +2150,7 @@ async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         SubagentSpawnLimits::default(),
         deps,
+        Vec::new(),
     );
     port.auth_input_refs.lock().unwrap().insert(input_ref());
 
@@ -2563,6 +2574,7 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         SubagentSpawnLimits::default(),
         deps,
+        Vec::new(),
     );
     let input_ref_a = CapabilityInputRef::new("input:spawn-a").unwrap();
     let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
@@ -2647,6 +2659,7 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         SubagentSpawnLimits::default(),
         deps,
+        Vec::new(),
     );
     let input_ref_a = CapabilityInputRef::new("input:spawn-a").unwrap();
     let input_ref_inner = CapabilityInputRef::new("input:inner").unwrap();
@@ -2746,6 +2759,7 @@ async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         SubagentSpawnLimits::default(),
         deps,
+        Vec::new(),
     );
     port.auth_input_refs.lock().unwrap().insert(input_ref());
 
@@ -2841,6 +2855,7 @@ async fn spawn_subagent_propagates_byte_len_from_result_writer() {
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         SubagentSpawnLimits::default(),
         deps,
+        Vec::new(),
     );
     port.auth_input_refs.lock().unwrap().insert(input_ref());
 
@@ -2853,5 +2868,91 @@ async fn spawn_subagent_propagates_byte_len_from_result_writer() {
         byte_len, fixed_byte_len,
         "spawn port must propagate the byte_len returned by the result writer \
          (D2 un-discard regression: byte_len must reach CapabilityOutcome)"
+    );
+}
+
+// ── New tests for schema redesign ────────────────────────────────────────────
+
+#[test]
+fn build_spawn_subagent_parameters_schema_enum_and_description() {
+    let catalog = vec![
+        SpawnSubagentFlavorDescriptor {
+            id: "general".into(),
+            summary: "summary one".into(),
+        },
+        SpawnSubagentFlavorDescriptor {
+            id: "planner".into(),
+            summary: "summary two".into(),
+        },
+    ];
+    let schema = build_spawn_subagent_parameters_schema(&catalog);
+
+    // required must list the new wire name
+    assert_eq!(schema["required"], json!(["subagent_type", "task"]));
+
+    // enum values come from catalog in order
+    let enum_vals = schema["properties"]["subagent_type"]["enum"]
+        .as_array()
+        .expect("enum array");
+    assert_eq!(enum_vals.len(), 2);
+    assert_eq!(enum_vals[0], json!("general"));
+    assert_eq!(enum_vals[1], json!("planner"));
+
+    // description contains both summaries
+    let description = schema["properties"]["subagent_type"]["description"]
+        .as_str()
+        .expect("description string");
+    assert!(
+        description.contains("summary one"),
+        "description must contain 'summary one', got: {description}"
+    );
+    assert!(
+        description.contains("summary two"),
+        "description must contain 'summary two', got: {description}"
+    );
+}
+
+#[test]
+fn spawn_subagent_args_wire_rename_and_alias_roundtrip() {
+    // Old wire format (flavor_id alias) must still deserialize
+    let from_flavor_id: SpawnSubagentArgs =
+        serde_json::from_str(r#"{"flavor_id":"general","task":"x"}"#)
+            .expect("flavor_id alias must deserialize");
+    assert_eq!(from_flavor_id.subagent_kind.as_str(), "general");
+
+    // New wire format (subagent_type) must deserialize
+    let from_subagent_type: SpawnSubagentArgs =
+        serde_json::from_str(r#"{"subagent_type":"general","task":"x"}"#)
+            .expect("subagent_type must deserialize");
+    assert_eq!(from_subagent_type.subagent_kind.as_str(), "general");
+
+    // Serialization emits subagent_type, not flavor_id
+    let serialized = serde_json::to_value(&from_subagent_type).expect("serializes");
+    assert!(
+        serialized.get("subagent_type").is_some(),
+        "serialized output must have 'subagent_type' key"
+    );
+    assert!(
+        serialized.get("flavor_id").is_none(),
+        "serialized output must NOT have 'flavor_id' key"
+    );
+
+    // When both the canonical name and alias are present, serde rejects the
+    // input as a duplicate field. Document this behavior so any change in
+    // serde's handling surfaces as a test failure.
+    let duplicate_result = serde_json::from_str::<SpawnSubagentArgs>(
+        r#"{"flavor_id":"old","subagent_type":"new","task":"x"}"#,
+    );
+    assert!(
+        duplicate_result.is_err(),
+        "serde_json must reject duplicate canonical+alias keys; got: {duplicate_result:?}"
+    );
+}
+
+#[test]
+fn spawn_subagent_description_contains_planner_nudge() {
+    assert!(
+        SPAWN_SUBAGENT_DESCRIPTION.contains("planner"),
+        "SPAWN_SUBAGENT_DESCRIPTION must mention 'planner' to nudge parents toward planning"
     );
 }

@@ -42,18 +42,42 @@ pub const DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN: u32 = 4;
 pub const DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS: u32 = 16;
 pub const DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID: &str = "builtin.spawn_subagent";
 const SPAWN_SUBAGENT_PROVIDER_TOOL_NAME: &str = "builtin__spawn_subagent";
-pub(crate) const SPAWN_SUBAGENT_DESCRIPTION: &str =
-    "Spawn a scoped child subagent to handle a focused task and return its result.";
+pub(crate) const SPAWN_SUBAGENT_DESCRIPTION: &str = "Delegate a focused task to a fresh child agent with its own context window and tool scope. The child runs to completion and returns its final result. Use when the task would otherwise pollute your context (deep file reads, multi-step research) or needs different tool permissions than your current scope. For complex tasks involving multiple steps, design choices, or unfamiliar libraries, spawn a `planner` first — it returns a structured plan you can then execute or hand to a `coder`. Pick `subagent_type` based on what the child needs: exploration, planning, or code changes.";
 
-fn spawn_subagent_parameters_schema() -> serde_json::Value {
+/// A flavor descriptor passed into [`SubagentSpawnCapabilityPort`] at
+/// construction time so the port can build a dynamic schema without depending
+/// on `ironclaw_reborn` (which would create a dependency cycle).
+#[derive(Clone, Debug)]
+pub struct SpawnSubagentFlavorDescriptor {
+    pub id: String,
+    pub summary: String,
+}
+
+pub fn build_spawn_subagent_parameters_schema(
+    catalog: &[SpawnSubagentFlavorDescriptor],
+) -> serde_json::Value {
+    let enum_values: Vec<serde_json::Value> =
+        catalog.iter().map(|f| serde_json::json!(f.id)).collect();
+
+    let description = if catalog.is_empty() {
+        "Which subagent profile to spawn.".to_string()
+    } else {
+        let lines: Vec<String> = catalog
+            .iter()
+            .map(|f| format!("- {}: {}", f.id, f.summary))
+            .collect();
+        format!("Which subagent profile to spawn. Options:\n{}", lines.join("\n"))
+    };
+
     serde_json::json!({
         "type": "object",
-        "required": ["flavor_id", "task"],
+        "required": ["subagent_type", "task"],
         "additionalProperties": false,
         "properties": {
-            "flavor_id": {
+            "subagent_type": {
                 "type": "string",
-                "description": "Subagent flavor id for the child run."
+                "enum": enum_values,
+                "description": description
             },
             "task": {
                 "type": "string",
@@ -150,7 +174,7 @@ pub enum SpawnSubagentMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnSubagentArgs {
-    #[serde(rename = "flavor_id")]
+    #[serde(rename = "subagent_type", alias = "flavor_id")]
     pub subagent_kind: SubagentKindId,
     pub task: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,7 +183,7 @@ pub struct SpawnSubagentArgs {
 
 #[derive(Debug, Deserialize)]
 struct SpawnSubagentWireArgs {
-    #[serde(rename = "flavor_id")]
+    #[serde(rename = "subagent_type", alias = "flavor_id")]
     subagent_kind: SubagentKindId,
     task: String,
     #[serde(default)]
@@ -353,6 +377,7 @@ pub struct SubagentSpawnCapabilityPort {
     spawn_id: CapabilityId,
     limits: SubagentSpawnLimits,
     deps: Arc<SubagentSpawnDeps>,
+    flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
     auth_input_refs: Mutex<HashSet<CapabilityInputRef>>,
     spawned_this_turn: AtomicU32,
 }
@@ -455,6 +480,7 @@ impl SubagentSpawnCapabilityPort {
         spawn_id: CapabilityId,
         limits: SubagentSpawnLimits,
         deps: Arc<SubagentSpawnDeps>,
+        flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
     ) -> Self {
         Self {
             inner,
@@ -462,6 +488,7 @@ impl SubagentSpawnCapabilityPort {
             spawn_id,
             limits,
             deps,
+            flavor_catalog,
             auth_input_refs: Mutex::new(HashSet::new()),
             spawned_this_turn: AtomicU32::new(0),
         }
@@ -480,7 +507,7 @@ impl SubagentSpawnCapabilityPort {
             capability_id: self.spawn_id.clone(),
             name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
             description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
-            parameters: spawn_subagent_parameters_schema(),
+            parameters: build_spawn_subagent_parameters_schema(&self.flavor_catalog),
         }
     }
 
@@ -492,7 +519,7 @@ impl SubagentSpawnCapabilityPort {
             safe_name: self.spawn_id.as_str().to_string(),
             safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
             concurrency_hint: ConcurrencyHint::Exclusive,
-            parameters_schema: spawn_subagent_parameters_schema(),
+            parameters_schema: build_spawn_subagent_parameters_schema(&self.flavor_catalog),
         }
     }
 
