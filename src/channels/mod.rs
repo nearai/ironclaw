@@ -43,8 +43,9 @@ mod webhook_server;
 #[cfg(feature = "tui")]
 pub use self::tui::TuiChannel;
 pub(crate) use attachments::{
-    MAX_INLINE_ATTACHMENT_BYTES, MAX_INLINE_ATTACHMENTS, MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
-    attachment_extension_for_mime,
+    ATTACHMENT_PATH_PREFIX, MAX_INLINE_ATTACHMENT_BYTES, MAX_INLINE_ATTACHMENTS,
+    MAX_INLINE_TOTAL_ATTACHMENT_BYTES, attachment_storage_root, fallback_attachment_filename,
+    persist_attachment_at, persist_legacy_image_attachments, sanitize_attachment_segment,
 };
 pub use channel::{
     AttachmentKind, Channel, ChannelSecretUpdater, ChatApprovalPrompt, EngineThreadSummary,

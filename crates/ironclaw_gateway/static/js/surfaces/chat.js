@@ -81,7 +81,7 @@ async function sendMessage() {
   }
   if (_sendCooldown) return;
   const content = input.value.trim();
-  if (!content && stagedImages.length === 0 && stagedAttachments.length === 0) return;
+  if (!content && stagedAttachments.length === 0) return;
 
   // Intercept approval keywords when an unresolved approval card is pending.
   // Find the most recent unresolved card for the current thread (resolved cards
@@ -115,10 +115,9 @@ async function sendMessage() {
     }
   }
 
-  // Snapshot attached images + attachments before the body block clears them,
-  // so the optimistic display, pending entry, and retry handler all see the
-  // same view the user pressed Enter on.
-  const attachedImageDataUrls = stagedImages.map(img => img.dataUrl);
+  // Snapshot attachments before the body block clears them, so the optimistic
+  // display, pending entry, and retry handler all see the same view the user
+  // pressed Enter on.
   const pendingAttachmentsForDisplay = stagedAttachments.map(att => ({
     kind: att.kind || (att.mime_type && att.mime_type.startsWith('image/') ? 'image' : 'document'),
     filename: att.filename || 'attachment',
@@ -127,8 +126,9 @@ async function sendMessage() {
     preview_url: att.preview_url || null,
     preview_text: '',
   }));
-  const displayContent = content
-    || (pendingAttachmentsForDisplay.length > 0 ? '(files attached)' : '(images attached)');
+  // Early-return at the top guarantees content or attachments is non-empty,
+  // so the fallback always reflects "files attached" when content is blank.
+  const displayContent = content || '(files attached)';
   const pendingCopyTextParts = [];
   if (displayContent) pendingCopyTextParts.push(displayContent);
   pendingAttachmentsForDisplay.forEach((att) => {
@@ -144,9 +144,6 @@ async function sendMessage() {
     attachments: pendingAttachmentsForDisplay,
     copyText: pendingCopyText,
   });
-  if (attachedImageDataUrls.length > 0) {
-    appendImagesToMessage(userMsg, attachedImageDataUrls);
-  }
   pruneOldMessages();
   if (currentThreadId) {
     activeWorkStore.updateThread(currentThreadId, {
@@ -170,17 +167,11 @@ async function sendMessage() {
       content: displayContent,
       copyText: pendingCopyText,
       attachments: pendingAttachmentsForDisplay.map((att) => ({ ...att })),
-      images: attachedImageDataUrls,
       timestamp: Date.now(),
     });
   }
 
   const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
-  if (stagedImages.length > 0) {
-    body.images = stagedImages.map(img => ({ media_type: img.media_type, data: img.data }));
-    stagedImages = [];
-    renderImagePreviews();
-  }
   // Clone attachments so the retry handler can restore them if send fails
   // without getting mutated by subsequent stagedAttachments clears.
   const pendingAttachments = stagedAttachments.map(att => ({ ...att }));
@@ -235,8 +226,7 @@ async function sendMessage() {
         e.preventDefault();
         if (userMsg.parentNode) userMsg.parentNode.removeChild(userMsg);
         // Restore the attachments we just cleared so the retry carries the
-        // same payload the failed send attempted. `stagedImages` is kept
-        // separately by the existing preview machinery.
+        // same payload the failed send attempted.
         if (pendingAttachments.length > 0) {
           stagedAttachments = pendingAttachments.map(att => ({ ...att }));
           if (typeof renderAttachmentPreviews === 'function') {
@@ -260,62 +250,6 @@ function enableChatInput() {
     input.placeholder = I18n.t('chat.inputPlaceholder');
   }
   if (btn) btn.disabled = false;
-}
-
-// --- Image Upload ---
-
-function renderImagePreviews() {
-  const strip = document.getElementById('image-preview-strip');
-  strip.innerHTML = '';
-  stagedImages.forEach((img, idx) => {
-    const container = document.createElement('div');
-    container.className = 'image-preview-container';
-
-    const preview = document.createElement('img');
-    preview.className = 'image-preview';
-    preview.src = img.dataUrl;
-    preview.alt = 'Attached image';
-
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'image-preview-remove';
-    removeBtn.textContent = '\u00d7';
-    removeBtn.addEventListener('click', () => {
-      stagedImages.splice(idx, 1);
-      renderImagePreviews();
-    });
-
-    container.appendChild(preview);
-    container.appendChild(removeBtn);
-    strip.appendChild(container);
-  });
-}
-
-const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per image
-const MAX_STAGED_IMAGES = 5;
-
-function handleImageFiles(files) {
-  Array.from(files).forEach(file => {
-    if (!file.type.startsWith('image/')) return;
-    if (file.size > MAX_IMAGE_SIZE_BYTES) {
-      alert(I18n.t('chat.imageTooBig', { name: file.name, size: (file.size / 1024 / 1024).toFixed(1) }));
-      return;
-    }
-    if (stagedImages.length >= MAX_STAGED_IMAGES) {
-      alert(I18n.t('chat.maxImages', { n: MAX_STAGED_IMAGES }));
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = function(e) {
-      const dataUrl = e.target.result;
-      const commaIdx = dataUrl.indexOf(',');
-      const meta = dataUrl.substring(0, commaIdx); // e.g. "data:image/png;base64"
-      const base64 = dataUrl.substring(commaIdx + 1);
-      const mediaType = meta.replace('data:', '').replace(';base64', '');
-      stagedImages.push({ media_type: mediaType, data: base64, dataUrl: dataUrl });
-      renderImagePreviews();
-    };
-    reader.readAsDataURL(file);
-  });
 }
 
 // The click/change/paste wiring for #attach-btn + #image-file-input lives in
@@ -620,19 +554,68 @@ function formatAttachmentSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function appendAttachmentFileCard(container, itemClassName, nameClassName, metaClassName, filename, metaText) {
+// Lucide-style SVG icons. Audio gets a music note; everything else falls
+// back to the generic file glyph. Video isn't supported by the backend
+// allowlist, so it's rejected at `handleAttachmentFiles` and never reaches
+// the icon picker.
+function attachmentIconSvg(mimeType) {
+  const mt = (mimeType || '').toLowerCase();
+  if (mt.startsWith('audio/')) {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+  }
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+}
+
+// Short, recognizable type label. Prefer the file extension because users
+// know "DOCX"/"MP3" instinctively; fall back to a MIME-derived category
+// when the filename is missing or extensionless.
+function attachmentTypeLabel(filename, mimeType) {
+  if (filename) {
+    const dot = filename.lastIndexOf('.');
+    if (dot > -1 && dot < filename.length - 1) {
+      const ext = filename.slice(dot + 1).toUpperCase();
+      // Sanity-cap extension length so an oddly-named file like
+      // "report.final-version-with-comments" doesn't blow out the label.
+      if (ext.length > 0 && ext.length <= 5) return ext;
+    }
+  }
+  const mt = (mimeType || '').toLowerCase();
+  if (mt === 'application/pdf') return 'PDF';
+  if (mt.startsWith('image/')) return 'Image';
+  if (mt.startsWith('audio/')) return 'Audio';
+  if (mt.startsWith('text/')) return 'Text';
+  return 'File';
+}
+
+// Compose `type • size` for the meta line, dropping either piece if missing.
+function attachmentMetaText(filename, mimeType, sizeLabel) {
+  return [attachmentTypeLabel(filename, mimeType), sizeLabel || '']
+    .filter(Boolean)
+    .join(' • ');
+}
+
+function appendAttachmentFileCard(container, classes, filename, metaText, mimeType) {
   const item = document.createElement('div');
-  item.className = itemClassName;
+  item.className = classes.item;
+  // Mirror the staging preview: icon on the left, name + meta on the right.
+  const iconEl = document.createElement('div');
+  iconEl.className = classes.icon;
+  iconEl.innerHTML = attachmentIconSvg(mimeType);
+  item.appendChild(iconEl);
+  const metaWrap = document.createElement('div');
+  metaWrap.className = classes.body;
   const nameEl = document.createElement('div');
-  nameEl.className = nameClassName;
+  nameEl.className = classes.name;
   nameEl.textContent = filename || 'attachment';
-  item.appendChild(nameEl);
+  nameEl.title = filename || '';
+  metaWrap.appendChild(nameEl);
   if (metaText) {
     const metaEl = document.createElement('div');
-    metaEl.className = metaClassName;
+    metaEl.className = classes.meta;
     metaEl.textContent = metaText;
-    item.appendChild(metaEl);
+    metaWrap.appendChild(metaEl);
   }
+  item.appendChild(metaWrap);
   container.appendChild(item);
 }
 
@@ -654,18 +637,24 @@ function renderAttachmentPreviews() {
       container.classList.add('attachment-preview-file');
       const icon = document.createElement('div');
       icon.className = 'attachment-preview-file-icon';
-      icon.textContent = (att.filename || 'FILE').split('.').pop().toUpperCase().slice(0, 4);
+      // Audio/video get type-specific glyphs so the user can read the card
+      // at a glance; everything else falls back to the generic file icon.
+      icon.innerHTML = attachmentIconSvg(att.mime_type);
       container.appendChild(icon);
       const meta = document.createElement('div');
       meta.className = 'attachment-preview-file-meta';
       const nameEl = document.createElement('div');
       nameEl.className = 'attachment-preview-file-name';
       nameEl.textContent = att.filename || 'Attached file';
+      nameEl.title = att.filename || '';
       meta.appendChild(nameEl);
-      const typeEl = document.createElement('div');
-      typeEl.className = 'attachment-preview-file-type';
-      typeEl.textContent = att.mime_type;
-      meta.appendChild(typeEl);
+      const metaText = attachmentMetaText(att.filename, att.mime_type, att.size_label);
+      if (metaText) {
+        const sizeEl = document.createElement('div');
+        sizeEl.className = 'attachment-preview-file-size';
+        sizeEl.textContent = metaText;
+        meta.appendChild(sizeEl);
+      }
       container.appendChild(meta);
     }
 
@@ -682,15 +671,147 @@ function renderAttachmentPreviews() {
   });
 }
 
-const MAX_ATTACHMENT_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per attachment
+const MAX_ATTACHMENT_SIZE_BYTES = 7 * 1024 * 1024; // 7 MB per attachment (matches MAX_INLINE_ATTACHMENT_BYTES)
 const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB decoded per message
 const MAX_STAGED_ATTACHMENTS = 5;
+
+// Image compression knobs for client-side resize before upload. The
+// pipeline:
+//   - Anything beyond IMAGE_COMPRESS_MAX_DIM gets resized via canvas.
+//   - JPEGs always re-encode to JPEG (no alpha to worry about).
+//   - PNGs sample the alpha channel of the resized canvas: if any pixel
+//     is non-opaque, we keep PNG to preserve transparency; if every
+//     pixel is opaque (typical for screenshots / phone-camera saves),
+//     we re-encode to JPEG to save 80%+ on the wire.
+//   - GIF / WebP / other bitmap MIMEs follow the same rule.
+// If the result is larger than the original (already-tight source PNG
+// of an icon, etc.), we fall back to the original and skip compression.
+const IMAGE_COMPRESS_MAX_DIM = 1600;
+const IMAGE_COMPRESS_QUALITY = 0.88;
+// MIME types we know how to round-trip through canvas. SVG and BMP and
+// other vector / unusual formats would lose fidelity; let them upload
+// as-is.
+const IMAGE_COMPRESS_RECODE_MIMES = new Set([
+  'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
+]);
+
+// Sample the alpha channel of `canvas` to decide whether the image has
+// any transparent pixels. Returns `true` on the first non-opaque pixel
+// (early-out). Falls open (returns `true`) if `getImageData` throws
+// because of canvas tainting — better to keep PNG than silently drop
+// transparency.
+function canvasHasTransparency(canvas) {
+  try {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return true;
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 255) return true;
+    }
+    return false;
+  } catch (_) {
+    return true;
+  }
+}
+
+// Re-encode an image data URL through canvas, downscaling to fit within
+// IMAGE_COMPRESS_MAX_DIM and choosing PNG vs JPEG output based on whether
+// the source has any transparent pixels. Returns `null` to signal "no
+// change" — caller falls back to the untouched original.
+function compressImageForUpload(dataUrl, mimeType) {
+  const lowerMime = (mimeType || '').toLowerCase();
+  if (!IMAGE_COMPRESS_RECODE_MIMES.has(lowerMime)) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const oversized = img.naturalWidth > IMAGE_COMPRESS_MAX_DIM
+          || img.naturalHeight > IMAGE_COMPRESS_MAX_DIM;
+        // For JPEGs: skip when both dimensions already fit — re-encoding
+        // would only lose quality. For PNGs: still pass through canvas
+        // when in-bounds *if* MIME translation could shrink it (an
+        // opaque PNG → JPEG re-encode is a big win even at native size).
+        const isOpaqueOrigin = lowerMime === 'image/jpeg' || lowerMime === 'image/jpg';
+        if (!oversized && isOpaqueOrigin) {
+          resolve(null);
+          return;
+        }
+        const ratio = Math.min(
+          IMAGE_COMPRESS_MAX_DIM / img.naturalWidth,
+          IMAGE_COMPRESS_MAX_DIM / img.naturalHeight,
+          1,
+        );
+        const w = Math.max(1, Math.round(img.naturalWidth * ratio));
+        const h = Math.max(1, Math.round(img.naturalHeight * ratio));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { resolve(null); return; }
+        ctx.drawImage(img, 0, 0, w, h);
+        // Pick output MIME based on actual transparency, not source MIME.
+        // A PNG with no alpha pixels (the common screenshot case) gets
+        // a JPEG re-encode; a true alpha-using PNG keeps PNG.
+        let outMime = 'image/jpeg';
+        if (lowerMime === 'image/png' || lowerMime === 'image/webp') {
+          if (canvasHasTransparency(canvas)) {
+            outMime = 'image/png';
+          }
+        }
+        const compressed = outMime === 'image/png'
+          ? canvas.toDataURL('image/png')
+          : canvas.toDataURL('image/jpeg', IMAGE_COMPRESS_QUALITY);
+        // Bail if the re-encode is larger than the original (highly
+        // optimized source PNGs of icons can land here).
+        if (compressed.length >= dataUrl.length) {
+          resolve(null);
+          return;
+        }
+        resolve({ dataUrl: compressed, mimeType: outMime });
+      } catch (_) {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+
+// Replace the filename's extension to match the post-compression bytes.
+// `image/png` → `.png`, anything else (the common case after re-encode)
+// → `.jpg`.
+function withCompressedExtension(filename, outputMime) {
+  const ext = outputMime === 'image/png' ? '.png' : '.jpg';
+  if (!filename) return `image${ext}`;
+  const dot = filename.lastIndexOf('.');
+  return dot > 0 ? filename.slice(0, dot) + ext : filename + ext;
+}
+
+// Approximate decoded bytes from a base64 data URL without re-decoding.
+function dataUrlDecodedBytes(dataUrl) {
+  const commaIdx = dataUrl.indexOf(',');
+  if (commaIdx === -1) return dataUrl.length;
+  // base64 expands by 4/3; padding accounts for at most 2 trailing '=' bytes.
+  const b64Len = dataUrl.length - commaIdx - 1;
+  const padding = (dataUrl.endsWith('==')) ? 2 : (dataUrl.endsWith('=') ? 1 : 0);
+  return Math.max(0, Math.floor(b64Len * 3 / 4) - padding);
+}
 
 function handleAttachmentFiles(files) {
   let projectedCount = stagedAttachments.length + pendingAttachmentCount;
   let projectedTotalBytes = stagedAttachments.reduce((sum, att) => sum + (att.size_bytes || 0), 0) + pendingAttachmentBytes;
   Array.from(files).forEach(file => {
     const mimeType = inferAttachmentMimeType(file);
+    // Backend allowlist (src/channels/web/util.rs `is_allowed_attachment_mime`)
+    // doesn't include video/*. Reject at the boundary so the user gets a clear
+    // alert instead of a server-side rejection after upload.
+    if ((file.type || '').toLowerCase().startsWith('video/')
+        || mimeType.toLowerCase().startsWith('video/')) {
+      alert(I18n.t('chat.videoNotSupported', { name: file.name }));
+      return;
+    }
     if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
       alert(I18n.t('chat.fileTooBig', { name: file.name, size: (file.size / 1024 / 1024).toFixed(1) }));
       return;
@@ -723,20 +844,33 @@ function handleAttachmentFiles(files) {
       const dataUrl = e.target.result;
       const commaIdx = dataUrl.indexOf(',');
       const meta = dataUrl.substring(0, commaIdx);
-      const base64 = dataUrl.substring(commaIdx + 1);
       const parsedType = meta.replace('data:', '').replace(';base64', '');
       const mediaType = (!parsedType || parsedType === 'application/octet-stream') ? mimeType : parsedType;
-      stagedAttachments.push({
-        kind: mediaType.startsWith('image/') ? 'image' : 'document',
-        mime_type: mediaType,
-        filename: file.name || null,
-        data_base64: base64,
-        preview_url: mediaType.startsWith('image/') ? dataUrl : null,
-        size_bytes: file.size,
-        size_label: formatAttachmentSize(file.size),
+      // Recode bitmap images client-side: oversized images get downscaled,
+      // and opaque PNGs get re-encoded as JPEG to drop ~80% of bytes
+      // (`compressImageForUpload` samples the alpha channel before
+      // committing to JPEG so true transparent PNGs keep PNG output).
+      compressImageForUpload(dataUrl, mediaType).then((compressed) => {
+        const finalDataUrl = compressed ? compressed.dataUrl : dataUrl;
+        const finalMime = compressed ? compressed.mimeType : mediaType;
+        const finalCommaIdx = finalDataUrl.indexOf(',');
+        const finalBase64 = finalDataUrl.substring(finalCommaIdx + 1);
+        const finalSize = compressed ? dataUrlDecodedBytes(finalDataUrl) : file.size;
+        const finalFilename = compressed
+          ? withCompressedExtension(file.name, finalMime)
+          : (file.name || null);
+        stagedAttachments.push({
+          kind: finalMime.startsWith('image/') ? 'image' : 'document',
+          mime_type: finalMime,
+          filename: finalFilename,
+          data_base64: finalBase64,
+          preview_url: finalMime.startsWith('image/') ? finalDataUrl : null,
+          size_bytes: finalSize,
+          size_label: formatAttachmentSize(finalSize),
+        });
+        renderAttachmentPreviews();
+        finalizeRead();
       });
-      renderAttachmentPreviews();
-      finalizeRead();
     };
     reader.onerror = function() {
       alert(I18n.t('error.unknown'));
@@ -845,6 +979,58 @@ function parseUserMessageContent(content) {
   return { text, attachments, copyText: copyParts.join('\n') };
 }
 
+// Fetch a Bearer-protected resource and convert it to a blob URL the
+// browser can hand to `<img src>`. The Authorization header keeps the
+// token out of the URL (vs. `?token=` query auth, which leaks via logs
+// and Referer per src/channels/web/platform/auth.rs).
+function fetchAttachmentAsBlobUrl(url) {
+  const opts = oidcProxyAuth ? {} : { headers: { 'Authorization': 'Bearer ' + token } };
+  return fetch(url, opts).then((resp) => {
+    if (!resp.ok) {
+      throw new Error('attachment fetch ' + resp.status);
+    }
+    return resp.blob();
+  }).then((blob) => URL.createObjectURL(blob));
+}
+
+// One-shot MutationObserver wired on the chat-messages container that
+// revokes the blob URL stamped on `image.dataset.blobUrl` whenever the
+// `<img>` (or any ancestor carrying it) is removed from the DOM.
+//
+// We can't revoke on the image's own `load` event: the lightbox handler
+// reads `target.src` and feeds it to a fresh `<img>` in the overlay, so
+// the blob URL must stay live for the visible lifetime of the chat
+// bubble. Tying the revoke to DOM removal covers every removal site —
+// `pruneOldMessages` (oldest-message cap), thread switch (history
+// re-render clears `#chat-messages`), and ad-hoc remove — without
+// breaking either inline rendering or click-to-preview.
+function wireAttachmentBlobCleanup() {
+  if (window.__attachmentBlobCleanupWired) return;
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+  window.__attachmentBlobCleanupWired = true;
+  const revokeForSubtree = (node) => {
+    if (!(node instanceof Element)) return;
+    const own = node instanceof HTMLImageElement ? node : null;
+    const candidates = own
+      ? [own]
+      : Array.from(node.querySelectorAll('img.message-attachment-image'));
+    candidates.forEach((img) => {
+      const blobUrl = img.dataset && img.dataset.blobUrl;
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+        delete img.dataset.blobUrl;
+      }
+    });
+  };
+  const observer = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      m.removedNodes.forEach(revokeForSubtree);
+    }
+  });
+  observer.observe(container, { childList: true, subtree: true });
+}
+
 function renderMessageAttachments(container, attachments) {
   if (!attachments || attachments.length === 0) return;
   const strip = document.createElement('div');
@@ -858,14 +1044,136 @@ function renderMessageAttachments(container, attachments) {
       strip.appendChild(image);
       return;
     }
+    if (att.kind === 'image' && att.url) {
+      // Server-side persistence path: fetch the bytes via the
+      // /api/attachments/... route (Bearer-auth'd) and render inline.
+      // Fall back to a file card if the fetch fails so the user still
+      // sees what was attached.
+      const image = document.createElement('img');
+      image.className = 'message-attachment-image';
+      image.alt = att.filename || 'Attached image';
+      strip.appendChild(image);
+      fetchAttachmentAsBlobUrl(att.url)
+        .then((blobUrl) => {
+          // Stamp the blob URL on the element so `wireAttachmentBlobCleanup`
+          // can revoke it when the bubble is removed from the DOM. We
+          // intentionally do NOT revoke on `load`: the lightbox click
+          // handler (and any browser repaint after bitmap eviction) needs
+          // the URL to stay live for as long as the bubble is visible. The
+          // MutationObserver-driven revoke covers `pruneOldMessages`,
+          // thread switches, and ad-hoc removals so memory still tracks
+          // the visible history rather than the document lifetime.
+          image.dataset.blobUrl = blobUrl;
+          image.src = blobUrl;
+        })
+        .catch(() => {
+          // Fetch failed (404, network, auth) — replace the empty <img>
+          // with the file-card fallback so the bubble doesn't show a
+          // broken image icon.
+          if (image.parentNode === strip) {
+            strip.removeChild(image);
+          }
+          appendAttachmentFileCard(
+            strip,
+            {
+              item: 'message-attachment-file',
+              icon: 'message-attachment-file-icon',
+              body: 'message-attachment-file-body',
+              name: 'message-attachment-file-name',
+              meta: 'message-attachment-file-meta',
+            },
+            att.filename || 'attachment',
+            attachmentMetaText(att.filename, att.mime_type, att.size_label),
+            att.mime_type
+          );
+        });
+      return;
+    }
+    // Match the staging preview: type-aware icon + filename + (type • size).
     appendAttachmentFileCard(
       strip,
-      'message-attachment-file',
-      'message-attachment-file-name',
-      'message-attachment-file-meta',
+      {
+        item: 'message-attachment-file',
+        icon: 'message-attachment-file-icon',
+        body: 'message-attachment-file-body',
+        name: 'message-attachment-file-name',
+        meta: 'message-attachment-file-meta',
+      },
       att.filename || 'attachment',
-      [att.mime_type, att.size_label].filter(Boolean).join(' • ')
+      attachmentMetaText(att.filename, att.mime_type, att.size_label),
+      att.mime_type
     );
   });
   container.appendChild(strip);
+}
+
+// --- Image lightbox ---
+
+// Lazy-create a fullscreen overlay showing the clicked image at its natural
+// size (capped to viewport). Click the backdrop or press ESC to close.
+function showImageLightbox(src, alt) {
+  // Remove any existing lightbox so rapid clicks don't stack overlays.
+  const existing = document.getElementById('image-lightbox');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'image-lightbox';
+  overlay.className = 'image-lightbox-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', I18n.t('chat.imagePreview'));
+  overlay.tabIndex = -1;
+
+  const img = document.createElement('img');
+  img.className = 'image-lightbox-image';
+  img.src = src;
+  if (alt) img.alt = alt;
+  overlay.appendChild(img);
+
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+
+  // Close only when the backdrop itself is clicked, never the image.
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+  document.addEventListener('keydown', onKey);
+
+  document.body.appendChild(overlay);
+  overlay.focus();
+}
+
+// Delegate click handling to document.body so dynamically-added images
+// (history rerenders, generated images, staging strip) are picked up
+// without rebinding listeners. Idempotent: re-injection of the bundle
+// (e.g. hot-reload) won't stack duplicate listeners.
+(function wireImageLightbox() {
+  if (window.__lightboxWired) return;
+  window.__lightboxWired = true;
+  document.addEventListener('click', (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLImageElement)) return;
+    if (!(target.classList.contains('image-preview')
+        || target.classList.contains('message-attachment-image')
+        || target.classList.contains('generated-image'))) {
+      return;
+    }
+    // Don't hijack clicks on images wrapped in anchors — let the link navigate.
+    if (target.closest('a')) return;
+    if (e.defaultPrevented) return;
+    e.preventDefault();
+    showImageLightbox(target.src, target.alt || '');
+  });
+})();
+
+// Set up the blob-URL cleanup observer once the chat-messages container
+// is in the DOM. `wireAttachmentBlobCleanup` is idempotent and guarded
+// against missing container, so it's safe to call from both paths.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', wireAttachmentBlobCleanup, { once: true });
+} else {
+  wireAttachmentBlobCleanup();
 }

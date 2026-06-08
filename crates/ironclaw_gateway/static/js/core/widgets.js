@@ -138,8 +138,8 @@ if (window.__IRONCLAW_LAYOUT__) {
         if (chips) chips.style.display = 'none';
       }
       if (layout.chat.image_upload === false) {
-        // The visible affordance is `#attach-btn` (the paperclip in the
-        // composer); the file input it triggers is `#image-file-input`.
+        // The visible affordance is `#attach-btn` (the round + button in
+        // the composer); the file input it triggers is `#image-file-input`.
         // Hide the button AND disable the input — hiding the button alone
         // wouldn't stop a programmatic `document.getElementById('image-file-input').click()`,
         // and operators that flip this flag almost always want the

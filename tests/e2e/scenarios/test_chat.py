@@ -580,6 +580,202 @@ async def test_gateway_files_only_attachments_reload_from_history(page, ironclaw
     assert "Rendered from persisted history." in (last_turn.get("user_input") or "")
 
 
+async def test_gateway_user_image_survives_page_refresh(page, ironclaw_server, mock_llm_server):
+    """Regression for #1341: user-uploaded image attachments must keep
+    rendering inline after a page refresh.
+
+    Before the persist-then-fetch path landed, the persisted `<attachments>`
+    XML carried metadata only (filename / mime / size) — no pixels. On
+    refresh the chat surface degraded every image into a generic file
+    card, which read as "the image was lost". This test:
+
+      1. uploads a PNG and sends it through the browser UI,
+      2. waits for the turn to land in `/api/chat/history` with a populated
+         `user_attachments[].url` (the server-side parse of the persisted
+         `project_path` attribute),
+      3. reloads the page,
+      4. asserts the user message still has an `<img>` (not a file card),
+         and the image's eventual `src` is a `blob:` URL — proving the
+         frontend fetched `/api/attachments/...` over Bearer auth and
+         materialized the bytes back into the DOM rather than reading from
+         the (gone) optimistic-send data URL.
+    """
+    attachment_input = page.locator(SEL["attachment_input"])
+    chat_input = page.locator(SEL["chat_input"])
+    thread_id = await _wait_for_current_thread_id(page)
+
+    await attachment_input.set_input_files(
+        files=[
+            {
+                "name": "kitten.png",
+                "mimeType": "image/png",
+                "buffer": ONE_BY_ONE_PNG,
+            },
+        ]
+    )
+    await chat_input.fill("Look at this cat.")
+    await chat_input.press("Enter")
+
+    history = await _wait_for_thread_response(
+        ironclaw_server,
+        thread_id,
+        expected_user_input="Look at this cat.",
+        timeout=45.0,
+    )
+
+    last_turn = history["turns"][-1]
+    user_attachments = last_turn.get("user_attachments") or []
+    assert len(user_attachments) == 1, last_turn
+    served = user_attachments[0]
+    assert served["filename"] == "kitten.png", served
+    assert served["kind"] == "image", served
+    assert served["url"].startswith("/api/attachments/"), served
+    # The persisted XML must point inside the attachments serving root —
+    # a `project_path` outside that prefix would mean the persist helper
+    # dropped to a path the route can't resolve.
+    assert ".ironclaw/attachments/" in (last_turn.get("user_input") or ""), last_turn
+
+    await page.reload(wait_until="domcontentloaded")
+    await page.locator(SEL["auth_screen"]).wait_for(state="hidden", timeout=15000)
+    await page.wait_for_function(
+        """targetThreadId => (
+          typeof sseHasConnectedBefore !== 'undefined' &&
+          sseHasConnectedBefore === true &&
+          typeof currentThreadId !== 'undefined' &&
+          currentThreadId === targetThreadId &&
+          document.querySelectorAll('#chat-messages .message.user').length > 0
+        )""",
+        arg=thread_id,
+        timeout=15000,
+    )
+
+    # Wait for the async fetch+blob swap on the rebuilt `<img>`. Without
+    # the fetch path the image element would either never appear or stay
+    # blank; with the fetch path it gets a `blob:` src once the bytes
+    # land. Polling here keeps the test resilient to small latency
+    # variations on slow CI runners.
+    await page.wait_for_function(
+        """() => {
+          const users = document.querySelectorAll('#chat-messages .message.user');
+          if (!users.length) return false;
+          const lastUser = users[users.length - 1];
+          const img = lastUser.querySelector('.message-attachment-image');
+          if (!img) return false;
+          return typeof img.src === 'string' && img.src.startsWith('blob:');
+        }""",
+        timeout=15000,
+    )
+
+    reloaded_state = await _last_user_message_state(page)
+    assert reloaded_state is not None
+    # The whole point of this regression test: after refresh we get an
+    # `<img>`, not a file card.
+    assert reloaded_state["imageCards"] == 1, reloaded_state
+    assert reloaded_state["fileCards"] == 0, reloaded_state
+    # And the user-typed text is still rendered cleanly without the
+    # `<attachments>` block leaking into visible markup.
+    assert "Look at this cat." in reloaded_state["text"], reloaded_state
+    assert "<attachments>" not in reloaded_state["text"], reloaded_state
+
+
+async def test_gateway_user_image_lightbox_still_loads_after_render(page, ironclaw_server, mock_llm_server):
+    """Regression: clicking a persisted image attachment must open the
+    lightbox with a viewable image, not a broken-icon placeholder.
+
+    The chat surface fetches `/api/attachments/...` into a blob URL and
+    stamps it on the inline `<img class="message-attachment-image">`.
+    The lightbox click handler reads `target.src` and feeds it to a
+    fresh `<img class="image-lightbox-image">` in an overlay — that
+    second load reuses the same blob URL. A previous regression revoked
+    the blob URL inside the inline `<img>`'s `load` handler, so the
+    lightbox's fresh load found a dead URL and rendered blank. The fix
+    ties the revoke to DOM removal via a MutationObserver on
+    `#chat-messages` instead, keeping the URL live for as long as the
+    chat bubble is visible.
+
+    This test reproduces the click→preview path end-to-end and asserts
+    `naturalWidth > 0` on the lightbox image, which is the only
+    cross-browser-safe way to distinguish "loaded the bytes" from
+    "rendered the broken-image icon" (Chrome reports `complete === true`
+    for both).
+    """
+    attachment_input = page.locator(SEL["attachment_input"])
+    chat_input = page.locator(SEL["chat_input"])
+    thread_id = await _wait_for_current_thread_id(page)
+
+    await attachment_input.set_input_files(
+        files=[
+            {
+                "name": "kitten.png",
+                "mimeType": "image/png",
+                "buffer": ONE_BY_ONE_PNG,
+            },
+        ]
+    )
+    await chat_input.fill("Show me the cat again.")
+    await chat_input.press("Enter")
+
+    await _wait_for_thread_response(
+        ironclaw_server,
+        thread_id,
+        expected_user_input="Show me the cat again.",
+        timeout=45.0,
+    )
+
+    # Reload so we exercise the persist-then-fetch path (the optimistic
+    # send uses a data URL, not a blob URL — the lightbox bug only
+    # surfaces on the blob path).
+    await page.reload(wait_until="domcontentloaded")
+    await page.locator(SEL["auth_screen"]).wait_for(state="hidden", timeout=15000)
+    await page.wait_for_function(
+        """targetThreadId => (
+          typeof sseHasConnectedBefore !== 'undefined' &&
+          sseHasConnectedBefore === true &&
+          typeof currentThreadId !== 'undefined' &&
+          currentThreadId === targetThreadId &&
+          document.querySelectorAll('#chat-messages .message.user').length > 0
+        )""",
+        arg=thread_id,
+        timeout=15000,
+    )
+    # Wait for the blob src to settle AND for the inline image to fully
+    # decode — `naturalWidth > 0` proves the decode succeeded before we
+    # click. If the revoke fired prematurely the inline `<img>` could
+    # still report `complete === true` while never having decoded any
+    # pixels, masking the bug.
+    await page.wait_for_function(
+        """() => {
+          const users = document.querySelectorAll('#chat-messages .message.user');
+          if (!users.length) return false;
+          const img = users[users.length - 1].querySelector('.message-attachment-image');
+          if (!img) return false;
+          return typeof img.src === 'string'
+            && img.src.startsWith('blob:')
+            && img.complete
+            && img.naturalWidth > 0;
+        }""",
+        timeout=15000,
+    )
+
+    inline_image = page.locator(".message.user .message-attachment-image").last
+    await inline_image.click()
+
+    # The lightbox overlay opens; its `<img>` should fetch from the
+    # SAME blob URL and decode successfully. `naturalWidth > 0` is the
+    # specific assertion that fails when the URL was revoked: a dead
+    # blob URL yields `complete === true` but `naturalWidth === 0`
+    # (the broken-image placeholder).
+    await page.locator("#image-lightbox").wait_for(state="visible", timeout=5000)
+    await page.wait_for_function(
+        """() => {
+          const lightbox = document.querySelector('#image-lightbox .image-lightbox-image');
+          if (!lightbox) return false;
+          return lightbox.complete && lightbox.naturalWidth > 0;
+        }""",
+        timeout=10000,
+    )
+
+
 async def test_gateway_attachment_unextractable_file_uses_placeholder(page, ironclaw_server, mock_llm_server):
     """A PDF that passes the MIME allowlist + header check but fails content
     extraction reaches the backend with a fallback "[Failed to extract…]"
@@ -736,8 +932,11 @@ async def test_gateway_attachment_limits_block_batched_uploads(page):
     await page.evaluate(
         """
         () => {
+          // MAX_ATTACHMENT_SIZE_BYTES is 7 MiB (raised from 5 MiB in
+          // #1341 polish to match MAX_INLINE_ATTACHMENT_BYTES). The
+          // per-file alert fires at size > limit, so use 7 MiB + 1 byte.
           const tooBig = new File(
-            [new Uint8Array((5 * 1024 * 1024) + 1)],
+            [new Uint8Array((7 * 1024 * 1024) + 1)],
             'too-big.txt',
             { type: 'text/plain' }
           );
