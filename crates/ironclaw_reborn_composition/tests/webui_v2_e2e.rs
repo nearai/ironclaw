@@ -292,24 +292,26 @@ struct ParsedSseEvent {
 fn parse_sse_events(bytes: &[u8]) -> Vec<ParsedSseEvent> {
     let text = String::from_utf8_lossy(bytes);
     let mut events = Vec::new();
-    for block in text.split("\n\n") {
-        let block = block.trim_matches(|c| c == '\n' || c == '\r');
-        if block.is_empty() {
+    let mut parsed = ParsedSseEvent::default();
+    let mut has_fields = false;
+    for line in text.lines() {
+        if line.is_empty() {
+            if has_fields {
+                events.push(parsed);
+                parsed = ParsedSseEvent::default();
+                has_fields = false;
+            }
             continue;
         }
-        let mut parsed = ParsedSseEvent::default();
-        for line in block.split('\n') {
-            let line = line.trim_end_matches('\r');
-            if let Some(rest) = line.strip_prefix("event:") {
-                parsed.event = Some(rest.trim_start().to_string());
-            } else if let Some(rest) = line.strip_prefix("id:") {
-                parsed.id = Some(rest.trim_start().to_string());
-            } else if let Some(rest) = line.strip_prefix("data:") {
-                parsed.data = Some(rest.trim_start().to_string());
-            }
-        }
-        if parsed.event.is_some() || parsed.data.is_some() {
-            events.push(parsed);
+        if let Some(rest) = line.strip_prefix("event:") {
+            parsed.event = Some(rest.trim_start().to_string());
+            has_fields = true;
+        } else if let Some(rest) = line.strip_prefix("id:") {
+            parsed.id = Some(rest.trim_start().to_string());
+            has_fields = true;
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            parsed.data = Some(rest.trim_start().to_string());
+            has_fields = true;
         }
     }
     events
@@ -488,6 +490,69 @@ fn events_include_error(bytes: &[u8]) -> bool {
         .any(|event| event.event.as_deref() == Some("error"))
 }
 
+fn events_include_final_reply(bytes: &[u8]) -> bool {
+    parse_sse_events(bytes)
+        .iter()
+        .any(|event| event.event.as_deref() == Some("final_reply"))
+}
+
+fn cursor_scopes_thread(cursor: &str, thread_id: &str) -> bool {
+    let Ok(cursor) = serde_json::from_str::<Value>(cursor) else {
+        return false;
+    };
+    let cursor = match cursor.as_str() {
+        Some(encoded) => match serde_json::from_str::<Value>(encoded) {
+            Ok(decoded) => decoded,
+            Err(_) => return false,
+        },
+        None => cursor,
+    };
+    cursor["runtime"]["scope"]["read_scope"]["thread_id"].as_str() == Some(thread_id)
+        || cursor["live"]["scope"]["read_scope"]["thread_id"].as_str() == Some(thread_id)
+        || cursor["turn"]["scope"]["thread_id"].as_str() == Some(thread_id)
+}
+
+fn first_scoped_cursor_before_later_id(events: &[ParsedSseEvent], thread_id: &str) -> String {
+    events
+        .iter()
+        .enumerate()
+        .find_map(|(index, event)| {
+            let id = event.id.as_deref()?;
+            if !cursor_scopes_thread(id, thread_id) {
+                return None;
+            }
+            events[index + 1..]
+                .iter()
+                .any(|later| later.id.is_some())
+                .then(|| id.to_string())
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "SSE stream must include a scoped cursor with replayable events after it, got ids: {:?}",
+                event_ids(events)
+            )
+        })
+}
+
+fn assert_only_fail_closed_error(label: &str, events: &[ParsedSseEvent]) -> Value {
+    assert_eq!(
+        events.len(),
+        1,
+        "{label} must fail closed before emitting replay/projection frames, got: {events:?}"
+    );
+    let error_event = events
+        .first()
+        .expect("event count checked")
+        .event
+        .as_deref();
+    assert_eq!(
+        error_event,
+        Some("error"),
+        "{label} must emit only an error event, got: {events:?}"
+    );
+    event_payload_json(events.first().expect("event count checked"))
+}
+
 fn event_payload_json(event: &ParsedSseEvent) -> Value {
     serde_json::from_str(event.data.as_deref().expect("SSE event data is present"))
         .expect("SSE data is JSON")
@@ -562,10 +627,11 @@ async fn webui_v2_beta_acceptance_stream_replay_restart_and_redaction() {
 
     send_message(&harness.router, &thread_id, "e2e-send-1").await;
 
-    let sse_bytes = collect_sse_until(&mut body, Duration::from_secs(10), |bytes| {
-        let events = parse_sse_events(bytes);
-        has_browser_visible_progress(&events) && event_ids(&events).len() >= 2
-    })
+    let sse_bytes = collect_sse_until(
+        &mut body,
+        Duration::from_secs(10),
+        events_include_final_reply,
+    )
     .await;
     drop(body);
 
@@ -583,12 +649,14 @@ async fn webui_v2_beta_acceptance_stream_replay_restart_and_redaction() {
         String::from_utf8_lossy(&sse_bytes)
     );
 
-    let replay_from = ids.first().expect("first cursor id").clone();
+    let replay_from = first_scoped_cursor_before_later_id(&events, &thread_id);
     let replay_response = open_sse(&harness.router, &thread_id, Some(&replay_from)).await;
     let mut replay_body = replay_response.into_body();
-    let replay_bytes = collect_sse_until(&mut replay_body, Duration::from_secs(5), |bytes| {
-        !event_ids(&parse_sse_events(bytes)).is_empty()
-    })
+    let replay_bytes = collect_sse_until(
+        &mut replay_body,
+        Duration::from_secs(5),
+        events_include_final_reply,
+    )
     .await;
     drop(replay_body);
 
@@ -629,11 +697,7 @@ async fn webui_v2_beta_acceptance_stream_replay_restart_and_redaction() {
 
     assert_no_sensitive_payload("foreign-cursor SSE error", &foreign_bytes);
     let foreign_events = parse_sse_events(&foreign_bytes);
-    let error_event = foreign_events
-        .iter()
-        .find(|event| event.event.as_deref() == Some("error"))
-        .expect("foreign cursor must fail closed with an SSE error event");
-    let error_json = event_payload_json(error_event);
+    let error_json = assert_only_fail_closed_error("foreign cursor", &foreign_events);
     assert_eq!(
         error_json["error"], "invalid_request",
         "foreign cursor error should be redacted and non-successful: {error_json}"
