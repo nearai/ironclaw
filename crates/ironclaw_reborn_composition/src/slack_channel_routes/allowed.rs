@@ -159,7 +159,7 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
             scan_route_admin_field(self.config, "subject_user_id", &subject_user_id)?;
             let subject_user_id =
                 UserId::new(subject_user_id).map_err(|_| SlackRouteError::BadRequest)?;
-            ensure_allowed_subject_user(self.config, &subject_user_id)?;
+            ensure_selected_subject_user(self.config, &channel_id, &subject_user_id)?;
 
             if assignments
                 .insert(channel_id.clone(), subject_user_id.clone())
@@ -222,6 +222,23 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
         }
         Ok(normalized.into_iter().collect())
     }
+}
+
+fn ensure_selected_subject_user(
+    config: &SlackChannelRouteAdminRouteConfig,
+    channel_id: &str,
+    subject_user_id: &UserId,
+) -> Result<(), SlackRouteError> {
+    if ensure_allowed_subject_user(config, subject_user_id).is_ok() {
+        return Ok(());
+    }
+    let managed_assignment = config
+        .channel_subject_assigner
+        .assignment_for(channel_id.to_string())?;
+    if managed_assignment.subject_user_id == *subject_user_id {
+        return Ok(());
+    }
+    Err(SlackRouteError::Forbidden)
 }
 
 async fn list_handler(
@@ -442,6 +459,53 @@ mod tests {
                 .routes
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn allowed_channel_admin_preserves_matching_generated_subjects() {
+        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
+
+        let initial_save = mount
+            .protected
+            .clone()
+            .oneshot(request("PUT", r#"{"channel_ids":["C0OPS"]}"#, TENANT))
+            .await
+            .expect("initial save responds");
+        assert_eq!(initial_save.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(initial_save.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let generated_subject = body["channels"][0]["subject_user_id"]
+            .as_str()
+            .expect("generated subject");
+
+        let explicit_save = mount
+            .protected
+            .clone()
+            .oneshot(request(
+                "PUT",
+                &serde_json::json!({
+                    "channels": [
+                        {
+                            "channel_id": "C0OPS",
+                            "subject_user_id": generated_subject
+                        }
+                    ]
+                })
+                .to_string(),
+                TENANT,
+            ))
+            .await
+            .expect("explicit save responds");
+
+        assert_eq!(explicit_save.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(explicit_save.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(body["channels"][0]["subject_user_id"], generated_subject);
     }
 
     #[tokio::test]
