@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "invite_url": {
+      "type": "string",
+      "description": "Trace Commons operator-issued invite link (https://…/onboard#CODE)"
+    },
+    "include_message_text": {
+      "type": "boolean",
+      "description": "Whether contributions may include redacted message text (default: false)"
+    },
+    "include_tool_payloads": {
+      "type": "boolean",
+      "description": "Whether contributions may include redacted tool payloads (default: false)"
+    },
+    "confirmed": {
+      "type": "boolean",
+      "description": "Must be true only after the user has explicitly consented in this conversation (default: false)"
+    }
+  },
+  "required": ["invite_url"],
+  "additionalProperties": false
+}

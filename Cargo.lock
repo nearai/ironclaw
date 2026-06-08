@@ -4449,6 +4449,7 @@ dependencies = [
  "ironclaw_product_adapter_registry",
  "ironclaw_prompt_envelope",
  "ironclaw_reborn_event_store",
+ "ironclaw_reborn_traces",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runtime_policy",

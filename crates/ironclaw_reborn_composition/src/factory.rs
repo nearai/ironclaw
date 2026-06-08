@@ -307,6 +307,9 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
                 EffectKind::Network,
                 EffectKind::SpawnProcess,
                 EffectKind::ExecuteCode,
+                // Required by builtin.trace_commons.onboard (operator-invite
+                // enrollment posts to an external onboarding server).
+                EffectKind::ExternalWrite,
             ],
             None,
         ),

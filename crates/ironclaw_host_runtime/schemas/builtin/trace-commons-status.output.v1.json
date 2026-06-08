@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "properties": {
+    "enrolled": { "type": "boolean" },
+    "tenant_id": { "type": ["string", "null"] },
+    "auth_mode": { "type": "string" },
+    "include_message_text": { "type": "boolean" },
+    "include_tool_payloads": { "type": "boolean" },
+    "endpoint": { "type": ["string", "null"] },
+    "error": { "type": "string" }
+  },
+  "required": ["enrolled"],
+  "additionalProperties": false
+}

@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "properties": {
+    "enrolled": { "type": "boolean" },
+    "tenant_id": { "type": "string" },
+    "ingest_url": { "type": "string" },
+    "issuer_url": { "type": "string" },
+    "device_key_id": { "type": "string" },
+    "consents": {
+      "type": "object",
+      "properties": {
+        "include_message_text": { "type": "boolean" },
+        "include_tool_payloads": { "type": "boolean" }
+      }
+    },
+    "community_url": { "type": "string" },
+    "profile_url": { "type": "string" },
+    "leaderboard_url": { "type": "string" },
+    "next_steps": { "type": "string" },
+    "consent_required": { "type": "boolean" },
+    "message": { "type": "string" },
+    "error_code": { "type": "string" }
+  },
+  "required": ["enrolled"],
+  "if": {
+    "properties": { "enrolled": { "const": true } }
+  },
+  "then": {
+    "required": [
+      "enrolled",
+      "tenant_id",
+      "ingest_url",
+      "issuer_url",
+      "device_key_id",
+      "consents",
+      "next_steps"
+    ]
+  },
+  "additionalProperties": false
+}
