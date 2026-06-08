@@ -62,3 +62,25 @@ test("onboarding is deferred while the providers query is still loading", () => 
     "must wait for the query to settle before redirecting"
   );
 });
+
+test("loading is still deferred even when the query has errored", () => {
+  // Pins the short-circuit: a future reorder of the `&&` chain must not let
+  // an in-flight retry (isLoading true) slip through to a redirect decision.
+  assert.equal(
+    shouldRouteToOnboarding({
+      isLoading: true,
+      hasActiveProvider: false,
+      isError: true,
+    }),
+    false
+  );
+});
+
+test("an omitted isError key is treated as no error", () => {
+  // Makes the implicit `!undefined === true` contract explicit: a caller
+  // that forgets to pass `isError` falls back to the reachable-route path.
+  assert.equal(
+    shouldRouteToOnboarding({ isLoading: false, hasActiveProvider: false }),
+    true
+  );
+});
