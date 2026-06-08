@@ -23,7 +23,8 @@ use ironclaw_product_adapters::{
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
     MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    SessionThreadService, TRIGGER_THREAD_SOURCE_TAG, ThreadHistoryRequest, ThreadMessageId,
+    ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -1706,19 +1707,17 @@ fn automation_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(true)
 }
 
-const AUTOMATION_TRIGGER_THREAD_SOURCE: &str = "automation_trigger";
-
 fn is_automation_trigger_thread(thread: &SessionThreadRecord) -> bool {
     let Some(metadata) = thread.metadata_json.as_deref() else {
         return false;
     };
-    if !metadata.contains(AUTOMATION_TRIGGER_THREAD_SOURCE) {
+    if !metadata.contains(TRIGGER_THREAD_SOURCE_TAG) {
         return false;
     }
     match serde_json::from_str::<serde_json::Value>(metadata) {
         Ok(metadata) => {
             metadata.get("source").and_then(serde_json::Value::as_str)
-                == Some(AUTOMATION_TRIGGER_THREAD_SOURCE)
+                == Some(TRIGGER_THREAD_SOURCE_TAG)
         }
         Err(error) => {
             tracing::debug!(

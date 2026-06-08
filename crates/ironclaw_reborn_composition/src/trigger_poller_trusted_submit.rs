@@ -12,7 +12,8 @@ use ironclaw_safety::{
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest as ThreadAcceptInboundMessageRequest, EnsureThreadRequest,
-    MessageContent, SessionThreadService as CanonicalSessionThreadService, ThreadScope,
+    MessageContent, SessionThreadService as CanonicalSessionThreadService,
+    TRIGGER_THREAD_SOURCE_TAG, ThreadScope,
 };
 use ironclaw_triggers::{
     TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerPromptMaterializer,
@@ -328,7 +329,7 @@ async fn record_trigger_prompt(
 
 fn trigger_thread_metadata_json(trigger_id: TriggerId) -> String {
     serde_json::json!({
-        "source": "automation_trigger",
+        "source": TRIGGER_THREAD_SOURCE_TAG,
         "trigger_id": trigger_id.to_string(),
     })
     .to_string()
@@ -1672,7 +1673,7 @@ mod tests {
                 .expect("trigger thread metadata"),
         )
         .expect("trigger thread metadata json");
-        assert_eq!(metadata["source"], "automation_trigger");
+        assert_eq!(metadata["source"], TRIGGER_THREAD_SOURCE_TAG);
         assert_eq!(metadata["trigger_id"], trigger_id.to_string());
         let history = thread_service
             .list_thread_history(ThreadHistoryRequest {
