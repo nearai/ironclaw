@@ -51,6 +51,9 @@ bind sockets or call `axum::serve`.
   contract crate defines the port and the storage crate provides
   filesystem-backed adapters under `/engine/openai_compat/refs/` with
   per-public-id mapping records plus per-scope idempotency index records.
+- The in-memory ref store is bounded and evicts the oldest mappings when full.
+  Durable filesystem retention and pruning are owned by host composition or the
+  storage adapter lifecycle, not by route handlers.
 - Client idempotency keys are scoped by authenticated actor scope, route
   surface, and request-body fingerprint. Same key + same fingerprint replays the
   same public ref; same key + different fingerprint is a sanitized conflict.

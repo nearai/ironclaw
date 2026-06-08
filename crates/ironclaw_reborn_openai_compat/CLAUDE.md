@@ -2,12 +2,14 @@
 
 Reborn-native OpenAI-compatible API contract surface for #3283 / #4442 /
 #4443 / #4444.
+
 ## Boundary
 
 This crate is a product/API route surface, not a host runtime:
 
 - It may define DTOs, route descriptors, sanitized error envelopes, and
-  feature-gated axum route fragments for host composition.- It must not bind sockets, call `axum::serve`, read v1 gateway state, or proxy
+  feature-gated axum route fragments for host composition.
+- It must not bind sockets, call `axum::serve`, read v1 gateway state, or proxy
   directly to `ironclaw_llm`.
 - Host composition owns listener binding, bearer/session auth, CORS/origin,
   body/rate limits, mounting, audit, and product workflow wiring.

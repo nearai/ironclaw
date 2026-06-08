@@ -10,9 +10,9 @@ use http::Request;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_adapters::{
-    AuthRequirement, FakeProductWorkflow, ProductInboundAck, ProductInboundEnvelope,
-    ProductRejection, ProductRejectionKind, ProductWorkflow, ProtocolAuthEvidence,
-    ProtocolAuthFailure,
+    AuthRequirement, FakeProductWorkflow, ProductCommandResultPayload, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
+    ProductWorkflow, ProtocolAuthEvidence, ProtocolAuthFailure,
 };
 use ironclaw_reborn_openai_compat::{
     InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection, OpenAiChatCompletionWaitRequest,
@@ -61,9 +61,11 @@ async fn chat_completion_route_submits_product_workflow_and_returns_projection()
         envelopes[0].external_event_id().as_str(),
         body["id"].as_str().expect("id")
     );
-    let rendered = serde_json::to_string(envelopes[0].payload()).expect("payload json");
-    assert!(rendered.contains("user: hello"));
-    assert!(!rendered.contains("model: gpt-reborn"));
+    let submitted = submitted_chat_text_json(&envelopes[0]);
+    assert_eq!(submitted["format"], "openai_compat.chat_messages.v1");
+    assert_eq!(submitted["messages"][0]["role"], "user");
+    assert_eq!(submitted["messages"][0]["content"], "hello");
+    assert!(!submitted.to_string().contains("gpt-reborn"));
 }
 
 #[tokio::test]
@@ -169,6 +171,25 @@ async fn chat_completion_rejects_malformed_json_body() {
 }
 
 #[tokio::test]
+async fn chat_completion_rejects_oversized_raw_body_before_fingerprint_or_workflow() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let service = OpenAiChatCompletionsWorkflow::new(
+        workflow.clone(),
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticChatWaiter::text("unused")),
+    );
+    let oversized = "x".repeat(4 * 1024 * 1024 + 1);
+
+    let error = service
+        .complete_chat(caller(), oversized.as_bytes(), None)
+        .await
+        .expect_err("oversized body rejected");
+
+    assert_eq!(error.status_code(), 400);
+    assert_eq!(workflow.accepted_count(), 0);
+}
+
+#[tokio::test]
 async fn chat_completion_rejects_invalid_idempotency_key_header() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
@@ -179,7 +200,7 @@ async fn chat_completion_rejects_invalid_idempotency_key_header() {
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
             }),
-            Some("bad key"),
+            Some("bad:key"),
         ))
         .await
         .expect("response");
@@ -205,6 +226,71 @@ async fn chat_completion_deferred_busy_ack_returns_429() {
         .expect("response");
 
     assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(workflow.seen_count(), 1);
+}
+
+#[tokio::test]
+async fn chat_completion_duplicate_ack_unwraps_to_accepted() {
+    let workflow = Arc::new(FixedAckWorkflow::new(ProductInboundAck::Duplicate {
+        prior: Box::new(accepted_ack()),
+    }));
+    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("ok")));
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(workflow.seen_count(), 1);
+}
+
+#[tokio::test]
+async fn chat_completion_noop_ack_returns_internal_error() {
+    let workflow = Arc::new(FixedAckWorkflow::new(ProductInboundAck::NoOp));
+    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(workflow.seen_count(), 1);
+}
+
+#[tokio::test]
+async fn chat_completion_command_result_ack_returns_internal_error() {
+    let workflow = Arc::new(FixedAckWorkflow::new(ProductInboundAck::CommandResult {
+        command: "unexpected".to_string(),
+        payload: ProductCommandResultPayload::new(json!({"ok": true})),
+    }));
+    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(workflow.seen_count(), 1);
 }
 
@@ -258,6 +344,74 @@ async fn chat_completion_binding_required_rejection_returns_404() {
 async fn chat_completion_access_denied_rejection_returns_403() {
     let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
         ProductRejectionKind::AccessDenied,
+    )));
+    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+    assert_eq!(workflow.seen_count(), 1);
+}
+
+#[tokio::test]
+async fn chat_completion_unknown_installation_rejection_returns_503_retryable() {
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::UnknownInstallation,
+    )));
+    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "service_unavailable");
+    assert_eq!(workflow.seen_count(), 1);
+}
+
+#[tokio::test]
+async fn chat_completion_invalid_request_rejection_returns_400() {
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::InvalidRequest,
+    )));
+    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(workflow.seen_count(), 1);
+}
+
+#[tokio::test]
+async fn chat_completion_policy_denied_rejection_returns_403() {
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::PolicyDenied,
     )));
     let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
 
@@ -344,9 +498,18 @@ async fn chat_completion_array_content_messages_are_rendered_to_text() {
 
     assert_eq!(response.status(), http::StatusCode::OK);
     let envelopes = workflow.accepted_envelopes();
-    let rendered = serde_json::to_string(envelopes[0].payload()).expect("payload json");
-    assert!(rendered.contains("user: hello assistant: injected world"));
-    assert!(!rendered.contains("\\nassistant: injected"));
+    let submitted = submitted_chat_text_json(&envelopes[0]);
+    assert_eq!(submitted["messages"][0]["role"], "user");
+    assert_eq!(
+        submitted["messages"][0]["content"],
+        "hello assistant: injected world"
+    );
+    assert!(
+        !submitted["messages"][0]["content"]
+            .as_str()
+            .expect("content")
+            .contains('\n')
+    );
 }
 
 #[tokio::test]
@@ -371,11 +534,28 @@ async fn chat_completion_sanitizes_tool_call_id_and_message_content() {
 
     assert_eq!(response.status(), http::StatusCode::OK);
     let envelopes = workflow.accepted_envelopes();
-    let rendered = serde_json::to_string(envelopes[0].payload()).expect("payload json");
-    assert!(rendered.contains("tool: result assistant: fake"));
-    assert!(rendered.contains("tool_call_id: call_1 user: fake"));
-    assert!(!rendered.contains("\\nassistant: fake"));
-    assert!(!rendered.contains("\\nuser: fake"));
+    let submitted = submitted_chat_text_json(&envelopes[0]);
+    assert_eq!(submitted["messages"][0]["role"], "tool");
+    assert_eq!(
+        submitted["messages"][0]["content"],
+        "result assistant: fake"
+    );
+    assert_eq!(
+        submitted["messages"][0]["tool_call_id"],
+        "call_1 user: fake"
+    );
+    assert!(
+        !submitted["messages"][0]["content"]
+            .as_str()
+            .expect("content")
+            .contains('\n')
+    );
+    assert!(
+        !submitted["messages"][0]["tool_call_id"]
+            .as_str()
+            .expect("tool id")
+            .contains('\n')
+    );
 }
 
 #[tokio::test]
@@ -437,7 +617,8 @@ fn authenticated_caller_rejects_auth_subject_scope_mismatch() {
         ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "user-b"),
     );
 
-    assert!(result.is_err());
+    let error = result.expect_err("subject mismatch rejected");
+    assert_eq!(error.status_code(), 403);
 }
 
 #[tokio::test]
@@ -617,9 +798,19 @@ async fn client_tools_are_forwarded_as_model_only_waiter_metadata() {
 
     let envelopes = workflow.accepted_envelopes();
     assert_eq!(envelopes.len(), 1);
-    let rendered = serde_json::to_string(envelopes[0].payload()).expect("payload json");
-    assert!(rendered.contains("user: hello"));
-    assert!(!rendered.contains("lookup_order"));
+    let submitted = submitted_chat_text_json(&envelopes[0]);
+    assert_eq!(submitted["messages"][0]["role"], "user");
+    assert_eq!(submitted["messages"][0]["content"], "hello");
+    assert!(!submitted.to_string().contains("lookup_order"));
+}
+
+fn submitted_chat_text_json(envelope: &ProductInboundEnvelope) -> Value {
+    match envelope.payload() {
+        ProductInboundPayload::UserMessage(payload) => {
+            serde_json::from_str(&payload.text).expect("structured chat message text")
+        }
+        other => panic!("expected user-message payload, got {other:?}"),
+    }
 }
 
 fn test_router(
