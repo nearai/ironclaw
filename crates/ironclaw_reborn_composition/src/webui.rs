@@ -122,6 +122,8 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         api = api.with_automation_product_facade(automation_facade);
     }
     if let Some(local_runtime) = &services.local_runtime {
+        // PR 19 wires Slack delivery targets through this inventory; until then
+        // the facade exposes an empty target list for product-neutral clients.
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
             Arc::clone(&local_runtime.outbound_preferences),
             Arc::new(EmptyOutboundDeliveryTargetInventory),
