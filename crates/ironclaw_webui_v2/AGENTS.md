@@ -11,7 +11,7 @@
 
 ## What This Crate Owns
 
-- The six native WebChat v2 routes and their host-owned ingress
+- The native WebChat v2 routes and their host-owned ingress
   descriptors.
 - Axum handler functions that dispatch to `RebornServicesApi`.
 - The HTTP wire shape (`WebUiV2HttpError`) for redacted error

@@ -49,8 +49,6 @@ registerPack("hi", {
 
   "chat.placeholder": "IronClaw को संदेश...",
   "chat.send": "संदेश भेजें",
-  "chat.removeImage": "इमेज हटाएँ",
-  "chat.removeAttachment": "अटैचमेंट हटाएँ",
 
   "chat.conversations": "वार्तालाप",
   "chat.threads": "{count} थ्रेड्स",
@@ -510,7 +508,6 @@ registerPack("hi", {
   "chat.suggestion3Desc": "सेटअप, ऑथ, पेयरिंग और उपलब्ध क्षमताओं की पुष्टि करें.",
   "chat.heroPlaceholder": "IronClaw से कुछ भी पूछें.",
   "chat.followUpPlaceholder": "फॉलो-अप बदलाव मांगें",
-  "chat.attachFiles": "फाइलें संलग्न करें",
   "chat.modeAutoReview": "ऑटो-रिव्यू",
   "chat.runtimeLocal": "स्थानीय रूप से काम करें",
   "chat.statusWorking": "काम हो रहा है",

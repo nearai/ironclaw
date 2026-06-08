@@ -124,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_connect_action_assets_render_shared_slack_pairing_card() {
+    fn chat_connect_action_assets_render_slack_pairing_and_extensions_channel_picker() {
         let chat = asset_text("js/pages/chat/chat.js");
         assert!(chat.contains("ChannelConnectCard"));
         assert!(chat.contains("channelConnectAction"));
@@ -132,17 +132,22 @@ mod tests {
 
         let card = asset_text("js/pages/chat/components/channel-connect-card.js");
         assert!(card.contains("SlackPairingSection"));
-        assert!(card.contains("connectAction.strategy === \"inbound_proof_code\""));
+        assert!(card.contains("isSlackStrategy(connectAction, \"inbound_proof_code\")"));
         assert!(card.contains("action=${connectAction.action}"));
 
-        let section = asset_text("js/components/slack-pairing-section.js");
-        assert!(section.contains("redeemSlackPairingCode(code)"));
-        assert!(section.contains("queryKey: [\"connectable-channels\"]"));
+        let picker = asset_text("js/components/slack-channel-picker.js");
+        assert!(picker.contains("listSlackAllowedChannels"));
+        assert!(picker.contains("saveSlackAllowedChannels(ids)"));
 
         let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
-        assert!(channels_tab.contains("slackStatusLabel"));
-        assert!(channels_tab.contains("slackConnectAction &&"));
-        assert!(channels_tab.contains("copy=${slackConnectAction.action}"));
+        assert!(channels_tab.contains("slackBuiltinStatus"));
+        assert!(channels_tab.contains("admin_managed_channels"));
+        assert!(channels_tab.contains("inbound_proof_code"));
+        assert!(channels_tab.contains("SlackChannelPicker"));
+        assert!(channels_tab.contains("SlackPairingSection"));
+        assert!(channels_tab.contains("findSlackConnectActions"));
+        assert!(channels_tab.contains("slackConnectActions"));
+        assert!(channels_tab.contains("action=${action.action}"));
 
         let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
         assert!(regression.contains("channel connect requests return an action"));

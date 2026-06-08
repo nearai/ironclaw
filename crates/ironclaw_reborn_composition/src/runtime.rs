@@ -3545,6 +3545,7 @@ mod tests {
                 result_ref: result_ref.as_str().to_string(),
                 safe_summary: ToolResultSafeSummary::new("subagent spawned").unwrap(),
                 provider_call: None,
+                model_observation: None,
             })
             .await
             .expect("parent result reference seeded");
