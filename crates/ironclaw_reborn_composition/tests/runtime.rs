@@ -155,11 +155,7 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        skill_root.join("references/policy.md"),
-        "filesystem policy",
-    )
-    .unwrap();
+    std::fs::write(skill_root.join("references/policy.md"), "filesystem policy").unwrap();
     let input = RebornRuntimeInput::from_services(
         RebornBuildInput::local_dev("runtime-skill-execution-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),

@@ -12,11 +12,16 @@ use axum::http::StatusCode;
 type HandlerResult<T> = Result<T, (StatusCode, String)>;
 type RegistryResult<T> = Result<T, ironclaw_skills::SkillRegistryError>;
 type SharedSkillRegistry = Arc<RwLock<ironclaw_skills::SkillRegistry>>;
+type ScopedRegistryBuildLock = Arc<tokio::sync::Mutex<()>>;
 
 const SCOPED_REGISTRY_CACHE_TTL: Duration = Duration::from_secs(30);
+const SCOPED_REGISTRY_CACHE_MAX_ENTRIES: usize = 1024;
 
 static SCOPED_SKILL_REGISTRIES: std::sync::LazyLock<
     std::sync::Mutex<HashMap<ScopedSkillRegistryCacheKey, CachedScopedSkillRegistry>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+static SCOPED_SKILL_REGISTRY_BUILD_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<ScopedSkillRegistryCacheKey, std::sync::Weak<tokio::sync::Mutex<()>>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -72,6 +77,13 @@ async fn cached_scoped_registry(
         return Ok(registry);
     }
 
+    let build_lock = scoped_registry_build_lock(&key)?;
+    let _build_guard = build_lock.lock().await;
+    let now = Instant::now();
+    if let Some(registry) = cached_registry(&key, now)? {
+        return Ok(registry);
+    }
+
     let mut scoped = {
         let guard = template.read().map_err(lock_error_response)?;
         scoped_registry_from_template(&guard, tenant_segment, &user.user_id)
@@ -114,7 +126,7 @@ fn cache_registry(
             "Can't access skills right now".to_string(),
         )
     })?;
-    cache.retain(|_, cached| now.duration_since(cached.discovered_at) < SCOPED_REGISTRY_CACHE_TTL);
+    prune_scoped_registry_cache(&mut cache, now);
     cache.insert(
         key,
         CachedScopedSkillRegistry {
@@ -123,6 +135,42 @@ fn cache_registry(
         },
     );
     Ok(())
+}
+
+fn prune_scoped_registry_cache(
+    cache: &mut HashMap<ScopedSkillRegistryCacheKey, CachedScopedSkillRegistry>,
+    now: Instant,
+) {
+    cache.retain(|_, cached| now.duration_since(cached.discovered_at) < SCOPED_REGISTRY_CACHE_TTL);
+    while cache.len() >= SCOPED_REGISTRY_CACHE_MAX_ENTRIES {
+        let Some(oldest_key) = cache
+            .iter()
+            .min_by_key(|(_, cached)| cached.discovered_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest_key);
+    }
+}
+
+fn scoped_registry_build_lock(
+    key: &ScopedSkillRegistryCacheKey,
+) -> HandlerResult<ScopedRegistryBuildLock> {
+    let mut locks = SCOPED_SKILL_REGISTRY_BUILD_LOCKS.lock().map_err(|error| {
+        tracing::error!("Scoped skill registry build lock map poisoned: {error}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Can't access skills right now".to_string(),
+        )
+    })?;
+    locks.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(existing) = locks.get(key).and_then(std::sync::Weak::upgrade) {
+        return Ok(existing);
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key.clone(), Arc::downgrade(&lock));
+    Ok(lock)
 }
 
 impl ScopedSkillRegistry {

@@ -1,24 +1,26 @@
 //! Skills management API handlers.
 
-use std::{collections::HashMap, sync::Arc};
-
-use axum::{
-    Json,
-    extract::{Path, State},
-    http::StatusCode,
+use std::{
+    collections::HashMap,
+    sync::{Arc, Weak},
 };
-use futures::future::join_all;
 
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::handlers::skill_registry_scope::scoped_skill_registry;
 use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+};
 
 static SKILL_MUTATION_LOCKS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
     std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
+const MAX_SKILL_SEARCH_QUERY_BYTES: usize = 1024;
 
 fn install_requested_identifier<'a>(
     name: &'a str,
@@ -90,6 +92,16 @@ fn skill_registry_error_response(
     }
 }
 
+fn validate_skill_search_query(query: &str) -> Result<(), (StatusCode, String)> {
+    if query.len() > MAX_SKILL_SEARCH_QUERY_BYTES {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Skill search query must be at most {MAX_SKILL_SEARCH_QUERY_BYTES} bytes"),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_skill_content_safety(content: &str) -> Result<(), (StatusCode, String)> {
     ironclaw_safety::validate_trusted_trigger_prompt(&*SKILL_CONTENT_SAFETY, content).map_err(
         |error| {
@@ -122,11 +134,14 @@ async fn skill_mutation_guard(
                 "Can't access skills right now".to_string(),
             )
         })?;
-        Arc::clone(
-            locks
-                .entry(lock_key)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-        )
+        locks.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(existing) = locks.get(&lock_key).and_then(Weak::upgrade) {
+            existing
+        } else {
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            locks.insert(lock_key, Arc::downgrade(&lock));
+            lock
+        }
     };
     Ok(lock.lock_owned().await)
 }
@@ -158,7 +173,6 @@ async fn skill_info(
             .unwrap_or(false),
         None => false,
     };
-    let bundle_path = bundle_dir.as_ref().map(|path| path.display().to_string());
     let source_kind = skill_source_kind(&skill.source);
     let can_edit = can_manage_skills && skill_is_user_managed(&skill.source);
     let can_delete = can_manage_skills && skill_can_delete(&skill.source);
@@ -168,7 +182,7 @@ async fn skill_info(
         description: skill.manifest.description.clone(),
         version: skill.manifest.version.clone(),
         trust: skill.trust.to_string(),
-        source: format!("{:?}", skill.source),
+        source: source_kind.as_str().to_string(),
         source_kind,
         keywords: skill.manifest.activation.keywords.clone(),
         usage_hint: Some(format!(
@@ -176,13 +190,24 @@ async fn skill_info(
             skill.manifest.name
         )),
         setup_hint: skill_setup_hint(&skill),
-        bundle_path,
+        bundle_path: None,
         install_source_url: install_meta.and_then(|meta| meta.source_url),
         has_requirements,
         has_scripts,
         can_edit,
         can_delete,
     }
+}
+
+async fn skill_infos(
+    skills: Vec<ironclaw_skills::types::LoadedSkill>,
+    can_manage_skills: bool,
+) -> Vec<SkillInfo> {
+    let mut infos = Vec::with_capacity(skills.len());
+    for skill in skills {
+        infos.push(skill_info(skill, can_manage_skills).await);
+    }
+    infos
 }
 
 pub async fn skills_list_handler(
@@ -192,12 +217,7 @@ pub async fn skills_list_handler(
     let registry = scoped_skill_registry(&state, &user).await?;
     let skill_snapshot = registry.skills_snapshot()?;
 
-    let skills: Vec<SkillInfo> = join_all(
-        skill_snapshot
-            .into_iter()
-            .map(|skill| skill_info(skill, true)),
-    )
-    .await;
+    let skills = skill_infos(skill_snapshot, true).await;
 
     let count = skills.len();
     Ok(Json(SkillListResponse { skills, count }))
@@ -208,6 +228,7 @@ pub async fn skills_search_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<SkillSearchRequest>,
 ) -> Result<Json<SkillSearchResponse>, (StatusCode, String)> {
+    validate_skill_search_query(&req.query)?;
     let registry = scoped_skill_registry(&state, &user).await?;
 
     let catalog = Arc::clone(state.skill_catalog.as_ref().ok_or((
@@ -236,12 +257,7 @@ pub async fn skills_search_handler(
                 || s.manifest.description.to_lowercase().contains(&query_lower)
         })
         .collect();
-    let installed: Vec<SkillInfo> = join_all(
-        matching_skills
-            .into_iter()
-            .map(|skill| skill_info(skill, true)),
-    )
-    .await;
+    let installed = skill_infos(matching_skills, true).await;
 
     let catalog_json: Vec<serde_json::Value> = entries
         .into_iter()
@@ -295,6 +311,7 @@ pub async fn skills_install_handler(
 
     tracing::info!(user_id = %user.user_id, skill = %req.name, "skill install requested");
 
+    // dispatch-exempt: web skill management mirrors the approved skill_install tool path.
     let _mutation_guard = skill_mutation_guard(&state, &user).await?;
     let mut scoped_registry = scoped_skill_registry(&state, &user).await?;
 
@@ -362,6 +379,7 @@ pub async fn skills_install_handler(
             Some(requested_identifier),
         )
         .map_err(|e| skill_registry_error_response(StatusCode::BAD_REQUEST, e))?;
+    validate_skill_content_safety(&install_content)?;
 
     if scoped_registry.has(&skill_name_from_parse)? {
         return Ok(Json(ActionResponse::fail(format!(
@@ -418,6 +436,7 @@ pub async fn skills_remove_handler(
 
     tracing::info!(user_id = %user.user_id, skill = %name, "skill remove requested");
 
+    // dispatch-exempt: web skill management mirrors the approved skill_remove tool path.
     let _mutation_guard = skill_mutation_guard(&state, &user).await?;
     let mut scoped_registry = scoped_skill_registry(&state, &user).await?;
 
@@ -498,6 +517,7 @@ pub async fn skills_update_handler(
 
     validate_skill_content_safety(&req.content)?;
 
+    // dispatch-exempt: web skill management mirrors the approved skill_update tool path.
     let _mutation_guard = skill_mutation_guard(&state, &user).await?;
     let mut scoped_registry = scoped_skill_registry(&state, &user).await?;
 

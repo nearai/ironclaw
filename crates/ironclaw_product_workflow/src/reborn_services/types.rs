@@ -387,8 +387,8 @@ pub struct RebornSkillInfo {
     pub name: String,
     pub description: String,
     pub version: String,
-    pub trust: String,
-    pub source: String,
+    pub trust: RebornSkillTrustLevel,
+    pub source: RebornSkillSourceKind,
     pub source_kind: RebornSkillSourceKind,
     #[serde(default)]
     pub keywords: Vec<String>,
@@ -408,6 +408,13 @@ pub struct RebornSkillInfo {
     pub can_edit: bool,
     #[serde(default)]
     pub can_delete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornSkillTrustLevel {
+    Trusted,
+    Installed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

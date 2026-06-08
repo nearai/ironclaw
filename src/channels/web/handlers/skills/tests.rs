@@ -104,11 +104,8 @@ async fn skill_info_reports_bundle_files() {
         info.install_source_url.as_deref(),
         Some("https://example.com/skill")
     );
-    assert!(
-        info.bundle_path
-            .as_deref()
-            .is_some_and(|path| path.ends_with("demo-skill"))
-    );
+    assert_eq!(info.source, "installed");
+    assert!(info.bundle_path.is_none());
 }
 
 #[tokio::test]
@@ -486,9 +483,11 @@ async fn skills_remove_handler_deletes_user_managed_skills() {
 
     assert!(response.success);
     assert!(!dir.path().join("installed_skills/installed-skill").exists());
-    let registry = state.skill_registry.as_ref().expect("registry");
-    let guard = registry.read().expect("registry read");
-    assert!(guard.find_by_name("installed-skill").is_none());
+    {
+        let registry = state.skill_registry.as_ref().expect("registry"); // dispatch-exempt: test assertion inspects registry state after handler dispatch.
+        let guard = registry.read().expect("registry read");
+        assert!(guard.find_by_name("installed-skill").is_none());
+    }
 
     let (state, dir) =
         state_with_skill("---\nname: editable-skill\ndescription: User\n---\n\nUser prompt.\n")
@@ -507,9 +506,11 @@ async fn skills_remove_handler_deletes_user_managed_skills() {
 
     assert!(response.success);
     assert!(!dir.path().join("editable-skill").exists());
-    let registry = state.skill_registry.as_ref().expect("registry");
-    let guard = registry.read().expect("registry read");
-    assert!(guard.find_by_name("editable-skill").is_none());
+    {
+        let registry = state.skill_registry.as_ref().expect("registry"); // dispatch-exempt: test assertion inspects registry state after handler dispatch.
+        let guard = registry.read().expect("registry read");
+        assert!(guard.find_by_name("editable-skill").is_none());
+    }
 }
 
 #[tokio::test]
@@ -671,6 +672,68 @@ async fn skills_update_handler_requires_confirmation_header() {
 
     assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
     assert!(err.1.contains("X-Confirm-Action"));
+}
+
+#[tokio::test]
+async fn skills_install_handler_requires_confirmation_header() {
+    let (state, _dir) =
+        state_with_skill("---\nname: editable-skill\ndescription: Before\n---\n\nBefore prompt.\n")
+            .await;
+
+    let err = super::skills_install_handler(
+        State(state),
+        test_user(),
+        HeaderMap::new(),
+        Json(crate::channels::web::types::SkillInstallRequest {
+            name: "new-skill".to_string(),
+            slug: None,
+            url: None,
+            content: Some("---\nname: new-skill\n---\n\nPrompt.\n".to_string()),
+        }),
+    )
+    .await
+    .expect_err("missing confirmation should fail");
+
+    assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+    assert!(err.1.contains("X-Confirm-Action"));
+}
+
+#[tokio::test]
+async fn skills_remove_handler_requires_confirmation_header() {
+    let (state, _dir) =
+        state_with_skill("---\nname: editable-skill\ndescription: Before\n---\n\nBefore prompt.\n")
+            .await;
+
+    let err = super::skills_remove_handler(
+        State(state),
+        test_user(),
+        HeaderMap::new(),
+        AxumPath("editable-skill".to_string()),
+    )
+    .await
+    .expect_err("missing confirmation should fail");
+
+    assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+    assert!(err.1.contains("X-Confirm-Action"));
+}
+
+#[tokio::test]
+async fn skills_search_handler_rejects_oversized_query() {
+    let (state, _dir) =
+        state_with_skill("---\nname: editable-skill\ndescription: Before\n---\n\nBefore prompt.\n")
+            .await;
+
+    let err = super::skills_search_handler(
+        State(state),
+        test_user(),
+        Json(crate::channels::web::types::SkillSearchRequest {
+            query: "x".repeat(super::MAX_SKILL_SEARCH_QUERY_BYTES + 1),
+        }),
+    )
+    .await
+    .expect_err("oversized search query should fail");
+
+    assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

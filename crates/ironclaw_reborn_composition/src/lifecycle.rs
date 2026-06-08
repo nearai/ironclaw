@@ -61,11 +61,6 @@ impl RebornLocalSkillManagementPort {
             .map_err(invalid_skill_context)
     }
 
-    fn skill_context(&self) -> Result<SkillManagementContext, RebornLocalSkillManagementError> {
-        let scope = self.owner_scope()?;
-        self.skill_context_for_scope(scope)
-    }
-
     fn skill_context_for_scope(
         &self,
         scope: ResourceScope,
@@ -79,28 +74,12 @@ impl RebornLocalSkillManagementPort {
         ))
     }
 
-    pub(crate) async fn list(
-        &self,
-    ) -> Result<Vec<ironclaw_skills::SkillSummary>, RebornLocalSkillManagementError> {
-        let context = self.skill_context()?;
-        Ok(list_skills(&context).await?)
-    }
-
     pub(crate) async fn list_for_scope(
         &self,
         scope: ResourceScope,
     ) -> Result<Vec<ironclaw_skills::SkillSummary>, RebornLocalSkillManagementError> {
         let context = self.skill_context_for_scope(scope)?;
         Ok(list_skills(&context).await?)
-    }
-
-    pub(crate) async fn search(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<ironclaw_skills::SkillSearchResult, RebornLocalSkillManagementError> {
-        let context = self.skill_context()?;
-        Ok(search_skills(&context, SkillSearchRequest { query, limit }).await?)
     }
 
     pub(crate) async fn search_for_scope(
@@ -132,25 +111,6 @@ impl RebornLocalSkillManagementPort {
         Ok(update_skill(&context, SkillUpdateRequest { name, content }).await?)
     }
 
-    pub(crate) async fn install(
-        &self,
-        name: Option<&str>,
-        content: &str,
-    ) -> Result<ironclaw_skills::SkillInstallResult, RebornLocalSkillManagementError> {
-        let context = self.skill_context()?;
-        Ok(install_skill(
-            &context,
-            SkillInstallRequest {
-                name,
-                content,
-                files: &[],
-                source: SkillInstallSource::User,
-                source_url: None,
-            },
-        )
-        .await?)
-    }
-
     pub(crate) async fn install_for_scope(
         &self,
         scope: ResourceScope,
@@ -169,14 +129,6 @@ impl RebornLocalSkillManagementPort {
             },
         )
         .await?)
-    }
-
-    pub(crate) async fn remove(
-        &self,
-        name: &str,
-    ) -> Result<ironclaw_skills::SkillRemoveResult, RebornLocalSkillManagementError> {
-        let context = self.skill_context()?;
-        Ok(remove_skill(&context, SkillRemoveRequest { name }).await?)
     }
 
     pub(crate) async fn remove_for_scope(
@@ -298,9 +250,13 @@ impl RebornLocalLifecycleFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         match action {
             LifecycleProductAction::SkillSearch { query } => {
+                let scope = self
+                    .skill_management
+                    .owner_scope()
+                    .map_err(map_local_skill_management_error)?;
                 let result = self
                     .skill_management
-                    .search(&query, SKILL_SEARCH_RESULT_LIMIT)
+                    .search_for_scope(scope, &query, SKILL_SEARCH_RESULT_LIMIT)
                     .await
                     .map_err(map_local_skill_management_error)?;
                 let matched_skills = result
@@ -321,9 +277,17 @@ impl RebornLocalLifecycleFacade {
                 ))
             }
             LifecycleProductAction::SkillInstall { name, content } => {
+                let scope = self
+                    .skill_management
+                    .owner_scope()
+                    .map_err(map_local_skill_management_error)?;
                 let installed = self
                     .skill_management
-                    .install(name.as_ref().map(LifecyclePackageId::as_str), &content)
+                    .install_for_scope(
+                        scope,
+                        name.as_ref().map(LifecyclePackageId::as_str),
+                        &content,
+                    )
                     .await
                     .map_err(map_local_skill_management_error)?;
                 Ok(response_with_payload(
@@ -337,9 +301,13 @@ impl RebornLocalLifecycleFacade {
             }
             LifecycleProductAction::SkillRemove { package_ref } => {
                 package_ref.require_kind(LifecyclePackageKind::Skill)?;
+                let scope = self
+                    .skill_management
+                    .owner_scope()
+                    .map_err(map_local_skill_management_error)?;
                 let removed = self
                     .skill_management
-                    .remove(package_ref.id.as_str())
+                    .remove_for_scope(scope, package_ref.id.as_str())
                     .await
                     .map_err(map_local_skill_management_error)?;
                 Ok(response_with_payload(

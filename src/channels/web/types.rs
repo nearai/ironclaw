@@ -838,6 +838,17 @@ pub enum SkillSourceKind {
     System,
 }
 
+impl SkillSourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Installed => "installed",
+            Self::Workspace => "workspace",
+            Self::System => "system",
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct SkillInfo {
     pub name: String,

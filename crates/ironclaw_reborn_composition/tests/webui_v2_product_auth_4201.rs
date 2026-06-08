@@ -26,11 +26,13 @@ use ironclaw_product_workflow::{
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness,
@@ -158,6 +160,55 @@ impl RebornServicesApi for UnusedServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn search_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn install_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn read_skill_content(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn update_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn remove_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 

@@ -7,8 +7,8 @@ use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, RebornServices as ProductRebornServices, RebornServicesApi,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind, SkillsProductFacade,
-    WebUiAuthenticatedCaller,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
 };
 
 use crate::{
@@ -206,9 +206,7 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
             catalog: Vec::new(),
             installed: result.skills.into_iter().map(skill_info).collect(),
             registry_url: String::new(),
-            catalog_error: result
-                .truncated
-                .then(|| "Skill search results were truncated".to_string()),
+            catalog_error: None,
         })
     }
 
@@ -312,17 +310,20 @@ fn skill_info(skill: ironclaw_skills::SkillSummary) -> RebornSkillInfo {
         ironclaw_skills::ManagedSkillSource::User => RebornSkillSourceKind::User,
         ironclaw_skills::ManagedSkillSource::Installed => RebornSkillSourceKind::Installed,
     };
-    let can_manage = source_kind != RebornSkillSourceKind::System;
+    let can_manage = matches!(
+        source_kind,
+        RebornSkillSourceKind::User | RebornSkillSourceKind::Installed
+    );
     RebornSkillInfo {
         name: skill.name.clone(),
         description: skill.description,
         version: skill.version,
         trust: if source_kind == RebornSkillSourceKind::Installed {
-            "Installed".to_string()
+            RebornSkillTrustLevel::Installed
         } else {
-            "Trusted".to_string()
+            RebornSkillTrustLevel::Trusted
         },
-        source: skill.source.as_str().to_string(),
+        source: source_kind,
         source_kind,
         keywords: skill.keywords,
         usage_hint: Some(format!(
@@ -581,6 +582,57 @@ mod tests {
         assert!(
             safe_content.content.contains("safe skill"),
             "unsafe update must not replace the existing skill"
+        );
+    }
+
+    #[tokio::test]
+    async fn skills_product_facade_updates_and_removes_user_skill() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(&storage_root).expect("storage root");
+        let facade = local_skills_facade(&storage_root);
+        let caller = caller("runtime-owner");
+
+        facade
+            .install_skill(
+                caller.clone(),
+                "draft-helper".to_string(),
+                Some(skill_content("draft-helper", "draft helper")),
+            )
+            .await
+            .expect("install skill");
+
+        let updated = facade
+            .update_skill(
+                caller.clone(),
+                "draft-helper".to_string(),
+                skill_content("draft-helper", "updated draft helper"),
+            )
+            .await
+            .expect("update skill");
+        assert!(updated.success);
+
+        let content = facade
+            .read_skill_content(caller.clone(), "draft-helper".to_string())
+            .await
+            .expect("read updated skill");
+        assert!(content.content.contains("updated draft helper"));
+
+        let removed = facade
+            .remove_skill(caller.clone(), "draft-helper".to_string())
+            .await
+            .expect("remove skill");
+        assert!(removed.success);
+
+        let missing = facade
+            .read_skill_content(caller, "draft-helper".to_string())
+            .await
+            .expect_err("removed skill should be gone");
+        assert_eq!(missing.status_code, 404);
+        assert!(
+            !storage_root
+                .join("tenants/tenant-alpha/users/runtime-owner/skills/draft-helper")
+                .exists()
         );
     }
 
