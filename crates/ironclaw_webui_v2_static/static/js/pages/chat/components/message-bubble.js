@@ -52,7 +52,7 @@ function ThinkingDisclosure({ content }) {
   `;
 }
 
-export function MessageBubble({ message, onRetry }) {
+function MessageBubbleImpl({ message, onRetry }) {
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
   const [copied, setCopied] = React.useState(false);
@@ -185,3 +185,11 @@ export function MessageBubble({ message, onRetry }) {
     </div>
   `;
 }
+
+// Memoized: during streaming the message list re-renders on every chunk,
+// but only the streaming message's `message` reference changes. Bubbles
+// whose `message`/`onRetry` props are unchanged skip re-rendering (and so
+// skip re-parsing their markdown). Relies on unchanged messages keeping a
+// stable object identity across `setMessages` updates, and on `onRetry`
+// being a stable callback from the parent.
+export const MessageBubble = React.memo(MessageBubbleImpl);

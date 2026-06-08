@@ -202,6 +202,7 @@ mod tests {
                     id,
                     Some(SkillTrust::Trusted),
                     Some(SkillVisibility::Visible),
+                    format!("{name} description"),
                 ));
                 files.insert(
                     (source, name.to_string(), "SKILL.md".to_string()),
@@ -469,6 +470,7 @@ mod tests {
                 bundle_id.clone(),
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
+                "Manifest display name",
             )],
             files: HashMap::from([
                 (

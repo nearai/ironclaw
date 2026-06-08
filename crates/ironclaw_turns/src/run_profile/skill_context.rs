@@ -5,15 +5,18 @@
 //!
 //! # Trust and Visibility Model
 //!
-//! Every installed skill in a run has two dimensions that gate what the model sees:
+//! Every installed skill in a run has three dimensions that gate what the model sees:
 //!
 //! - **Trust level** ([`SkillTrustLevel`]): determines how much content the model receives.
-//!   `Trusted` skills include their full prompt content; `Installed` skills expose only
-//!   a safe description.
+//!   `Trusted` skills may include prompt content after activation; `Installed` skills expose
+//!   only a safe description.
 //!
 //! - **Visibility** ([`SkillVisibility`]): determines whether the model sees the skill at all.
 //!   `Visible` skills appear in the context; `Hidden` and `Denied` skills are omitted entirely
 //!   so the model has no knowledge of their existence.
+//!
+//! - **Activation state** ([`SkillActivationState`]): determines whether a visible trusted
+//!   skill is only discoverable metadata or loaded prompt context.
 //!
 //! # Fail-closed semantics
 //!
@@ -106,13 +109,13 @@ pub enum SkillVisibility {
 /// on `ironclaw_skills`.
 ///
 /// - `Installed`: read-only context; the model sees only the safe description.
-/// - `Trusted`: full context; the model sees description and prompt content.
+/// - `Trusted`: loaded context may include description and prompt content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillTrustLevel {
     /// Registry/external skill — description only, no prompt content.
     Installed,
-    /// User-placed/trusted skill — description and prompt content.
+    /// User-placed/trusted skill — description and, once loaded, prompt content.
     Trusted,
 }
 
@@ -123,6 +126,32 @@ impl SkillTrustLevel {
             Self::Trusted => "trusted",
         }
     }
+}
+
+/// Activation state for a skill in the current run.
+///
+/// Discovery exposes only safe metadata. Loaded skills may expose prompt
+/// content when the host also marks them trusted and visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillActivationState {
+    /// The model may know this skill exists, but prompt content is withheld.
+    Discoverable,
+    /// The skill was deterministically selected for the run.
+    Loaded,
+}
+
+impl SkillActivationState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Discoverable => "discoverable",
+            Self::Loaded => "loaded",
+        }
+    }
+}
+
+fn default_skill_activation_state() -> SkillActivationState {
+    SkillActivationState::Loaded
 }
 
 // ---------------------------------------------------------------------------
@@ -180,8 +209,12 @@ pub struct InstalledSkillSnapshot {
     pub trust: SkillTrustLevel,
     /// Visibility — determines whether the model sees this skill at all.
     pub visibility: SkillVisibility,
+    /// Activation state — determines whether prompt content may be disclosed.
+    #[serde(default = "default_skill_activation_state")]
+    pub activation_state: SkillActivationState,
     /// Full prompt content. Only included in model context when
-    /// `trust == Trusted` and `visibility == Visible`.
+    /// `trust == Trusted`, `visibility == Visible`, and
+    /// `activation_state == Loaded`.
     pub prompt_content: Option<String>,
     /// Sanitized description safe for model consumption.
     pub safe_description: String,
@@ -224,6 +257,7 @@ impl SkillRunSnapshot {
             return Self::empty();
         }
 
+        entries.iter_mut().for_each(canonicalize_skill_entry);
         entries.sort_by(compare_skill_entries);
         let version = compute_snapshot_version(&entries);
         Self {
@@ -342,15 +376,14 @@ impl SkillContextSource for SkillContextService {
         let mut total_bytes = 0usize;
 
         for entry in visible {
-            let model_content = match entry.trust {
-                SkillTrustLevel::Trusted => {
-                    if let Some(ref content) = entry.prompt_content {
-                        format!("{}\n\n{}", entry.safe_description, content)
-                    } else {
-                        entry.safe_description.clone()
-                    }
+            let model_content = if can_disclose_prompt_content(entry) {
+                if let Some(ref content) = entry.prompt_content {
+                    format!("{}\n\n{}", entry.safe_description, content)
+                } else {
+                    entry.safe_description.clone()
                 }
-                SkillTrustLevel::Installed => entry.safe_description.clone(),
+            } else {
+                entry.safe_description.clone()
             };
             let safe_summary = entry.safe_description.clone();
 
@@ -477,14 +510,9 @@ fn validate_snapshot(snapshot: &SkillRunSnapshot) -> Result<(), SkillContextErro
         return Err(SkillContextError::InvalidSnapshotVersion);
     }
 
-    let expected_version = if entries_are_sorted_by_key(&snapshot.entries) {
-        compute_snapshot_version(&snapshot.entries)
-    } else {
-        let mut sorted_entries = snapshot.entries.clone();
-        sorted_entries.sort_by(compare_skill_entries);
-        compute_snapshot_version(&sorted_entries)
-    };
-    if snapshot.snapshot_version != expected_version {
+    if snapshot.snapshot_version != expected_snapshot_version(snapshot, compute_snapshot_version)
+        && !legacy_snapshot_version_matches(snapshot)
+    {
         return Err(SkillContextError::InvalidSnapshotVersion);
     }
 
@@ -505,6 +533,32 @@ fn entries_are_sorted_by_key(entries: &[InstalledSkillSnapshot]) -> bool {
         .all(|pair| compare_skill_entries(&pair[0], &pair[1]) != Ordering::Greater)
 }
 
+fn expected_snapshot_version(
+    snapshot: &SkillRunSnapshot,
+    compute_version: fn(&[InstalledSkillSnapshot]) -> String,
+) -> String {
+    if entries_are_sorted_by_key(&snapshot.entries) {
+        compute_version(&snapshot.entries)
+    } else {
+        let mut sorted_entries = snapshot.entries.clone();
+        sorted_entries.sort_by(compare_skill_entries);
+        compute_version(&sorted_entries)
+    }
+}
+
+fn legacy_snapshot_version_matches(snapshot: &SkillRunSnapshot) -> bool {
+    if !snapshot
+        .entries
+        .iter()
+        .all(|entry| entry.activation_state == SkillActivationState::Loaded)
+    {
+        return false;
+    }
+
+    snapshot.snapshot_version
+        == expected_snapshot_version(snapshot, compute_legacy_snapshot_version)
+}
+
 fn compare_visible_skill_entries(
     a: &&InstalledSkillSnapshot,
     b: &&InstalledSkillSnapshot,
@@ -518,8 +572,21 @@ fn compare_skill_entries(a: &InstalledSkillSnapshot, b: &InstalledSkillSnapshot)
         .then_with(|| a.name.cmp(&b.name))
         .then_with(|| trust_rank(a.trust).cmp(&trust_rank(b.trust)))
         .then_with(|| visibility_rank(a.visibility).cmp(&visibility_rank(b.visibility)))
+        .then_with(|| activation_rank(a.activation_state).cmp(&activation_rank(b.activation_state)))
         .then_with(|| a.safe_description.cmp(&b.safe_description))
         .then_with(|| a.prompt_content.cmp(&b.prompt_content))
+}
+
+fn canonicalize_skill_entry(entry: &mut InstalledSkillSnapshot) {
+    if !can_disclose_prompt_content(entry) {
+        entry.prompt_content = None;
+    }
+}
+
+fn can_disclose_prompt_content(entry: &InstalledSkillSnapshot) -> bool {
+    entry.trust == SkillTrustLevel::Trusted
+        && entry.visibility == SkillVisibility::Visible
+        && entry.activation_state == SkillActivationState::Loaded
 }
 
 const fn trust_rank(trust: SkillTrustLevel) -> u8 {
@@ -534,6 +601,13 @@ const fn visibility_rank(visibility: SkillVisibility) -> u8 {
         SkillVisibility::Visible => 0,
         SkillVisibility::Hidden => 1,
         SkillVisibility::Denied => 2,
+    }
+}
+
+const fn activation_rank(activation_state: SkillActivationState) -> u8 {
+    match activation_state {
+        SkillActivationState::Discoverable => 0,
+        SkillActivationState::Loaded => 1,
     }
 }
 
@@ -659,6 +733,44 @@ fn compute_snapshot_version(sorted_entries: &[InstalledSkillSnapshot]) -> String
                 SkillVisibility::Denied => b"denied",
             },
         );
+        feed_digest_field(&mut digest, entry.activation_state.as_str().as_bytes());
+        match entry.prompt_content {
+            Some(ref content) => {
+                digest.update([1]);
+                feed_digest_field(&mut digest, content.as_bytes());
+            }
+            None => digest.update([0]),
+        }
+        feed_digest_field(&mut digest, entry.safe_description.as_bytes());
+        feed_digest_field(&mut digest, entry.ordering_key.as_bytes());
+        digest.update([0xFE]);
+    }
+
+    format!("sha256:{}", hex::encode(digest.finalize()))
+}
+
+/// Compute the pre-activation-state snapshot version for persisted snapshots
+/// serialized before progressive skill disclosure was introduced.
+fn compute_legacy_snapshot_version(sorted_entries: &[InstalledSkillSnapshot]) -> String {
+    let mut digest = Sha256::new();
+
+    for entry in sorted_entries {
+        feed_digest_field(&mut digest, entry.name.as_bytes());
+        feed_digest_field(
+            &mut digest,
+            match entry.trust {
+                SkillTrustLevel::Installed => b"installed",
+                SkillTrustLevel::Trusted => b"trusted",
+            },
+        );
+        feed_digest_field(
+            &mut digest,
+            match entry.visibility {
+                SkillVisibility::Visible => b"visible",
+                SkillVisibility::Hidden => b"hidden",
+                SkillVisibility::Denied => b"denied",
+            },
+        );
         match entry.prompt_content {
             Some(ref content) => {
                 digest.update([1]);
@@ -695,6 +807,7 @@ mod tests {
             name: "alpha".to_string(),
             trust: SkillTrustLevel::Trusted,
             visibility: SkillVisibility::Visible,
+            activation_state: SkillActivationState::Loaded,
             prompt_content: Some("prompt".to_string()),
             safe_description: "description".to_string(),
             ordering_key: "alpha".to_string(),

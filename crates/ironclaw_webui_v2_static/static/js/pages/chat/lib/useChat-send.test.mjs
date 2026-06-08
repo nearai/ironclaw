@@ -59,6 +59,56 @@ function createReactStub({ initialByIndex = new Map(), setCalls = [] } = {}) {
   };
 }
 
+function createSendGuardContext() {
+  let sendCalled = false;
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("unsupported payloads should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("unsupported payloads should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      sendCalled = true;
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+  return { context, sendWasCalled: () => sendCalled };
+}
+
 test("useChat.send: accepted ref reconciles pending message on timeline reload", async () => {
   const threadId = "thread-1";
   let renderedMessages = [];
@@ -153,6 +203,52 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
     renderedMessages.map((message) => message.id),
     ["msg-message-1"],
   );
+});
+
+test("useChat.send: rejects image attachments instead of dropping them", async () => {
+  const threadId = "thread-1";
+  const { context, sendWasCalled } = createSendGuardContext();
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await assert.rejects(
+    () =>
+      chat.send("", {
+        images: [{ dataUrl: "data:image/png;base64,cG5n", size: 3 }],
+      }),
+    (error) => {
+      assert.equal(
+        error.safeErrorCode,
+        "webui_v2_multimodal_payload_unsupported",
+      );
+      return true;
+    },
+  );
+  assert.equal(sendWasCalled(), false);
+});
+
+test("useChat.send: rejects file attachments instead of dropping them", async () => {
+  const threadId = "thread-1";
+  const { context, sendWasCalled } = createSendGuardContext();
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await assert.rejects(
+    () =>
+      chat.send("please review", {
+        attachments: [{ filename: "notes.txt", size: 4 }],
+      }),
+    (error) => {
+      assert.equal(
+        error.safeErrorCode,
+        "webui_v2_multimodal_payload_unsupported",
+      );
+      return true;
+    },
+  );
+  assert.equal(sendWasCalled(), false);
 });
 
 test("useChat.cancelRun clears local state before cancel request resolves", async () => {

@@ -72,6 +72,7 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
 
 `config path` and `doctor` are safe diagnostics; they report the resolved home,
 profile, `config.toml`, `providers.json`, and `v1_state: not-used`.
+They do not create Reborn state or seed config files.
 
 ### Configure the model route
 
@@ -129,6 +130,13 @@ api_key_env = "OPENAI_API_KEY"
 `[identity]`, `[runner]`, and `[skills]`; `config init` writes commented
 guidance for the supported fields.
 
+If `config.toml` is missing, the first stateful runtime start through `run`,
+`repl`, or `serve` seeds a sparse file with `api_version` and the safe
+`local-dev` boot profile. Read-only commands and `run --dry-run` stay
+side-effect-free. One-off environment selections such as
+`IRONCLAW_REBORN_PROFILE=local-dev-yolo` are not persisted into the seeded
+file.
+
 Important: `api_key_env` is the name of an environment variable, not the secret
 itself. Reborn rejects inline secret-shaped values in `config.toml` and
 `providers.json`.
@@ -141,7 +149,9 @@ after writing config, use `models set-provider <provider>` or edit
 ### Env-only model selection
 
 If `$IRONCLAW_REBORN_HOME/config.toml` is absent or has no `[llm.default]`,
-Reborn can resolve the LLM from environment variables:
+Reborn can resolve the LLM from environment variables. A sparse first-run
+seeded config does not include `[llm.default]`, so env-only model selection
+continues to work:
 
 ```bash
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-env-only"

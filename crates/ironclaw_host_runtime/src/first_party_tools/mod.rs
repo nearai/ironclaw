@@ -484,21 +484,8 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
     object.retain(|key, value| {
         !(declared.contains(key.as_str())
             && !required.contains(key)
-            && (value.as_str() == Some("null") || value.is_null())
-            && !preserve_optional_null_sentinel(
-                request.capability_id.as_str(),
-                key.as_str(),
-                value,
-            ))
+            && (value.as_str() == Some("null") || value.is_null()))
     });
-}
-
-fn preserve_optional_null_sentinel(
-    capability_id: &str,
-    key: &str,
-    value: &serde_json::Value,
-) -> bool {
-    capability_id == MEMORY_WRITE_CAPABILITY_ID && key == "target" && value.is_null()
 }
 
 fn resource_profile() -> Option<ResourceProfile> {

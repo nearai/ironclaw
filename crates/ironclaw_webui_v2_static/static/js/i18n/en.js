@@ -65,10 +65,10 @@ registerPack("en", {
   // Chat — empty state
   "chat.heroTitle": "Hello, what do you need help with?",
   "chat.heroDesc":
-    "Start with a goal, a repo question, a review request, or files that need work.",
+    "Start with a goal, a repo question, a review request, or work you want inspected.",
   "chat.emptyTitle": "Start with a concrete operator task.",
   "chat.emptyDesc":
-    "Send a message, attach files, or ask for a gateway check. The workspace keeps approvals and runtime activity visible as the turn progresses.",
+    "Send a message or ask for a gateway check. The workspace keeps approvals and runtime activity visible as the turn progresses.",
   "chat.suggestion1": "Map the current gateway state",
   "chat.suggestion1Desc": "Inspect runtime health, channels, tools, and open work.",
   "chat.suggestion2": "Review recent thread activity",
@@ -81,14 +81,12 @@ registerPack("en", {
   "chat.heroPlaceholder": "Ask IronClaw anything.",
   "chat.followUpPlaceholder": "Ask for follow-up changes",
   "chat.send": "Send message",
-  "chat.attachFiles": "Attach files",
-  "chat.removeImage": "Remove image",
-  "chat.removeAttachment": "Remove attachment",
+  "chat.attachmentsUnsupported":
+    "WebChat v2 does not support image or file attachments yet. Remove the attachments and describe what you want in text.",
   "chat.modeAutoReview": "Auto-review",
   "chat.runtimeLocal": "Work locally",
   "chat.statusWorking": "Working",
   "chat.jumpToLatest": "Jump to latest",
-  "chat.dropToAttach": "Drop files to attach",
   "shortcuts.title": "Keyboard shortcuts",
   "shortcuts.send": "Send message",
   "shortcuts.newline": "New line",
@@ -423,6 +421,16 @@ registerPack("en", {
   "channels.active": "active",
   "channels.inactive": "inactive",
   "channels.available": "available",
+  "channels.slackAccessTitle": "Slack channel access",
+  "channels.slackAccessInstructions": "Choose the Slack channels this tenant app may answer in.",
+  "channels.slackAccessAdd": "Add",
+  "channels.slackAccessLoading": "Loading Slack channels...",
+  "channels.slackAccessEmpty": "No Slack channels allowed yet.",
+  "channels.slackAccessAllow": "Allow {channelId}",
+  "channels.slackAccessSave": "Save channels",
+  "channels.slackAccessSaving": "Saving...",
+  "channels.slackAccessSuccess": "Slack channels saved.",
+  "channels.slackAccessError": "Slack channel update failed.",
 
   // Settings — tools tab
   "tools.permissions": "Tool permissions",

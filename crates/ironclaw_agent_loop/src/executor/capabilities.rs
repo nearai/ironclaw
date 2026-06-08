@@ -26,7 +26,8 @@ use super::{
     cancelled_exit, capability_batch_counts, capability_call_signature, capability_error_class,
     capability_failure_kind, capability_host_error, capability_invocation_from_candidate,
     capability_is_visible, capability_summary, failed_exit, honor_retry_alteration,
-    push_call_signature_once, push_completed_result, sanitized_strategy_summary,
+    model_visible_capability_failure_observation, push_call_signature_once, push_completed_result,
+    sanitized_strategy_summary,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -101,7 +102,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 diagnostic_ref: None,
             };
             match self
-                .handle_capability_error(ctx, state, call, summary, &mut capability_batch)
+                .handle_capability_error(ctx, state, call, summary, None, &mut capability_batch)
                 .await?
             {
                 BatchStep::Continue(next) => state = *next,
@@ -485,7 +486,7 @@ impl CapabilityStage {
                     )?,
                     diagnostic_ref: None,
                 };
-                self.handle_capability_error(ctx, state, call, summary, capability_batch)
+                self.handle_capability_error(ctx, state, call, summary, None, capability_batch)
                     .await
             }
             CapabilityOutcome::Failed(failure) => {
@@ -495,6 +496,8 @@ impl CapabilityStage {
                 state
                     .recent_failure_kinds
                     .push(capability_failure_kind(&failure.error_kind));
+                let model_observation =
+                    Some(model_visible_capability_failure_observation(&failure));
                 let summary = CapabilityErrorSummary {
                     class: capability_error_class(&failure.error_kind),
                     safe_summary: capability_failed_summary(
@@ -503,8 +506,15 @@ impl CapabilityStage {
                     )?,
                     diagnostic_ref: None,
                 };
-                self.handle_capability_error(ctx, state, call, summary, capability_batch)
-                    .await
+                self.handle_capability_error(
+                    ctx,
+                    state,
+                    call,
+                    summary,
+                    model_observation,
+                    capability_batch,
+                )
+                .await
             }
         }
     }
@@ -515,6 +525,7 @@ impl CapabilityStage {
         mut state: LoopExecutionState,
         call: CapabilityCallCandidate,
         mut summary: CapabilityErrorSummary,
+        mut model_observation: Option<ironclaw_turns::run_profile::ModelVisibleToolObservation>,
         capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         for _ in 0..MAX_CAPABILITY_RETRIES {
@@ -526,7 +537,14 @@ impl CapabilityStage {
             {
                 RecoveryOutcome::ToolErrorResult { recovery } => {
                     state.recovery_state = recovery;
-                    append_capability_error_ref(ctx.host, &mut state, &call, &summary).await?;
+                    append_capability_error_ref(
+                        ctx.host,
+                        &mut state,
+                        &call,
+                        &summary,
+                        model_observation.clone(),
+                    )
+                    .await?;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -538,7 +556,14 @@ impl CapabilityStage {
                     failure_kind,
                 } => {
                     state.recovery_state = recovery;
-                    append_capability_error_ref(ctx.host, &mut state, &call, &summary).await?;
+                    append_capability_error_ref(
+                        ctx.host,
+                        &mut state,
+                        &call,
+                        &summary,
+                        model_observation.clone(),
+                    )
+                    .await?;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -586,6 +611,8 @@ impl CapabilityStage {
                             if failure.error_kind == CapabilityFailureKind::Cancelled {
                                 return self.cancelled_after_checkpoint(ctx, state).await;
                             }
+                            model_observation =
+                                Some(model_visible_capability_failure_observation(&failure));
                             summary = CapabilityErrorSummary {
                                 class: capability_error_class(&failure.error_kind),
                                 safe_summary: capability_failed_summary(
@@ -610,7 +637,8 @@ impl CapabilityStage {
             }
         }
 
-        append_capability_error_ref(ctx.host, &mut state, &call, &summary).await?;
+        append_capability_error_ref(ctx.host, &mut state, &call, &summary, model_observation)
+            .await?;
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;

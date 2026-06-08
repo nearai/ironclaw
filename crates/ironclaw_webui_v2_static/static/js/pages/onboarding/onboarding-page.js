@@ -1,4 +1,4 @@
-import { useNavigate, useOutletContext } from "react-router";
+import { Navigate, useNavigate, useOutletContext } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
@@ -165,6 +165,15 @@ function FeaturedProviderRow({ entry, provider, configured, isBusy, login, t, on
 }
 
 export function OnboardingPage() {
+  const { isAdmin = false, isChecking = false } = useOutletContext();
+  if (isChecking) return null;
+  if (!isAdmin) {
+    return html`<${Navigate} to="/chat" replace />`;
+  }
+  return html`<${OperatorOnboardingPage} />`;
+}
+
+function OperatorOnboardingPage() {
   const t = useT();
   const navigate = useNavigate();
   const queryClient = useQueryClient();

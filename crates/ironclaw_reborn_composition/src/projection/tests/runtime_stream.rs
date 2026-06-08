@@ -1188,13 +1188,16 @@ async fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping
     assert_eq!(item.total, WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
     assert_eq!(item.payloads.len(), WEBUI_RUNTIME_ITEM_MAX_PAYLOADS);
     assert!(matches!(
-        &item.payloads[0],
+        &item.payloads[0].payload,
         ProductOutboundPayload::ProjectionSnapshot { state } if state.items.len() == 1
     ));
     assert_eq!(
         item.payloads
             .iter()
-            .filter(|payload| matches!(payload, ProductOutboundPayload::CapabilityActivity(_)))
+            .filter(|payload| matches!(
+                payload.payload,
+                ProductOutboundPayload::CapabilityActivity(_)
+            ))
             .count(),
         WEBUI_PROJECTION_PAGE_LIMIT
     );
