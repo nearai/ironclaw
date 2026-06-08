@@ -2889,6 +2889,41 @@ async fn executor_skip_model_turn_bypasses_model_stage() {
             stopped_on_suspension: false,
         },
     ]);
+
+    // F7: seed an input ack on the SkipModel iteration (iteration 2 = second
+    // poll_inputs call). Batches are consumed in order; iteration 1 gets the
+    // first (empty), iteration 2 gets the one with the ack token, iteration 3
+    // gets the third (empty). The SkipModel path must deliver this ack to the
+    // host (canonical.rs line ~317: pending_input_ack.ack(host).await?).
+    let run_context = host.run_context().clone();
+    // Seed a steering input ack for iteration 2 (the SkipModel iteration).
+    // A Steering input is required to make consume_drainable_inputs advance the
+    // ack; without a consumed input, ack_tokens remains empty regardless of the
+    // input_acks field in the batch.
+    let host = host.with_input_batches(vec![
+        LoopInputBatch {
+            inputs: Vec::new(),
+            input_acks: Vec::new(),
+            next_cursor: input_cursor(&run_context, "input-cursor:iter-1"),
+        },
+        LoopInputBatch {
+            inputs: vec![LoopInput::Steering {
+                message_ref: message_ref("msg:steering-skip-model"),
+            }],
+            input_acks: vec![input_ack(
+                &run_context,
+                "input-cursor:iter-2",
+                "input-ack:skip-model-executor",
+            )],
+            next_cursor: input_cursor(&run_context, "input-cursor:iter-2"),
+        },
+        LoopInputBatch {
+            inputs: Vec::new(),
+            input_acks: Vec::new(),
+            next_cursor: input_cursor(&run_context, "input-cursor:iter-3"),
+        },
+    ]);
+
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
@@ -2928,6 +2963,17 @@ async fn executor_skip_model_turn_bypasses_model_stage() {
     // observe_completed_turn's unconditional increment. 3 iterations =
     // 3 completed turns (capabilities + SkipModel + reply).
     assert_eq!(final_state.stop_state.turns_completed, 3);
+
+    // F7: the ack token seeded for the SkipModel iteration must have been
+    // delivered to the host. This exercises the D1-regression path:
+    // PromptStep::SkipModel carries the ack out of PromptStage, then
+    // canonical.rs delivers it before stop.observe (line ~317).
+    assert!(
+        host.acked_input_tokens()
+            .contains(&LoopInputAckToken::new("input-ack:skip-model-executor").expect("valid")),
+        "ack token from the SkipModel iteration must be delivered to the host; \
+         if it is missing, canonical.rs is dropping the ack on the SkipModel path"
+    );
 }
 
 /// Multi-call batch: two calls in one turn each carrying 20 000 bytes for the

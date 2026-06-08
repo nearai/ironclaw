@@ -26,12 +26,12 @@ use super::{
 /// file (single-seam thesis per the WU-A design doc).
 #[derive(Clone)]
 pub(crate) struct PostCapabilityStage {
-    policy: Arc<dyn CompactionForceStrategy>,
+    compaction_force: Arc<dyn CompactionForceStrategy>,
 }
 
 impl PostCapabilityStage {
-    pub(crate) fn new(policy: Arc<dyn CompactionForceStrategy>) -> Self {
-        Self { policy }
+    pub(crate) fn new(compaction_force: Arc<dyn CompactionForceStrategy>) -> Self {
+        Self { compaction_force }
     }
 
     /// R2 — drain settled background-mode subagent results.
@@ -76,7 +76,7 @@ impl ExecutorStage<TurnCompletedStep> for PostCapabilityStage {
         // AssistantReply turns reach here with an empty map and gain nothing
         // from the policy scan + Arc<dyn> virtual dispatch.
         if !state.post_capability_state.pending_capability_bytes.is_empty()
-            && let Some(initiator) = self.policy.should_force_compact(&state)
+            && let Some(initiator) = self.compaction_force.should_force_compact(&state)
         {
             state.compaction_state.force_compact_on_next_iteration = true;
             state.post_capability_state.skip_model_this_iteration = true;

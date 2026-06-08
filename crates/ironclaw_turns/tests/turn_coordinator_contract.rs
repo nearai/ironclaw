@@ -199,6 +199,45 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
 }
 
 #[test]
+fn subagent_capability_outcomes_round_trip_with_non_zero_byte_len() {
+    // Verify byte_len survives serde round-trip for BOTH AwaitDependentRun
+    // and SpawnedChildRun (each variant). A regression that silently
+    // decoded byte_len: 0 from the wire would defeat ByteCapStrategy for
+    // exactly these paths.
+    let gate_ref = LoopGateRef::new("gate:test-bytes").expect("valid");
+    let result_ref = LoopResultRef::new("result:test-bytes").expect("valid");
+    let await_dep = CapabilityOutcome::AwaitDependentRun {
+        gate_ref,
+        result_ref,
+        safe_summary: "await large".to_string(),
+        byte_len: 48_500,
+    };
+    let json = serde_json::to_value(&await_dep).expect("serialize");
+    let decoded: CapabilityOutcome = serde_json::from_value(json).expect("decode");
+    if let CapabilityOutcome::AwaitDependentRun { byte_len, .. } = decoded {
+        assert_eq!(byte_len, 48_500);
+    } else {
+        panic!("expected AwaitDependentRun variant");
+    }
+
+    let child_run_id = TurnRunId::new();
+    let result_ref = LoopResultRef::new("result:child-bytes").expect("valid");
+    let spawn = CapabilityOutcome::SpawnedChildRun {
+        child_run_id,
+        result_ref,
+        safe_summary: "spawn large".to_string(),
+        byte_len: 60_000,
+    };
+    let json = serde_json::to_value(&spawn).expect("serialize");
+    let decoded: CapabilityOutcome = serde_json::from_value(json).expect("decode");
+    if let CapabilityOutcome::SpawnedChildRun { byte_len, .. } = decoded {
+        assert_eq!(byte_len, 60_000);
+    } else {
+        panic!("expected SpawnedChildRun variant");
+    }
+}
+
+#[test]
 fn subagent_gate_and_blocked_wire_contracts_are_stable() {
     let gate_kind = serde_json::to_value(LoopGateKind::AwaitDependentRun).unwrap();
     assert_eq!(gate_kind, serde_json::json!("await_dependent_run"));
