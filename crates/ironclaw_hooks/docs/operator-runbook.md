@@ -92,6 +92,12 @@ capability × hook × field)` key arrives at the cap, the LRU entry
 The cap defends against unbounded growth across permutations
 (threat-model D5).
 
+A single tenant is additionally capped at
+`MAX_KEYS_PER_TENANT = MAX_HISTORY_KEYS / 4` across BOTH predicate
+history maps. Invocation-count keys and numeric-sum keys share that
+tenant budget; when the tenant is at the cap, the oldest-front key
+for that tenant is evicted regardless of which map owns it.
+
 ### What an eviction *means*
 
 The evicted key's rolling window is lost. The next invocation
