@@ -139,6 +139,7 @@ not bypass domain invariants by mutating primitive storage rows directly.
 | `/tmp` | ephemeral runtime temp backend | scoped filesystem | no | Process/invocation-local temporary data. |
 | `/secrets` | typed encrypted secret repository | secret APIs only; optional redacted projection | no | No generic listing of secret material/source records. |
 | `/events` | durable event/audit append log + projections | event/projection APIs; optional export | no | Events are append/projection records, not mutable files. |
+| `/engine/openai_compat/refs` | `ironclaw_reborn_openai_compat_storage` implementing `OpenAiCompatRefStore` over `RootFilesystem` | OpenAI-compatible ref/idempotency API only | no | Source of truth for opaque `chatcmpl-*` / `resp_*` public refs, actor-scoped idempotency, and internal ProductWorkflow/projection refs. Initial adapter stores a CAS-protected state record at `/engine/openai_compat/refs/state.json`; PostgreSQL/libSQL parity comes from the selected `RootFilesystem` backend. |
 | `/processes` | typed process-lifecycle repository routed through `ironclaw_filesystem` (records, results, outputs) | process APIs | no | Consumer mount alias for `ironclaw_processes`; alias-relative under the per-invocation `MountView`. |
 | `/authorization` | typed capability-lease repository routed through `ironclaw_filesystem` | lease APIs | no | Consumer mount alias for `ironclaw_authorization`; alias-relative under the per-invocation `MountView`. |
 | `/outbound` | typed outbound-delivery repository routed through `ironclaw_filesystem` (policies, subscriptions, attempts) | outbound APIs | indexed scope projection | Consumer mount alias for `ironclaw_outbound`; alias-relative under the per-invocation `MountView`. |
@@ -229,6 +230,13 @@ Rules:
 - should use typed runtime repositories when queryable;
 - if file-shaped blobs are needed, mount under `/engine/runtime` or `/engine` with `IndexPolicy::NotIndexed`;
 - writes should not create memory chunks, embeddings, or memory versions unless explicitly converted into knowledge.
+
+OpenAI-compatible ref mappings are high-churn runtime/control-plane state under
+`/engine/openai_compat/refs`. Callers must go through `OpenAiCompatRefStore`;
+generic filesystem reads or writes are storage mechanics, not an authority path.
+The stored JSON state is schema-validated on load and save, including
+public-id/surface consistency, so malformed persisted mappings fail closed before
+lookup, replay, bind, cancel, stream-resume, or projection retrieval.
 
 ---
 

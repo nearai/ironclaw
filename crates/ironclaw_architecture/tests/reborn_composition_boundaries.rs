@@ -36,6 +36,7 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_threads",
     "ironclaw_loop_support",
     "ironclaw_reborn",
+    "ironclaw_reborn_openai_compat",
     "ironclaw_product_adapters",
     "ironclaw_product_workflow",
     "ironclaw_triggers",

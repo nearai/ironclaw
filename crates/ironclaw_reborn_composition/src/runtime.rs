@@ -2327,12 +2327,11 @@ pub(crate) struct RebornLlmReloadParts {
 
 #[cfg(feature = "root-llm-provider")]
 async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, RebornRuntimeError> {
-    let model = llm.model().to_string();
     let session = ironclaw_llm::create_session_manager(llm.config.session.clone()).await;
     let raw = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
-    wrap_swappable_gateway(raw, Some(model), session)
+    wrap_swappable_gateway(raw, session)
 }
 
 /// Cold-boot gateway: no LLM configured yet. Wraps a placeholder provider (which
@@ -2344,7 +2343,7 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
     let raw: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(PlaceholderLlmProvider);
-    wrap_swappable_gateway(raw, None, session)
+    wrap_swappable_gateway(raw, session)
 }
 
 /// Wrap a raw provider in a [`SwappableLlmProvider`] + reload handle and build
@@ -2353,7 +2352,6 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
 #[cfg(feature = "root-llm-provider")]
 fn wrap_swappable_gateway(
     raw: Arc<dyn ironclaw_llm::LlmProvider>,
-    model: Option<String>,
     session: Arc<ironclaw_llm::SessionManager>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
@@ -2367,7 +2365,7 @@ fn wrap_swappable_gateway(
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
     })?;
-    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, model);
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
     let gateway = LlmProviderModelGateway::new(provider, policy.clone());
     Ok(LlmGatewayBundle {
         gateway: Arc::new(gateway),
@@ -2563,6 +2561,17 @@ mod tests {
     };
 
     const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+    async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
+        runtime.worker_cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !runtime.worker_handle.is_finished() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("turn-runner worker should stop before manual turn-state test");
+    }
 
     fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
         EffectiveRuntimePolicy {
@@ -2950,6 +2959,129 @@ mod tests {
             run_id: TurnRunId::new(),
             turn_id: TurnId::new(),
         }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[derive(Debug)]
+    struct RecordingLlmProvider {
+        active_model: StdMutex<String>,
+        requests: StdMutex<Vec<Option<String>>>,
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    impl RecordingLlmProvider {
+        fn new(active_model: &str) -> Self {
+            Self {
+                active_model: StdMutex::new(active_model.to_string()),
+                requests: StdMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[async_trait]
+    impl ironclaw_llm::LlmProvider for RecordingLlmProvider {
+        fn model_name(&self) -> &str {
+            "recording-provider"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, ironclaw_llm::LlmError> {
+            self.requests
+                .lock()
+                .expect("recording provider request lock poisoned")
+                .push(request.model);
+            Ok(ironclaw_llm::CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, ironclaw_llm::LlmError> {
+            self.requests
+                .lock()
+                .expect("recording provider request lock poisoned")
+                .push(request.model);
+            Ok(ironclaw_llm::ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        fn active_model_name(&self) -> String {
+            self.active_model
+                .lock()
+                .expect("recording provider active-model lock poisoned")
+                .clone()
+        }
+
+        fn set_model(&self, model: &str) -> Result<(), ironclaw_llm::LlmError> {
+            *self
+                .active_model
+                .lock()
+                .expect("recording provider active-model lock poisoned") = model.to_string();
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn swappable_gateway_uses_current_active_model_for_requests() {
+        let provider = Arc::new(RecordingLlmProvider::new("boot-model"));
+        let raw: Arc<dyn ironclaw_llm::LlmProvider> = provider.clone();
+        let session =
+            ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
+        let bundle = super::wrap_swappable_gateway(raw, session).expect("gateway bundle");
+
+        bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await
+            .expect("first request");
+        bundle
+            .reload
+            .reload_handle
+            .primary_provider()
+            .set_model("reloaded-model")
+            .expect("set active model");
+        bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await
+            .expect("second request");
+
+        let requests = provider
+            .requests
+            .lock()
+            .expect("recording provider request lock poisoned");
+        assert_eq!(
+            *requests,
+            vec![
+                Some("boot-model".to_string()),
+                Some("reloaded-model".to_string())
+            ],
+            "production gateway must not keep sending the model selected at boot"
+        );
     }
 
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
@@ -3476,16 +3608,7 @@ mod tests {
         .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-        // This test directly seeds synthetic queued turns; stop the live worker
-        // so it cannot claim the child run before cancellation propagation.
-        runtime.worker_cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !runtime.worker_handle.is_finished() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("turn-runner worker should stop before synthetic turn setup");
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
         let conversation = runtime.new_conversation().await.expect("conversation");
         let parent_scope = runtime.turn_scope_for(&conversation.0);
         let actor = TurnActor::new(runtime.actor_user_id.clone());

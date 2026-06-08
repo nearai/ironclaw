@@ -61,6 +61,7 @@ impl NearAiLoginStateStore {
     }
 
     #[cfg(any(test, feature = "webui-v2-beta"))]
+    #[allow(dead_code)]
     pub(crate) async fn consume(&self, state: &str) -> bool {
         let mut states = self.states.lock().await;
         let now = Instant::now();
@@ -148,13 +149,9 @@ impl RebornLlmConfigService {
     /// running provider. A reload failure is logged, not fatal — the on-disk
     /// config is authoritative and applies on next restart.
     ///
-    /// The reload swaps the live provider's *inner* backend. It does NOT yet
-    /// update the model gateway's pinned model-profile route or cost table
-    /// (those are built once at boot), so changing the active *model* fully
-    /// applies on restart; for providers that honor per-request model overrides
-    /// the gateway still pins the boot model until then. A swappable model
-    /// gateway (and live reload from a no-LLM cold boot, where no reload handle
-    /// exists at all) is owned by the first-run provider work.
+    /// The reload swaps the live provider's *inner* backend. The gateway's
+    /// model profile is intentionally unpinned so requests use the reloaded
+    /// provider's active model instead of the model selected at boot.
     async fn refresh_running_provider(&self) {
         let Some(reload) = self.reload.as_ref() else {
             // Cold boot: no LLM was configured at startup, so there is no live

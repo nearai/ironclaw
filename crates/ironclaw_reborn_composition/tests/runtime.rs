@@ -265,7 +265,7 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
     // and reaches a terminal state without hanging.
     let conversation = runtime.new_conversation().await.unwrap();
     let reply = tokio::time::timeout(
-        Duration::from_secs(2),
+        SEND_USER_MESSAGE_TIMEOUT,
         runtime.send_user_message(&conversation, "hello"),
     )
     .await

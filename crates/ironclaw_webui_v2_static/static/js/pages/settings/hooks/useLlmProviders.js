@@ -30,6 +30,11 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
   const snapshot = enabled
     ? providersQuery.data || { providers: [], active: null }
     : { providers: [], active: null };
+  // If the providers query failed (e.g. 404 when the route is gated under
+  // multi-user / SSO auth, or a transient 5xx / offline), we can't conclude
+  // "no LLM configured" — the provider may be set operator-side at boot — so
+  // callers must not treat the failure as a reason to onboard.
+  const isError = enabled && providersQuery.isError;
   const builtinOverrides = {};
   // Map the wire view onto the field names the components/helpers expect.
   const allProviders = (snapshot.providers || []).map((provider) => ({
@@ -115,6 +120,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
     activeProviderId,
     selectedModel,
     hasActiveProvider,
+    isError,
     isLoading: providersQuery.isLoading,
     error: providersQuery.error,
     setActiveProvider: (provider) => setActiveMutation.mutateAsync(provider),

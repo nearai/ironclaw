@@ -89,6 +89,38 @@ impl WebuiAuthenticator for MultiUserToken {
     }
 }
 
+#[tokio::test]
+async fn health_route_is_public_for_platform_probes() {
+    let bundle = RebornWebuiBundle {
+        api: Arc::new(StubServices::default()),
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![],
+    );
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/health")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024).await.expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("health json");
+    assert_eq!(json["status"], "healthy");
+    assert_eq!(json["channel"], "reborn");
+}
+
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_personal_binding_pairing_mount_tests {
     use super::*;
