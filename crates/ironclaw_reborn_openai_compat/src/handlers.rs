@@ -3,8 +3,6 @@ use axum::body::Bytes;
 use axum::extract::{Extension, Path, State};
 use axum::http::HeaderMap;
 
-const MAX_IDEMPOTENCY_KEY_LEN: usize = 256;
-
 use crate::{
     OpenAiChatCompletionResponse, OpenAiCompatAuthenticatedCaller, OpenAiCompatHttpError,
     OpenAiCompatIdempotencyKey, OpenAiCompatRouteSurface, OpenAiCompatRouterState,
@@ -62,7 +60,7 @@ pub async fn responses_v1_create(
         caller,
         headers,
         body,
-        OpenAiCompatRouteSurface::ResponsesV1,
+        OpenAiCompatRouteSurface::ResponsesApi,
     )
     .await
 }
@@ -173,11 +171,6 @@ fn idempotency_key_from_headers(
     let value = value
         .to_str()
         .map_err(|_| OpenAiCompatHttpError::invalid_request(Some("idempotency_key".to_string())))?;
-    if value.len() > MAX_IDEMPOTENCY_KEY_LEN || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
-        return Err(OpenAiCompatHttpError::invalid_request(Some(
-            "idempotency_key".to_string(),
-        )));
-    }
     OpenAiCompatIdempotencyKey::new(value)
         .map(Some)
         .map_err(|_| OpenAiCompatHttpError::invalid_request(Some("idempotency_key".to_string())))
