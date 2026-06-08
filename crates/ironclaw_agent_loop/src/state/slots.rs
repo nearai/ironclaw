@@ -400,7 +400,14 @@ pub enum RepeatedCallWarningPhase {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GateStrategyState {}
 
-/// Persistent state owned by `PostCapabilityStage`.
+/// Per-turn pipeline-directive state for `PostCapabilityStage`.
+///
+/// Unlike sibling `<Domain>StrategyState` types in this module, this slot
+/// belongs to a pipeline stage (not a strategy) and is **cleared every
+/// turn** rather than carried across iterations as resumable state. The
+/// distinct naming marks it as a different category: stages own
+/// transient one-shot directives (`skip_model_this_iteration`,
+/// `pending_capability_bytes`); strategies own resumable accounting.
 ///
 /// ### `pending_capability_bytes`
 /// Per-capability byte accounting accumulator. Filled on each completed
