@@ -14,8 +14,9 @@ use crate::{
     OpenAiChatCompletionResponse, OpenAiChatFinishReason, OpenAiChatMessage, OpenAiChatMessageRole,
     OpenAiChatTool, OpenAiChatToolCall, OpenAiCompatActorScope, OpenAiCompatBindInternalRefs,
     OpenAiCompatHttpError, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,
-    OpenAiCompatPublicId, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
-    OpenAiCompatRefStore, OpenAiCompatRequestFingerprint, OpenAiCompatRouteSurface, OpenAiUsage,
+    OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck, OpenAiCompatRefReservation,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
+    OpenAiCompatRouteSurface, OpenAiUsage,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -28,6 +29,8 @@ use ironclaw_product_adapters::{
 };
 
 const DEFAULT_CHAT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_CHAT_COMPLETION_MESSAGES: usize = 1_000;
 const OPENAI_COMPAT_ADAPTER_ID: &str = "openai_compat";
 const OPENAI_COMPAT_INSTALLATION_ID: &str = "openai_compat_default";
 const OPENAI_COMPAT_ACTOR_KIND: &str = "openai_compat_user";
@@ -134,22 +137,42 @@ impl OpenAiChatCompletionsWorkflow {
                 idempotency_key,
             ))
             .await?;
-        let mapping = match reservation {
-            OpenAiCompatRefReservationOutcome::Created(mapping)
-            | OpenAiCompatRefReservationOutcome::Replayed(mapping) => mapping,
+        let (public_id, accepted_ack, created_at) = match reservation {
+            OpenAiCompatRefReservationOutcome::Created(mapping) => {
+                let created_at = mapping.created_at;
+                let OpenAiCompatPublicId::ChatCompletion(public_id) = mapping.public_id else {
+                    return Err(OpenAiCompatHttpError::internal());
+                };
+                let envelope =
+                    self.chat_product_envelope(&caller, &public_id, user_message_payload)?;
+                let ack = self.product_workflow.submit_inbound(envelope).await?;
+                let accepted_ack = accepted_ack_from_ack(ack)?;
+                let _ = self
+                    .ref_store
+                    .record_accepted_ack(OpenAiCompatRecordAcceptedAck::new(
+                        caller.scope().clone(),
+                        OpenAiCompatPublicId::ChatCompletion(public_id.clone()),
+                        accepted_ack.clone(),
+                    ))
+                    .await?;
+                (public_id, accepted_ack, created_at)
+            }
+            OpenAiCompatRefReservationOutcome::Replayed(mapping) => {
+                let created_at = mapping.created_at;
+                let accepted_ack = mapping
+                    .accepted_ack
+                    .ok_or_else(OpenAiCompatHttpError::internal)?;
+                let OpenAiCompatPublicId::ChatCompletion(public_id) = mapping.public_id else {
+                    return Err(OpenAiCompatHttpError::internal());
+                };
+                (public_id, accepted_ack, created_at)
+            }
             OpenAiCompatRefReservationOutcome::Conflict(_) => {
                 return Err(OpenAiCompatHttpError::conflict(Some(
                     "idempotency_key".to_string(),
                 )));
             }
         };
-        let OpenAiCompatPublicId::ChatCompletion(public_id) = mapping.public_id.clone() else {
-            return Err(OpenAiCompatHttpError::internal());
-        };
-
-        let envelope = self.chat_product_envelope(&caller, &public_id, user_message_payload)?;
-        let ack = self.product_workflow.submit_inbound(envelope).await?;
-        let accepted_ack = accepted_ack_from_ack(ack)?;
         let wait_request = OpenAiChatCompletionWaitRequest {
             public_id: public_id.clone(),
             actor_scope: caller.scope().clone(),
@@ -174,19 +197,31 @@ impl OpenAiChatCompletionsWorkflow {
         })??;
 
         if let Some(internal_refs) = wait_result.internal_refs {
-            self.ref_store
-                .bind_internal_refs(OpenAiCompatBindInternalRefs::new(
-                    caller.scope().clone(),
-                    OpenAiCompatPublicId::ChatCompletion(public_id.clone()),
-                    internal_refs,
-                ))
-                .await?;
+            match tokio::time::timeout(
+                DEFAULT_BIND_INTERNAL_REFS_TIMEOUT,
+                self.ref_store
+                    .bind_internal_refs(OpenAiCompatBindInternalRefs::new(
+                        caller.scope().clone(),
+                        OpenAiCompatPublicId::ChatCompletion(public_id.clone()),
+                        internal_refs,
+                    )),
+            )
+            .await
+            {
+                Ok(result) => {
+                    let _ = result?;
+                }
+                Err(_) => tracing::warn!(
+                    public_id = public_id.as_str(),
+                    "bind_internal_refs timed out; continuing without binding"
+                ),
+            }
         }
 
         Ok(OpenAiChatCompletionResponse {
             id: public_id,
             object: "chat.completion".to_string(),
-            created: unix_timestamp_now(),
+            created: created_at,
             model: wait_result.effective_model.unwrap_or(request.model),
             choices: vec![OpenAiChatChoice {
                 index: 0,
@@ -300,20 +335,24 @@ pub trait OpenAiChatCompletionWaiter: Send + Sync {
 }
 
 fn accepted_ack_from_ack(
-    ack: ProductInboundAck,
+    mut ack: ProductInboundAck,
 ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
-    match ack {
-        ProductInboundAck::Accepted { .. } => Ok(ack),
-        ProductInboundAck::Duplicate { prior } => accepted_ack_from_ack(*prior),
-        ProductInboundAck::DeferredBusy { .. } => Err(OpenAiCompatHttpError::from_kind(
-            429,
-            true,
-            crate::OpenAiCompatErrorKind::RateLimited,
-            None,
-        )),
-        ProductInboundAck::Rejected(rejection) => Err(error_from_rejection(rejection)),
-        ProductInboundAck::CommandResult { .. } | ProductInboundAck::NoOp => {
-            Err(OpenAiCompatHttpError::internal())
+    loop {
+        match ack {
+            ProductInboundAck::Accepted { .. } => return Ok(ack),
+            ProductInboundAck::Duplicate { prior } => ack = *prior,
+            ProductInboundAck::DeferredBusy { .. } => {
+                return Err(OpenAiCompatHttpError::from_kind(
+                    429,
+                    true,
+                    crate::OpenAiCompatErrorKind::RateLimited,
+                    None,
+                ));
+            }
+            ProductInboundAck::Rejected(rejection) => return Err(error_from_rejection(rejection)),
+            ProductInboundAck::CommandResult { .. } | ProductInboundAck::NoOp => {
+                return Err(OpenAiCompatHttpError::internal());
+            }
         }
     }
 }
@@ -362,6 +401,11 @@ fn chat_messages_to_product_text(
             "messages".to_string(),
         )));
     }
+    if request.messages.len() > MAX_CHAT_COMPLETION_MESSAGES {
+        return Err(OpenAiCompatHttpError::invalid_request(Some(
+            "messages".to_string(),
+        )));
+    }
     let mut lines = Vec::with_capacity(request.messages.len() + 1);
     for message in &request.messages {
         let role = match message.role {
@@ -379,7 +423,10 @@ fn chat_messages_to_product_text(
             lines.push(format!("assistant_tool_calls: {}", tool_calls.len()));
         }
         if let Some(tool_call_id) = &message.tool_call_id {
-            lines.push(format!("tool_call_id: {tool_call_id}"));
+            lines.push(format!(
+                "tool_call_id: {}",
+                sanitize_product_text_fragment(tool_call_id)
+            ));
         }
     }
     Ok(lines.join("\n"))
@@ -397,12 +444,12 @@ fn chat_user_message_payload(
 
 fn content_value_to_text(content: Option<&serde_json::Value>) -> String {
     match content {
-        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(serde_json::Value::String(text)) => sanitize_product_text_fragment(text),
         Some(serde_json::Value::Array(items)) => items
             .iter()
             .filter_map(content_array_item_text)
             .collect::<Vec<_>>()
-            .join("\n"),
+            .join(" "),
         Some(value) if !value.is_null() => "[non_text_content]".to_string(),
         _ => String::new(),
     }
@@ -414,11 +461,11 @@ fn content_array_item_text(value: &serde_json::Value) -> Option<String> {
         Some("text" | "input_text" | "output_text") => object
             .get("text")
             .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
+            .map(sanitize_product_text_fragment),
         _ => Some("[non_text_content]".to_string()),
     }
 }
 
-fn unix_timestamp_now() -> u64 {
-    Utc::now().timestamp().try_into().unwrap_or(0)
+fn sanitize_product_text_fragment(value: &str) -> String {
+    value.replace(['\n', '\r'], " ")
 }

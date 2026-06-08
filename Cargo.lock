@@ -5086,6 +5086,7 @@ dependencies = [
  "http-body-util",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
+ "ironclaw_turns",
  "serde",
  "serde_json",
  "sha2 0.10.9",

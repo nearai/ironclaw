@@ -36,6 +36,7 @@ tokio = { version = "1", features = ["time"], optional = true }
 http = "1"
 http-body-util = "0.1"
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support"] }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 tower = { version = "0.5", features = ["util"] }
 

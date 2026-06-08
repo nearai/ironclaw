@@ -7,6 +7,7 @@
 //! route behavior.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
@@ -495,13 +496,20 @@ fn new_pending_mapping(request: &OpenAiCompatRefReservation) -> OpenAiCompatReso
         owner: request.owner.clone(),
         surface: request.surface,
         request_fingerprint: request.request_fingerprint.clone(),
-        created_at: chrono::Utc::now().timestamp().try_into().unwrap_or(0),
+        created_at: unix_timestamp_now(),
         idempotency_key: request.idempotency_key.clone(),
         accepted_ack: None,
         binding: OpenAiCompatResourceBinding::Pending,
     };
     debug_assert!(mapping.validate().is_ok());
     mapping
+}
+
+fn unix_timestamp_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn entry_for_mapping(mapping: &OpenAiCompatResourceMapping) -> Result<Entry, OpenAiCompatRefError> {
