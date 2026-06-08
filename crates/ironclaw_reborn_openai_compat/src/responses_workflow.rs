@@ -3,7 +3,8 @@
 //! This non-streaming slice routes Responses create/cancel through the
 //! ProductWorkflow facade and resolves retrieve through a composition-supplied
 //! projection reader. Streaming translation remains a later EventStreamManager
-//! slice.
+//! slice. The ack and text helpers intentionally mirror the chat slice until
+//! the two surfaces share a crate-private normalization module.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,12 +12,13 @@ use std::time::Duration;
 use crate::{
     OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatBindInternalRefs,
     OpenAiCompatHttpError, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,
-    OpenAiCompatProductActionRef, OpenAiCompatPublicId, OpenAiCompatRefLookup,
-    OpenAiCompatRefOperation, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
-    OpenAiCompatRefStore, OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding,
-    OpenAiCompatResourceMapping, OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef,
-    OpenAiResponseId, OpenAiResponseObject, OpenAiResponsesCreateRequest, OpenAiResponsesInput,
-    OpenAiResponsesInputItem, OpenAiResponsesMessageRole,
+    OpenAiCompatProductActionRef, OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck,
+    OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
+    OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
+    OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiResponsesCreateRequest, OpenAiResponsesInput, OpenAiResponsesInputItem,
+    OpenAiResponsesMessageRole,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -103,17 +105,64 @@ impl OpenAiResponsesWorkflow {
                 idempotency_key,
             ))
             .await?;
-        let mapping = match reservation {
-            OpenAiCompatRefReservationOutcome::Created(mapping) => mapping,
-            OpenAiCompatRefReservationOutcome::Replayed(mapping) => {
-                return self
-                    .projection_reader
-                    .read_response(OpenAiResponseReadRequest {
-                        public_id: response_public_id(&mapping)?,
-                        actor_scope: caller.scope().clone(),
+        let (mapping, accepted_ack) = match reservation {
+            OpenAiCompatRefReservationOutcome::Created(mapping) => {
+                let public_id = response_public_id(&mapping)?;
+                let (mapping, accepted_ack) = self
+                    .submit_response_and_record_ack(
+                        &caller,
+                        &public_id,
+                        previous_mapping.as_ref(),
+                        user_message_payload,
+                    )
+                    .await?;
+                let mapping = self
+                    .ensure_response_mapping_bound(
+                        caller.scope().clone(),
+                        public_id,
                         mapping,
-                    })
-                    .await;
+                        &accepted_ack,
+                    )
+                    .await?;
+                (mapping, accepted_ack)
+            }
+            OpenAiCompatRefReservationOutcome::Replayed(mapping) => {
+                let public_id = response_public_id(&mapping)?;
+                if let Some(accepted_ack) = mapping.accepted_ack.clone() {
+                    let mapping = self
+                        .ensure_response_mapping_bound(
+                            caller.scope().clone(),
+                            public_id.clone(),
+                            mapping,
+                            &accepted_ack,
+                        )
+                        .await?;
+                    return self
+                        .projection_reader
+                        .read_response(OpenAiResponseReadRequest {
+                            public_id,
+                            actor_scope: caller.scope().clone(),
+                            mapping,
+                        })
+                        .await;
+                }
+                let (mapping, accepted_ack) = self
+                    .submit_response_and_record_ack(
+                        &caller,
+                        &public_id,
+                        previous_mapping.as_ref(),
+                        user_message_payload,
+                    )
+                    .await?;
+                let mapping = self
+                    .ensure_response_mapping_bound(
+                        caller.scope().clone(),
+                        public_id,
+                        mapping,
+                        &accepted_ack,
+                    )
+                    .await?;
+                (mapping, accepted_ack)
             }
             OpenAiCompatRefReservationOutcome::Conflict(_) => {
                 return Err(OpenAiCompatHttpError::conflict(Some(
@@ -122,24 +171,6 @@ impl OpenAiResponsesWorkflow {
             }
         };
         let public_id = response_public_id(&mapping)?;
-
-        let envelope = self.response_product_envelope(
-            &caller,
-            &public_id,
-            previous_mapping.as_ref(),
-            user_message_payload,
-        )?;
-        let ack = self.product_workflow.submit_inbound(envelope).await?;
-        let accepted_ack = accepted_ack_from_ack(ack)?;
-        let base_internal_refs = internal_refs_from_ack(&accepted_ack)?;
-        let mapping = self
-            .bind_internal_refs(
-                caller.scope().clone(),
-                public_id.clone(),
-                base_internal_refs.clone(),
-            )
-            .await?
-            .unwrap_or(mapping);
 
         let wait_result = tokio::time::timeout(
             self.wait_timeout,
@@ -233,6 +264,49 @@ impl OpenAiResponsesWorkflow {
             .ok_or_else(|| OpenAiCompatHttpError::not_found(Some("response_id".to_string())))
     }
 
+    async fn submit_response_and_record_ack(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        public_id: &OpenAiResponseId,
+        previous_mapping: Option<&OpenAiCompatResourceMapping>,
+        user_message_payload: UserMessagePayload,
+    ) -> Result<(OpenAiCompatResourceMapping, ProductInboundAck), OpenAiCompatHttpError> {
+        let envelope = self.response_product_envelope(
+            caller,
+            public_id,
+            previous_mapping,
+            user_message_payload,
+        )?;
+        let ack = self.product_workflow.submit_inbound(envelope).await?;
+        let accepted_ack = accepted_ack_from_ack(ack)?;
+        let mapping = self
+            .ref_store
+            .record_accepted_ack(OpenAiCompatRecordAcceptedAck::new(
+                caller.scope().clone(),
+                OpenAiCompatPublicId::Response(public_id.clone()),
+                accepted_ack.clone(),
+            ))
+            .await?
+            .ok_or_else(|| OpenAiCompatHttpError::not_found(Some("response_id".to_string())))?;
+        Ok((mapping, accepted_ack))
+    }
+
+    async fn ensure_response_mapping_bound(
+        &self,
+        owner: OpenAiCompatActorScope,
+        public_id: OpenAiResponseId,
+        mapping: OpenAiCompatResourceMapping,
+        accepted_ack: &ProductInboundAck,
+    ) -> Result<OpenAiCompatResourceMapping, OpenAiCompatHttpError> {
+        if matches!(mapping.binding, OpenAiCompatResourceBinding::Bound { .. }) {
+            return Ok(mapping);
+        }
+        let internal_refs = internal_refs_from_ack(accepted_ack)?;
+        self.bind_internal_refs(owner, public_id, internal_refs)
+            .await?
+            .ok_or_else(bind_internal_refs_unavailable)
+    }
+
     async fn bind_internal_refs(
         &self,
         owner: OpenAiCompatActorScope,
@@ -268,6 +342,13 @@ impl OpenAiResponsesWorkflow {
         previous_mapping: Option<&OpenAiCompatResourceMapping>,
         user_message_payload: UserMessagePayload,
     ) -> Result<ProductInboundEnvelope, OpenAiCompatHttpError> {
+        if let Some(mapping) = previous_mapping {
+            if &mapping.owner != caller.scope() {
+                return Err(OpenAiCompatHttpError::not_found(Some(
+                    "previous_response_id".to_string(),
+                )));
+            }
+        }
         let conversation_ref = previous_mapping
             .map(|mapping| mapping.public_id.as_str())
             .unwrap_or_else(|| public_id.as_str());
@@ -381,7 +462,11 @@ fn validate_responses_request(
             "stream".to_string(),
         )));
     }
-    if request.tools.is_some() {
+    if request
+        .tools
+        .as_ref()
+        .map_or(false, |tools| !tools.is_empty())
+    {
         return Err(OpenAiCompatHttpError::invalid_request(Some(
             "tools".to_string(),
         )));
@@ -463,6 +548,15 @@ fn error_from_rejection(rejection: ProductRejection) -> OpenAiCompatHttpError {
     }
 }
 
+fn bind_internal_refs_unavailable() -> OpenAiCompatHttpError {
+    OpenAiCompatHttpError::from_kind(
+        503,
+        true,
+        crate::OpenAiCompatErrorKind::ServiceUnavailable,
+        None,
+    )
+}
+
 fn internal_refs_from_ack(
     ack: &ProductInboundAck,
 ) -> Result<OpenAiCompatInternalRefs, OpenAiCompatHttpError> {
@@ -493,10 +587,13 @@ fn internal_refs_from_ack(
 fn response_turn_run_ref(
     mapping: &OpenAiCompatResourceMapping,
 ) -> Result<OpenAiCompatTurnRunRef, OpenAiCompatHttpError> {
-    let OpenAiCompatResourceBinding::Bound { internal_refs } = &mapping.binding else {
-        return Err(OpenAiCompatHttpError::not_found(Some(
-            "response_id".to_string(),
-        )));
+    let internal_refs = match &mapping.binding {
+        OpenAiCompatResourceBinding::Pending => {
+            return Err(OpenAiCompatHttpError::conflict(Some(
+                "response_id".to_string(),
+            )));
+        }
+        OpenAiCompatResourceBinding::Bound { internal_refs } => internal_refs,
     };
     let Some(turn_run_ref) = internal_refs.turn_run_ref.as_ref() else {
         return Err(OpenAiCompatHttpError::not_found(Some(
@@ -601,7 +698,7 @@ fn response_input_item_to_text(item: &OpenAiResponsesInputItem) -> String {
 }
 
 fn sanitize_product_text_segment(value: &str) -> String {
-    value.replace(['\n', '\r'], " ")
+    value.replace(['\n', '\r', ':'], " ")
 }
 
 fn response_role_name(role: OpenAiResponsesMessageRole) -> &'static str {
