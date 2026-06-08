@@ -183,6 +183,7 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
             .map(|entry| entry.reply_target_binding_ref.clone());
         let tenant_id = caller.tenant_id.clone();
         let user_id = caller.user_id.clone();
+        let updated_at = Utc::now();
         let updated = self
             .preferences
             .update_communication_preference(
@@ -204,7 +205,7 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
                         default_modality: existing
                             .as_ref()
                             .and_then(|record| record.default_modality),
-                        updated_at: Utc::now(),
+                        updated_at,
                         updated_by: user_id.clone(),
                     })
                 }),
