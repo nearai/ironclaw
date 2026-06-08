@@ -501,14 +501,21 @@ where
         let safe_summary = parent_result_summary(event, &child_output)?;
         if !state.terminal_result_written {
             let payload = background_completion_payload(event, record, &child_output)?;
-            match self
+            let terminal_byte_len = match self
                 .result_writer
                 .update_capability_result(&record.parent_run_context, result_ref, payload)
                 .await
             {
-                Ok(()) => {}
+                Ok(byte_len) => byte_len,
                 Err(error) => return Err(map_host_error(error)),
-            }
+            };
+            self.gate_store
+                .record_terminal_byte_len(
+                    &record.gate_ref,
+                    record.child_run_id,
+                    terminal_byte_len,
+                )
+                .map_err(map_host_error)?;
             self.gate_store
                 .mark_terminal_result_written(&record.gate_ref, record.child_run_id)
                 .map_err(map_host_error)?;
@@ -1303,10 +1310,11 @@ mod tests {
             _run_context: &ironclaw_turns::run_profile::LoopRunContext,
             result_ref: &LoopResultRef,
             output: serde_json::Value,
-        ) -> Result<(), AgentLoopHostError> {
+        ) -> Result<u64, AgentLoopHostError> {
             assert_eq!(result_ref, &self.result_ref);
+            let byte_len = serde_json::to_vec(&output).map(|v| v.len() as u64).unwrap_or(0);
             self.writes.lock().unwrap().push(output);
-            Ok(())
+            Ok(byte_len)
         }
     }
 
@@ -1347,7 +1355,7 @@ mod tests {
             _run_context: &ironclaw_turns::run_profile::LoopRunContext,
             result_ref: &LoopResultRef,
             output: serde_json::Value,
-        ) -> Result<(), AgentLoopHostError> {
+        ) -> Result<u64, AgentLoopHostError> {
             assert_eq!(result_ref, &self.result_ref);
             let mut calls = self.calls.lock().unwrap();
             *calls += 1;
@@ -1357,8 +1365,9 @@ mod tests {
                     "injected result write failure",
                 ));
             }
+            let byte_len = serde_json::to_vec(&output).map(|v| v.len() as u64).unwrap_or(0);
             self.writes.lock().unwrap().push(output);
-            Ok(())
+            Ok(byte_len)
         }
     }
 
@@ -1916,6 +1925,7 @@ mod tests {
             terminal_status: None,
             terminal_event: None,
             terminal_result_written: false,
+            terminal_byte_len: 0,
             descendant_reservation_release_claimed: false,
             descendant_reservation_released: false,
             delivery_claimed: true,
@@ -3804,6 +3814,7 @@ mod tests {
                     owner_user_id: Some(owner.clone()),
                 }),
                 terminal_result_written: true,
+                terminal_byte_len: 0,
                 descendant_reservation_release_claimed: false,
                 descendant_reservation_released: false,
                 delivery_claimed: true,
@@ -4255,6 +4266,7 @@ mod tests {
                     owner_user_id: Some(owner.clone()),
                 }),
                 terminal_result_written: true,
+                terminal_byte_len: 0,
                 descendant_reservation_release_claimed: false,
                 descendant_reservation_released: false,
                 delivery_claimed: true,

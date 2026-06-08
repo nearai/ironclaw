@@ -283,7 +283,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
         output: serde_json::Value,
-    ) -> Result<(), AgentLoopHostError> {
+    ) -> Result<u64, AgentLoopHostError> {
         ensure_ref_scoped_to_run("result", result_ref.as_str(), run_context)?;
         let byte_len = serialized_json_len(&output, "capability result")?;
         let mut results = self
@@ -334,7 +334,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
                 byte_len,
             },
         );
-        Ok(())
+        Ok(byte_len as u64)
     }
 
     async fn delete_capability_result(

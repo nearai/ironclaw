@@ -19,6 +19,12 @@ pub struct AwaitedChildState {
     pub terminal_status: Option<TurnStatus>,
     pub terminal_event: Option<AwaitedChildTerminalEvent>,
     pub terminal_result_written: bool,
+    /// Serialized byte length of the terminal capability result payload written
+    /// by `SubagentCompletionObserver::write_terminal_result` via
+    /// `LoopCapabilityResultWriter::update_capability_result`. Zero until
+    /// `terminal_result_written` is set; carries the real child output size
+    /// (not the initial spawn placeholder) for downstream byte-cap accounting.
+    pub terminal_byte_len: u64,
     pub descendant_reservation_release_claimed: bool,
     pub descendant_reservation_released: bool,
     pub delivery_claimed: bool,
@@ -162,6 +168,34 @@ impl BoundedSubagentGateResolutionStore {
             for state in states {
                 state.delivery_claimed = false;
                 state.delivered_to_parent = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record the serialized byte length of the terminal capability result
+    /// payload for a given child run. Called by
+    /// `SubagentCompletionObserver::write_terminal_result` immediately after
+    /// `update_capability_result` returns the real payload size.
+    ///
+    /// This stores the actual child output size on `AwaitedChildState` so that
+    /// the parent loop's byte-cap accounting can use the terminal payload size
+    /// rather than the initial spawn-placeholder size. The value is available
+    /// to the consumption path (WU-C durable settlement or in-memory drain)
+    /// via `state_for_gate` / `claim_all_terminal_states_for_child`.
+    pub fn record_terminal_byte_len(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+        byte_len: u64,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            for state in states
+                .iter_mut()
+                .filter(|state| state.record.child_run_id == child_run_id)
+            {
+                state.terminal_byte_len = byte_len;
             }
         }
         Ok(())
@@ -443,6 +477,7 @@ impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
                 terminal_status: None,
                 terminal_event: None,
                 terminal_result_written: false,
+                terminal_byte_len: 0,
                 descendant_reservation_release_claimed: false,
                 descendant_reservation_released: false,
                 delivery_claimed: false,

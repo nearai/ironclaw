@@ -156,7 +156,7 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
         _run_context: &LoopRunContext,
         _result_ref: &LoopResultRef,
         _output: serde_json::Value,
-    ) -> Result<(), AgentLoopHostError> {
+    ) -> Result<u64, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "capability result updates are not supported by this writer",

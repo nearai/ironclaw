@@ -520,7 +520,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
         output: serde_json::Value,
-    ) -> Result<(), AgentLoopHostError> {
+    ) -> Result<u64, AgentLoopHostError> {
         ensure_local_dev_ref_scope("result", result_ref.as_str(), run_context)?;
         let bytes = staged_value_bytes(&output)?;
         let mut results = self.results.lock().map_err(|_| capability_io_error())?;
@@ -543,7 +543,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             ));
         }
         results.insert_measured(result_ref.as_str().to_string(), output, bytes);
-        Ok(())
+        Ok(bytes as u64)
     }
 
     async fn delete_capability_result(
