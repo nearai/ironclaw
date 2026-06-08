@@ -65,6 +65,7 @@ Codex auth reuse:
 - If Codex is logged in with API-key mode, IronClaw uses the standard OpenAI endpoint.
 - If Codex is logged in with ChatGPT OAuth mode, IronClaw routes to the private `chatgpt.com/backend-api/codex` Responses API via `codex_chatgpt.rs`.
 - ChatGPT mode supports one automatic 401 refresh using the refresh token persisted in `auth.json`.
+- In ChatGPT mode the `/models` list is gated by the reported Codex `client_version`. It is auto-detected from the installed `codex` binary (`codex --version`), falling back to a bundled default. A stale value silently hides newer models (e.g. `gpt-5.5`) the account is entitled to.
 
 ## AWS Bedrock Provider
 
