@@ -4,6 +4,7 @@ mod reborn_support;
 mod support;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::{
     Json, Router,
@@ -21,7 +22,7 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
 use reborn_support::{
-    harness::{RebornBinaryE2EHarness, assert_milestone_order},
+    harness::{HarnessWaitConfig, RebornBinaryE2EHarness, assert_milestone_order},
     model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
     },
@@ -111,7 +112,14 @@ async fn reborn_trace_core_builtin_tools_parity() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(
+            submitted.run_id,
+            TurnStatus::Completed,
+            HarnessWaitConfig {
+                timeout: Duration::from_secs(15),
+                poll_interval: Duration::from_millis(10),
+            },
+        )
         .await
         .expect("completed run");
     harness

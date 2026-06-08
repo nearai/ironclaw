@@ -159,7 +159,7 @@ impl SlackChannelSubjectAssigner {
         hasher.update(channel_id.as_bytes());
         let digest = hasher.finalize();
         let mut suffix = String::with_capacity(32);
-        for byte in &digest[..16] {
+        for byte in digest.iter().take(16) {
             use std::fmt::Write as _;
             write!(&mut suffix, "{byte:02x}").map_err(|_| SlackChannelRouteError::InvalidRoute)?;
         }
@@ -1067,6 +1067,37 @@ mod tests {
             .expect("list responds");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn route_admin_list_handles_oversized_cursor_without_overflow() {
+        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let mount = slack_channel_route_admin_route_mount(route_config(store));
+
+        let response = mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "{WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH}?limit=1&cursor={}",
+                        usize::MAX
+                    ))
+                    .header("content-length", "0")
+                    .extension(caller(TENANT, "user:admin"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("list responds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(body["routes"], serde_json::json!([]));
+        assert_eq!(body["next_cursor"], serde_json::Value::Null);
     }
 
     #[tokio::test]

@@ -123,6 +123,9 @@ Expected fields include:
 - `profile`
 - `v1_state: not-used`
 
+`config path`, `doctor`, and other read-only surfaces do not create Reborn
+state or seed config files.
+
 ### `doctor`
 
 Validates and reports Reborn boot configuration without creating state directories or starting runtime services.
@@ -227,6 +230,15 @@ Use `--dry-run` for the side-effect-free readiness snapshot:
 ```bash
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --dry-run
 ```
+
+When `$IRONCLAW_REBORN_HOME/config.toml` is missing, the first stateful
+runtime start through `run`, `repl`, or feature-gated `serve` seeds a sparse
+`config.toml` containing `api_version` and the safe `local-dev` boot profile.
+It intentionally does not seed `[llm.default]`, so env-only model selection
+continues to work. `run --dry-run`, diagnostics, and read-only commands remain
+side-effect-free. One-off environment selections such as
+`IRONCLAW_REBORN_PROFILE=local-dev-yolo` are not persisted into the seeded
+file.
 
 Expected fields include:
 

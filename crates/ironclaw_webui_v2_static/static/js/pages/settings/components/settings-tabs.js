@@ -5,12 +5,15 @@ import { SETTINGS_TABS } from "../lib/settings-schema.js";
 
 function useVisibleTabs(isAdmin) {
   return React.useMemo(
-    () => SETTINGS_TABS.filter((tab) => isAdmin || tab.id !== "users"),
+    () =>
+      SETTINGS_TABS.filter(
+        (tab) => isAdmin || (tab.id !== "users" && tab.id !== "inference")
+      ),
     [isAdmin]
   );
 }
 
-export function SettingsTabs({ activeTab, onTabChange, isAdmin = true }) {
+export function SettingsTabs({ activeTab, onTabChange, isAdmin = false }) {
   const t = useT();
   const tabs = useVisibleTabs(isAdmin);
   return html`
@@ -45,7 +48,7 @@ export function SettingsTabs({ activeTab, onTabChange, isAdmin = true }) {
   `;
 }
 
-export function SettingsTabsMobile({ activeTab, onTabChange, isAdmin = true }) {
+export function SettingsTabsMobile({ activeTab, onTabChange, isAdmin = false }) {
   const t = useT();
   const tabs = useVisibleTabs(isAdmin);
   const active = tabs.find((tab) => tab.id === activeTab) || tabs[0];

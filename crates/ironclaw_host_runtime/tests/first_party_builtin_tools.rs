@@ -1418,7 +1418,7 @@ async fn memory_write_rejects_traversal_paths() {
 #[tokio::test]
 async fn memory_write_rejects_non_string_target() {
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
-    for target in [json!(null), json!(42), json!(true)] {
+    for target in [json!(42), json!(true)] {
         let failure = invoke_with_context(
             &runtime,
             MEMORY_WRITE_CAPABILITY_ID,
@@ -1435,6 +1435,33 @@ async fn memory_write_rejects_non_string_target() {
         .unwrap_err();
         assert_eq!(failure, RuntimeFailureKind::InvalidInput);
     }
+}
+
+#[tokio::test]
+async fn memory_write_treats_null_target_as_omitted() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let output = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": null,
+            "content": "null target should use the default daily log"
+        }),
+        execution_context_with_mounts(
+            [MEMORY_WRITE_CAPABILITY_ID],
+            memory_mounts(MountPermissions::read_write_list_delete()),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(output["status"], json!("written"));
+    assert_eq!(output["append"], json!(true));
+    assert!(
+        output["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("daily/") && path.ends_with(".md")),
+        "null target should default to today's daily log, got {output:?}"
+    );
 }
 
 #[tokio::test]

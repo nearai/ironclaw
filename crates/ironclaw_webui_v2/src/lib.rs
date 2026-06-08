@@ -59,8 +59,8 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_CANCEL_RUN,
     WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_ROUTE_CREATE_THREAD,
     WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER, WEBUI_V2_ROUTE_DELETE_THREAD,
-    WEBUI_V2_ROUTE_GET_EXTENSION_SETUP, WEBUI_V2_ROUTE_GET_LLM_CONFIG, WEBUI_V2_ROUTE_GET_TIMELINE,
-    WEBUI_V2_ROUTE_INSTALL_EXTENSION, WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
+    WEBUI_V2_ROUTE_GET_EXTENSION_SETUP, WEBUI_V2_ROUTE_GET_LLM_CONFIG, WEBUI_V2_ROUTE_GET_SESSION,
+    WEBUI_V2_ROUTE_GET_TIMELINE, WEBUI_V2_ROUTE_INSTALL_EXTENSION, WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
     WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS, WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY,
     WEBUI_V2_ROUTE_LIST_EXTENSIONS, WEBUI_V2_ROUTE_LIST_LLM_MODELS, WEBUI_V2_ROUTE_LIST_THREADS,
     WEBUI_V2_ROUTE_REMOVE_EXTENSION, WEBUI_V2_ROUTE_RESOLVE_GATE, WEBUI_V2_ROUTE_SEND_MESSAGE,
@@ -75,15 +75,18 @@ pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 #[cfg(feature = "webui-v2-beta")]
 pub use handlers::{
     activate_extension, cancel_run, complete_nearai_wallet_login, create_thread,
-    delete_llm_provider, delete_thread, get_extension_setup, get_llm_config, get_timeline,
-    install_extension, list_automations, list_connectable_channels, list_extension_registry,
-    list_extensions, list_llm_models, list_threads, remove_extension, resolve_gate, send_message,
-    set_active_llm, setup_extension, start_codex_login, start_nearai_login, stream_events,
-    stream_events_ws, test_llm_connection, upsert_llm_provider,
+    delete_llm_provider, delete_thread, get_extension_setup, get_llm_config, get_session,
+    get_timeline, install_extension, list_automations, list_connectable_channels,
+    list_extension_registry, list_extensions, list_llm_models, list_threads, remove_extension,
+    resolve_gate, send_message, set_active_llm, setup_extension, start_codex_login,
+    start_nearai_login, stream_events, stream_events_ws, test_llm_connection, upsert_llm_provider,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use router::{
-    WebUiV2RouteOptions, WebUiV2State, webui_v2_router, webui_v2_router_with_options,
+    WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State, webui_v2_router,
+    webui_v2_router_with_options,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use schema::{WebChatV2Event, WebChatV2EventFrame};
+#[cfg(feature = "webui-v2-beta")]
+pub use sse_capacity::DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER;

@@ -36,6 +36,9 @@ use ironclaw_turns::{
     },
 };
 
+/// Compaction prompt-index fixtures exposed for crate integration tests.
+pub mod compaction;
+
 use crate::state::{
     CapabilityCallSignature, CheckpointKind, LoopExecutionState, RecoveryAttemptClass,
     RecoveryStrategyState,
@@ -640,6 +643,7 @@ impl ironclaw_turns::run_profile::LoopContextPort for MockAgentLoopDriverHost {
         Ok(LoopContextBundle {
             identity_messages: Vec::new(),
             messages: Vec::new(),
+            compaction_message_index: Vec::new(),
             instruction_snippets: Vec::new(),
             memory_snippets: Vec::new(),
         })

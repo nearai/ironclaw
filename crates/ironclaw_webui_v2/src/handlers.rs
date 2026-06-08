@@ -40,9 +40,28 @@ use ironclaw_product_workflow::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::WebUiV2HttpError;
-use crate::router::WebUiV2State;
+use crate::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WebUiV2SessionResponse {
+    pub tenant_id: String,
+    pub user_id: String,
+    pub capabilities: WebUiV2Capabilities,
+}
+
+/// `GET /api/webchat/v2/session`
+pub async fn get_session(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Json<WebUiV2SessionResponse> {
+    Json(WebUiV2SessionResponse {
+        tenant_id: caller.tenant_id.to_string(),
+        user_id: caller.user_id.to_string(),
+        capabilities: state.capabilities(),
+    })
+}
 
 /// `POST /api/webchat/v2/threads`
 ///

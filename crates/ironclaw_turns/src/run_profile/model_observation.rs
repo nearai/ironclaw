@@ -274,10 +274,7 @@ fn validate_text_len(value: &str, label: &'static str, max: usize) -> Result<(),
     if value.len() > max {
         return Err(format!("{label} exceeds {max} bytes"));
     }
-    if value
-        .chars()
-        .any(|character| is_disallowed_control_character(character))
-    {
+    if value.chars().any(is_disallowed_control_character) {
         return Err(format!("{label} must not contain NUL/control characters"));
     }
     Ok(())

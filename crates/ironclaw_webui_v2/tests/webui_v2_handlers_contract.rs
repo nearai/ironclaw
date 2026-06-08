@@ -48,7 +48,9 @@ use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
     EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus,
 };
-use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
+use ironclaw_webui_v2::{
+    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
+};
 use serde_json::Value;
 use tokio::sync::Notify;
 use tower::ServiceExt;
@@ -63,11 +65,22 @@ fn caller() -> WebUiAuthenticatedCaller {
 }
 
 fn router_with(services: Arc<dyn RebornServicesApi>) -> Router {
-    webui_v2_router(WebUiV2State::new(services))
-        // Production composition runs the bearer-token middleware that
-        // constructs this `Extension`; tests bypass auth and inject the
-        // caller directly so the regression target is the handler itself.
-        .layer(axum::Extension(caller()))
+    router_with_capabilities(services, WebUiV2Capabilities::default())
+}
+
+fn router_with_capabilities(
+    services: Arc<dyn RebornServicesApi>,
+    capabilities: WebUiV2Capabilities,
+) -> Router {
+    webui_v2_router(WebUiV2State::new(
+        services,
+        capabilities,
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    // Production composition runs the bearer-token middleware that
+    // constructs this `Extension`; tests bypass auth and inject the
+    // caller directly so the regression target is the handler itself.
+    .layer(axum::Extension(caller()))
 }
 
 fn service_unavailable_error(retryable: bool) -> RebornServicesError {
@@ -1100,6 +1113,57 @@ async fn list_connectable_channels_dispatches_through_facade() {
 }
 
 #[tokio::test]
+async fn get_session_returns_caller_identity_and_capabilities() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services,
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["tenant_id"], "tenant-alpha");
+    assert_eq!(body["user_id"], "user-alpha");
+    assert_eq!(body["capabilities"]["operator_webui_config"], true);
+}
+
+#[tokio::test]
+async fn get_session_returns_false_operator_capability_when_capabilities_default() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["tenant_id"], "tenant-alpha");
+    assert_eq!(body["user_id"], "user-alpha");
+    assert_eq!(body["capabilities"]["operator_webui_config"], false);
+}
+
+#[tokio::test]
 async fn list_connectable_channels_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
     services.fail_list_connectable_channels(RebornServicesError {
@@ -1547,8 +1611,12 @@ async fn stream_events_ws_shares_capacity_with_sse_streams() {
     let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
     // Pool size 1: any one open stream (SSE or WS) must exhaust the
     // budget for the caller.
-    let router = webui_v2_router(WebUiV2State::with_sse_concurrency_limit(services, 1))
-        .layer(axum::Extension(caller()));
+    let router = webui_v2_router(WebUiV2State::new(
+        services,
+        WebUiV2Capabilities::default(),
+        1,
+    ))
+    .layer(axum::Extension(caller()));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1656,8 +1724,12 @@ async fn stream_events_ws_shares_capacity_with_sse_streams() {
 async fn stream_events_caps_concurrent_streams_per_caller() {
     let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
     // Use a low custom cap so the test runs without burning resources.
-    let router = webui_v2_router(WebUiV2State::with_sse_concurrency_limit(services, 2))
-        .layer(axum::Extension(caller()));
+    let router = webui_v2_router(WebUiV2State::new(
+        services,
+        WebUiV2Capabilities::default(),
+        2,
+    ))
+    .layer(axum::Extension(caller()));
 
     let open_stream = || {
         router.clone().oneshot(
@@ -1859,8 +1931,12 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
     // Cap of 1 so we can observe slot release directly: a second open
     // returns 429 while the first is held, and 200 once it's released.
     let services: Arc<dyn RebornServicesApi> = Arc::new(StallingServices);
-    let router = webui_v2_router(WebUiV2State::with_sse_concurrency_limit(services, 1))
-        .layer(axum::Extension(caller()));
+    let router = webui_v2_router(WebUiV2State::new(
+        services,
+        WebUiV2Capabilities::default(),
+        1,
+    ))
+    .layer(axum::Extension(caller()));
 
     let open_stream = || {
         router.clone().oneshot(
@@ -2327,7 +2403,11 @@ async fn missing_caller_extension_returns_500() {
     // No `Extension(caller)` layer — exercises the failure mode if host
     // composition forgets to run the bearer middleware.
     let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
-    let router = webui_v2_router(WebUiV2State::new(services));
+    let router = webui_v2_router(WebUiV2State::new(
+        services,
+        WebUiV2Capabilities::default(),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ));
 
     let response = router
         .oneshot(
@@ -2560,8 +2640,12 @@ async fn stream_events_ws_releases_slot_on_peer_close() {
     use futures::SinkExt;
 
     let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
-    let router = webui_v2_router(WebUiV2State::with_sse_concurrency_limit(services, 1))
-        .layer(axum::Extension(caller()));
+    let router = webui_v2_router(WebUiV2State::new(
+        services,
+        WebUiV2Capabilities::default(),
+        1,
+    ))
+    .layer(axum::Extension(caller()));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
