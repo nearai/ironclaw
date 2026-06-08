@@ -1777,6 +1777,46 @@ fn doctor_rejects_missing_home_for_default_reborn_home() {
     );
 }
 
+#[test]
+fn doctor_json_reports_checks_and_summary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .args(["doctor", "--json"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw-reborn doctor --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+
+    let checks = json["checks"].as_array().expect("checks is array");
+    assert!(!checks.is_empty(), "checks should not be empty");
+    for check in checks {
+        assert!(check.get("name").is_some(), "check must have name");
+        assert!(check.get("category").is_some(), "check must have category");
+        assert!(check.get("outcome").is_some(), "check must have outcome");
+        assert!(check.get("detail").is_some(), "check must have detail");
+    }
+
+    let summary = &json["summary"];
+    assert!(summary["pass"].is_u64(), "summary.pass must be numeric");
+    assert!(summary["fail"].is_u64(), "summary.fail must be numeric");
+    assert!(summary["skip"].is_u64(), "summary.skip must be numeric");
+
+    assert!(
+        !reborn_home.exists(),
+        "doctor --json should not create state directories"
+    );
+}
+
 // ─── Boot-config TOML + provider catalog (epic #3036 prep) ───────────────────
 
 #[test]
