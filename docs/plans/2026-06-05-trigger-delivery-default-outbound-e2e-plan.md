@@ -4,12 +4,15 @@ Date: 2026-06-05
 
 Status: source-of-truth implementation plan, revised 2026-06-08
 
-Context: `$gsd-discuss-phase` was requested for this work, but this checkout has
-no `.planning/ROADMAP.md` phase entry to attach to. This repo-native plan
-captures the phase context and implementation decisions for downstream agents.
-It supersedes
-`docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md` for
-trigger delivery and default outbound delivery planning.
+Context: the discuss-phase workflow was requested for this work, but this
+checkout has no `.planning/ROADMAP.md` phase entry to attach to. This
+repo-native plan captures the phase context and implementation decisions for
+downstream agents.
+
+This plan supersedes the removed 2026-05-29 trigger-loop delivery resolution
+plan for trigger delivery and default outbound delivery planning. That older
+plan is available only through git history; this file is the repo-local source
+of truth.
 
 ## Summary
 
@@ -28,9 +31,7 @@ already supports outbound `FinalReply`, `GatePrompt`, and `AuthPrompt` via
 Slack `chat.postMessage`. The first E2E remains text final replies only; Slack
 progress/projection payloads and non-text modality defaults remain deferred.
 
-## Current Status
-
-Completed or merged before this revision:
+## Completed Prerequisites
 
 - Product-workflow outbound preference facade exists:
   `get_outbound_preferences`, `set_outbound_preferences`, and
@@ -42,7 +43,7 @@ Completed or merged before this revision:
 - Current default preference storage is still user-scoped through
   `CommunicationPreferenceRecord { tenant_id, user_id, ... }`.
 
-Implementation branch decision, revised 2026-06-08:
+## Implementation Snapshot
 
 - Base new implementation PRs on `origin/main`, not `origin/reborn-integration`.
 - The old `trigger-delivery-scoped-defaults` commit and phase worktrees are
@@ -54,13 +55,6 @@ Implementation branch decision, revised 2026-06-08:
 - Old phase worktree copies of the 2026-05-29 plan should be treated as
   historical comparison context only; update this document as the source of
   truth.
-- The repo-local
-  `docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md`
-  file is superseded by this plan and has been removed after the carry-forward
-  gates below were represented here.
-
-Staged or in-progress in the phase-4 prereq worktree:
-
 - Slack host-beta can expose configured/persisted Slack channel routes through
   a generic `OutboundDeliveryTargetProvider` staged on `SlackHostBetaMounts`.
 - Slack final-reply delivery reads the shared
@@ -70,7 +64,7 @@ Staged or in-progress in the phase-4 prereq worktree:
   should not become user-selectable until the scoped authority model below is
   implemented.
 
-Known gaps after this revision:
+## Known Gaps Before Phase 2
 
 - There is no shared-agent default delivery scope yet on `main`.
 - There is no durable target-authority resolver for validating a saved Slack
@@ -240,7 +234,11 @@ Does the run have a live source route?
     |
     +-- yes --> TriggeredFromSourceRoute
     |           validate observed source route
-    |           send to that source route
+    |             |
+    |             +-- valid --> send to that source route
+    |             |
+    |             +-- missing/stale/invalid --> fail closed
+    |                                        do not fall back to scoped defaults
     |
     +-- no ---> Determine run ownership scope
                     |
@@ -425,8 +423,8 @@ Exit criteria:
 - Trigger delivery no longer assumes every default is tenant/user scoped.
 - Shared-agent defaults are not faked through a synthetic user id.
 - Personal preference behavior remains backward compatible.
-- CAS fallback behavior is either supported or fails closed; it never silently
-  degrades to an unconditional write.
+- CAS fallback behavior fails closed when versioned CAS is unsupported;
+  unconditional `Any` writes are not an acceptable fallback.
 
 ### Phase 3 — Channel-Neutral Target Authority Resolver
 
@@ -641,7 +639,10 @@ Implement Slack target authority in two paths:
 Do not write defaults at pairing-code redemption time. Do not run provider
 network calls while holding preference CAS locks; resolve or provision durable
 target authority first, then write the preference with the scoped compare
-token.
+token. If that preference write conflicts during DM provisioning, re-read the
+current preference. If the saved target already matches the provisioned target
+id, treat the operation as success; otherwise retry with the new compare token
+or surface the conflict through the normal preference-write path.
 
 Slack DM send-time validation should treat `missing_scope`, `user_not_found`,
 `user_disabled`, `user_not_visible`, Slack Connect `invalid_user_combination`,
