@@ -2863,6 +2863,11 @@ async fn executor_skip_model_turn_bypasses_model_stage() {
         "skip_model_this_iteration must be cleared by PromptStage before the \
          final reply turn"
     );
+
+    // CompactionOnly turns DO count toward turns_completed per
+    // observe_completed_turn's unconditional increment. 3 iterations =
+    // 3 completed turns (capabilities + SkipModel + reply).
+    assert_eq!(final_state.stop_state.turns_completed, 3);
 }
 
 /// Multi-call batch: two calls in one turn each carrying 20 000 bytes for the

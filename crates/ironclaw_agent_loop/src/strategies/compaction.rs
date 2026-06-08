@@ -799,4 +799,21 @@ mod tests {
         let policy = ByteCapPolicy::with_defaults();
         assert_eq!(policy.should_force_compact(&state), None);
     }
+
+    #[test]
+    fn byte_cap_policy_with_cap_overrides_default_cap() {
+        let ctx = crate::test_support::test_run_context("byte-cap-with-cap");
+        let mut state = LoopExecutionState::initial_for_run(&ctx);
+        let id = CapabilityId::new("custom.large_tool").unwrap();
+        state
+            .post_capability_state
+            .pending_capability_bytes
+            .insert(id.clone(), 5_000);
+        // Default cap (32_000) would NOT trip at 5_000; custom cap of 4_000 should trip.
+        let policy = ByteCapPolicy::with_defaults().with_cap(id, 4_000);
+        assert_eq!(
+            policy.should_force_compact(&state),
+            Some(CompactionInitiator::CapabilityResultOverflow)
+        );
+    }
 }

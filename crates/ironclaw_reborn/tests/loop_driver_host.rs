@@ -652,6 +652,40 @@ async fn progress_port_routes_compaction_progress_milestones() {
 }
 
 #[tokio::test]
+async fn progress_port_routes_capability_result_overflow_initiator() {
+    // Mirror progress_port_routes_compaction_progress_milestones but using
+    // CompactionInitiator::CapabilityResultOverflow to validate the
+    // snake_case serialization ("capability_result_overflow") and the
+    // milestone routing path don't drop the new variant.
+    let fixture = HostFixture::new("thread-progress-overflow-initiator", "hello overflow").await;
+    let host = fixture.build_host().await;
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    let started_task = SystemInferenceTaskId::new();
+
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CompactionStarted {
+            task_id: started_task,
+            initiator: CompactionInitiator::CapabilityResultOverflow,
+        })
+        .await
+        .unwrap();
+
+    let milestones = fixture.milestones();
+    assert!(matches!(
+        milestones[0].kind,
+        LoopHostMilestoneKind::CompactionStarted {
+            task_id,
+            initiator: CompactionInitiator::CapabilityResultOverflow,
+        } if task_id == started_task
+    ));
+    assert!(milestones.iter().all(|milestone| {
+        milestone.scope == fixture.context.scope
+            && milestone.turn_id == fixture.context.turn_id
+            && milestone.run_id == fixture.context.run_id
+    }));
+}
+
+#[tokio::test]
 async fn progress_port_checkpoint_written_does_not_double_emit() {
     let fixture = HostFixture::new("thread-progress-checkpoint", "hello progress").await;
     let host = fixture.build_host().await;
