@@ -213,7 +213,8 @@ mod tests {
         let layout = asset_text("js/layout/gateway-layout.js");
         assert!(layout.contains("enabled: isAdmin"));
         assert!(layout.contains("const needsOnboarding ="));
-        assert!(layout.contains("isAdmin && !llmProviders.isLoading"));
+        assert!(layout.contains("isAdmin &&"));
+        assert!(layout.contains("shouldRouteToOnboarding({"));
 
         let app = asset_text("js/app/app.js");
         assert!(app.contains("isChecking=${auth.isChecking}"));
