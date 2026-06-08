@@ -870,17 +870,18 @@ struct BackendErrorPreferenceRepository;
 
 #[async_trait]
 impl CommunicationPreferenceRepository for BackendErrorPreferenceRepository {
-    async fn put_communication_preference(
+    async fn write_communication_preference(
         &self,
         _record: CommunicationPreferenceRecord,
-    ) -> Result<(), OutboundError> {
-        Ok(())
+        _expectation: CommunicationPreferenceWriteExpectation,
+    ) -> Result<CommunicationPreferenceVersion, OutboundError> {
+        Err(OutboundError::Backend)
     }
 
-    async fn load_communication_preference(
+    async fn load_versioned_communication_preference(
         &self,
         _key: CommunicationPreferenceKey,
-    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
         Err(OutboundError::Backend)
     }
 }
@@ -1136,12 +1137,16 @@ fn preference_record(
     auth_prompt_target: Option<&str>,
 ) -> CommunicationPreferenceRecord {
     CommunicationPreferenceRecord {
-        tenant_id: TenantId::new("tenant-a").expect("valid tenant"),
-        user_id: UserId::new("user-a").expect("valid user"),
-        final_reply_target: final_reply_target.map(reply_ref),
-        progress_target: progress_target.map(reply_ref),
-        approval_prompt_target: approval_prompt_target.map(reply_ref),
-        auth_prompt_target: auth_prompt_target.map(reply_ref),
+        scope: DeliveryDefaultScope::personal(
+            TenantId::new("tenant-a").expect("valid tenant"),
+            UserId::new("user-a").expect("valid user"),
+        ),
+        targets: CommunicationPreferenceTargets {
+            final_reply: final_reply_target.map(reply_ref),
+            progress: progress_target.map(reply_ref),
+            approval_prompt: approval_prompt_target.map(reply_ref),
+            auth_prompt: auth_prompt_target.map(reply_ref),
+        },
         default_modality: Some(CommunicationModality::Text),
         updated_at: now(),
         updated_by: UserId::new("user-a").expect("valid user"),

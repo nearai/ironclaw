@@ -26,19 +26,24 @@
 //!   `delivery_id`. An indexed `scope` projection allows
 //!   `list_delivery_attempts(scope)` to filter within the tenant-scoped
 //!   subtree without materializing every row.
-//! - `/outbound/communication-preferences/<sha256(v1-length-prefixed-key)>.json` — tenant/user
-//!   communication preference row keyed by a hashed `CommunicationPreferenceKey`.
-//!   Reply-target refs remain candidates and do not grant send authority.
+//! - `/outbound/communication-preferences/<scope-hash>.json` — scoped
+//!   communication preference row keyed by a hashed
+//!   `CommunicationPreferenceKey`. Personal defaults keep the legacy v1
+//!   tenant/user hash; shared-agent defaults use a v2 tenant/agent/project
+//!   hash. Reply-target refs remain candidates and do not grant send authority.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
+};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
-    IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
+    IndexSpec, IndexValue, Page, RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId};
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -50,9 +55,11 @@ use crate::validation::{
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
-    CommunicationPreferenceRepository, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundDeliveryId, OutboundError, OutboundStateStore, ProjectionSubscriptionId,
-    ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    CommunicationPreferenceRepository, CommunicationPreferenceVersion,
+    CommunicationPreferenceWriteExpectation, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
+    OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError, OutboundStateStore,
+    ProjectionSubscriptionId, ProjectionSubscriptionRecord, ThreadNotificationPolicy,
+    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
 };
 
 /// Maximum number of compare-and-swap retries on a read-then-write path
@@ -114,6 +121,19 @@ where
         tenant: &TenantId,
         cas: CasExpectation,
     ) -> Result<(), OutboundError> {
+        self.put_json_versioned(scope, path, value, tenant, cas)
+            .await
+            .map(|_| ())
+    }
+
+    async fn put_json_versioned<T: Serialize>(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        value: &T,
+        tenant: &TenantId,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, OutboundError> {
         let body = serde_json::to_vec(value).map_err(|_| OutboundError::Serialization)?;
         let entry = Entry::bytes(body)
             .with_content_type(ContentType::json())
@@ -145,34 +165,93 @@ where
                 tenant_id_index_key(),
                 tenant_id_index_value(&attempt.scope.tenant_id),
             );
-        self.put_with_byte_fallback(scope, path, entry, cas).await
+        self.put_with_byte_fallback(scope, path, entry, cas)
+            .await
+            .map(|_| ())
     }
 
     /// Write `entry` with the given CAS expectation, falling back to a
-    /// metadata-stripped opaque write + `CasExpectation::Any` for backends
-    /// that reject record-shape entries or non-`Any` CAS (e.g.
-    /// `LocalFilesystem`). Mirrors
-    /// [`ironclaw_processes::filesystem_store::put_with_byte_fallback`] so
-    /// every byte-only mount in the workspace stays writeable through the
-    /// new filesystem stores.
+    /// metadata-stripped opaque write for backends that reject record-shape
+    /// entries. The original CAS expectation is preserved on fallback so
+    /// byte-only backends cannot silently downgrade stale-write protection to
+    /// an unconditional overwrite. Byte-only backends do not expose durable
+    /// record versions, so the fallback keeps process-local versions under a
+    /// path lock to preserve stale-write detection within this process.
     async fn put_with_byte_fallback(
         &self,
         scope: &ResourceScope,
         path: &ScopedPath,
         entry: Entry,
         cas: CasExpectation,
-    ) -> Result<(), OutboundError> {
+    ) -> Result<RecordVersion, OutboundError> {
         match self.filesystem.put(scope, path, entry.clone(), cas).await {
-            Ok(_) => Ok(()),
+            Ok(version) => Ok(version),
             Err(FilesystemError::Unsupported { .. }) => {
-                let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
+                self.put_opaque_with_fallback_cas(scope, path, entry, cas)
+                    .await
+            }
+            Err(error) => Err(map_fs_error(error)),
+        }
+    }
+
+    async fn put_opaque_with_fallback_cas(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, OutboundError> {
+        let key = filesystem_record_key(self.filesystem.as_ref(), scope, path);
+        let record_lock = filesystem_record_lock_for_key(&key);
+        let _guard = record_lock.lock().await;
+        let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
+        match cas {
+            CasExpectation::Any => {
                 self.filesystem
                     .put(scope, path, opaque, CasExpectation::Any)
                     .await
-                    .map(|_| ())
-                    .map_err(map_fs_error)
+                    .map_err(map_fs_error)?;
+                Ok(set_fallback_version(&key, |current| {
+                    current.saturating_add(1)
+                }))
             }
-            Err(error) => Err(map_fs_error(error)),
+            CasExpectation::Absent => {
+                if self
+                    .filesystem
+                    .get(scope, path)
+                    .await
+                    .map_err(map_fs_error)?
+                    .is_some()
+                {
+                    return Err(OutboundError::CasConflict);
+                }
+                self.filesystem
+                    .put(scope, path, opaque, CasExpectation::Any)
+                    .await
+                    .map_err(map_fs_error)?;
+                Ok(set_fallback_version(&key, |_| 1))
+            }
+            CasExpectation::Version(expected) => {
+                let Some(versioned) = self
+                    .filesystem
+                    .get(scope, path)
+                    .await
+                    .map_err(map_fs_error)?
+                else {
+                    return Err(OutboundError::CasConflict);
+                };
+                let current = fallback_version(&key).unwrap_or(versioned.version);
+                if current != expected {
+                    return Err(OutboundError::CasConflict);
+                }
+                self.filesystem
+                    .put(scope, path, opaque, CasExpectation::Any)
+                    .await
+                    .map_err(map_fs_error)?;
+                Ok(set_fallback_version(&key, |current| {
+                    current.max(expected.get()).saturating_add(1)
+                }))
+            }
         }
     }
 
@@ -219,6 +298,12 @@ where
         };
         let parsed = serde_json::from_slice(&versioned.entry.body)
             .map_err(|_| OutboundError::Serialization)?;
+        let key = filesystem_record_key(self.filesystem.as_ref(), scope, path);
+        let version = fallback_version(&key).unwrap_or(versioned.version);
+        let versioned = VersionedEntry {
+            version,
+            ..versioned
+        };
         Ok(Some((parsed, versioned)))
     }
 
@@ -231,6 +316,27 @@ where
             .get_versioned_json::<T>(scope, path)
             .await?
             .map(|(value, _)| value))
+    }
+
+    async fn write_communication_preference_at(
+        &self,
+        path: &ScopedPath,
+        resource_scope: &ResourceScope,
+        record: &CommunicationPreferenceRecord,
+        expectation: CommunicationPreferenceWriteExpectation,
+    ) -> Result<CommunicationPreferenceVersion, OutboundError> {
+        self.ensure_tenant_id_index(resource_scope, &communication_preferences_root()?)
+            .await?;
+        let version = self
+            .put_json_versioned(
+                resource_scope,
+                path,
+                record,
+                record.scope.tenant_id(),
+                communication_preference_cas(expectation),
+            )
+            .await?;
+        Ok(CommunicationPreferenceVersion::from_backend(version.get()))
     }
 }
 
@@ -246,29 +352,27 @@ where
         validate_communication_preference(&record)?;
         let key = record.key();
         let path = communication_preference_path(&key)?;
-        let resource_scope = communication_preference_resource_scope(&key.tenant_id, &key.user_id);
+        let resource_scope = communication_preference_resource_scope(&key);
         for _ in 0..MAX_CAS_RETRIES {
-            let (cas, existing) = match self
+            let expectation = match self
                 .get_versioned_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
                 .await?
             {
                 Some((existing, versioned)) => {
-                    (CasExpectation::Version(versioned.version), Some(existing))
+                    if existing.key() != key {
+                        return Err(OutboundError::Backend);
+                    }
+                    CommunicationPreferenceWriteExpectation::Version(
+                        CommunicationPreferenceVersion::from_backend(versioned.version.get()),
+                    )
                 }
-                None => (CasExpectation::Absent, None),
+                None => CommunicationPreferenceWriteExpectation::Absent,
             };
-            if let Some(existing) = existing.as_ref()
-                && existing.key() != key
-            {
-                return Err(OutboundError::Backend);
-            }
-            self.ensure_tenant_id_index(&resource_scope, &communication_preferences_root()?)
-                .await?;
             match self
-                .put_json(&resource_scope, &path, &record, &record.tenant_id, cas)
+                .write_communication_preference_at(&path, &resource_scope, &record, expectation)
                 .await
             {
-                Ok(()) => return Ok(()),
+                Ok(_) => return Ok(()),
                 Err(OutboundError::CasConflict) => continue,
                 Err(error) => return Err(error),
             }
@@ -276,22 +380,45 @@ where
         Err(OutboundError::Backend)
     }
 
-    async fn load_communication_preference(
+    async fn write_communication_preference(
+        &self,
+        record: CommunicationPreferenceRecord,
+        expectation: CommunicationPreferenceWriteExpectation,
+    ) -> Result<CommunicationPreferenceVersion, OutboundError> {
+        validate_communication_preference(&record)?;
+        let key = record.key();
+        let path = communication_preference_path(&key)?;
+        let resource_scope = communication_preference_resource_scope(&key);
+        if let Some(existing) = self
+            .get_versioned_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
+            .await?
+            && existing.0.key() != key
+        {
+            return Err(OutboundError::Backend);
+        }
+        self.write_communication_preference_at(&path, &resource_scope, &record, expectation)
+            .await
+    }
+
+    async fn load_versioned_communication_preference(
         &self,
         key: CommunicationPreferenceKey,
-    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
         let path = communication_preference_path(&key)?;
-        let resource_scope = communication_preference_resource_scope(&key.tenant_id, &key.user_id);
-        let Some(record) = self
-            .get_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
+        let resource_scope = communication_preference_resource_scope(&key);
+        let Some((record, versioned)) = self
+            .get_versioned_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
             .await?
         else {
             return Ok(None);
         };
-        if record.tenant_id != key.tenant_id || record.user_id != key.user_id {
+        if record.key() != key {
             return Err(OutboundError::Backend);
         }
-        Ok(Some(record))
+        Ok(Some(VersionedCommunicationPreferenceRecord {
+            record,
+            version: CommunicationPreferenceVersion(versioned.version.get()),
+        }))
     }
 }
 
@@ -603,29 +730,78 @@ fn communication_preference_path(
     key: &CommunicationPreferenceKey,
 ) -> Result<ScopedPath, OutboundError> {
     let mut hasher = Sha256::new();
-    let tenant = key.tenant_id.as_str();
-    let user = key.user_id.as_str();
-    hasher.update(b"v1:");
-    hasher.update(tenant.len().to_string().as_bytes());
-    hasher.update(b":");
-    hasher.update(tenant.as_bytes());
-    hasher.update(b":");
-    hasher.update(user.len().to_string().as_bytes());
-    hasher.update(b":");
-    hasher.update(user.as_bytes());
+    match &key.scope {
+        DeliveryDefaultScope::Personal { tenant_id, user_id } => {
+            let tenant = tenant_id.as_str();
+            let user = user_id.as_str();
+            hasher.update(b"v1:");
+            hasher.update(tenant.len().to_string().as_bytes());
+            hasher.update(b":");
+            hasher.update(tenant.as_bytes());
+            hasher.update(b":");
+            hasher.update(user.len().to_string().as_bytes());
+            hasher.update(b":");
+            hasher.update(user.as_bytes());
+        }
+        DeliveryDefaultScope::SharedAgent {
+            tenant_id,
+            agent_id,
+            project_id,
+        } => {
+            hash_len_prefixed(&mut hasher, b"v2:shared-agent", tenant_id.as_str());
+            hash_len_prefixed(&mut hasher, b"agent", agent_id.as_str());
+            match project_id {
+                Some(project_id) => {
+                    hash_len_prefixed(&mut hasher, b"project:some", project_id.as_str())
+                }
+                None => hash_len_prefixed(&mut hasher, b"project:none", ""),
+            }
+        }
+    }
     let digest = hex::encode(hasher.finalize());
     ScopedPath::new(format!("{COMMUNICATION_PREFERENCES_ROOT}/{digest}.json"))
         .map_err(|_| OutboundError::Backend)
 }
 
-fn communication_preference_resource_scope(
-    tenant_id: &TenantId,
-    user_id: &UserId,
-) -> ResourceScope {
+fn communication_preference_resource_scope(key: &CommunicationPreferenceKey) -> ResourceScope {
     let mut scope = ResourceScope::system();
-    scope.tenant_id = tenant_id.clone();
-    scope.user_id = user_id.clone();
+    match &key.scope {
+        DeliveryDefaultScope::Personal { tenant_id, user_id } => {
+            scope.tenant_id = tenant_id.clone();
+            scope.user_id = user_id.clone();
+        }
+        DeliveryDefaultScope::SharedAgent {
+            tenant_id,
+            agent_id,
+            project_id,
+        } => {
+            scope.tenant_id = tenant_id.clone();
+            scope.agent_id = Some(agent_id.clone());
+            scope.project_id = project_id.clone();
+        }
+    }
     scope
+}
+
+fn communication_preference_cas(
+    expectation: CommunicationPreferenceWriteExpectation,
+) -> CasExpectation {
+    match expectation {
+        CommunicationPreferenceWriteExpectation::Any => CasExpectation::Any,
+        CommunicationPreferenceWriteExpectation::Absent => CasExpectation::Absent,
+        CommunicationPreferenceWriteExpectation::Version(version) => {
+            CasExpectation::Version(RecordVersion::from_backend(version.get()))
+        }
+    }
+}
+
+fn hash_len_prefixed(hasher: &mut Sha256, label: &[u8], value: &str) {
+    hasher.update(label);
+    hasher.update(b":");
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    hasher.update(b":");
 }
 
 fn deliveries_root() -> Result<ScopedPath, OutboundError> {
@@ -722,6 +898,60 @@ fn scope_matches(left: &TurnScope, right: &TurnScope) -> bool {
         && left.agent_id == right.agent_id
         && left.project_id == right.project_id
         && left.thread_id == right.thread_id
+}
+
+type FilesystemRecordLock = Arc<tokio::sync::Mutex<()>>;
+
+static FILESYSTEM_RECORD_LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
+static FALLBACK_RECORD_VERSIONS: OnceLock<Mutex<HashMap<String, RecordVersion>>> = OnceLock::new();
+
+fn filesystem_record_key<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    path: &ScopedPath,
+) -> String
+where
+    F: RootFilesystem,
+{
+    filesystem
+        .resolve(scope, path)
+        .map(|virtual_path| virtual_path.as_str().to_string())
+        .unwrap_or_else(|_| path.as_str().to_string())
+}
+
+fn filesystem_record_lock_for_key(key: &str) -> FilesystemRecordLock {
+    let locks = FILESYSTEM_RECORD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard: MutexGuard<'_, HashMap<String, Weak<tokio::sync::Mutex<()>>>> = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(existing) = guard.get(key).and_then(Weak::upgrade) {
+        return existing;
+    }
+    let fresh: FilesystemRecordLock = Arc::new(tokio::sync::Mutex::new(()));
+    guard.insert(key.to_string(), Arc::downgrade(&fresh));
+    fresh
+}
+
+fn fallback_version(key: &str) -> Option<RecordVersion> {
+    FALLBACK_RECORD_VERSIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(key)
+        .copied()
+}
+
+fn set_fallback_version(key: &str, update: impl FnOnce(u64) -> u64) -> RecordVersion {
+    let versions = FALLBACK_RECORD_VERSIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = versions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let current = guard.get(key).map_or(0, |version| version.get());
+    let next = RecordVersion::from_backend(update(current));
+    guard.insert(key.to_string(), next);
+    next
 }
 
 fn map_fs_error(error: FilesystemError) -> OutboundError {

@@ -8,13 +8,15 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    InMemoryOutboundStateStore, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundError, OutboundPolicyService, OutboundStateStore, ProjectionSubscriptionRecord,
-    ReplyTargetBindingClaim, ReplyTargetBindingValidator, RequestedOutboundContext,
-    RequestedOutboundKind, RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
-    SystemEventReasonCode, ThreadNotificationPolicy, ThreadProjectionAccessClaim,
-    ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef,
-    TriggerSourceKind, UpdateDeliveryStatusRequest,
+    CommunicationPreferenceTargets, CommunicationPreferenceVersion,
+    CommunicationPreferenceWriteExpectation, DeliveryDefaultScope, InMemoryOutboundStateStore,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundError, OutboundPolicyService,
+    OutboundStateStore, ProjectionSubscriptionRecord, ReplyTargetBindingClaim,
+    ReplyTargetBindingValidator, RequestedOutboundContext, RequestedOutboundKind,
+    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SystemEventReasonCode,
+    ThreadNotificationPolicy, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
+    ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeliveryStatus, EgressCredentialHandle, EgressResponse,
@@ -143,25 +145,30 @@ impl FakePreferenceRepository {
 
 #[async_trait]
 impl CommunicationPreferenceRepository for FakePreferenceRepository {
-    async fn put_communication_preference(
+    async fn write_communication_preference(
         &self,
         record: CommunicationPreferenceRecord,
-    ) -> Result<(), OutboundError> {
+        _expectation: CommunicationPreferenceWriteExpectation,
+    ) -> Result<CommunicationPreferenceVersion, OutboundError> {
         self.put_record(record);
-        Ok(())
+        Ok(CommunicationPreferenceVersion::from_backend(1))
     }
 
-    async fn load_communication_preference(
+    async fn load_versioned_communication_preference(
         &self,
         key: CommunicationPreferenceKey,
-    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
         *self.load_calls.lock().expect("preference lock") += 1;
         Ok(self
             .records
             .lock()
             .expect("preference lock")
             .get(&key)
-            .cloned())
+            .cloned()
+            .map(|record| VersionedCommunicationPreferenceRecord {
+                record,
+                version: CommunicationPreferenceVersion::from_backend(1),
+            }))
     }
 }
 
@@ -237,18 +244,23 @@ impl StatusFailingOutboundStore {
 
 #[async_trait]
 impl CommunicationPreferenceRepository for StatusFailingOutboundStore {
-    async fn put_communication_preference(
+    async fn write_communication_preference(
         &self,
         record: CommunicationPreferenceRecord,
-    ) -> Result<(), OutboundError> {
-        self.inner.put_communication_preference(record).await
+        expectation: CommunicationPreferenceWriteExpectation,
+    ) -> Result<CommunicationPreferenceVersion, OutboundError> {
+        self.inner
+            .write_communication_preference(record, expectation)
+            .await
     }
 
-    async fn load_communication_preference(
+    async fn load_versioned_communication_preference(
         &self,
         key: CommunicationPreferenceKey,
-    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
-        self.inner.load_communication_preference(key).await
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
+        self.inner
+            .load_versioned_communication_preference(key)
+            .await
     }
 }
 
@@ -631,12 +643,32 @@ fn seed_preference(repo: &FakePreferenceRepository, scope: &TurnScope) {
 
 fn preference_record(scope: &TurnScope) -> CommunicationPreferenceRecord {
     CommunicationPreferenceRecord {
-        tenant_id: scope.tenant_id.clone(),
-        user_id: actor().user_id.clone(),
-        final_reply_target: Some(validated_reply_target()),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
+        scope: DeliveryDefaultScope::personal(scope.tenant_id.clone(), actor().user_id.clone()),
+        targets: CommunicationPreferenceTargets {
+            final_reply: Some(validated_reply_target()),
+            progress: None,
+            approval_prompt: None,
+            auth_prompt: None,
+        },
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: Utc::now(),
+        updated_by: UserId::new("pref-updater").expect("valid updater"),
+    }
+}
+
+fn shared_preference_record(scope: &TurnScope) -> CommunicationPreferenceRecord {
+    CommunicationPreferenceRecord {
+        scope: DeliveryDefaultScope::shared_agent(
+            scope.tenant_id.clone(),
+            scope.agent_id.clone().expect("agent-scoped test scope"),
+            scope.project_id.clone(),
+        ),
+        targets: CommunicationPreferenceTargets {
+            final_reply: Some(validated_reply_target()),
+            progress: None,
+            approval_prompt: None,
+            auth_prompt: None,
+        },
         default_modality: Some(CommunicationModality::Text),
         updated_at: Utc::now(),
         updated_by: UserId::new("pref-updater").expect("valid updater"),
@@ -712,6 +744,48 @@ async fn authorized_final_reply_renders_through_telegram_egress_after_validation
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
+}
+
+#[tokio::test]
+async fn shared_agent_default_renders_through_product_workflow_after_validation() {
+    let scope = scope();
+    let store = InMemoryOutboundStateStore::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    preferences.put_record(shared_preference_record(&scope));
+    let resolver = FakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = telegram_adapter();
+    let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+    egress.allow_credential_handle("telegram_bot_token");
+    let sink = FakeOutboundDeliverySink::new();
+
+    let outcome = prepare_and_render_product_outbound(
+        &policy,
+        &preferences,
+        &resolver,
+        ProductOutboundDeliveryRequest {
+            delivery: delivery_request(scope),
+            payload: final_reply_payload(),
+            projection_cursor: ProjectionCursor::new("cursor:outbound:shared")
+                .expect("valid cursor"),
+            adapter: &adapter,
+            egress: &egress,
+            delivery_sink: &sink,
+        },
+    )
+    .await
+    .expect("delivery succeeds");
+
+    assert!(matches!(
+        outcome,
+        ProductOutboundDeliveryOutcome::Rendered { .. }
+    ));
+    assert_eq!(validator.calls(), 1);
+    assert_eq!(preferences.load_calls(), 2);
+    assert_eq!(resolver.called_targets(), vec![validated_reply_target()]);
+    assert_eq!(egress.calls().len(), 1);
 }
 
 #[tokio::test]

@@ -268,9 +268,10 @@ mod tests {
     use super::*;
     use crate::{
         CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
-        CommunicationPreferenceRecord, InMemoryOutboundStateStore, OutboundPushKind,
-        RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
-        SourceRouteContext, SystemEventReasonCode,
+        CommunicationPreferenceRecord, CommunicationPreferenceTargets, DeliveryDefaultScope,
+        InMemoryOutboundStateStore, OutboundPushKind, RunNotificationContext,
+        RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext, SystemEventReasonCode,
+        TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
     };
 
     #[tokio::test]
@@ -340,7 +341,8 @@ mod tests {
                 modality: CommunicationModality::Text,
                 intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
-                    origin: RunNotificationOrigin::LiveSourceRoute {
+                    origin: RunNotificationOrigin::TriggeredFromSourceRoute {
+                        trigger: trigger_context(),
                         source_route: SourceRouteContext {
                             reply_target_binding_ref: reply_ref("reply:source"),
                         },
@@ -433,12 +435,13 @@ mod tests {
         auth_prompt_target: Option<&str>,
     ) -> CommunicationPreferenceRecord {
         CommunicationPreferenceRecord {
-            tenant_id: scope.tenant_id.clone(),
-            user_id: user_id("alice"),
-            final_reply_target: final_reply_target.map(reply_ref),
-            progress_target: progress_target.map(reply_ref),
-            approval_prompt_target: approval_prompt_target.map(reply_ref),
-            auth_prompt_target: auth_prompt_target.map(reply_ref),
+            scope: DeliveryDefaultScope::personal(scope.tenant_id.clone(), user_id("alice")),
+            targets: CommunicationPreferenceTargets {
+                final_reply: final_reply_target.map(reply_ref),
+                progress: progress_target.map(reply_ref),
+                approval_prompt: approval_prompt_target.map(reply_ref),
+                auth_prompt: auth_prompt_target.map(reply_ref),
+            },
             default_modality: Some(CommunicationModality::Text),
             updated_at: now(),
             updated_by: user_id("alice"),
@@ -452,6 +455,16 @@ mod tests {
             Some(ProjectId::new("project-a").expect("valid project")),
             ThreadId::new(thread_id).expect("valid thread"),
         )
+    }
+
+    fn trigger_context() -> TriggerCommunicationContext {
+        TriggerCommunicationContext {
+            trigger_origin_ref: TriggerOriginRef::new("trigger:service-test")
+                .expect("valid trigger origin ref"),
+            trigger_source_kind: TriggerSourceKind::Schedule,
+            fire_slot: TriggerFireSlot::new("2026-06-08T09:00:00Z")
+                .expect("valid trigger fire slot"),
+        }
     }
 
     fn actor(user_id_value: &str) -> TurnActor {

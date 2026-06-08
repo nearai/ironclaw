@@ -3,8 +3,9 @@ use ironclaw_turns::ReplyTargetBindingRef;
 use crate::{
     CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,
     CommunicationDeliveryResolution, CommunicationDeliveryResolutionRequest,
-    CommunicationPreferenceKey, CommunicationPreferenceRepository, OutboundError,
-    RequestedOutboundContext, RunNotificationContext, RunNotificationOrigin,
+    CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
+    DeliveryDefaultScope, OutboundError, RequestedOutboundContext, RunNotificationContext,
+    RunNotificationOrigin,
 };
 
 /// Deterministic host-owned outbound target selection.
@@ -150,22 +151,32 @@ impl<'a> OutboundResolutionEngine<'a> {
         kind: PreferenceTargetKind,
     ) -> Result<ReplyTargetBindingRef, OutboundError> {
         let key = CommunicationPreferenceKey::new(scope.tenant_id.clone(), actor.user_id.clone());
-        let Some(record) = self
+        if let Some(target) = self
             .communication_preferences
             .load_communication_preference(key)
             .await?
-        else {
-            return Err(missing_preference_error(kind));
-        };
+            .and_then(|record| target_for_kind(record, kind))
+        {
+            return Ok(target);
+        }
 
-        let target = match kind {
-            PreferenceTargetKind::FinalReply => record.final_reply_target,
-            PreferenceTargetKind::Progress => record.progress_target,
-            PreferenceTargetKind::ApprovalPrompt => record.approval_prompt_target,
-            PreferenceTargetKind::AuthPrompt => record.auth_prompt_target,
-        };
+        if let Some(agent_id) = &scope.agent_id {
+            let key = CommunicationPreferenceKey::for_scope(DeliveryDefaultScope::shared_agent(
+                scope.tenant_id.clone(),
+                agent_id.clone(),
+                scope.project_id.clone(),
+            ));
+            if let Some(target) = self
+                .communication_preferences
+                .load_communication_preference(key)
+                .await?
+                .and_then(|record| target_for_kind(record, kind))
+            {
+                return Ok(target);
+            }
+        }
 
-        target.ok_or_else(|| missing_preference_error(kind))
+        Err(missing_preference_error(kind))
     }
 }
 
@@ -176,6 +187,19 @@ enum PreferenceTargetKind {
     Progress,
     ApprovalPrompt,
     AuthPrompt,
+}
+
+#[allow(dead_code, reason = "wired into OutboundPolicyService in PR6")]
+fn target_for_kind(
+    record: CommunicationPreferenceRecord,
+    kind: PreferenceTargetKind,
+) -> Option<ReplyTargetBindingRef> {
+    match kind {
+        PreferenceTargetKind::FinalReply => record.targets.final_reply,
+        PreferenceTargetKind::Progress => record.targets.progress,
+        PreferenceTargetKind::ApprovalPrompt => record.targets.approval_prompt,
+        PreferenceTargetKind::AuthPrompt => record.targets.auth_prompt,
+    }
 }
 
 #[allow(dead_code, reason = "wired into OutboundPolicyService in PR6")]
@@ -203,26 +227,30 @@ mod tests {
 
     use super::*;
     use crate::{
-        CommunicationModality, CommunicationPreferenceRecord, InMemoryOutboundStateStore,
-        RequestedOutboundKind, RunNotificationEventKind, SourceRouteContext, SystemEventReasonCode,
+        CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceTargets,
+        CommunicationPreferenceVersion, CommunicationPreferenceWriteExpectation,
+        DeliveryDefaultScope, InMemoryOutboundStateStore, RequestedOutboundKind,
+        RunNotificationEventKind, SourceRouteContext, SystemEventReasonCode,
         TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+        VersionedCommunicationPreferenceRecord,
     };
 
     struct BackendErrorPreferenceRepository;
 
     #[async_trait]
     impl CommunicationPreferenceRepository for BackendErrorPreferenceRepository {
-        async fn put_communication_preference(
+        async fn write_communication_preference(
             &self,
             _record: CommunicationPreferenceRecord,
-        ) -> Result<(), OutboundError> {
-            Ok(())
+            _expectation: CommunicationPreferenceWriteExpectation,
+        ) -> Result<CommunicationPreferenceVersion, OutboundError> {
+            Err(OutboundError::Backend)
         }
 
-        async fn load_communication_preference(
+        async fn load_versioned_communication_preference(
             &self,
             _key: CommunicationPreferenceKey,
-        ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+        ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
             Err(OutboundError::Backend)
         }
     }
@@ -416,6 +444,36 @@ mod tests {
         let candidate = expect_candidate(candidate);
 
         assert_eq!(candidate.target, reply_ref("reply:triggered-default"));
+        assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
+    }
+
+    #[tokio::test]
+    async fn triggered_final_reply_falls_back_to_shared_agent_preference() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(shared_preference_record(
+                Some("reply:shared-agent-default"),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("seed shared preference");
+
+        let candidate = engine
+            .resolve(&run_notification_request(
+                RunNotificationEventKind::FinalReplyReady,
+                RunNotificationOrigin::Triggered {
+                    trigger: trigger_context(),
+                },
+            ))
+            .await
+            .expect("triggered final reply resolves");
+        let candidate = expect_candidate(candidate);
+
+        assert_eq!(candidate.target, reply_ref("reply:shared-agent-default"));
         assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
     }
 
@@ -665,12 +723,40 @@ mod tests {
         auth_prompt_target: Option<&str>,
     ) -> CommunicationPreferenceRecord {
         CommunicationPreferenceRecord {
-            tenant_id: TenantId::new("tenant-a").expect("valid tenant"),
-            user_id: UserId::new("user-a").expect("valid user"),
-            final_reply_target: final_reply_target.map(reply_ref),
-            progress_target: progress_target.map(reply_ref),
-            approval_prompt_target: approval_prompt_target.map(reply_ref),
-            auth_prompt_target: auth_prompt_target.map(reply_ref),
+            scope: DeliveryDefaultScope::personal(
+                TenantId::new("tenant-a").expect("valid tenant"),
+                UserId::new("user-a").expect("valid user"),
+            ),
+            targets: CommunicationPreferenceTargets {
+                final_reply: final_reply_target.map(reply_ref),
+                progress: progress_target.map(reply_ref),
+                approval_prompt: approval_prompt_target.map(reply_ref),
+                auth_prompt: auth_prompt_target.map(reply_ref),
+            },
+            default_modality: Some(CommunicationModality::Text),
+            updated_at: now(),
+            updated_by: UserId::new("user-a").expect("valid user"),
+        }
+    }
+
+    fn shared_preference_record(
+        final_reply_target: Option<&str>,
+        progress_target: Option<&str>,
+        approval_prompt_target: Option<&str>,
+        auth_prompt_target: Option<&str>,
+    ) -> CommunicationPreferenceRecord {
+        CommunicationPreferenceRecord {
+            scope: DeliveryDefaultScope::shared_agent(
+                TenantId::new("tenant-a").expect("valid tenant"),
+                AgentId::new("agent-a").expect("valid agent"),
+                Some(ProjectId::new("project-a").expect("valid project")),
+            ),
+            targets: CommunicationPreferenceTargets {
+                final_reply: final_reply_target.map(reply_ref),
+                progress: progress_target.map(reply_ref),
+                approval_prompt: approval_prompt_target.map(reply_ref),
+                auth_prompt: auth_prompt_target.map(reply_ref),
+            },
             default_modality: Some(CommunicationModality::Text),
             updated_at: now(),
             updated_by: UserId::new("user-a").expect("valid user"),

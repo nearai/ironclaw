@@ -19,6 +19,9 @@ mod validation;
 
 pub use communication_preferences::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
+    CommunicationPreferenceSlot, CommunicationPreferenceTargets, CommunicationPreferenceVersion,
+    CommunicationPreferenceWriteExpectation, DeliveryDefaultScope,
+    UpdateCommunicationPreferenceSlotRequest, VersionedCommunicationPreferenceRecord,
 };
 pub use delivery_resolution::{
     CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,

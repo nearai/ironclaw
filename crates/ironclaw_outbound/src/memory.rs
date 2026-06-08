@@ -14,9 +14,11 @@ use crate::validation::{
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
-    CommunicationPreferenceRepository, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundDeliveryId, OutboundError, OutboundStateStore, ProjectionSubscriptionId,
-    ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    CommunicationPreferenceRepository, CommunicationPreferenceVersion,
+    CommunicationPreferenceWriteExpectation, LoadSubscriptionCursorRequest,
+    OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError, OutboundStateStore,
+    ProjectionSubscriptionId, ProjectionSubscriptionRecord, ThreadNotificationPolicy,
+    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
 };
 
 #[derive(Default)]
@@ -26,7 +28,8 @@ pub struct InMemoryOutboundStateStore {
 
 #[derive(Default)]
 struct InMemoryOutboundState {
-    communication_preferences: HashMap<CommunicationPreferenceKey, CommunicationPreferenceRecord>,
+    communication_preferences:
+        HashMap<CommunicationPreferenceKey, VersionedCommunicationPreferenceRecord>,
     policies: HashMap<ThreadScopeKey, ThreadNotificationPolicy>,
     subscriptions: HashMap<ProjectionSubscriptionKey, ProjectionSubscriptionRecord>,
     deliveries: HashMap<OutboundDeliveryId, OutboundDeliveryAttempt>,
@@ -91,20 +94,36 @@ impl ProjectionSubscriptionKey {
 
 #[async_trait]
 impl CommunicationPreferenceRepository for InMemoryOutboundStateStore {
-    async fn put_communication_preference(
+    async fn write_communication_preference(
         &self,
         record: CommunicationPreferenceRecord,
-    ) -> Result<(), OutboundError> {
+        expectation: CommunicationPreferenceWriteExpectation,
+    ) -> Result<CommunicationPreferenceVersion, OutboundError> {
         validate_communication_preference(&record)?;
         let mut state = self.lock_state()?;
-        state.communication_preferences.insert(record.key(), record);
-        Ok(())
+        let key = record.key();
+        let existing = state.communication_preferences.get(&key);
+        match (expectation, existing) {
+            (CommunicationPreferenceWriteExpectation::Any, _) => {}
+            (CommunicationPreferenceWriteExpectation::Absent, None) => {}
+            (CommunicationPreferenceWriteExpectation::Version(expected), Some(existing))
+                if existing.version == expected => {}
+            _ => return Err(OutboundError::CasConflict),
+        }
+        let version = existing
+            .map(|existing| existing.version.next())
+            .unwrap_or(CommunicationPreferenceVersion(1));
+        state.communication_preferences.insert(
+            key,
+            VersionedCommunicationPreferenceRecord { record, version },
+        );
+        Ok(version)
     }
 
-    async fn load_communication_preference(
+    async fn load_versioned_communication_preference(
         &self,
         key: CommunicationPreferenceKey,
-    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
         let state = self.lock_state()?;
         Ok(state.communication_preferences.get(&key).cloned())
     }
