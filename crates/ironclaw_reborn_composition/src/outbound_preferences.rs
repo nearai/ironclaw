@@ -171,7 +171,7 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
             updated_by: caller.user_id.clone(),
         };
         self.preferences
-            .put_communication_preference(record.clone())
+            .put_communication_preference(record)
             .await
             .map_err(map_outbound_repository_error)?;
         Ok(RebornOutboundPreferencesResponse {
