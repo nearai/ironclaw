@@ -1,13 +1,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::{LoopProgressEvent, SystemInferenceTaskId};
 
 use crate::strategies::{ByteCapStrategy, CompactionForceStrategy};
 
-use super::{
-    AgentLoopExecutorError, CheckpointStage, ExecutorStage, StageContext, TurnCompletedStep,
-};
+use super::{AgentLoopExecutorError, ExecutorStage, StageContext, TurnCompletedStep};
 
 /// Owns post-capability lifecycle — the seam between `CapabilityStage`
 /// and `StopStage.observe()`.
@@ -60,7 +57,7 @@ impl ExecutorStage<TurnCompletedStep> for PostCapabilityStage {
 
     async fn process(
         &self,
-        ctx: StageContext<'_>,
+        _ctx: StageContext<'_>,
         input: TurnCompletedStep,
     ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
         // R2: drain settled background children (no-op until producers exist).
@@ -79,17 +76,13 @@ impl ExecutorStage<TurnCompletedStep> for PostCapabilityStage {
             && let Some(initiator) = self.compaction_force.should_force_compact(&state)
         {
             state.compaction_state.force_compact_on_next_iteration = true;
+            state.compaction_state.force_compact_initiator = Some(initiator);
             state.post_capability_state.skip_model_this_iteration = true;
-
-            CheckpointStage
-                .emit_progress(
-                    ctx,
-                    LoopProgressEvent::CompactionStarted {
-                        task_id: SystemInferenceTaskId::new(),
-                        initiator,
-                    },
-                )
-                .await;
+            // CompactionStarted is emitted by PromptCompactionStep on the next
+            // iteration when it actually runs the compactor. Threading the
+            // initiator through state.compaction_state.force_compact_initiator
+            // ensures the event reports CapabilityResultOverflow (or whichever
+            // policy variant tripped) instead of falling back to Auto.
         }
 
         // Always clear the per-turn byte accumulator regardless of whether the
@@ -206,6 +199,12 @@ mod tests {
             panic!("expected Continue");
         };
         assert!(out.compaction_state.force_compact_on_next_iteration);
+        assert_eq!(
+            out.compaction_state.force_compact_initiator,
+            Some(CompactionInitiator::CapabilityResultOverflow),
+            "D-A: PostCapabilityStage must thread the initiator through \
+             compaction_state.force_compact_initiator instead of emitting CompactionStarted"
+        );
         assert!(out.post_capability_state.skip_model_this_iteration);
         assert!(out.post_capability_state.pending_capability_bytes.is_empty());
     }

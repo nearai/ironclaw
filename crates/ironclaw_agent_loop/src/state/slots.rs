@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use ironclaw_host_api::CapabilityId;
+use ironclaw_turns::run_profile::CompactionInitiator;
 
 use super::CapabilityCallSignature;
 
@@ -23,6 +24,14 @@ pub struct CompactionStrategyState {
     pub last_deferred: Option<DeferredCompactionWatermark>,
     #[serde(default)]
     pub force_compact_on_next_iteration: bool,
+    /// Initiator to emit on the NEXT iteration's `CompactionStarted` event
+    /// when `force_compact_on_next_iteration` causes the compactor to run.
+    /// Set by `PostCapabilityStage` when its policy trips; consumed
+    /// (.take()) by `PromptCompactionStep` so the event has the
+    /// proximate-cause initiator (e.g. `CapabilityResultOverflow`)
+    /// instead of falling back to `Auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_compact_initiator: Option<CompactionInitiator>,
 }
 
 /// Records the deferred cut point and prompt snapshot fingerprint for a

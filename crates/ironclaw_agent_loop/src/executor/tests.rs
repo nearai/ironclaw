@@ -2820,10 +2820,21 @@ async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
         "pending_capability_bytes must be cleared after trip"
     );
 
-    // Progress port must have received a compaction_started event.
+    // D-A: PostCapabilityStage no longer emits CompactionStarted directly;
+    // it threads the initiator through force_compact_initiator for
+    // PromptCompactionStep to emit on the next iteration. Because this test
+    // uses terminate_hint=true and the loop exits before the SkipModel
+    // iteration runs, compaction_started must NOT appear here.
     assert!(
-        host.progress_event_names().contains(&"compaction_started"),
-        "compaction_started event must be emitted when the byte cap trips"
+        !host.progress_event_names().contains(&"compaction_started"),
+        "compaction_started must NOT be emitted by PostCapabilityStage (D-A fix); \
+         it is deferred to PromptCompactionStep on the next iteration"
+    );
+    // D-A: the initiator must be threaded through state.
+    assert_eq!(
+        final_state.compaction_state.force_compact_initiator,
+        Some(ironclaw_turns::run_profile::CompactionInitiator::CapabilityResultOverflow),
+        "force_compact_initiator must be CapabilityResultOverflow after a byte-cap trip"
     );
 }
 
@@ -2944,11 +2955,15 @@ async fn executor_skip_model_turn_bypasses_model_stage() {
          SkipModel iteration must bypass ModelStage"
     );
 
-    // The SkipModel iteration emits a compaction_started event (from
-    // PostCapabilityStage in iteration 1) — verify the progression.
+    // D-A: PostCapabilityStage no longer emits CompactionStarted directly;
+    // it defers to PromptCompactionStep. In this mock environment the
+    // compaction_prompt.message_index is empty, so should_compact() returns
+    // Skip and no CompactionStarted event is emitted. The SkipModel route
+    // is confirmed by the model_requests().len() == 2 assertion above.
     assert!(
-        host.progress_event_names().contains(&"compaction_started"),
-        "compaction_started event must be present from the byte-cap trip"
+        !host.progress_event_names().contains(&"compaction_started"),
+        "compaction_started must NOT appear when message_index is empty \
+         (PromptCompactionStep skips compaction; PostCapabilityStage no longer emits it)"
     );
 
     // Final state: skip_model flag cleared (PromptStage consumed it).
@@ -3033,9 +3048,20 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
             .is_empty(),
         "pending_capability_bytes must be cleared after PostCapabilityStage trips"
     );
+    // D-A: PostCapabilityStage no longer emits CompactionStarted directly;
+    // the event is deferred to PromptCompactionStep on the next iteration.
+    // Because this test uses terminate_hint=true and exits before the SkipModel
+    // iteration runs, compaction_started must NOT appear here.
     assert!(
-        host.progress_event_names().contains(&"compaction_started"),
-        "compaction_started event must be emitted for the accumulated overflow"
+        !host.progress_event_names().contains(&"compaction_started"),
+        "compaction_started must NOT be emitted by PostCapabilityStage (D-A fix); \
+         it is deferred to PromptCompactionStep on the next iteration"
+    );
+    // D-A: the initiator must be threaded through state.
+    assert_eq!(
+        final_state.compaction_state.force_compact_initiator,
+        Some(ironclaw_turns::run_profile::CompactionInitiator::CapabilityResultOverflow),
+        "force_compact_initiator must be CapabilityResultOverflow after accumulated overflow"
     );
 }
 
@@ -3088,11 +3114,15 @@ async fn spawned_child_run_byte_len_accumulates_and_trips_policy() {
          the SpawnedChildRun byte_len — was hardcoded to 0 before D2 fix"
     );
 
-    // compaction_started event must have been emitted by PostCapabilityStage.
+    // D-A: PostCapabilityStage no longer emits CompactionStarted directly;
+    // it defers to PromptCompactionStep. In this mock environment the
+    // compaction_prompt.message_index is empty, so should_compact() returns
+    // Skip and no CompactionStarted event is emitted. The SkipModel route
+    // is confirmed by the model_requests().len() == 2 assertion above.
     assert!(
-        host.progress_event_names().contains(&"compaction_started"),
-        "compaction_started event must be emitted when spawned-child byte_len \
-         exceeds the per-capability cap (49 001 > 32 000 default)"
+        !host.progress_event_names().contains(&"compaction_started"),
+        "compaction_started must NOT appear when message_index is empty \
+         (PromptCompactionStep skips; PostCapabilityStage no longer emits it)"
     );
 }
 

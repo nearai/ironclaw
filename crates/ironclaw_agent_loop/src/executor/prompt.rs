@@ -363,13 +363,15 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         };
 
         let task_id = SystemInferenceTaskId::new();
+        let initiator = state
+            .compaction_state
+            .force_compact_initiator
+            .take()
+            .unwrap_or(CompactionInitiator::Auto);
         CheckpointStage
             .emit_progress(
                 self.ctx,
-                LoopProgressEvent::CompactionStarted {
-                    task_id,
-                    initiator: CompactionInitiator::Auto,
-                },
+                LoopProgressEvent::CompactionStarted { task_id, initiator },
             )
             .await;
         state = match CheckpointStage
