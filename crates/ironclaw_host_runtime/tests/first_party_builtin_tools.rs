@@ -243,7 +243,7 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
         .get("properties")
         .and_then(Value::as_object)
         .expect("spawn_subagent schema properties");
-    assert!(properties.contains_key("flavor_id"));
+    assert!(properties.contains_key("subagent_type"));
     assert!(properties.contains_key("task"));
     assert!(properties.contains_key("handoff"));
     assert!(!properties.contains_key("mode"));
