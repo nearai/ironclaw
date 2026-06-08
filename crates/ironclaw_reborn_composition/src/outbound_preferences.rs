@@ -24,29 +24,56 @@ pub(crate) struct OutboundDeliveryTargetEntry {
 }
 
 #[async_trait]
-pub(crate) trait OutboundDeliveryTargetInventory: Send + Sync {
+pub(crate) trait OutboundDeliveryTargetProvider: Send + Sync {
     async fn list_outbound_delivery_targets(
         &self,
         caller: &WebUiAuthenticatedCaller,
     ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError>;
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct EmptyOutboundDeliveryTargetInventory;
+pub(crate) struct OutboundDeliveryTargetRegistry {
+    providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
+}
+
+impl std::fmt::Debug for OutboundDeliveryTargetRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OutboundDeliveryTargetRegistry")
+            .field("providers", &self.providers.len())
+            .finish()
+    }
+}
+
+impl OutboundDeliveryTargetRegistry {
+    pub(crate) fn empty() -> Self {
+        Self {
+            providers: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_providers(providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>) -> Self {
+        Self { providers }
+    }
+}
 
 #[async_trait]
-impl OutboundDeliveryTargetInventory for EmptyOutboundDeliveryTargetInventory {
+impl OutboundDeliveryTargetProvider for OutboundDeliveryTargetRegistry {
     async fn list_outbound_delivery_targets(
         &self,
-        _caller: &WebUiAuthenticatedCaller,
+        caller: &WebUiAuthenticatedCaller,
     ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        Ok(Vec::new())
+        let mut targets = Vec::new();
+        for provider in &self.providers {
+            targets.extend(provider.list_outbound_delivery_targets(caller).await?);
+        }
+        Ok(targets)
     }
 }
 
 pub(crate) struct RebornOutboundPreferencesFacade {
     preferences: Arc<dyn CommunicationPreferenceRepository>,
-    targets: Arc<dyn OutboundDeliveryTargetInventory>,
+    targets: Arc<dyn OutboundDeliveryTargetProvider>,
 }
 
 impl std::fmt::Debug for RebornOutboundPreferencesFacade {
@@ -54,7 +81,7 @@ impl std::fmt::Debug for RebornOutboundPreferencesFacade {
         formatter
             .debug_struct("RebornOutboundPreferencesFacade")
             .field("preferences", &"Arc<dyn CommunicationPreferenceRepository>")
-            .field("targets", &"Arc<dyn OutboundDeliveryTargetInventory>")
+            .field("targets", &"Arc<dyn OutboundDeliveryTargetProvider>")
             .finish()
     }
 }
@@ -62,7 +89,7 @@ impl std::fmt::Debug for RebornOutboundPreferencesFacade {
 impl RebornOutboundPreferencesFacade {
     pub(crate) fn new(
         preferences: Arc<dyn CommunicationPreferenceRepository>,
-        targets: Arc<dyn OutboundDeliveryTargetInventory>,
+        targets: Arc<dyn OutboundDeliveryTargetProvider>,
     ) -> Self {
         Self {
             preferences,
@@ -151,41 +178,47 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
         let key = Self::key(&caller);
-        let existing = self
-            .preferences
-            .load_communication_preference(key)
-            .await
-            .map_err(map_outbound_repository_error)?;
         let resolved_final_reply_target = match request.final_reply_target_id.as_ref() {
             Some(target_id) => Some(self.resolve_final_reply_target(&caller, target_id).await?),
             None => None,
         };
+        let final_reply_target = resolved_final_reply_target
+            .as_ref()
+            .map(|entry| entry.reply_target_binding_ref.clone());
+        let final_reply_target_summary =
+            resolved_final_reply_target.map(|entry| entry.summary.clone());
         let now = Utc::now();
-        let record = CommunicationPreferenceRecord {
-            tenant_id: caller.tenant_id.clone(),
-            user_id: caller.user_id.clone(),
-            final_reply_target: resolved_final_reply_target
-                .as_ref()
-                .map(|entry| entry.reply_target_binding_ref.clone()),
-            progress_target: existing
-                .as_ref()
-                .and_then(|record| record.progress_target.clone()),
-            approval_prompt_target: existing
-                .as_ref()
-                .and_then(|record| record.approval_prompt_target.clone()),
-            auth_prompt_target: existing
-                .as_ref()
-                .and_then(|record| record.auth_prompt_target.clone()),
-            default_modality: existing.as_ref().and_then(|record| record.default_modality),
-            updated_at: now,
-            updated_by: caller.user_id.clone(),
-        };
+        let tenant_id = caller.tenant_id.clone();
+        let user_id = caller.user_id.clone();
         self.preferences
-            .put_communication_preference(record)
+            .update_communication_preference(
+                key,
+                Box::new(move |existing| {
+                    Ok(CommunicationPreferenceRecord {
+                        tenant_id: tenant_id.clone(),
+                        user_id: user_id.clone(),
+                        final_reply_target: final_reply_target.clone(),
+                        progress_target: existing
+                            .as_ref()
+                            .and_then(|record| record.progress_target.clone()),
+                        approval_prompt_target: existing
+                            .as_ref()
+                            .and_then(|record| record.approval_prompt_target.clone()),
+                        auth_prompt_target: existing
+                            .as_ref()
+                            .and_then(|record| record.auth_prompt_target.clone()),
+                        default_modality: existing
+                            .as_ref()
+                            .and_then(|record| record.default_modality),
+                        updated_at: now,
+                        updated_by: user_id.clone(),
+                    })
+                }),
+            )
             .await
             .map_err(map_outbound_repository_error)?;
         Ok(RebornOutboundPreferencesResponse {
-            final_reply_target: resolved_final_reply_target.map(|entry| entry.summary),
+            final_reply_target: final_reply_target_summary,
             default_modality: RebornOutboundDeliveryModality::Text,
         })
     }
@@ -290,7 +323,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl OutboundDeliveryTargetInventory for FakeTargetInventory {
+    impl OutboundDeliveryTargetProvider for FakeTargetInventory {
         async fn list_outbound_delivery_targets(
             &self,
             caller: &WebUiAuthenticatedCaller,
@@ -308,7 +341,7 @@ mod tests {
     struct FailingTargetInventory;
 
     #[async_trait]
-    impl OutboundDeliveryTargetInventory for FailingTargetInventory {
+    impl OutboundDeliveryTargetProvider for FailingTargetInventory {
         async fn list_outbound_delivery_targets(
             &self,
             _caller: &WebUiAuthenticatedCaller,
@@ -341,6 +374,14 @@ mod tests {
         ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
             Err(OutboundError::Backend)
         }
+
+        async fn update_communication_preference(
+            &self,
+            _key: CommunicationPreferenceKey,
+            _update: ironclaw_outbound::CommunicationPreferenceUpdate,
+        ) -> Result<CommunicationPreferenceRecord, OutboundError> {
+            Err(OutboundError::Backend)
+        }
     }
 
     struct PutFailingPreferenceRepository;
@@ -359,6 +400,20 @@ mod tests {
             _key: CommunicationPreferenceKey,
         ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
             Ok(None)
+        }
+
+        async fn update_communication_preference(
+            &self,
+            key: CommunicationPreferenceKey,
+            mut update: ironclaw_outbound::CommunicationPreferenceUpdate,
+        ) -> Result<CommunicationPreferenceRecord, OutboundError> {
+            let record = update(None)?;
+            if record.key() != key {
+                return Err(OutboundError::InvalidRequest {
+                    reason: "communication preference update key mismatch",
+                });
+            }
+            Err(OutboundError::Backend)
         }
     }
 
@@ -695,6 +750,89 @@ mod tests {
         assert!(response.next_cursor.is_none());
     }
 
+    #[tokio::test]
+    async fn target_registry_aggregates_channel_neutral_providers_for_default_selection() {
+        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let slack_provider = Arc::new(FakeTargetInventory::default());
+        slack_provider.insert(
+            "user-alpha",
+            target_entry_for_channel(
+                "slack-alpha",
+                "slack",
+                "Slack DM",
+                "reply:slack-alpha",
+                true,
+            ),
+        );
+        let telegram_provider = Arc::new(FakeTargetInventory::default());
+        telegram_provider.insert(
+            "user-alpha",
+            target_entry_for_channel(
+                "telegram-alpha",
+                "telegram",
+                "Telegram chat",
+                "reply:telegram-alpha",
+                true,
+            ),
+        );
+        let registry = Arc::new(OutboundDeliveryTargetRegistry::from_providers(vec![
+            slack_provider,
+            telegram_provider,
+        ]));
+        let facade = RebornOutboundPreferencesFacade::new(store.clone(), registry);
+
+        let listed = facade
+            .list_outbound_delivery_targets(caller("tenant-alpha", "user-alpha"))
+            .await
+            .expect("target list");
+        assert_eq!(
+            listed
+                .targets
+                .iter()
+                .map(|entry| entry.target.channel.as_str())
+                .collect::<Vec<_>>(),
+            vec!["slack", "telegram"]
+        );
+
+        facade
+            .set_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(target_id("telegram-alpha")),
+                },
+            )
+            .await
+            .expect("set target from second provider");
+        let stored = store
+            .load_communication_preference(CommunicationPreferenceKey::new(
+                tenant("tenant-alpha"),
+                user("user-alpha"),
+            ))
+            .await
+            .expect("load stored record")
+            .expect("stored record");
+        assert_eq!(
+            stored
+                .final_reply_target
+                .as_ref()
+                .map(|target| target.as_str()),
+            Some("reply:telegram-alpha")
+        );
+    }
+
+    #[tokio::test]
+    async fn target_registry_propagates_provider_failure() {
+        let registry =
+            OutboundDeliveryTargetRegistry::from_providers(vec![Arc::new(FailingTargetInventory)]);
+
+        let error = registry
+            .list_outbound_delivery_targets(&caller("tenant-alpha", "user-alpha"))
+            .await
+            .expect_err("provider failure");
+
+        assert_unavailable_backend_error(error);
+    }
+
     #[test]
     fn repository_error_mapping_distinguishes_authority_conflict_and_backend_errors() {
         for invalid_request_error in [
@@ -740,12 +878,28 @@ mod tests {
         reply_target: &str,
         final_replies: bool,
     ) -> OutboundDeliveryTargetEntry {
+        target_entry_for_channel(
+            target_id_value,
+            "slack",
+            "Slack DM",
+            reply_target,
+            final_replies,
+        )
+    }
+
+    fn target_entry_for_channel(
+        target_id_value: &str,
+        channel: &str,
+        display_name: &str,
+        reply_target: &str,
+        final_replies: bool,
+    ) -> OutboundDeliveryTargetEntry {
         OutboundDeliveryTargetEntry {
             summary: RebornOutboundDeliveryTargetSummary::new(
                 target_id(target_id_value),
-                "slack",
-                "Slack DM",
-                Some("Slack direct message".to_string()),
+                channel,
+                display_name,
+                Some(format!("{display_name} direct message")),
             )
             .expect("valid target summary"),
             capabilities: RebornOutboundDeliveryTargetCapabilities {

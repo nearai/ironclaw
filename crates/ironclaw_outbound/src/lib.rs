@@ -19,6 +19,7 @@ mod validation;
 
 pub use communication_preferences::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
+    CommunicationPreferenceUpdate,
 };
 pub use delivery_resolution::{
     CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,

@@ -14,9 +14,10 @@ use crate::validation::{
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
-    CommunicationPreferenceRepository, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundDeliveryId, OutboundError, OutboundStateStore, ProjectionSubscriptionId,
-    ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    CommunicationPreferenceRepository, CommunicationPreferenceUpdate,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError,
+    OutboundStateStore, ProjectionSubscriptionId, ProjectionSubscriptionRecord,
+    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
 
 #[derive(Default)]
@@ -107,6 +108,33 @@ impl CommunicationPreferenceRepository for InMemoryOutboundStateStore {
     ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
         let state = self.lock_state()?;
         Ok(state.communication_preferences.get(&key).cloned())
+    }
+
+    async fn update_communication_preference(
+        &self,
+        key: CommunicationPreferenceKey,
+        mut update: CommunicationPreferenceUpdate,
+    ) -> Result<CommunicationPreferenceRecord, OutboundError> {
+        loop {
+            let existing = {
+                let state = self.lock_state()?;
+                state.communication_preferences.get(&key).cloned()
+            };
+            let record = update(existing.clone())?;
+            validate_communication_preference(&record)?;
+            if record.key() != key {
+                return Err(OutboundError::InvalidRequest {
+                    reason: "communication preference update key mismatch",
+                });
+            }
+            let mut state = self.lock_state()?;
+            if state.communication_preferences.get(&key).cloned() == existing {
+                state
+                    .communication_preferences
+                    .insert(record.key(), record.clone());
+                return Ok(record);
+            }
+        }
     }
 }
 

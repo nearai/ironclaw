@@ -17,7 +17,7 @@ use crate::{
     lifecycle::{
         RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
     },
-    outbound_preferences::{EmptyOutboundDeliveryTargetInventory, RebornOutboundPreferencesFacade},
+    outbound_preferences::{OutboundDeliveryTargetRegistry, RebornOutboundPreferencesFacade},
     webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
 
@@ -137,11 +137,11 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         api = api.with_automation_product_facade(automation_facade);
     }
     if let Some(local_runtime) = &services.local_runtime {
-        // GitHub PR #4537 carry-forward tracks the Slack delivery target
-        // bridge; until then this product-neutral facade exposes no targets.
+        // GitHub PR #4537 carry-forward tracks real product target providers;
+        // until then this product-neutral facade exposes no targets.
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
             Arc::clone(&local_runtime.outbound_preferences),
-            Arc::new(EmptyOutboundDeliveryTargetInventory),
+            Arc::new(OutboundDeliveryTargetRegistry::empty()),
         )));
     }
     if let Some(connectable_channels) = connectable_channels {
