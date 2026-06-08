@@ -233,4 +233,64 @@ mod tests {
         let result = stage.process(ctx, input).await.expect("process ok");
         assert!(matches!(result, TurnCompletedStep::Exit(_)));
     }
+
+    /// BUG-N1 regression: policy returns None but pending bytes are non-empty.
+    /// Before the fix, only the trip-arm cleared the map, so a non-tripping
+    /// capability turn would carry bytes over to the next iteration (causing
+    /// cross-turn accumulation). After the fix, the unconditional clear at the
+    /// end of process() must drain the map even when the policy returns None,
+    /// while leaving both compaction flags false.
+    #[tokio::test]
+    async fn policy_none_with_nonempty_map_clears_map_without_setting_flags() {
+        let stage = PostCapabilityStage::new(Arc::new(StubPolicy(None)));
+        let ctx_data = test_run_context("post-cap-none-nonempty");
+        let mut state = LoopExecutionState::initial_for_run(&ctx_data);
+
+        // Pre-seed the byte accumulator with a non-empty entry to simulate a
+        // capability turn that accumulated bytes but did not exceed the cap.
+        let cap_id = CapabilityId::new("builtin.http").expect("valid");
+        state
+            .post_capability_state
+            .pending_capability_bytes
+            .insert(cap_id, 100);
+
+        assert!(
+            !state.post_capability_state.pending_capability_bytes.is_empty(),
+            "pre-condition: map must be non-empty before process()"
+        );
+
+        let summary = TurnSummary::reply_rejected();
+        let input = TurnCompletedStep::Continue {
+            state: Box::new(state),
+            summary,
+        };
+
+        let host = make_host();
+        let family = make_family();
+        let ctx = StageContext {
+            planner: family.planner(),
+            host: &host,
+        };
+
+        let result = stage.process(ctx, input).await.expect("process ok");
+
+        let TurnCompletedStep::Continue { state: out, .. } = result else {
+            panic!("expected Continue");
+        };
+        // Policy returned None → flags must stay false.
+        assert!(
+            !out.compaction_state.force_compact_on_next_iteration,
+            "force_compact_on_next_iteration must stay false when policy returns None"
+        );
+        assert!(
+            !out.post_capability_state.skip_model_this_iteration,
+            "skip_model_this_iteration must stay false when policy returns None"
+        );
+        // BUG-N1 fix: map must be cleared unconditionally even on the non-trip path.
+        assert!(
+            out.post_capability_state.pending_capability_bytes.is_empty(),
+            "pending_capability_bytes must be cleared even when the policy does not trip \
+             (BUG-N1: non-trip turns were carrying bytes over to the next iteration)"
+        );
+    }
 }

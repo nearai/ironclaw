@@ -3049,3 +3049,72 @@ async fn spawned_child_run_byte_len_accumulates_and_trips_policy() {
          exceeds the per-capability cap (49 001 > 32 000 default)"
     );
 }
+
+/// D2 coverage: AwaitDependentRun outcomes carry byte_len into
+/// pending_capability_bytes via push_completed_result (gates.rs).
+/// Because AwaitDependentRun exits Blocked (the gate never SkipAndContinues),
+/// PostCapabilityStage does not run its policy check on the Exit path.
+/// This test verifies that the byte_len IS accumulated into the
+/// BeforeBlock checkpoint state — confirming the propagation path is
+/// correct — and that the loop exits Blocked as expected. The model is
+/// called once (capability turn) before the gate fires.
+#[tokio::test]
+async fn await_dependent_run_byte_len_accumulates_and_trips_policy() {
+    // Iteration 1: model → AwaitDependentRun with 33 001 bytes (> 32 000-byte
+    // default cap). The gate fires and blocks the loop. Unlike SpawnedChildRun,
+    // the AwaitDependentRun path exits Blocked rather than Continue, so
+    // PostCapabilityStage does not evaluate the policy on this turn — but the
+    // bytes ARE accumulated into pending_capability_bytes before the block.
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AwaitDependentRun {
+                gate_ref: LoopGateRef::new("gate:await-large").expect("valid"),
+                result_ref: LoopResultRef::new("result:await-large").expect("valid"),
+                safe_summary: "await dependent run with large result".to_string(),
+                // Exceeds the default 32 000-byte fallback cap. If byte_len were
+                // still propagated as 0 in the AwaitDependentRunGateStage path,
+                // the pending_capability_bytes assertion below would fail.
+                byte_len: 33_001,
+            }],
+            stopped_on_suspension: true,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    // AwaitDependentRun always blocks — the gate does not SkipAndContinue.
+    assert!(
+        matches!(exit, LoopExit::Blocked(_)),
+        "AwaitDependentRun must exit Blocked when the gate strategy returns Block"
+    );
+
+    // The model is called exactly once: the capability turn. The gate fires
+    // after the capability batch, blocking before a second iteration begins.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "model must be called exactly once (capability turn only); \
+         the gate blocks before any subsequent iteration"
+    );
+
+    // Bytes must have been accumulated into pending_capability_bytes by
+    // push_completed_result inside AwaitDependentRunGateStage (gates.rs).
+    // Inspect the BeforeBlock checkpoint — that is the state written just
+    // before the loop exits Blocked.
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    let accumulated = before_block_state
+        .post_capability_state
+        .pending_capability_bytes
+        .values()
+        .sum::<u64>();
+    assert_eq!(
+        accumulated, 33_001,
+        "pending_capability_bytes must accumulate the AwaitDependentRun byte_len \
+         (33 001) via push_completed_result before the gate checkpoint fires"
+    );
+}

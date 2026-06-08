@@ -563,4 +563,48 @@ mod tests {
             })
         ));
     }
+
+    /// Round-2 test coverage: verify that a non-default `post_capability_state`
+    /// (populated `pending_capability_bytes` + `skip_model_this_iteration = true`)
+    /// survives `to_checkpoint_payload` / `from_checkpoint_payload` intact.
+    ///
+    /// This is the replay-correctness gate: if these fields are lost on
+    /// checkpoint encode/decode, a resumed run would start with a stale byte
+    /// accumulator or would incorrectly re-run the model that was supposed to
+    /// be skipped.
+    #[test]
+    fn post_capability_state_with_bytes_round_trips_through_checkpoint() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+
+        // Seed pending_capability_bytes with a non-zero entry.
+        let cap_id = CapabilityId::new("builtin.http").expect("valid capability id");
+        state
+            .post_capability_state
+            .pending_capability_bytes
+            .insert(cap_id.clone(), 33_001);
+        // Also set skip_model_this_iteration to verify it round-trips.
+        state.post_capability_state.skip_model_this_iteration = true;
+
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeModel)
+                .expect("decode checkpoint payload");
+
+        assert_eq!(
+            restored.post_capability_state.pending_capability_bytes.get(&cap_id),
+            Some(&33_001),
+            "pending_capability_bytes must survive checkpoint encode/decode"
+        );
+        assert!(
+            restored.post_capability_state.skip_model_this_iteration,
+            "skip_model_this_iteration must survive checkpoint encode/decode"
+        );
+        // Full equality check — no other fields must have changed.
+        assert_eq!(
+            restored.post_capability_state,
+            state.post_capability_state,
+            "entire PostCapabilityStageState must round-trip without loss"
+        );
+    }
 }
