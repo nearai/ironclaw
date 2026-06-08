@@ -4729,7 +4729,10 @@ mod tests {
     async fn webui_route_rejects_list_automations_without_agent_binding() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
-        use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
+        use ironclaw_webui_v2::{
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State,
+            webui_v2_router,
+        };
         use tower::ServiceExt;
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -4765,8 +4768,12 @@ mod tests {
             None,
             None,
         );
-        let router = webui_v2_router(WebUiV2State::new(bundle.api))
-            .layer(axum::Extension(caller_without_agent));
+        let router = webui_v2_router(WebUiV2State::new(
+            bundle.api,
+            WebUiV2Capabilities::default(),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(caller_without_agent));
 
         let response = router
             .oneshot(

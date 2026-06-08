@@ -11,6 +11,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::routing::{delete, get, post};
 use ironclaw_product_workflow::RebornServicesApi;
+use serde::Serialize;
 
 use crate::descriptors::{
     WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_CANCEL_RUN,
@@ -27,7 +28,7 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_STREAM_EVENTS_WS, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
 };
 use crate::handlers;
-use crate::sse_capacity::{DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, SseCapacity};
+use crate::sse_capacity::SseCapacity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebUiV2RouteOptions {
@@ -62,46 +63,16 @@ pub struct WebUiV2State {
     capabilities: WebUiV2Capabilities,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct WebUiV2Capabilities {
     pub operator_webui_config: bool,
 }
 
 impl WebUiV2State {
-    /// Build state with the default per-caller SSE concurrency cap
-    /// ([`DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER`]).
-    pub fn new(services: Arc<dyn RebornServicesApi>) -> Self {
-        Self::with_sse_concurrency_limit(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
-    }
-
-    pub fn with_capabilities(
+    pub fn new(
         services: Arc<dyn RebornServicesApi>,
         capabilities: WebUiV2Capabilities,
-    ) -> Self {
-        Self::with_sse_concurrency_limit_and_capabilities(
-            services,
-            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
-            capabilities,
-        )
-    }
-
-    /// Build state with a custom per-caller SSE concurrency cap. Use
-    /// from host composition or tests that want to tune the ceiling.
-    pub fn with_sse_concurrency_limit(
-        services: Arc<dyn RebornServicesApi>,
         max_concurrent_streams_per_caller: usize,
-    ) -> Self {
-        Self::with_sse_concurrency_limit_and_capabilities(
-            services,
-            max_concurrent_streams_per_caller,
-            WebUiV2Capabilities::default(),
-        )
-    }
-
-    pub fn with_sse_concurrency_limit_and_capabilities(
-        services: Arc<dyn RebornServicesApi>,
-        max_concurrent_streams_per_caller: usize,
-        capabilities: WebUiV2Capabilities,
     ) -> Self {
         Self {
             services,

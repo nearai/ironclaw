@@ -40,8 +40,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
   // Whether the backend has a usable active provider. Prefer the persisted
   // operator snapshot, but also honor runtime/env-configured LLMs surfaced by
   // gateway status so first-run onboarding does not mask an already-live model.
-  const hasActiveProvider =
-    !enabled || Boolean(snapshot.active?.provider_id || gatewayStatus?.llm_backend);
+  const hasActiveProvider = Boolean(snapshot.active?.provider_id || gatewayStatus?.llm_backend);
   const activeProviderId =
     snapshot.active?.provider_id || gatewayStatus?.llm_backend || "nearai";
   const selectedModel = snapshot.active?.model || gatewayStatus?.llm_model || "";

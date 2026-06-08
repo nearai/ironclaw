@@ -165,7 +165,8 @@ function FeaturedProviderRow({ entry, provider, configured, isBusy, login, t, on
 }
 
 export function OnboardingPage() {
-  const { isAdmin = false } = useOutletContext();
+  const { isAdmin = false, isChecking = false } = useOutletContext();
+  if (isChecking) return null;
   if (!isAdmin) {
     return html`<${Navigate} to="/chat" replace />`;
   }

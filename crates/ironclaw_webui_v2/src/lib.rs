@@ -88,3 +88,5 @@ pub use router::{
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use schema::{WebChatV2Event, WebChatV2EventFrame};
+#[cfg(feature = "webui-v2-beta")]
+pub use sse_capacity::DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER;
