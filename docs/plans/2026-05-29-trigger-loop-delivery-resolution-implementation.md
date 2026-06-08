@@ -820,6 +820,27 @@ read the same communication preference repository used by the default outbound
 preference API. Do not encode WebUI rendering assumptions in this bridge; the
 API must remain usable by any authenticated product surface.
 
+Carry-forward API and repository follow-ups from PR 4537 review:
+
+- Expand `RebornOutboundDeliveryModality` in a dedicated product API follow-up
+  before surfacing non-text outbound defaults. The outbound repository already
+  supports `Text`, `Voice`, `Image`, `Mixed`, and `Unknown`, while the current
+  WebUI/product response DTO intentionally exposes only `Text`. Do not add a
+  partial mapper in composition until the public enum and serde contract are
+  deliberately expanded.
+- Add a product-safe stale-target representation before treating missing
+  inventory matches as first-class UI state. The preferred low-churn shape is a
+  sibling status field that can distinguish `none_configured` from
+  `unavailable` while preserving the existing `final_reply_target:
+  Option<RebornOutboundDeliveryTargetSummary>` field. A tagged target-state DTO
+  is cleaner but should be evaluated as a larger API contract change.
+- Add an atomic update operation to `CommunicationPreferenceRepository` before
+  depending on concurrent preference updates for production behavior. The fix
+  belongs in the repository/store contract so in-memory and filesystem-backed
+  stores re-read and re-apply the update under their own lock/CAS semantics. Do
+  not paper over this with a composition-local facade mutex; that would only
+  serialize one process and one facade instance.
+
 If concrete Reborn product egress is not ready, leave this as fast-follow and
 ship trigger V1 as local persisted threads only.
 
