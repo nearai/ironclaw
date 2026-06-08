@@ -383,6 +383,43 @@ model = "claude-3-5-sonnet-latest"
     }
 
     #[test]
+    fn collect_leaf_entries_array_value_becomes_list() {
+        let value = serde_json::json!({
+            "tags": ["alpha", "beta"]
+        });
+        let mut entries = Vec::new();
+        collect_leaf_entries(&value, String::new(), &mut entries);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "tags");
+        assert!(
+            matches!(
+                &entries[0].value,
+                Some(ConfigValue::List(items)) if items == &["alpha", "beta"]
+            ),
+            "expected List([\"alpha\", \"beta\"]), got {:?}",
+            entries[0].value
+        );
+    }
+
+    #[test]
+    fn collect_leaf_entries_array_drops_non_string_elements() {
+        let value = serde_json::json!({
+            "tags": ["alpha", 42, true, "beta"]
+        });
+        let mut entries = Vec::new();
+        collect_leaf_entries(&value, String::new(), &mut entries);
+        assert_eq!(entries.len(), 1);
+        assert!(
+            matches!(
+                &entries[0].value,
+                Some(ConfigValue::List(items)) if items == &["alpha", "beta"]
+            ),
+            "non-string elements should be dropped, got {:?}",
+            entries[0].value
+        );
+    }
+
+    #[test]
     fn json_to_config_value_negative_integer_becomes_float() {
         let val = serde_json::json!(-5);
         let config_val = json_to_config_value(&val);
