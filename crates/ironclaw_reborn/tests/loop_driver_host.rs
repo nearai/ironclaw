@@ -4363,7 +4363,7 @@ async fn text_only_host_stage_checkpoint_payload_rejects_foreign_schema_id() {
 async fn text_only_host_skill_context_does_not_expand_capability_surface() {
     let fixture = HostFixture::new("thread-host-skill-capability", "hello").await;
     let source = Arc::new(StaticSkillContextSource::new(vec![
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             skill_md(
                 "installed-alpha",
                 "installed skill description",

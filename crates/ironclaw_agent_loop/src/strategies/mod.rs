@@ -17,6 +17,7 @@
 // Keep the unused lint local to these crate-private strategy contracts.
 #![allow(dead_code, unused_imports)]
 
+mod active_task_compaction;
 pub(crate) mod batch;
 mod budget;
 mod capability;
@@ -30,6 +31,7 @@ pub(crate) mod recovery;
 mod reply_admission;
 mod stop;
 
+pub(crate) use active_task_compaction::ActiveTaskPreservingCompactionStrategy;
 pub(crate) use batch::{
     BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary, DefaultBatchPolicyStrategy,
 };

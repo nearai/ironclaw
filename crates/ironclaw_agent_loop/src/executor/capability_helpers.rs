@@ -5,8 +5,13 @@ use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
         AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityInvocation, CapabilityResultMessage,
-        CapabilitySurfaceVersion, ProviderToolCallReference, VisibleCapabilitySurface,
+        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureDetail,
+        CapabilityFailureKind, CapabilityInputIssue, CapabilityInputIssueCode,
+        CapabilityInputRepair, CapabilityInvocation, CapabilityRecoveryHint,
+        CapabilityResultMessage, CapabilitySurfaceVersion, ModelVisibleToolObservation,
+        ObservationTrust, ProviderToolCallReference, SameCallRetryConstraint,
+        ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -16,6 +21,9 @@ use crate::{
 };
 
 use super::{AgentLoopExecutorError, capability_host_error};
+
+const MAX_MODEL_OBSERVATION_INPUT_ISSUES: usize = 3;
+const MAX_MODEL_OBSERVATION_TEXT_BYTES: usize = 256;
 
 pub(super) fn capability_invocation_from_candidate(
     call: CapabilityCallCandidate,
@@ -116,6 +124,7 @@ pub(super) async fn append_capability_result_ref(
         result_ref: result.result_ref.clone(),
         safe_summary: result.safe_summary.clone(),
         provider_call: provider_tool_call_reference(call),
+        model_observation: None,
     })
     .await
     .map_err(capability_host_error)?;
@@ -145,9 +154,16 @@ pub(super) async fn append_capability_error_ref(
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
     summary: &CapabilityErrorSummary,
+    model_observation: Option<ModelVisibleToolObservation>,
 ) -> Result<(), AgentLoopExecutorError> {
-    append_capability_safe_summary_ref(host, state, call, summary.safe_summary.as_str().to_string())
-        .await
+    append_capability_safe_summary_ref_with_observation(
+        host,
+        state,
+        call,
+        summary.safe_summary.as_str().to_string(),
+        model_observation,
+    )
+    .await
 }
 
 pub(super) async fn append_capability_safe_summary_ref(
@@ -155,6 +171,16 @@ pub(super) async fn append_capability_safe_summary_ref(
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
     safe_summary: String,
+) -> Result<(), AgentLoopExecutorError> {
+    append_capability_safe_summary_ref_with_observation(host, state, call, safe_summary, None).await
+}
+
+async fn append_capability_safe_summary_ref_with_observation(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+    safe_summary: String,
+    model_observation: Option<ModelVisibleToolObservation>,
 ) -> Result<(), AgentLoopExecutorError> {
     if call.provider_replay.is_none() {
         return Ok(());
@@ -164,11 +190,133 @@ pub(super) async fn append_capability_safe_summary_ref(
         result_ref: result_ref.clone(),
         safe_summary,
         provider_call: provider_tool_call_reference(call),
+        model_observation,
     })
     .await
     .map_err(capability_host_error)?;
     state.result_refs.push(result_ref);
     Ok(())
+}
+
+pub(super) fn model_visible_capability_failure_observation(
+    failure: &CapabilityFailure,
+) -> ModelVisibleToolObservation {
+    match &failure.detail {
+        Some(CapabilityFailureDetail::InvalidInput { issues }) => {
+            invalid_input_observation(bounded_input_issues(issues))
+        }
+        _ => ModelVisibleToolObservation {
+            schema_version:
+                ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Error,
+            summary: format!("Capability failed with {}.", failure.error_kind.as_str()),
+            detail: ToolObservationDetail::GenericFailure {
+                failure_kind: failure.error_kind.clone(),
+            },
+            artifacts: Vec::new(),
+            recovery: Some(generic_failure_recovery(&failure.error_kind)),
+            trust: ObservationTrust::UntrustedToolOutput,
+        },
+    }
+}
+
+fn bounded_input_issues(issues: &[CapabilityInputIssue]) -> Vec<CapabilityInputIssue> {
+    issues
+        .iter()
+        .take(MAX_MODEL_OBSERVATION_INPUT_ISSUES)
+        .map(|issue| CapabilityInputIssue {
+            path: truncate_model_observation_text(&issue.path),
+            code: issue.code,
+            expected: issue
+                .expected
+                .as_deref()
+                .map(truncate_model_observation_text),
+            received: issue
+                .received
+                .as_deref()
+                .map(truncate_model_observation_text),
+            schema_path: issue
+                .schema_path
+                .as_deref()
+                .map(truncate_model_observation_text),
+        })
+        .collect()
+}
+
+fn truncate_model_observation_text(value: &str) -> String {
+    if value.len() <= MAX_MODEL_OBSERVATION_TEXT_BYTES {
+        return value.to_string();
+    }
+    let mut end = MAX_MODEL_OBSERVATION_TEXT_BYTES;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string() // safety: `end` is reduced until it lands on a valid UTF-8 boundary.
+}
+
+fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleToolObservation {
+    let repairs = issues.iter().map(input_issue_repair).collect();
+    ModelVisibleToolObservation {
+        schema_version: ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        status: ToolObservationStatus::Error,
+        summary: "Tool input failed schema validation.".to_string(),
+        detail: ToolObservationDetail::InvalidInput { issues },
+        artifacts: Vec::new(),
+        recovery: Some(ToolRecoveryObservation {
+            same_call_retry: SameCallRetryConstraint::RequiresChangedInput,
+            repairs,
+            recovery_hint: CapabilityRecoveryHint::CorrectArgumentsBeforeRetry,
+        }),
+        trust: ObservationTrust::UntrustedToolOutput,
+    }
+}
+
+fn generic_failure_recovery(error_kind: &CapabilityFailureKind) -> ToolRecoveryObservation {
+    let same_call_retry = match error_kind {
+        CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
+            SameCallRetryConstraint::Forbidden
+        }
+        CapabilityFailureKind::InvalidInput
+        | CapabilityFailureKind::InvalidOutput
+        | CapabilityFailureKind::OutputTooLarge => SameCallRetryConstraint::RequiresChangedInput,
+        CapabilityFailureKind::Backend
+        | CapabilityFailureKind::Network
+        | CapabilityFailureKind::Transient
+        | CapabilityFailureKind::Unavailable => SameCallRetryConstraint::AllowedAfterDelay,
+        CapabilityFailureKind::Cancelled
+        | CapabilityFailureKind::MissingRuntime
+        | CapabilityFailureKind::Permanent => SameCallRetryConstraint::NotUseful,
+        CapabilityFailureKind::Dispatcher
+        | CapabilityFailureKind::OperationFailed
+        | CapabilityFailureKind::Process
+        | CapabilityFailureKind::Resource
+        | CapabilityFailureKind::Internal
+        | CapabilityFailureKind::Unknown(_) => SameCallRetryConstraint::Allowed,
+        _ => SameCallRetryConstraint::Allowed,
+    };
+    ToolRecoveryObservation {
+        same_call_retry,
+        repairs: Vec::new(),
+        recovery_hint: CapabilityRecoveryHint::RespectFailureConstraint,
+    }
+}
+
+fn input_issue_repair(issue: &CapabilityInputIssue) -> CapabilityInputRepair {
+    match issue.code {
+        CapabilityInputIssueCode::MissingRequired => CapabilityInputRepair::ProvideRequiredField {
+            path: issue.path.clone(),
+        },
+        CapabilityInputIssueCode::UnexpectedField => CapabilityInputRepair::RemoveUnexpectedField {
+            path: issue.path.clone(),
+        },
+        CapabilityInputIssueCode::TypeMismatch => CapabilityInputRepair::ChangeType {
+            path: issue.path.clone(),
+            expected: issue.expected.clone(),
+        },
+        CapabilityInputIssueCode::InvalidValue => CapabilityInputRepair::UseAllowedValue {
+            path: issue.path.clone(),
+        },
+    }
 }
 
 pub(super) fn synthetic_provider_error_result_ref(

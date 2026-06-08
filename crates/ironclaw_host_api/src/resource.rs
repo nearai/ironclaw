@@ -27,9 +27,17 @@ pub const LOCAL_DEFAULT_PROJECT_ID: &str = "bootstrap";
 /// caller-supplied identifier can ever collide with it.
 pub const SYSTEM_RESERVED_ID: &str = "\x1fSYSTEM\x1f";
 
-/// True iff `value` is the system sentinel string. Used by id deserializers
-/// to route the sentinel through the `from_trusted` escape hatch, and by
-/// callers that need to special-case scope-derived paths or display values.
+/// True iff `value` is the system sentinel string.
+///
+/// **Trust boundary.** This predicate is only safe to consult on values
+/// that already came through a trusted persistence round-trip (a DB row,
+/// a `ResourceScope::system()` constructed in-process, etc.) — i.e.
+/// paths where the caller has already established that the input cannot
+/// be attacker-controlled. The `tenant` / `user` id deserializers use it
+/// to re-admit the sentinel through `from_trusted` so writes round-trip;
+/// other id kinds must continue to reject sentinel-shaped input from
+/// external request bodies. Do not use this to special-case raw user
+/// input in route handlers without a prior authorization check.
 pub fn is_system_reserved(value: &str) -> bool {
     value == SYSTEM_RESERVED_ID
 }

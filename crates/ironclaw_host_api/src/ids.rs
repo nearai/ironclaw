@@ -150,8 +150,14 @@ macro_rules! string_id {
                 // Sentinel records (e.g. `ResourceScope::system`) are written
                 // through `from_trusted` and intentionally contain bytes the
                 // validator rejects. Rehydrate them through the same escape
-                // hatch so writes round-trip.
-                if $crate::resource::is_system_reserved(&value) {
+                // hatch so writes round-trip — but ONLY for the two id kinds
+                // that `ResourceScope::system()` uses. Other id types
+                // (extension, package, secret, ...) must continue to reject
+                // sentinel-shaped input from the wire so an attacker cannot
+                // forge a system-scoped value through an external API.
+                if matches!($kind, "tenant" | "user")
+                    && $crate::resource::is_system_reserved(&value)
+                {
                     return Ok(Self::from_trusted(value));
                 }
                 Self::new(value).map_err(serde::de::Error::custom)
@@ -319,5 +325,26 @@ mod string_id_serde_tests {
         let raw = serde_json::to_string("acme-co").unwrap();
         let id: TenantId = serde_json::from_str(&raw).expect("ordinary tenant id deserializes");
         assert_eq!(id.as_str(), "acme-co");
+    }
+
+    #[test]
+    fn non_scope_ids_reject_system_sentinel_on_wire() {
+        // The deserialize bypass is restricted to `tenant`/`user` because
+        // those are the only kinds `ResourceScope::system()` uses. Other id
+        // kinds must keep rejecting the sentinel so an external caller
+        // cannot forge a system-scoped identifier via JSON input.
+        let raw = serde_json::to_string(SYSTEM_RESERVED_ID).unwrap();
+        assert!(
+            serde_json::from_str::<ExtensionId>(&raw).is_err(),
+            "ExtensionId must reject the system sentinel on the wire"
+        );
+        assert!(
+            serde_json::from_str::<PackageId>(&raw).is_err(),
+            "PackageId must reject the system sentinel on the wire"
+        );
+        assert!(
+            serde_json::from_str::<SecretHandle>(&raw).is_err(),
+            "SecretHandle must reject the system sentinel on the wire"
+        );
     }
 }

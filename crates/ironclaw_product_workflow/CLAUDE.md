@@ -18,6 +18,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `ConversationBindingService` | Resolves external adapter refs → canonical Reborn identifiers |
 | `ProductConversationBindingService` | Adapter from product workflow bindings to `ironclaw_conversations` with trusted installation→tenant mapping |
 | `StaticProductInstallationResolver` / `ProductInstallationScope` | Host-owned installation registry used by local-dev/tests to select tenant and default agent/project scope |
+| `ProductConversationSubjectRouteResolver` | Host-owned dynamic shared-route subject resolver; product workflow consults it before static per-installation subject routes |
 | `IdempotencyLedger` | Durable action deduplication port |
 | `InMemoryIdempotencyLedger` | Local-dev/test ledger with in-flight lease recovery semantics |
 | `ProductInboundAction` | Durable ledger record for inbound actions |
@@ -110,6 +111,10 @@ resolve. Thread hints in subscription requests may narrow to the already
 resolved binding only; they are not authority to switch threads or tenants.
 Projection/subscription resolution is lookup-only and must not create bindings,
 threads, or external-event route reservations.
+Shared-route subject users are also first-bind scope, not a live overlay on
+existing external conversation bindings. Route admin updates apply to new
+bindings; existing Slack threads must continue resolving under the owner that
+created their thread scope.
 
 Outbound delivery orchestration starts only after `ironclaw_outbound` resolves
 and validates a communication delivery candidate. `OutboundPolicyService`

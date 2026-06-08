@@ -477,6 +477,18 @@ fn should_fallback_routine_notification(error: &ChannelError) -> bool {
     !matches!(error, ChannelError::MissingRoutingTarget { .. })
 }
 
+fn setup_markers_for_skills(
+    skills: &[ironclaw_skills::LoadedSkill],
+) -> std::collections::HashSet<String> {
+    let mut markers = std::collections::HashSet::new();
+    for skill in skills {
+        if let Some(marker) = &skill.manifest.activation.setup_marker {
+            markers.insert(marker.clone());
+        }
+    }
+    markers
+}
+
 /// Core dependencies for the agent.
 ///
 /// Bundles the shared components to reduce argument count.
@@ -884,27 +896,16 @@ impl Agent {
         let Some(registry) = self.skill_registry() else {
             return (vec![], message_content.to_string(), vec![]);
         };
-        // Snapshot the skill list + distinct setup markers under the read
-        // lock, then drop the guard before any await. The marker checks
-        // and the prefilter call don't need the registry lock and we
-        // shouldn't hold a poisonable RwLock across an await point.
-        let (available, distinct_markers) = match registry.read() {
-            Ok(guard) => {
-                let skills_clone: Vec<ironclaw_skills::LoadedSkill> = guard.skills().to_vec();
-                let mut markers: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                for s in &skills_clone {
-                    if let Some(m) = &s.manifest.activation.setup_marker {
-                        markers.insert(m.clone());
-                    }
-                }
-                (skills_clone, markers)
-            }
-            Err(e) => {
-                tracing::error!("Skill registry lock poisoned: {}", e);
-                return (vec![], message_content.to_string(), vec![]);
-            }
+        // Snapshot the skill list + distinct setup markers, then drop any
+        // registry state before marker checks and prefiltering. In hosted
+        // multi-tenant mode, non-owner turns resolve the same private skill
+        // mount used by the Settings UI so self-installed skills can actually
+        // activate at runtime.
+        let available = match self.available_skills_for_user(registry, user_id).await {
+            Some(skills) => skills,
+            None => return (vec![], message_content.to_string(), vec![]),
         };
+        let distinct_markers = setup_markers_for_skills(&available);
 
         // Resolve which setup markers are satisfied by the current
         // workspace. A marker is "satisfied" iff its path exists.
@@ -981,6 +982,32 @@ impl Agent {
         }
 
         (selected, rewritten, feedback)
+    }
+
+    async fn available_skills_for_user(
+        &self,
+        registry: &Arc<std::sync::RwLock<SkillRegistry>>,
+        user_id: &str,
+    ) -> Option<Vec<ironclaw_skills::LoadedSkill>> {
+        if self.config.multi_tenant {
+            let mut scoped = match registry.read() {
+                Ok(guard) => guard.clone_config_for_tenant_user_scope(self.owner_id(), user_id),
+                Err(e) => {
+                    tracing::error!("Skill registry lock poisoned: {}", e);
+                    return None;
+                }
+            };
+            scoped.discover_all().await;
+            return Some(scoped.skills().to_vec());
+        }
+
+        match registry.read() {
+            Ok(guard) => Some(guard.skills().to_vec()),
+            Err(e) => {
+                tracing::error!("Skill registry lock poisoned: {}", e);
+                None
+            }
+        }
     }
 
     /// Send initial engine thread list and routines to the TUI channel so
@@ -2671,6 +2698,59 @@ mod tests {
             Some(Arc::new(crate::context::ContextManager::new(1))),
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn select_active_skills_uses_scoped_user_registry_in_multi_tenant_mode() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let registry = ironclaw_skills::SkillRegistry::new(temp.path().join("owner-skills"))
+            .with_installed_dir(temp.path().join("owner-installed"));
+        let scoped = registry.clone_config_for_tenant_user_scope("owner", "alice");
+        let skill_content = r#"---
+name: tenant-skill
+description: Tenant runtime skill
+---
+
+Only Alice should be able to activate this skill.
+"#;
+        ironclaw_skills::SkillRegistry::prepare_install_to_disk(
+            scoped.install_target_dir(),
+            "tenant-skill",
+            skill_content,
+        )
+        .await
+        .expect("install scoped skill");
+
+        let mut agent = make_legacy_handle_message_test_agent();
+        agent.config.multi_tenant = true;
+        agent.deps.owner_id = "owner".to_string();
+        agent.deps.skill_registry = Some(Arc::new(std::sync::RwLock::new(registry)));
+
+        let (selected, rewritten, feedback) = agent
+            .select_active_skills("please use /tenant-skill", "alice")
+            .await;
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|skill| skill.name())
+                .collect::<Vec<_>>(),
+            vec!["tenant-skill"]
+        );
+        assert!(rewritten.contains("Tenant runtime skill"));
+        assert!(
+            feedback
+                .iter()
+                .any(|note| note.contains("force-activated via /mention"))
+        );
+
+        let (owner_selected, _, _) = agent
+            .select_active_skills("please use /tenant-skill", "owner")
+            .await;
+        assert!(
+            owner_selected.is_empty(),
+            "owner/shared registry must not discover hidden scoped user skills"
+        );
     }
 
     #[cfg(feature = "libsql")]

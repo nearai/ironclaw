@@ -4905,7 +4905,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-test",
- "uuid",
  "wat",
 ]
 
@@ -4979,6 +4978,7 @@ dependencies = [
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_event_store",
+ "ironclaw_reborn_identity",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runtime_policy",
@@ -5055,6 +5055,60 @@ dependencies = [
  "tracing",
  "urlencoding",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "ironclaw_reborn_identity"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_reborn_openai_compat"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "hex",
+ "http 1.4.1",
+ "http-body-util",
+ "ironclaw_host_api",
+ "ironclaw_product_adapters",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_reborn_openai_compat_storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_reborn_openai_compat",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5236,6 +5290,7 @@ dependencies = [
  "futures",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "libc",
  "regex",
  "reqwest",
  "serde",

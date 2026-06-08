@@ -18,15 +18,23 @@ import {
 // selection, `builtin`, and `api_key_set`. Overrides are no longer a separate
 // client-side merge — the backend resolves them — so `builtinOverrides` is kept
 // as an empty object purely for the shared helper signatures.
-export function useLlmProviders({ settings: _settings, gatewayStatus }) {
+export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = true }) {
   const queryClient = useQueryClient();
   const providersQuery = useQuery({
     queryKey: ["llm-providers"],
     queryFn: fetchLlmProviders,
+    enabled,
     staleTime: 60_000,
   });
 
-  const snapshot = providersQuery.data || { providers: [], active: null };
+  const snapshot = enabled
+    ? providersQuery.data || { providers: [], active: null }
+    : { providers: [], active: null };
+  // If the providers query failed (e.g. 404 when the route is gated under
+  // multi-user / SSO auth, or a transient 5xx / offline), we can't conclude
+  // "no LLM configured" — the provider may be set operator-side at boot — so
+  // callers must not treat the failure as a reason to onboard.
+  const isError = enabled && providersQuery.isError;
   const builtinOverrides = {};
   // Map the wire view onto the field names the components/helpers expect.
   const allProviders = (snapshot.providers || []).map((provider) => ({
@@ -37,9 +45,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus }) {
   // Whether the backend has a usable active provider. Prefer the persisted
   // operator snapshot, but also honor runtime/env-configured LLMs surfaced by
   // gateway status so first-run onboarding does not mask an already-live model.
-  const hasActiveProvider = Boolean(
-    snapshot.active?.provider_id || gatewayStatus?.llm_backend
-  );
+  const hasActiveProvider = Boolean(snapshot.active?.provider_id || gatewayStatus?.llm_backend);
   const activeProviderId =
     snapshot.active?.provider_id || gatewayStatus?.llm_backend || "nearai";
   const selectedModel = snapshot.active?.model || gatewayStatus?.llm_model || "";
@@ -114,6 +120,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus }) {
     activeProviderId,
     selectedModel,
     hasActiveProvider,
+    isError,
     isLoading: providersQuery.isLoading,
     error: providersQuery.error,
     setActiveProvider: (provider) => setActiveMutation.mutateAsync(provider),

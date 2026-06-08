@@ -883,6 +883,14 @@ impl CommunicationPreferenceRepository for BackendErrorPreferenceRepository {
     ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
         Err(OutboundError::Backend)
     }
+
+    async fn update_communication_preference(
+        &self,
+        _key: CommunicationPreferenceKey,
+        _update: CommunicationPreferenceUpdate,
+    ) -> Result<CommunicationPreferenceRecord, OutboundError> {
+        Err(OutboundError::Backend)
+    }
 }
 
 #[derive(Default)]

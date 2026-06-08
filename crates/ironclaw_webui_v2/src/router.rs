@@ -9,24 +9,28 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use ironclaw_product_workflow::RebornServicesApi;
+use serde::Serialize;
 
 use crate::descriptors::{
     WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_CANCEL_RUN,
     WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_PATTERN_CREATE_THREAD,
-    WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER, WEBUI_V2_PATTERN_GET_LLM_CONFIG,
-    WEBUI_V2_PATTERN_GET_TIMELINE, WEBUI_V2_PATTERN_INSTALL_EXTENSION,
+    WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER, WEBUI_V2_PATTERN_DELETE_THREAD,
+    WEBUI_V2_PATTERN_GET_LLM_CONFIG, WEBUI_V2_PATTERN_GET_SESSION, WEBUI_V2_PATTERN_GET_TIMELINE,
+    WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_INSTALL_SKILL,
     WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS,
     WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
-    WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_REMOVE_EXTENSION,
-    WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
-    WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_START_CODEX_LOGIN,
-    WEBUI_V2_PATTERN_START_NEARAI_LOGIN, WEBUI_V2_PATTERN_STREAM_EVENTS,
-    WEBUI_V2_PATTERN_STREAM_EVENTS_WS, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
+    WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_LIST_SKILLS,
+    WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
+    WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
+    WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SKILL_DETAIL,
+    WEBUI_V2_PATTERN_START_CODEX_LOGIN, WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
+    WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
+    WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
 };
 use crate::handlers;
-use crate::sse_capacity::{DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, SseCapacity};
+use crate::sse_capacity::SseCapacity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebUiV2RouteOptions {
@@ -58,24 +62,24 @@ impl WebUiV2RouteOptions {
 pub struct WebUiV2State {
     services: Arc<dyn RebornServicesApi>,
     sse_capacity: Arc<SseCapacity>,
+    capabilities: WebUiV2Capabilities,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct WebUiV2Capabilities {
+    pub operator_webui_config: bool,
 }
 
 impl WebUiV2State {
-    /// Build state with the default per-caller SSE concurrency cap
-    /// ([`DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER`]).
-    pub fn new(services: Arc<dyn RebornServicesApi>) -> Self {
-        Self::with_sse_concurrency_limit(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
-    }
-
-    /// Build state with a custom per-caller SSE concurrency cap. Use
-    /// from host composition or tests that want to tune the ceiling.
-    pub fn with_sse_concurrency_limit(
+    pub fn new(
         services: Arc<dyn RebornServicesApi>,
+        capabilities: WebUiV2Capabilities,
         max_concurrent_streams_per_caller: usize,
     ) -> Self {
         Self {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
+            capabilities,
         }
     }
 
@@ -85,6 +89,10 @@ impl WebUiV2State {
 
     pub(crate) fn sse_capacity(&self) -> &Arc<SseCapacity> {
         &self.sse_capacity
+    }
+
+    pub(crate) fn capabilities(&self) -> WebUiV2Capabilities {
+        self.capabilities
     }
 }
 
@@ -107,6 +115,11 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             WEBUI_V2_PATTERN_CREATE_THREAD,
             post(handlers::create_thread).get(handlers::list_threads),
         )
+        .route(
+            WEBUI_V2_PATTERN_DELETE_THREAD,
+            delete(handlers::delete_thread),
+        )
+        .route(WEBUI_V2_PATTERN_GET_SESSION, get(handlers::get_session))
         .route(WEBUI_V2_PATTERN_SEND_MESSAGE, post(handlers::send_message))
         .route(WEBUI_V2_PATTERN_GET_TIMELINE, get(handlers::get_timeline))
         .route(WEBUI_V2_PATTERN_STREAM_EVENTS, get(handlers::stream_events))
@@ -127,6 +140,21 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_LIST_EXTENSIONS,
             get(handlers::list_extensions),
+        )
+        .route(WEBUI_V2_PATTERN_LIST_SKILLS, get(handlers::list_skills))
+        .route(
+            WEBUI_V2_PATTERN_SEARCH_SKILLS,
+            post(handlers::search_skills),
+        )
+        .route(
+            WEBUI_V2_PATTERN_INSTALL_SKILL,
+            post(handlers::install_skill),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SKILL_DETAIL,
+            get(handlers::get_skill_content)
+                .put(handlers::update_skill)
+                .delete(handlers::remove_skill),
         )
         .route(
             WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,

@@ -2,6 +2,7 @@ import { React } from "../lib/html.js";
 import { queryClient } from "../lib/query-client.js";
 import {
   exchangeLoginTicket,
+  fetchSession,
   logout as logoutRequest,
   readStoredToken,
   storeToken,
@@ -10,9 +11,9 @@ import {
 // The Reborn host validates bearer tokens via OIDC; the SPA simply
 // carries whatever token the user supplies (via `?token=` URL param,
 // `#token=` URL fragment, OAuth `login_ticket` exchange, or
-// `sessionStorage`) and lets the server reject anything invalid. No
-// v2 endpoint exposes session probing or profile info, so this hook
-// holds no derived identity state.
+// `sessionStorage`) and lets the server reject anything invalid. The
+// session endpoint is the source of truth for derived identity and
+// UI capabilities.
 //
 // `?token=`  — manual-token paste pattern (the "Connect" form on
 //              the login page).
@@ -124,8 +125,12 @@ export function useAuthSession() {
   );
   const [error, setError] = React.useState(() => consumeLoginErrorFromUrl());
   const [loginTicket] = React.useState(() => consumeLoginTicketFromUrl());
+  const [session, setSession] = React.useState(null);
   const [isExchanging, setIsExchanging] = React.useState(
     () => Boolean(loginTicket && !readStoredToken()),
+  );
+  const [isSessionChecking, setIsSessionChecking] = React.useState(
+    () => Boolean(readStoredToken()),
   );
 
   React.useEffect(() => {
@@ -138,7 +143,9 @@ export function useAuthSession() {
       .then((nextToken) => {
         if (cancelled) return;
         storeToken(nextToken);
+        setIsSessionChecking(true);
         setToken(nextToken);
+        setSession(null);
         setError("");
         setIsExchanging(false);
         queryClient.clear();
@@ -153,9 +160,41 @@ export function useAuthSession() {
     };
   }, [loginTicket]);
 
+  React.useEffect(() => {
+    if (!token || isExchanging) {
+      setSession(null);
+      setIsSessionChecking(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setIsSessionChecking(true);
+    fetchSession()
+      .then((nextSession) => {
+        if (cancelled) return;
+        setSession(nextSession);
+        setIsSessionChecking(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setSession(null);
+        setIsSessionChecking(false);
+        if (err?.status === 401 || err?.status === 403) {
+          storeToken("");
+          setToken("");
+          setError("Your session expired. Please sign in again.");
+          queryClient.clear();
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, isExchanging]);
+
   const signIn = React.useCallback((nextToken) => {
     storeToken(nextToken);
+    setIsSessionChecking(Boolean(nextToken));
     setToken(nextToken);
+    setSession(null);
     setError("");
     queryClient.clear();
   }, []);
@@ -168,26 +207,26 @@ export function useAuthSession() {
     // visually signed out and can re-authenticate.
     logoutRequest().catch(() => {});
     storeToken("");
+    setIsSessionChecking(false);
     setToken("");
+    setSession(null);
     setError("");
     queryClient.clear();
   }, []);
 
   return {
     token,
-    profile: null,
+    profile: session
+      ? {
+          tenant_id: session.tenant_id,
+          user_id: session.user_id,
+        }
+      : null,
     error,
     setError,
-    isChecking: isExchanging,
+    isChecking: isExchanging || isSessionChecking,
     isAuthenticated: Boolean(token),
-    // No v2 profile endpoint exists yet, so the SPA cannot prove
-    // admin status — default closed. The fork's `!profile`
-    // permissive read defaulted open, which is the wrong direction
-    // for a bearer-only auth surface. Admin-gated routes are also
-    // hidden via `route.hidden`, so this is defense in depth; once a
-    // server-issued profile endpoint lands the flag flips from
-    // there.
-    isAdmin: false,
+    isAdmin: Boolean(session?.capabilities?.operator_webui_config),
     signIn,
     signOut,
   };

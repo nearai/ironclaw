@@ -1889,6 +1889,10 @@ impl Agent {
                     .with_requester_id(&message.sender_id);
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
             job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
+            if self.config.multi_tenant {
+                job_ctx.metadata["skill_scope_owner_id"] =
+                    serde_json::Value::String(self.owner_id().to_string());
+            }
             // Prefer a valid timezone from the approval message, fall back to the
             // resolved timezone stored when the approval was originally requested.
             let tz_candidate = message

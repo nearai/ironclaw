@@ -20,8 +20,8 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InMemoryIdempotencyLedger,
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
-    ProductConversationRouteKey, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, StaticProductInstallationResolver,
+    ProductConversationRouteKey, ProductConversationSubjectRouteResolver, ProductInstallationKey,
+    ProductInstallationScope, ProductWorkflowError, StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
     SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackV2Adapter,
@@ -36,6 +36,9 @@ use thiserror::Error;
 
 use crate::RebornRuntime;
 use crate::slack_actor_identity::SlackUserIdentityActorResolver;
+use crate::slack_channel_routes::{
+    SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
+};
 use crate::slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
@@ -209,6 +212,7 @@ pub enum SlackHostBetaBuildError {
 pub struct SlackHostBetaMounts {
     pub events: PublicRouteMount,
     pub personal_binding_pairing: SlackPersonalBindingPairingRouteConfig,
+    pub channel_routes: SlackChannelRouteAdminRouteConfig,
 }
 
 pub fn build_slack_events_route_mount(
@@ -263,17 +267,45 @@ pub fn build_slack_host_beta_mounts(
         config.slack_actor.clone(),
         config.user_id.clone(),
         Arc::new(SlackUserIdentityActorResolver::new(state.clone())),
-        Arc::new(SlackPairingActorResolver::new(state, pairing.clone())),
+        Arc::new(SlackPairingActorResolver::new(
+            state.clone(),
+            pairing.clone(),
+        )),
     ));
-    let events = build_slack_events_route_mount_with_actor_user_resolver(
+    let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
+    let subject_route_resolver: Arc<dyn ProductConversationSubjectRouteResolver> =
+        Arc::new(SlackChannelRouteSubjectResolver::new(
+            config.tenant_id.clone(),
+            config.installation_id.clone(),
+            Arc::clone(&channel_route_store),
+        ));
+    let events = build_slack_events_route_mount_with_resolvers(
         runtime,
-        config,
+        config.clone(),
         actor_user_resolver,
+        Some(subject_route_resolver),
     )?;
+    let allowed_route_subjects = std::iter::once(config.user_id.clone())
+        .chain(config.shared_subject_user_id.clone())
+        .chain(
+            config
+                .channel_routes
+                .iter()
+                .map(|route| route.subject_user_id.clone()),
+        );
+    let channel_routes = SlackChannelRouteAdminRouteConfig::new(
+        config.tenant_id.clone(),
+        config.installation_id.clone(),
+        config.team_id.as_str().to_string(),
+        config.user_id.clone(),
+        channel_route_store,
+    )
+    .with_allowed_subject_user_ids(allowed_route_subjects);
 
     Ok(SlackHostBetaMounts {
         events,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
+        channel_routes,
     })
 }
 
@@ -281,6 +313,15 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
     runtime: &RebornRuntime,
     config: SlackHostBetaConfig,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
+    build_slack_events_route_mount_with_resolvers(runtime, config, actor_user_resolver, None)
+}
+
+fn build_slack_events_route_mount_with_resolvers(
+    runtime: &RebornRuntime,
+    config: SlackHostBetaConfig,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
     // The resolver controls inbound Slack actor binding. `config.user_id`
     // scopes host-mediated Slack bot-token egress and legacy static actor
@@ -314,6 +355,11 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
             .clone()
             .unwrap_or_else(|| config.user_id.clone()),
     );
+    if let Some(subject_route_resolver) = subject_route_resolver {
+        scope = scope
+            .with_conversation_subject_route_resolver(subject_route_resolver)
+            .without_default_subject_for_unrouted_shared_conversations();
+    }
     for route in &config.channel_routes {
         let route_key = slack_channel_route_key(&config.team_id, route)?;
         scope = scope.with_conversation_subject_route(route_key, route.subject_user_id.clone());
@@ -547,7 +593,8 @@ mod tests {
     };
     use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
     use ironclaw_product_workflow::{
-        ProductActorUserResolutionRequest, ProductWorkflowError, WebUiAuthenticatedCaller,
+        ProductActorUserResolutionRequest, ProductWorkflowError, RebornChannelConnectStrategy,
+        WebUiAuthenticatedCaller,
     };
     use ironclaw_resources::InMemoryResourceGovernor;
     use ironclaw_secrets::InMemorySecretStore;
@@ -560,12 +607,20 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::slack_channel_routes::{
+        WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+        slack_channel_route_admin_route_mount,
+    };
+    use crate::slack_connectable_channel::{
+        SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
+    };
     use crate::slack_personal_binding_pairing_serve::{
         WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
     };
     use crate::{
         RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, SLACK_EVENTS_PATH,
-        build_reborn_runtime, local_dev_runtime_policy,
+        WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime, local_dev_runtime_policy,
+        webui_v2_app,
     };
 
     const TENANT: &str = "tenant:slack-host";
@@ -580,6 +635,36 @@ mod tests {
     const SECRET: &str = "host-signing-secret";
 
     type HmacSha256 = Hmac<sha2::Sha256>;
+
+    struct OperatorTokenAuthenticator;
+
+    #[async_trait]
+    impl WebuiAuthenticator for OperatorTokenAuthenticator {
+        async fn authenticate(&self, token: &str) -> Option<UserId> {
+            if token == "operator-token" {
+                Some(UserId::new(USER).expect("user"))
+            } else {
+                None
+            }
+        }
+
+        fn allows_operator_webui_config(&self) -> bool {
+            true
+        }
+    }
+
+    struct MultiUserTokenAuthenticator;
+
+    #[async_trait]
+    impl WebuiAuthenticator for MultiUserTokenAuthenticator {
+        async fn authenticate(&self, token: &str) -> Option<UserId> {
+            if token == "operator-token" {
+                Some(UserId::new(USER).expect("user"))
+            } else {
+                None
+            }
+        }
+    }
 
     #[tokio::test]
     async fn build_slack_events_route_mount_builds_signed_route_from_reborn_runtime() {
@@ -939,19 +1024,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_slack_host_beta_mounts_defaults_channel_app_mentions_to_host_user() {
+    async fn slack_channel_route_admin_assignment_routes_channel_mention_to_subject() {
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
         let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
-        let mut host_config = config();
-        host_config.channel_routes = Vec::new();
-        let mounts = build_slack_host_beta_mounts(&runtime, host_config).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .expect("mounts");
+        let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes);
+        let assign_response = route_mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("content-type", "application/json")
+                    .extension(WebUiAuthenticatedCaller {
+                        tenant_id: TenantId::new(TENANT).expect("tenant"),
+                        user_id: UserId::new(USER).expect("user"),
+                        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                        project_id: Some(ProjectId::new(PROJECT).expect("project")),
+                    })
+                    .body(Body::from(format!(
+                        r#"{{"channel_id":"C0HOST","subject_user_id":"{SHARED_SUBJECT}"}}"#
+                    )))
+                    .expect("assign request builds"),
+            )
+            .await
+            .expect("assign route responds");
+        assert_eq!(assign_response.status(), StatusCode::OK);
 
         let body = app_mention_event_body_with(
-            "Ev-host-beta-channel-default-subject",
-            "<@U-BOT> help with fallback",
+            "Ev-host-beta-admin-routed-channel-mention",
+            "<@U-BOT> help in channel",
             "1710000000.000050",
         );
         post_signed_slack_event(&mounts.events, &body).await;
@@ -961,45 +1067,367 @@ mod tests {
 
         let history = wait_for_slack_thread_history_with_owner(
             &runtime,
-            Some(UserId::new(USER).expect("user")),
+            Some(UserId::new(SHARED_SUBJECT).expect("shared subject")),
         )
         .await;
         let accepted_message = history
             .messages
             .iter()
-            .find(|message| message.content.as_deref() == Some("help with fallback"))
-            .expect("fallback shared Slack app mention message is present");
-        let run_id = TurnRunId::parse(
-            accepted_message
-                .turn_run_id
-                .as_deref()
-                .expect("accepted Slack message should carry submitted run id"),
-        )
-        .expect("valid submitted run id");
-        let run_state = runtime
-            .webui_turn_coordinator()
-            .get_run_state(GetRunStateRequest {
-                scope: TurnScope::new_with_owner(
-                    TenantId::new(TENANT).expect("tenant"),
-                    Some(AgentId::new(AGENT).expect("agent")),
-                    Some(ProjectId::new(PROJECT).expect("project")),
-                    accepted_message.thread_id.clone(),
-                    Some(UserId::new(USER).expect("user")),
-                ),
-                run_id,
-            })
-            .await
-            .expect("read fallback channel mention run state");
+            .find(|message| message.content.as_deref() == Some("help in channel"))
+            .expect("accepted Slack app mention message is present under assigned subject");
         assert_eq!(
-            run_state.status,
-            TurnStatus::Completed,
-            "fallback channel mention run failed: {:?}",
-            run_state.failure
+            accepted_message.source_binding_id.as_deref(),
+            Some(
+                "adapter:8:slack_v2;installation:17:install_host_beta;agent:16:agent:slack-host;project:18:project:slack-host;space:6:T0HOST;conversation:6:C0HOST;topic:17:1710000000.000050;"
+            )
         );
-        let final_reply = wait_for_slack_post_message(&egress, "ok").await;
-        assert_eq!(final_reply["channel"], "C0HOST");
-        assert_eq!(final_reply["text"], "ok");
-        assert_eq!(final_reply["thread_ts"], "1710000000.000050");
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn slack_channel_route_admin_rejects_unassigned_channel_mention() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .expect("mounts");
+
+        let body = app_mention_event_body_with(
+            "Ev-host-beta-unassigned-channel-mention",
+            "<@U-BOT> help in unassigned channel",
+            "1710000000.000060",
+        );
+        post_signed_slack_event(&mounts.events, &body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+        assert_no_slack_threads_for_owner(
+            &runtime,
+            Some(UserId::new(SHARED_SUBJECT).expect("shared subject")),
+        )
+        .await;
+        assert!(egress.post_message_bodies_with_text("ok").is_empty());
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn slack_allowed_channels_are_reachable_through_webui_v2_app() {
+        let (runtime, _root) = runtime().await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .expect("mounts");
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Visible,
+        )
+        .expect("webui bundle");
+        let app = webui_v2_app(
+            bundle,
+            WebuiServeConfig::new(
+                TenantId::new(TENANT).expect("tenant"),
+                Arc::new(OperatorTokenAuthenticator),
+                Vec::new(),
+            )
+            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+            .with_slack_channel_routes(mounts.channel_routes),
+        )
+        .expect("webui app");
+
+        let save = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"channel_ids":["C0HOST","C0OPS"]}"#))
+                    .expect("save request builds"),
+            )
+            .await
+            .expect("save route responds");
+        assert_eq!(save.status(), StatusCode::OK);
+        let save_body = axum::body::to_bytes(save.into_body(), 64 * 1024)
+            .await
+            .expect("save body");
+        let save_body: serde_json::Value = serde_json::from_slice(&save_body).expect("save json");
+        assert_eq!(save_body["channels"].as_array().expect("channels").len(), 2);
+        assert_ne!(
+            save_body["channels"][0]["subject_user_id"],
+            save_body["channels"][1]["subject_user_id"],
+            "allowed API should assign one tenant-scoped subject per channel"
+        );
+
+        let list = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .body(Body::empty())
+                    .expect("list request builds"),
+            )
+            .await
+            .expect("list route responds");
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list.into_body(), 64 * 1024)
+            .await
+            .expect("list body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("list json");
+        assert_eq!(
+            body["channels"],
+            serde_json::json!([
+                {
+                    "channel_id":"C0HOST",
+                    "subject_user_id": save_body["channels"][0]["subject_user_id"].clone()
+                },
+                {
+                    "channel_id":"C0OPS",
+                    "subject_user_id": save_body["channels"][1]["subject_user_id"].clone()
+                }
+            ])
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn slack_channel_route_admin_is_reachable_through_webui_v2_app() {
+        let (runtime, _root) = runtime().await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .expect("mounts");
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Visible,
+        )
+        .expect("webui bundle");
+        let app = webui_v2_app(
+            bundle,
+            WebuiServeConfig::new(
+                TenantId::new(TENANT).expect("tenant"),
+                Arc::new(OperatorTokenAuthenticator),
+                Vec::new(),
+            )
+            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+            .with_slack_channel_routes(mounts.channel_routes),
+        )
+        .expect("webui app");
+
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"channel_id":"C0HOST","subject_user_id":"{SHARED_SUBJECT}"}}"#
+                    )))
+                    .expect("unauthenticated request builds"),
+            )
+            .await
+            .expect("unauthenticated route responds");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let empty_list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .body(Body::empty())
+                    .expect("empty list request builds"),
+            )
+            .await
+            .expect("empty list route responds");
+        assert_eq!(empty_list.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(empty_list.into_body(), 64 * 1024)
+            .await
+            .expect("empty list body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("empty list json");
+        assert_eq!(body["routes"], serde_json::json!([]));
+        assert_eq!(body["next_cursor"], serde_json::Value::Null);
+
+        let upsert = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"channel_id":"C0HOST","subject_user_id":"{SHARED_SUBJECT}"}}"#
+                    )))
+                    .expect("upsert request builds"),
+            )
+            .await
+            .expect("upsert route responds");
+        assert_eq!(upsert.status(), StatusCode::OK);
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .body(Body::empty())
+                    .expect("list request builds"),
+            )
+            .await
+            .expect("list route responds");
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list.into_body(), 64 * 1024)
+            .await
+            .expect("list body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("list json");
+        assert_eq!(body["routes"][0]["channel_id"], "C0HOST");
+        assert_eq!(body["routes"][0]["subject_user_id"], SHARED_SUBJECT);
+
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"channel_id":"C0HOST"}"#))
+                    .expect("delete request builds"),
+            )
+            .await
+            .expect("delete route responds");
+        assert_eq!(delete.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(delete.into_body(), 64 * 1024)
+            .await
+            .expect("delete body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("delete json");
+        assert_eq!(body["deleted"], true);
+
+        let list_after_delete = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .body(Body::empty())
+                    .expect("list request builds"),
+            )
+            .await
+            .expect("list route responds");
+        assert_eq!(list_after_delete.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list_after_delete.into_body(), 64 * 1024)
+            .await
+            .expect("list body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("list json");
+        assert_eq!(body["routes"], serde_json::json!([]));
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn slack_channel_routes_are_not_mounted_for_non_operator_authenticator() {
+        let (runtime, _root) = runtime().await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .expect("mounts");
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Hidden,
+        )
+        .expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new(USER).expect("user"),
+            Some(AgentId::new(AGENT).expect("agent")),
+            Some(ProjectId::new(PROJECT).expect("project")),
+        );
+        let connectable = bundle
+            .api
+            .list_connectable_channels(caller)
+            .await
+            .expect("connectable channels");
+        assert!(
+            connectable
+                .channels
+                .iter()
+                .any(|channel| channel.strategy == RebornChannelConnectStrategy::InboundProofCode),
+            "non-operator WebUI should still advertise personal Slack pairing"
+        );
+        assert!(
+            connectable
+                .channels
+                .iter()
+                .all(|channel| channel.strategy
+                    != RebornChannelConnectStrategy::AdminManagedChannels),
+            "non-operator WebUI must not advertise Slack admin channel management"
+        );
+        let app = webui_v2_app(
+            bundle,
+            WebuiServeConfig::new(
+                TenantId::new(TENANT).expect("tenant"),
+                Arc::new(MultiUserTokenAuthenticator),
+                Vec::new(),
+            )
+            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+            .with_slack_channel_routes(mounts.channel_routes),
+        )
+        .expect("webui app");
+
+        for (method, uri, body) in [
+            ("GET", WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, ""),
+            (
+                "PUT",
+                WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+                r#"{"channel_id":"C0HOST","subject_user_id":"user:slack-shared-subject"}"#,
+            ),
+            (
+                "DELETE",
+                WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+                r#"{"channel_id":"C0HOST"}"#,
+            ),
+            ("GET", WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, ""),
+            (
+                "PUT",
+                WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
+                r#"{"channel_ids":["C0HOST"]}"#,
+            ),
+        ] {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", "Bearer operator-token");
+            if method != "GET" {
+                builder = builder.header("content-type", "application/json");
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    builder
+                        .body(Body::from(body.to_string()))
+                        .expect("request builds"),
+                )
+                .await
+                .expect("route responds");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{method} route must not be mounted for non-operator auth"
+            );
+        }
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
@@ -1178,6 +1606,24 @@ mod tests {
         .expect("valid config")
     }
 
+    fn config_without_channel_routes() -> SlackHostBetaConfig {
+        SlackHostBetaConfig::new(SlackHostBetaConfigInput {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            installation_id: INSTALLATION.to_string(),
+            team_id: SlackTeamId::new(TEAM),
+            api_app_id: Some(API_APP.to_string()),
+            slack_user_id: Some(SLACK_USER.to_string()),
+            user_id: UserId::new(USER).expect("user"),
+            shared_subject_user_id: Some(UserId::new(SHARED_SUBJECT).expect("shared subject")),
+            channel_routes: Vec::new(),
+            signing_secret: SecretString::from(SECRET),
+            bot_token: SecretString::from("xoxb-host-token"),
+        })
+        .expect("valid config")
+    }
+
     async fn post_signed_slack_event(mount: &PublicRouteMount, body: &str) {
         let timestamp = current_unix_timestamp();
         let response = mount
@@ -1270,6 +1716,33 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    async fn assert_no_slack_threads_for_owner(
+        runtime: &RebornRuntime,
+        owner_user_id: Option<UserId>,
+    ) {
+        let thread_service = runtime.webui_thread_service();
+        let scope = ThreadScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            owner_user_id,
+            mission_id: None,
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let threads = thread_service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope,
+                limit: Some(1),
+                cursor: None,
+            })
+            .await
+            .expect("list Slack-created threads");
+        assert!(
+            threads.threads.is_empty(),
+            "unexpected Slack-created thread"
+        );
     }
 
     fn current_unix_timestamp() -> u64 {

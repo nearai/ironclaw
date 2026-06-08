@@ -559,6 +559,114 @@ fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWork
     }
 }
 
+/// Fold legacy pre-#4381 WebUI `user_identities` rows into the canonical
+/// identity store. The old store wrote those rows into the same libSQL
+/// substrate; reading that SQL table is a substrate-level concern handled
+/// here in the host layer (not the identity crate), then each row is bound
+/// into the filesystem-backed store so an existing SSO user keeps their
+/// `UserId` across upgrade. Idempotent (bind re-points to the same user) and
+/// a no-op when the legacy table is absent (fresh installs).
+#[cfg(feature = "webui-v2-beta")]
+async fn fold_legacy_webui_identities<R>(
+    db: &libsql::Database,
+    tenant_id: &TenantId,
+    store: &R,
+) -> Result<(), ironclaw_reborn_identity::RebornIdentityError>
+where
+    R: ironclaw_reborn_identity::RebornIdentityResolver + ?Sized,
+{
+    use ironclaw_reborn_identity::{
+        ExternalSubjectId, ProviderKind, RebornIdentityError, ResolveExternalIdentity, SurfaceKind,
+    };
+
+    fn backend(error: libsql::Error) -> RebornIdentityError {
+        RebornIdentityError::Backend(error.to_string())
+    }
+    fn invalid_key(error: ironclaw_reborn_identity::IdentityKeyError) -> RebornIdentityError {
+        RebornIdentityError::Backend(error.to_string())
+    }
+
+    let conn = db.connect().map_err(backend)?;
+    // Scope the existence-check cursor so it is dropped (read lock released)
+    // before any write; a lingering open cursor would block the
+    // filesystem-backed writes below with `database is locked`.
+    let legacy_table_exists = {
+        let mut table = conn
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'user_identities'",
+                (),
+            )
+            .await
+            .map_err(backend)?;
+        table.next().await.map_err(backend)?.is_some()
+    };
+    if !legacy_table_exists {
+        return Ok(());
+    }
+
+    // Drain the read cursor fully BEFORE writing: the store's writes go
+    // through a different libSQL connection on the same file, and an open
+    // read cursor here would block them with `database is locked`.
+    //
+    // Carry the verified-email fields too: the legacy WebUI store recorded
+    // `email` / `email_verified`, and dropping them on migration would leave
+    // the canonical verified-email index unseeded. A migrated Google user
+    // would keep their id for the same provider/subject, but a later GitHub
+    // login with the same verified email would find no index and mint a
+    // second user — a permanent split. `adopt_migrated_identity` preserves
+    // both the user id and the verified-email linkage.
+    //
+    // This intentionally GRANDFATHERS each row's `email_verified` as recorded
+    // under the policy in force when the row was written; the one-time fold
+    // does NOT re-validate the legacy email against the CURRENT operator
+    // allowlist. That is safe because admission is enforced per login, not
+    // per index: every live SSO login is gated by `WebuiUserDirectory` against
+    // the current allowed-email-domains BEFORE the resolver is consulted, so a
+    // grandfathered index for a domain the operator has since removed is never
+    // reached (the login is rejected at admission). Re-gating the migration on
+    // the current allowlist would need the allowlist plumbed into this
+    // substrate-level fold; admission already bounds exploitability, so the
+    // migration faithfully preserves prior verified-email links instead.
+    let mut legacy = Vec::new();
+    let mut rows = conn
+        .query(
+            "SELECT provider, provider_user_id, user_id, email, email_verified \
+             FROM user_identities",
+            (),
+        )
+        .await
+        .map_err(backend)?;
+    while let Some(row) = rows.next().await.map_err(backend)? {
+        let provider: String = row.get(0).map_err(backend)?;
+        let subject: String = row.get(1).map_err(backend)?;
+        let user: String = row.get(2).map_err(backend)?;
+        let email: Option<String> = row.get(3).map_err(backend)?;
+        // Legacy column is an INTEGER (0/1); read as i64 so a NULL or odd
+        // encoding fails loud rather than silently coercing to unverified.
+        let email_verified: i64 = row.get(4).map_err(backend)?;
+        legacy.push((provider, subject, user, email, email_verified != 0));
+    }
+    drop(rows);
+    drop(conn);
+
+    for (provider, subject, user, email, email_verified) in legacy {
+        let identity = ResolveExternalIdentity {
+            tenant_id: tenant_id.clone(),
+            surface_kind: SurfaceKind::Oauth,
+            provider_kind: ProviderKind::new(provider).map_err(invalid_key)?,
+            provider_instance_id: None,
+            external_subject_id: ExternalSubjectId::new(subject).map_err(invalid_key)?,
+            email,
+            email_verified,
+            display_name: None,
+        };
+        let user_id = UserId::new(user)
+            .map_err(|error| RebornIdentityError::InvalidUserId(error.to_string()))?;
+        store.adopt_migrated_identity(identity, &user_id).await?;
+    }
+    Ok(())
+}
+
 impl RebornRuntime {
     /// Snapshot of the substrate facades produced by `build_reborn_services`.
     /// Exposed for diagnostics / readiness reporting; **not** for traffic.
@@ -663,6 +771,50 @@ impl RebornRuntime {
         &self,
     ) -> Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>> {
         self.trigger_conversation_pairing.as_ref().map(Arc::clone)
+    }
+
+    /// Open the canonical Reborn identity resolver on the runtime's existing
+    /// local-dev libSQL substrate handle, running the store's idempotent
+    /// schema migrations plus the one-time legacy WebUI identity fold under
+    /// `tenant_id`. Rides the same `reborn-local-dev.db` handle the runtime
+    /// already owns rather than opening a second handle to that file (the
+    /// host filesystem abstraction owns the substrate, not the caller).
+    /// Returns `None` when the runtime was built without a local-runtime
+    /// substrate (production-shape profiles not yet wired), so callers fail
+    /// closed.
+    #[cfg(feature = "webui-v2-beta")]
+    pub async fn open_reborn_identity_resolver(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Option<
+        Result<
+            Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>,
+            ironclaw_reborn_identity::RebornIdentityError,
+        >,
+    > {
+        let local = self.services.local_runtime.as_ref()?;
+        // Build the store on the host scoped filesystem (same substrate
+        // boundary as every other durable store), scoped by the runtime-owner
+        // caller identity. Data is partitioned by tenant in the record path.
+        let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+            Arc::clone(&local.identity_filesystem),
+            self.thread_scope.tenant_id.clone(),
+            self.actor_user_id.clone(),
+            self.thread_scope.agent_id.clone(),
+            self.thread_scope.project_id.clone(),
+        );
+        // One-time legacy fold: the pre-#4381 WebUI store wrote `user_identities`
+        // rows into the same libSQL substrate. Reading that SQL table is a
+        // substrate-level concern, so it lives here in the host layer (not the
+        // identity crate) and binds each row into the filesystem-backed store.
+        if let Err(err) =
+            fold_legacy_webui_identities(&local.identity_substrate_db, tenant_id, &store).await
+        {
+            return Some(Err(err));
+        }
+        Some(Ok(
+            Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>
+        ))
     }
 
     pub(crate) fn webui_thread_service(&self) -> Arc<dyn SessionThreadService> {
@@ -2175,12 +2327,11 @@ pub(crate) struct RebornLlmReloadParts {
 
 #[cfg(feature = "root-llm-provider")]
 async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, RebornRuntimeError> {
-    let model = llm.model().to_string();
     let session = ironclaw_llm::create_session_manager(llm.config.session.clone()).await;
     let raw = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
-    wrap_swappable_gateway(raw, Some(model), session)
+    wrap_swappable_gateway(raw, session)
 }
 
 /// Cold-boot gateway: no LLM configured yet. Wraps a placeholder provider (which
@@ -2192,7 +2343,7 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
     let raw: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(PlaceholderLlmProvider);
-    wrap_swappable_gateway(raw, None, session)
+    wrap_swappable_gateway(raw, session)
 }
 
 /// Wrap a raw provider in a [`SwappableLlmProvider`] + reload handle and build
@@ -2201,7 +2352,6 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
 #[cfg(feature = "root-llm-provider")]
 fn wrap_swappable_gateway(
     raw: Arc<dyn ironclaw_llm::LlmProvider>,
-    model: Option<String>,
     session: Arc<ironclaw_llm::SessionManager>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
@@ -2215,7 +2365,7 @@ fn wrap_swappable_gateway(
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
     })?;
-    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, model);
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
     let gateway = LlmProviderModelGateway::new(provider, policy.clone());
     Ok(LlmGatewayBundle {
         gateway: Arc::new(gateway),
@@ -2370,10 +2520,10 @@ mod tests {
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
         LifecycleReadinessBlocker, RebornExtensionCredentialSetup, RebornServicesErrorCode,
-        RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-        WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
-        WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-        approval_gate_ref,
+        RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
+        RebornSubmitTurnResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
+        WebUiListAutomationsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+        WebUiSetupExtensionRequest, approval_gate_ref,
     };
     use ironclaw_run_state::ApprovalRequestStore;
     use ironclaw_skills::SkillTrust;
@@ -2411,6 +2561,17 @@ mod tests {
     };
 
     const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+    async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
+        runtime.worker_cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !runtime.worker_handle.is_finished() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("turn-runner worker should stop before manual turn-state test");
+    }
 
     fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
         EffectiveRuntimePolicy {
@@ -2800,10 +2961,148 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "root-llm-provider")]
+    #[derive(Debug)]
+    struct RecordingLlmProvider {
+        active_model: StdMutex<String>,
+        requests: StdMutex<Vec<Option<String>>>,
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    impl RecordingLlmProvider {
+        fn new(active_model: &str) -> Self {
+            Self {
+                active_model: StdMutex::new(active_model.to_string()),
+                requests: StdMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[async_trait]
+    impl ironclaw_llm::LlmProvider for RecordingLlmProvider {
+        fn model_name(&self) -> &str {
+            "recording-provider"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, ironclaw_llm::LlmError> {
+            self.requests
+                .lock()
+                .expect("recording provider request lock poisoned")
+                .push(request.model);
+            Ok(ironclaw_llm::CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, ironclaw_llm::LlmError> {
+            self.requests
+                .lock()
+                .expect("recording provider request lock poisoned")
+                .push(request.model);
+            Ok(ironclaw_llm::ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        fn active_model_name(&self) -> String {
+            self.active_model
+                .lock()
+                .expect("recording provider active-model lock poisoned")
+                .clone()
+        }
+
+        fn set_model(&self, model: &str) -> Result<(), ironclaw_llm::LlmError> {
+            *self
+                .active_model
+                .lock()
+                .expect("recording provider active-model lock poisoned") = model.to_string();
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn swappable_gateway_uses_current_active_model_for_requests() {
+        let provider = Arc::new(RecordingLlmProvider::new("boot-model"));
+        let raw: Arc<dyn ironclaw_llm::LlmProvider> = provider.clone();
+        let session =
+            ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
+        let bundle = super::wrap_swappable_gateway(raw, session).expect("gateway bundle");
+
+        bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await
+            .expect("first request");
+        bundle
+            .reload
+            .reload_handle
+            .primary_provider()
+            .set_model("reloaded-model")
+            .expect("set active model");
+        bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await
+            .expect("second request");
+
+        let requests = provider
+            .requests
+            .lock()
+            .expect("recording provider request lock poisoned");
+        assert_eq!(
+            *requests,
+            vec![
+                Some("boot-model".to_string()),
+                Some("reloaded-model".to_string())
+            ],
+            "production gateway must not keep sending the model selected at boot"
+        );
+    }
+
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
         format!(
             "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
         )
+    }
+
+    fn user_skill_dir(
+        storage_root: &std::path::Path,
+        tenant_id: &str,
+        user_id: &str,
+        name: &str,
+    ) -> std::path::PathBuf {
+        storage_root
+            .join("tenants")
+            .join(tenant_id)
+            .join("users")
+            .join(user_id)
+            .join("skills")
+            .join(name)
     }
 
     fn skill_md_with_setup_marker(
@@ -3324,6 +3623,7 @@ mod tests {
         .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
         let conversation = runtime.new_conversation().await.expect("conversation");
         let parent_scope = runtime.turn_scope_for(&conversation.0);
         let actor = TurnActor::new(runtime.actor_user_id.clone());
@@ -3393,6 +3693,7 @@ mod tests {
                 result_ref: result_ref.as_str().to_string(),
                 safe_summary: ToolResultSafeSummary::new("subagent spawned").unwrap(),
                 provider_call: None,
+                model_observation: None,
             })
             .await
             .expect("parent result reference seeded");
@@ -3611,7 +3912,7 @@ mod tests {
             requests: Arc::clone(&requests),
         });
         let skill_source = Arc::new(StaticSkillContextSource::new(vec![
-            HostSkillContextCandidate::new(
+            HostSkillContextCandidate::loaded(
                 skill_md(
                     "review-helper",
                     "review helper description",
@@ -3696,7 +3997,7 @@ mod tests {
             requests: Arc::clone(&requests),
         });
         let skill_source = Arc::new(StaticSkillContextSource::new(vec![
-            HostSkillContextCandidate::new(
+            HostSkillContextCandidate::loaded(
                 skill_md(
                     "configured-helper",
                     "configured helper description",
@@ -3777,9 +4078,15 @@ mod tests {
             ),
         )
         .expect("write system skill");
-        std::fs::create_dir_all(storage_root.join("skills/local-helper")).expect("user skill dir");
+        let local_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-filesystem-skill-tenant",
+            "runtime-filesystem-skill-owner",
+            "local-helper",
+        );
+        std::fs::create_dir_all(&local_helper_dir).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/local-helper/SKILL.md"),
+            local_helper_dir.join("SKILL.md"),
             skill_md(
                 "local-helper",
                 "local helper description",
@@ -3861,13 +4168,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_runtime_backfills_legacy_owner_skill_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("skills/legacy-helper"))
+            .expect("legacy skill dir");
+        std::fs::write(
+            storage_root.join("skills/legacy-helper/SKILL.md"),
+            skill_md(
+                "legacy-helper",
+                "legacy helper description",
+                "LEGACY_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write legacy helper skill");
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-legacy-skill-owner", storage_root.clone())
+                .with_runtime_policy(local_dev_runtime_policy()),
+        );
+        let runtime = build_reborn_runtime(input).await.expect("runtime");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+
+        let result = runtime
+            .execute_skill_message(&conversation, "$legacy-helper")
+            .await
+            .expect("execute skill message");
+
+        assert_eq!(result.plan.activations().len(), 1);
+        assert_eq!(result.plan.activations()[0].name, "legacy-helper");
+        assert!(
+            storage_root
+                .join(
+                    "tenants/reborn-cli/users/runtime-legacy-skill-owner/skills/legacy-helper/SKILL.md"
+                )
+                .exists()
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
     async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/asset-helper/references"))
+        let asset_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-skill-exec-tenant",
+            "runtime-skill-exec-owner",
+            "asset-helper",
+        );
+        std::fs::create_dir_all(asset_helper_dir.join("references"))
             .expect("asset skill references dir");
         std::fs::write(
-            storage_root.join("skills/asset-helper/SKILL.md"),
+            asset_helper_dir.join("SKILL.md"),
             skill_md(
                 "asset-helper",
                 "asset helper description",
@@ -3876,7 +4230,7 @@ mod tests {
         )
         .expect("write asset helper skill");
         std::fs::write(
-            storage_root.join("skills/asset-helper/references/policy.md"),
+            asset_helper_dir.join("references/policy.md"),
             "asset helper policy",
         )
         .expect("write asset helper policy");
@@ -3978,9 +4332,15 @@ mod tests {
             ),
         )
         .expect("write system skill");
-        std::fs::create_dir_all(storage_root.join("skills/code-review")).expect("user skill dir");
+        let user_code_review_dir = user_skill_dir(
+            &storage_root,
+            "runtime-ambiguous-skill-tenant",
+            "runtime-ambiguous-skill-owner",
+            "code-review",
+        );
+        std::fs::create_dir_all(&user_code_review_dir).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/code-review/SKILL.md"),
+            user_code_review_dir.join("SKILL.md"),
             skill_md(
                 "code-review",
                 "user review description",
@@ -4035,10 +4395,16 @@ mod tests {
     async fn local_dev_runtime_suppresses_explicit_setup_skill_when_workspace_marker_exists() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/marker-helper")).expect("user skill dir");
+        let marker_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-setup-marker-tenant",
+            "runtime-setup-marker-owner",
+            "marker-helper",
+        );
+        std::fs::create_dir_all(&marker_helper_dir).expect("user skill dir");
         std::fs::create_dir_all(storage_root.join("workspace/markers")).expect("marker dir");
         std::fs::write(
-            storage_root.join("skills/marker-helper/SKILL.md"),
+            marker_helper_dir.join("SKILL.md"),
             skill_md_with_setup_marker(
                 "marker-helper",
                 "marker helper description",
@@ -4110,9 +4476,15 @@ mod tests {
     async fn local_dev_runtime_activates_setup_skill_when_workspace_marker_is_absent() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/marker-helper")).expect("user skill dir");
+        let marker_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-setup-marker-absent-tenant",
+            "runtime-setup-marker-absent-owner",
+            "marker-helper",
+        );
+        std::fs::create_dir_all(&marker_helper_dir).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/marker-helper/SKILL.md"),
+            marker_helper_dir.join("SKILL.md"),
             skill_md_with_setup_marker(
                 "marker-helper",
                 "marker helper description",
@@ -4222,9 +4594,15 @@ mod tests {
     async fn local_dev_runtime_skips_invalid_filesystem_skill_before_model_call() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/bad-helper")).expect("bad skill dir");
+        let bad_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-bad-skill-tenant",
+            "runtime-bad-skill-owner",
+            "bad-helper",
+        );
+        std::fs::create_dir_all(&bad_helper_dir).expect("bad skill dir");
         std::fs::write(
-            storage_root.join("skills/bad-helper/SKILL.md"),
+            bad_helper_dir.join("SKILL.md"),
             skill_md(
                 "different-name",
                 "bad helper description",
@@ -4572,12 +4950,72 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    #[tokio::test]
+    async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui outbound ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-outbound-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-outbound-tenant".to_string(),
+            agent_id: "runtime-webui-outbound-agent".to_string(),
+            source_binding_id: "runtime-webui-outbound-source".to_string(),
+            reply_target_binding_id: "runtime-webui-outbound-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-outbound-tenant").unwrap(),
+            UserId::new("runtime-webui-outbound-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-outbound-agent").unwrap()),
+            None,
+        );
+
+        let cleared = bundle
+            .api
+            .set_outbound_preferences(
+                caller.clone(),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: None,
+                },
+            )
+            .await
+            .expect("outbound preference clear uses composed facade");
+        assert!(cleared.final_reply_target.is_none());
+
+        let targets = bundle
+            .api
+            .list_outbound_delivery_targets(caller)
+            .await
+            .expect("outbound target listing uses composed facade");
+        assert!(targets.targets.is_empty());
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
     #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn webui_route_rejects_list_automations_without_agent_binding() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
-        use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
+        use ironclaw_webui_v2::{
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State,
+            webui_v2_router,
+        };
         use tower::ServiceExt;
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -4613,8 +5051,12 @@ mod tests {
             None,
             None,
         );
-        let router = webui_v2_router(WebUiV2State::new(bundle.api))
-            .layer(axum::Extension(caller_without_agent));
+        let router = webui_v2_router(WebUiV2State::new(
+            bundle.api,
+            WebUiV2Capabilities::default(),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(caller_without_agent));
 
         let response = router
             .oneshot(
@@ -4628,6 +5070,199 @@ mod tests {
             .expect("route response");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn open_reborn_identity_resolver_migrates_legacy_webui_identities_through_runtime() {
+        use ironclaw_reborn_identity::{
+            ExternalSubjectId, ProviderKind, ResolveExternalIdentity, SurfaceKind,
+        };
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-identity-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-identity-tenant".to_string(),
+            agent_id: "runtime-identity-agent".to_string(),
+            source_binding_id: "runtime-identity-source".to_string(),
+            reply_target_binding_id: "runtime-identity-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let tenant = TenantId::new("runtime-identity-tenant").expect("tenant");
+
+        // Seed a legacy pre-#4381 WebUI identity into the SAME substrate DB the
+        // runtime owns, exactly as the old store wrote it.
+        let substrate = Arc::clone(
+            &runtime
+                .services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime substrate")
+                .identity_substrate_db,
+        );
+        let seed = substrate.connect().expect("substrate connection");
+        seed.execute_batch(
+            "CREATE TABLE user_identities (\
+                 provider TEXT NOT NULL, provider_user_id TEXT NOT NULL, \
+                 user_id TEXT NOT NULL, email TEXT, email_verified INTEGER NOT NULL, \
+                 created_at TEXT NOT NULL, \
+                 PRIMARY KEY (provider, provider_user_id));",
+        )
+        .await
+        .expect("seed legacy schema");
+        seed.execute(
+            "INSERT INTO user_identities \
+                 (provider, provider_user_id, user_id, email, email_verified, created_at) \
+                 VALUES ('google', 'g-legacy', 'legacy-runtime-user', 'legacy@x.com', 1, \
+                     '2026-01-01T00:00:00Z')",
+            (),
+        )
+        .await
+        .expect("seed legacy identity");
+        // Drop the raw seed connection before the fold runs: production never
+        // holds a second raw handle on the substrate, and an idle extra
+        // connection here would contend with the filesystem-backed writes.
+        drop(seed);
+
+        // The production accessor `serve` relies on: it opens the resolver on
+        // the runtime-owned substrate handle and runs the legacy fold, so the
+        // returning legacy user must resolve to their original UserId rather
+        // than being re-minted.
+        let resolver = runtime
+            .open_reborn_identity_resolver(&tenant)
+            .await
+            .expect("runtime carries a local-runtime substrate")
+            .expect("resolver opens");
+        let resolved = resolver
+            .resolve_or_create(ResolveExternalIdentity {
+                tenant_id: tenant.clone(),
+                surface_kind: SurfaceKind::Oauth,
+                provider_kind: ProviderKind::new("google").expect("provider"),
+                provider_instance_id: None,
+                external_subject_id: ExternalSubjectId::new("g-legacy").expect("subject"),
+                email: Some("legacy@x.com".to_string()),
+                email_verified: true,
+                display_name: None,
+            })
+            .await
+            .expect("resolve");
+        assert_eq!(
+            resolved.as_str(),
+            "legacy-runtime-user",
+            "a returning legacy SSO user keeps their UserId through the runtime accessor"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn open_reborn_identity_resolver_migrates_legacy_verified_email_linking() {
+        use ironclaw_reborn_identity::{
+            ExternalSubjectId, ProviderKind, ResolveExternalIdentity, SurfaceKind,
+        };
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-identity-link-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-identity-link-tenant".to_string(),
+            agent_id: "runtime-identity-link-agent".to_string(),
+            source_binding_id: "runtime-identity-link-source".to_string(),
+            reply_target_binding_id: "runtime-identity-link-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let tenant = TenantId::new("runtime-identity-link-tenant").expect("tenant");
+
+        // Seed a legacy pre-#4381 WebUI Google identity with a VERIFIED email.
+        let substrate = Arc::clone(
+            &runtime
+                .services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime substrate")
+                .identity_substrate_db,
+        );
+        let seed = substrate.connect().expect("substrate connection");
+        seed.execute_batch(
+            "CREATE TABLE user_identities (\
+                 provider TEXT NOT NULL, provider_user_id TEXT NOT NULL, \
+                 user_id TEXT NOT NULL, email TEXT, email_verified INTEGER NOT NULL, \
+                 created_at TEXT NOT NULL, \
+                 PRIMARY KEY (provider, provider_user_id));",
+        )
+        .await
+        .expect("seed legacy schema");
+        seed.execute(
+            "INSERT INTO user_identities \
+                 (provider, provider_user_id, user_id, email, email_verified, created_at) \
+                 VALUES ('google', 'g-legacy', 'legacy-link-user', 'shared@x.com', 1, \
+                     '2026-01-01T00:00:00Z')",
+            (),
+        )
+        .await
+        .expect("seed legacy identity");
+        drop(seed);
+
+        // The fold must seed the canonical verified-email index from the
+        // migrated row's verified email — not just preserve the per-subject id.
+        let resolver = runtime
+            .open_reborn_identity_resolver(&tenant)
+            .await
+            .expect("runtime carries a local-runtime substrate")
+            .expect("resolver opens");
+
+        // The upgrade case: a LATER login through a DIFFERENT OAuth provider
+        // with the SAME verified email must link to the migrated user instead
+        // of minting a second one.
+        let via_github = resolver
+            .resolve_or_create(ResolveExternalIdentity {
+                tenant_id: tenant.clone(),
+                surface_kind: SurfaceKind::Oauth,
+                provider_kind: ProviderKind::new("github").expect("provider"),
+                provider_instance_id: None,
+                external_subject_id: ExternalSubjectId::new("gh-new").expect("subject"),
+                email: Some("shared@x.com".to_string()),
+                email_verified: true,
+                display_name: None,
+            })
+            .await
+            .expect("resolve");
+        assert_eq!(
+            via_github.as_str(),
+            "legacy-link-user",
+            "a migrated verified legacy email must link a later different-provider login"
+        );
+
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
@@ -5086,9 +5721,15 @@ mod tests {
     async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/webui-helper")).expect("user skill dir");
+        let webui_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-webui-skill-tenant",
+            "runtime-webui-skill-user",
+            "webui-helper",
+        );
+        std::fs::create_dir_all(&webui_helper_dir).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/webui-helper/SKILL.md"),
+            webui_helper_dir.join("SKILL.md"),
             skill_md(
                 "webui-helper",
                 "webui helper description",
@@ -5185,7 +5826,7 @@ mod tests {
             .expect("webui-recorded skill context should load");
         let combined_skill_context = selected
             .iter()
-            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .map(|candidate| candidate.loaded_skill_md().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(selected.len(), 1);

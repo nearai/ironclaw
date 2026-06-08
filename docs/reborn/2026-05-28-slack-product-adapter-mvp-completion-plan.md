@@ -141,7 +141,7 @@ async fn slack_events_handler(request: HttpRequest) -> HttpResponse {
 
     spawn_reborn_task(async move {
         let parsed = slack_adapter.parse_inbound(verified_context, request.body).await?;
-        product_workflow.accept_inbound(parsed).await?;
+        product_workflow.submit_inbound(parsed).await?;
     });
 
     ack

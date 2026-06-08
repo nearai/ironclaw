@@ -268,6 +268,7 @@ pub struct AppendToolResultReferenceRequest {
     pub result_ref: String,
     pub safe_summary: ToolResultSafeSummary,
     pub provider_call: Option<ProviderToolCallReferenceEnvelope>,
+    pub model_observation: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

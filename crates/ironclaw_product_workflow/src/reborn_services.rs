@@ -4,7 +4,10 @@
 //! instead of reaching into turn coordination, thread stores, runtime lanes, DB
 //! stores, dispatchers, or capability hosts directly.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex as StdMutex, Weak},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -28,6 +31,7 @@ use ironclaw_turns::{
     TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 use crate::{
@@ -68,20 +72,29 @@ pub use types::{
     RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
-    RebornExtensionSetupSecret, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError> + Send + Sync;
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
+type ThreadOperationLocks = StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>;
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -113,6 +126,148 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
         Ok(RebornConnectableChannelListResponse {
             channels: self.channels.iter().cloned().collect(),
         })
+    }
+}
+
+#[async_trait]
+pub trait SkillsProductFacade: Send + Sync {
+    async fn list_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn search_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn install_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name, content);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn read_skill_content(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        let _ = (caller, name);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn update_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name, content);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn remove_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedSkillsProductFacade;
+
+impl UnsupportedSkillsProductFacade {
+    pub fn new_static() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl SkillsProductFacade for UnsupportedSkillsProductFacade {}
+
+#[async_trait]
+pub trait OutboundPreferencesProductFacade: Send + Sync {
+    /// Return the authenticated caller's scoped outbound preferences.
+    ///
+    /// Real implementations must scope stored preferences by the caller's
+    /// tenant/user identity. The Phase 1 unsupported implementation returns an
+    /// empty projection so read callers can treat "not configured yet" as a
+    /// stable state while mutation and target inventory remain fail-closed.
+    async fn get_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
+
+    /// Persist the caller's scoped outbound delivery preferences.
+    ///
+    /// Implementations must scope writes by the caller's tenant/user identity.
+    /// `RebornServices` installs `UnsupportedOutboundPreferencesProductFacade`
+    /// by default, which keeps Phase 1 mutation attempts fail-closed with a
+    /// non-retryable service-unavailable response until a real facade is wired.
+    async fn set_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
+
+    /// List delivery targets available to the authenticated caller.
+    ///
+    /// Implementations must scope target inventory by the caller's tenant/user
+    /// identity. `RebornServices` installs
+    /// `UnsupportedOutboundPreferencesProductFacade` by default, which keeps
+    /// Phase 1 target discovery fail-closed with a non-retryable
+    /// service-unavailable response until a real facade is wired.
+    async fn list_outbound_delivery_targets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError>;
+}
+
+#[derive(Debug)]
+pub struct UnsupportedOutboundPreferencesProductFacade;
+
+impl UnsupportedOutboundPreferencesProductFacade {
+    pub fn new_static() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductFacade {
+    async fn get_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Ok(RebornOutboundPreferencesResponse::default())
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(outbound_preferences_unavailable())
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        Err(outbound_preferences_unavailable())
     }
 }
 
@@ -270,6 +425,12 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiSendMessageRequest,
     ) -> Result<RebornSubmitTurnResponse, RebornServicesError>;
 
+    async fn delete_thread(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError>;
+
     async fn get_timeline(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -327,10 +488,78 @@ pub trait RebornServicesApi: Send + Sync {
         })
     }
 
+    /// Return the authenticated caller's scoped outbound preferences.
+    ///
+    /// Implementations must scope stored preferences by the caller's
+    /// tenant/user identity. Unsupported behavior belongs in
+    /// `UnsupportedOutboundPreferencesProductFacade`, not in trait defaults.
+    async fn get_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
+
+    /// Persist the authenticated caller's outbound delivery preference.
+    ///
+    /// Implementations must scope mutations by the caller's tenant/user
+    /// identity and fail closed when no writable outbound-preferences facade is
+    /// wired.
+    async fn set_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
+
+    /// List delivery targets available to the authenticated caller.
+    ///
+    /// Implementations must scope target inventory by the caller's tenant/user
+    /// identity and fail closed when no outbound target inventory facade is
+    /// wired.
+    async fn list_outbound_delivery_targets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError>;
+
     async fn list_extensions(
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError>;
+
+    async fn list_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError>;
+
+    async fn search_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError>;
+
+    async fn install_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
+
+    async fn read_skill_content(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError>;
+
+    async fn update_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
+
+    async fn remove_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
 
     async fn list_extension_registry(
         &self,
@@ -475,13 +704,16 @@ pub struct RebornServices {
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
+    skills_facade: Arc<dyn SkillsProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
+    outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
+    thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
 impl RebornServices {
@@ -497,13 +729,18 @@ impl RebornServices {
                 "reborn_lifecycle_facade_unwired",
             )),
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
+            skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
             connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
+            outbound_preferences_facade: Arc::new(
+                UnsupportedOutboundPreferencesProductFacade::new_static(),
+            ),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             extension_credentials: None,
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
+            thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -533,11 +770,27 @@ impl RebornServices {
         self
     }
 
+    pub fn with_skills_product_facade(
+        mut self,
+        skills_facade: Arc<dyn SkillsProductFacade>,
+    ) -> Self {
+        self.skills_facade = skills_facade;
+        self
+    }
+
     pub fn with_connectable_channels_facade(
         mut self,
         connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     ) -> Self {
         self.connectable_channels_facade = connectable_channels_facade;
+        self
+    }
+
+    pub fn with_outbound_preferences_facade(
+        mut self,
+        outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
+    ) -> Self {
+        self.outbound_preferences_facade = outbound_preferences_facade;
         self
     }
 
@@ -688,6 +941,7 @@ impl RebornServicesApi for RebornServices {
         };
 
         let (scope, thread_scope) = self.resolve_webui_thread_metadata(scope, &actor).await?;
+        let _thread_operation_guard = self.lock_thread_operation(&scope).await;
         let source_binding_id = webui_source_binding_id(&scope, &actor);
         let external_event_id = client_action_id.as_str().to_string();
 
@@ -846,6 +1100,27 @@ impl RebornServicesApi for RebornServices {
                 Err(map_turn_error(error))
             }
         }
+    }
+
+    async fn delete_thread(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let scope = caller.turn_scope(thread_id.clone());
+        let thread_scope = thread_scope_from_turn_scope(&scope, Some(caller.user_id.clone()))?;
+        let _thread_operation_guard = self.lock_thread_operation(&scope).await;
+        self.reject_delete_with_active_run(&scope, &thread_scope, &thread_id)
+            .await?;
+        self.thread_service
+            .delete_thread(&thread_scope, &thread_id)
+            .await
+            .map_err(map_ownership_probe_error)?;
+        Ok(RebornDeleteThreadResponse {
+            thread_id,
+            deleted: true,
+        })
     }
 
     async fn get_timeline(
@@ -1084,11 +1359,90 @@ impl RebornServicesApi for RebornServices {
             .await
     }
 
+    async fn get_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        self.outbound_preferences_facade
+            .get_outbound_preferences(caller)
+            .await
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        self.outbound_preferences_facade
+            .set_outbound_preferences(caller, request)
+            .await
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        self.outbound_preferences_facade
+            .list_outbound_delivery_targets(caller)
+            .await
+    }
+
     async fn list_extensions(
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
         extensions::list_extensions(self.lifecycle_facade.as_ref(), caller).await
+    }
+
+    async fn list_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        self.skills_facade.list_skills(caller).await
+    }
+
+    async fn search_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        self.skills_facade.search_skills(caller, query).await
+    }
+
+    async fn install_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade
+            .install_skill(caller, name, content)
+            .await
+    }
+
+    async fn read_skill_content(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        self.skills_facade.read_skill_content(caller, name).await
+    }
+
+    async fn update_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade.update_skill(caller, name, content).await
+    }
+
+    async fn remove_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade.remove_skill(caller, name).await
     }
 
     async fn list_extension_registry(
@@ -1272,8 +1626,76 @@ impl RebornServicesApi for RebornServices {
     }
 }
 
+impl RebornServices {
+    fn thread_operation_lock(&self, scope: &TurnScope) -> Arc<AsyncMutex<()>> {
+        let key = thread_operation_key(scope);
+        let mut locks = match self.thread_operation_locks.lock() {
+            Ok(locks) => locks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(AsyncMutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
+    }
+
+    async fn lock_thread_operation(&self, scope: &TurnScope) -> OwnedMutexGuard<()> {
+        self.thread_operation_lock(scope).lock_owned().await
+    }
+
+    async fn reject_delete_with_active_run(
+        &self,
+        scope: &TurnScope,
+        thread_scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), RebornServicesError> {
+        let history = self
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .map_err(map_timeline_probe_error)?;
+        let mut seen = HashSet::new();
+        for run_id in history
+            .messages
+            .iter()
+            .filter_map(|message| message.turn_run_id.as_deref())
+            .map(parse_persisted_turn_run_id)
+        {
+            let run_id = run_id?;
+            if !seen.insert(run_id) {
+                continue;
+            }
+            match self
+                .turn_coordinator
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+            {
+                Ok(state) if state.status.keeps_active_lock() => {
+                    return Err(delete_thread_busy());
+                }
+                Ok(_) | Err(TurnError::ScopeNotFound) => {}
+                Err(error) => return Err(map_turn_error(error)),
+            }
+        }
+        Ok(())
+    }
+}
+
 fn automation_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(true)
+}
+
+fn outbound_preferences_unavailable() -> RebornServicesError {
+    RebornServicesError::service_unavailable(false)
 }
 
 struct AcceptedWebUiMessage {
@@ -1808,6 +2230,10 @@ fn parse_run_id_field(
         })
 }
 
+fn parse_persisted_turn_run_id(value: &str) -> Result<TurnRunId, RebornServicesError> {
+    TurnRunId::parse(value).map_err(|_| RebornServicesError::internal_invariant())
+}
+
 fn accepted_message_ref(message_id: String) -> Result<AcceptedMessageRef, RebornServicesError> {
     AcceptedMessageRef::new(format!("msg:{message_id}")).map_err(|_| {
         RebornServicesError::from_status(RebornServicesErrorCode::Internal, 500, false)
@@ -1893,6 +2319,33 @@ fn legacy_webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> Strin
         ),
         segment("thread", scope.thread_id.as_str()),
         segment("actor", actor.user_id.as_str())
+    )
+}
+
+fn thread_operation_key(scope: &TurnScope) -> String {
+    format!(
+        "{}{}{}{}{}",
+        segment("tenant", scope.tenant_id.as_str()),
+        segment(
+            "agent",
+            scope.agent_id.as_ref().map(AgentId::as_str).unwrap_or("")
+        ),
+        segment(
+            "project",
+            scope
+                .project_id
+                .as_ref()
+                .map(ProjectId::as_str)
+                .unwrap_or("")
+        ),
+        segment("thread", scope.thread_id.as_str()),
+        segment(
+            "owner",
+            scope
+                .explicit_owner_user_id()
+                .map(UserId::as_str)
+                .unwrap_or("")
+        )
     )
 }
 
@@ -2096,6 +2549,15 @@ fn map_thread_error(error: SessionThreadError) -> RebornServicesError {
         | SessionThreadError::Deserialization(_)
         | SessionThreadError::Backend(_) => RebornServicesError::service_unavailable(true),
     }
+}
+
+fn delete_thread_busy() -> RebornServicesError {
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::Conflict,
+        RebornServicesErrorKind::Busy,
+        409,
+        false,
+    )
 }
 
 fn map_turn_error(error: TurnError) -> RebornServicesError {
