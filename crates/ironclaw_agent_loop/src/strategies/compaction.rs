@@ -194,16 +194,16 @@ impl ByteCapStrategy {
         let mut caps = BTreeMap::new();
         // spawn_subagent results can carry larger structured payloads.
         caps.insert(
-            CapabilityId::new("builtin.spawn_subagent").expect("builtin capability id"),
+            CapabilityId::new("builtin.spawn_subagent").expect("builtin capability id"), // safety: compile-time constant builtin id, structurally valid by construction
             48_000,
         );
         // http + web_fetch occasionally return large pages/JSON.
         caps.insert(
-            CapabilityId::new("builtin.http").expect("builtin capability id"),
+            CapabilityId::new("builtin.http").expect("builtin capability id"), // safety: compile-time constant builtin id, structurally valid by construction
             32_000,
         );
         caps.insert(
-            CapabilityId::new("builtin.web_fetch").expect("builtin capability id"),
+            CapabilityId::new("builtin.web_fetch").expect("builtin capability id"), // safety: compile-time constant builtin id, structurally valid by construction
             32_000,
         );
         Self {
