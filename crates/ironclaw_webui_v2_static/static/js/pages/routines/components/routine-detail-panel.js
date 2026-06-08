@@ -45,6 +45,7 @@ export function RoutineDetailPanel({
   onDeleteRoutine,
 }) {
   const navigate = useNavigate();
+  const t = useT();
 
   if (isLoading) {
     return html`
@@ -61,7 +62,7 @@ export function RoutineDetailPanel({
     return html`
       <${EmptyPanel}
         title=${t("routine.unavailable")}
-        description=${error?.message || "This routine no longer exists or is outside your access scope."}
+        description=${error?.message || t("routine.unavailableDesc")}
       />
     `;
   }

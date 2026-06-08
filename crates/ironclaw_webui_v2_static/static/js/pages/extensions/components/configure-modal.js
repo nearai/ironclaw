@@ -139,10 +139,10 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
                         disabled=${oauthMutation.isPending}
                       >
                         ${oauthMutation.isPending
-                          ? t("extensions.opening") || "Opening..."
+                          ? t("extensions.opening")
                           : secret.provided
-                            ? "Reconnect"
-                            : t("extensions.authorize") || "Authorize"}
+                            ? t("extensions.reconnect")
+                            : t("extensions.authorize")}
                       <//>
                     </div>
                   `

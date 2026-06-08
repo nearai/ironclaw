@@ -42,6 +42,7 @@ function presentationFor(state) {
 }
 
 function ThreadItem({ thread, isActive, presentation, onSelect, onDelete }) {
+  const t = useT();
   const activityIso = threadActivityIso(thread);
   const timeLabel = formatThreadActivityLabel(activityIso);
   const timeTitle = formatThreadActivityTooltip(activityIso);

@@ -29,6 +29,7 @@ function packageId(item) {
 
 /* Lightweight overflow menu. Real <button>s; closes on outside click. */
 function OverflowMenu({ actions, isBusy }) {
+  const t = useT();
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef(null);
 
