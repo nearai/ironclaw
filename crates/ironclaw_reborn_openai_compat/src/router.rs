@@ -14,6 +14,10 @@ use crate::handlers;
 
 #[derive(Clone, Default)]
 pub struct OpenAiCompatRouterState {
+    /// Wired by host composition when `openai-compat-beta` is active.
+    /// When `None`, chat completions requests return 501 fail-closed.
+    /// arch-exempt: optional Arc, genuinely optional by design; default
+    /// fail-closed behavior is intentional until host composition wires #4444.
     chat_completions: Option<Arc<OpenAiChatCompletionsWorkflow>>,
 }
 
