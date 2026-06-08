@@ -666,11 +666,11 @@ where
 {
     let alias = root_mount_alias(root);
     let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new(alias.as_str()).expect("root mount alias is valid"),
-        VirtualPath::new(alias).expect("root mount target is valid"),
+        MountAlias::new(alias.as_str()).expect("root mount alias is valid"), // safety: root_mount_alias returns "/" or a single absolute path segment from an existing ScopedPath.
+        VirtualPath::new(alias).expect("root mount target is valid"), // safety: root_mount_alias returns an absolute virtual path accepted by VirtualPath.
         MountPermissions::read_write_list_delete(),
     )])
-    .expect("root ledger mount view is valid");
+    .expect("root ledger mount view is valid"); // safety: the mount view contains one read-write grant with validated alias and target.
     Arc::new(ScopedFilesystem::with_fixed_view(filesystem, mounts))
 }
 
@@ -687,15 +687,15 @@ fn root_mount_alias(root: &ScopedPath) -> String {
 fn root_scope() -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("tenant:product-workflow-storage-root")
-            .expect("static tenant id is valid"),
+            .expect("static tenant id is valid"), // safety: static literal uses the validated tenant id grammar.
         user_id: UserId::new("user:product-workflow-storage-root")
-            .expect("static user id is valid"),
+            .expect("static user id is valid"), // safety: static literal uses the validated user id grammar.
         agent_id: Some(
-            AgentId::new("agent:product-workflow-storage-root").expect("static agent id is valid"),
+            AgentId::new("agent:product-workflow-storage-root").expect("static agent id is valid"), // safety: static literal uses the validated agent id grammar.
         ),
         project_id: Some(
             ProjectId::new("project:product-workflow-storage-root")
-                .expect("static project id is valid"),
+                .expect("static project id is valid"), // safety: static literal uses the validated project id grammar.
         ),
         mission_id: None,
         thread_id: None,
