@@ -49,9 +49,9 @@ progress/projection payloads and non-text modality defaults remain deferred.
 - The old `trigger-delivery-scoped-defaults` commit and phase worktrees are
   reference snapshots only. Do not blindly rebase or cherry-pick them.
 - The current branch payload should be semantically ported onto `main`:
-  preserve main's product-workflow preference facade and
-  `CommunicationPreferenceRepository::update_communication_preference` callback
-  API while adding scoped defaults and versioned repository operations.
+  migrate the current internal product-workflow preference calls onto scoped
+  versioned repository operations instead of preserving a compatibility shim for
+  unlaunched callers.
 - Old phase worktree copies of the 2026-05-29 plan should be treated as
   historical comparison context only; update this document as the source of
   truth.
@@ -380,16 +380,14 @@ Current implementation approach:
 - Start from a clean `origin/main` worktree.
 - Port the scoped-default model from the old `trigger-delivery-scoped-defaults`
   branch as a semantic change, not a direct conflict-marker resolution.
-- Keep `main`'s generic `CommunicationPreferenceUpdate` /
-  `update_communication_preference` contract because current composition and
-  product-workflow code already depend on it.
-- Implement that generic update contract on top of the new versioned
-  read/write path so callers keep their stable API while scoped preferences get
-  stale-write protection.
-- Make the versioned scoped repository contract the canonical mutation path.
-  Keep `update_communication_preference` only as a compatibility adapter over a
-  scope-aware `CommunicationPreferenceKey`, with an explicit follow-up to remove
-  any obsolete user-only call sites once product surfaces use scoped writes.
+- Make the versioned scoped repository contract the only supported mutation
+  path for this phase.
+- Do not preserve `update_communication_preference` as a compatibility adapter.
+  The old preference callback API has not launched, so current internal callers
+  should migrate directly to read scoped preference, apply the update with the
+  observed version or ETag, and write with CAS.
+- Any temporary helper used during the phase must be private, must require the
+  observed scoped version or ETag, and must be removed before Phase 2 exits.
 - Keep the PR scoped to outbound model, repository/storage behavior,
   resolution behavior, and caller-level tests. WebUI routes, Slack target
   authority, and trigger terminal E2E remain later phases.
