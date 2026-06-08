@@ -104,7 +104,10 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
     ) -> Result<Vec<SlackAllowedChannel>, SlackRouteError> {
         let assignments = match (request.channel_ids, request.channels) {
             (Some(channel_ids), None) => self.managed_assignments(channel_ids)?,
-            (None, Some(channels)) => self.explicit_assignments(channels)?,
+            (None, Some(channels)) => {
+                let current_subjects_by_channel = self.current_subjects_by_channel().await?;
+                self.explicit_assignments(channels, &current_subjects_by_channel)?
+            }
             _ => return Err(SlackRouteError::BadRequest),
         };
         let routes = self
@@ -139,6 +142,7 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
     fn explicit_assignments(
         &self,
         channels: Vec<SlackAllowedChannelSaveAssignment>,
+        current_subjects_by_channel: &BTreeMap<String, UserId>,
     ) -> Result<Vec<SlackChannelRouteAssignment>, SlackRouteError> {
         if channels.len() > MAX_ALLOWED_CHANNELS {
             return Err(SlackRouteError::BadRequest);
@@ -159,7 +163,12 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
             scan_route_admin_field(self.config, "subject_user_id", &subject_user_id)?;
             let subject_user_id =
                 UserId::new(subject_user_id).map_err(|_| SlackRouteError::BadRequest)?;
-            ensure_selected_subject_user(self.config, &channel_id, &subject_user_id)?;
+            ensure_selected_subject_user(
+                self.config,
+                current_subjects_by_channel,
+                &channel_id,
+                &subject_user_id,
+            )?;
 
             if assignments
                 .insert(channel_id.clone(), subject_user_id.clone())
@@ -174,6 +183,20 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
                 SlackChannelRouteAssignment::new(channel_id, subject_user_id)
             })
             .collect())
+    }
+
+    async fn current_subjects_by_channel(
+        &self,
+    ) -> Result<BTreeMap<String, UserId>, SlackRouteError> {
+        self.list_all_routes()
+            .await?
+            .into_iter()
+            .map(|route| {
+                let subject_user_id =
+                    UserId::new(route.subject_user_id).map_err(|_| SlackRouteError::Unavailable)?;
+                Ok((route.channel_id, subject_user_id))
+            })
+            .collect()
     }
 
     async fn list_all_routes(&self) -> Result<Vec<SlackChannelRoute>, SlackRouteError> {
@@ -226,10 +249,17 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
 
 fn ensure_selected_subject_user(
     config: &SlackChannelRouteAdminRouteConfig,
+    current_subjects_by_channel: &BTreeMap<String, UserId>,
     channel_id: &str,
     subject_user_id: &UserId,
 ) -> Result<(), SlackRouteError> {
     if ensure_allowed_subject_user(config, subject_user_id).is_ok() {
+        return Ok(());
+    }
+    if current_subjects_by_channel
+        .get(channel_id)
+        .is_some_and(|current_subject_user_id| current_subject_user_id == subject_user_id)
+    {
         return Ok(());
     }
     let managed_assignment = config
@@ -565,6 +595,97 @@ mod tests {
                 .await
                 .expect("resolve raw route"),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn allowed_channel_admin_preserves_existing_unmanaged_subject_for_same_channel() {
+        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
+        let tenant_id = TenantId::new(TENANT).expect("tenant");
+        let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
+        store
+            .upsert_route(
+                SlackChannelRouteKey::new(
+                    tenant_id,
+                    installation_id,
+                    TEAM.to_string(),
+                    "C0RAW".to_string(),
+                )
+                .expect("raw key"),
+                UserId::new("user:raw-route-subject").expect("raw subject"),
+            )
+            .await
+            .expect("seed raw route");
+
+        let response = mount
+            .protected
+            .oneshot(request(
+                "PUT",
+                r#"{"channels":[{"channel_id":"C0RAW","subject_user_id":"user:raw-route-subject"},{"channel_id":"C0ENG","subject_user_id":"user:eng-team-agent"}]}"#,
+                TENANT,
+            ))
+            .await
+            .expect("save responds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(
+            body["channels"],
+            serde_json::json!([
+                {
+                    "channel_id": "C0ENG",
+                    "subject_user_id": "user:eng-team-agent"
+                },
+                {
+                    "channel_id": "C0RAW",
+                    "subject_user_id": "user:raw-route-subject"
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn allowed_channel_admin_rejects_existing_unmanaged_subject_for_other_channel() {
+        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
+        let tenant_id = TenantId::new(TENANT).expect("tenant");
+        let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
+        let raw_key = SlackChannelRouteKey::new(
+            tenant_id.clone(),
+            installation_id.clone(),
+            TEAM.to_string(),
+            "C0RAW".to_string(),
+        )
+        .expect("raw key");
+        store
+            .upsert_route(
+                raw_key.clone(),
+                UserId::new("user:raw-route-subject").expect("raw subject"),
+            )
+            .await
+            .expect("seed raw route");
+
+        let response = mount
+            .protected
+            .oneshot(request(
+                "PUT",
+                r#"{"channels":[{"channel_id":"C0ENG","subject_user_id":"user:raw-route-subject"}]}"#,
+                TENANT,
+            ))
+            .await
+            .expect("save responds");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            store
+                .resolve_subject_user_id(&raw_key)
+                .await
+                .expect("resolve raw route"),
+            Some(UserId::new("user:raw-route-subject").expect("raw subject"))
         );
     }
 

@@ -22,7 +22,7 @@ function slackChannelPickerSourceForTest() {
     }
     lines.push(line.replace("export function SlackChannelPicker", "function SlackChannelPicker"));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackChannelPicker };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackChannelPicker, subjectOptionsForChannel };`;
 }
 
 function createReactStub(state) {
@@ -211,4 +211,33 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   query.isError = true;
   rendered = renderPicker(context, state);
   assert.equal(valuesAfter(rendered, "disabled=").at(-1), true);
+});
+
+test("subjectOptionsForChannel keeps current route subjects row-scoped", () => {
+  const context = {
+    globalThis: {},
+    html,
+  };
+  vm.runInNewContext(slackChannelPickerSourceForTest(), context);
+
+  const subjects = [
+    { subject_user_id: "user:eng-team-agent", display_name: "Eng agent" },
+  ];
+  const rawRowOptions = context.globalThis.__testExports.subjectOptionsForChannel(subjects, {
+    channel_id: "C0RAW",
+    subject_user_id: "user:raw-route-subject",
+  });
+  const otherRowOptions = context.globalThis.__testExports.subjectOptionsForChannel(subjects, {
+    channel_id: "C0ENG",
+    subject_user_id: "user:eng-team-agent",
+  });
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(rawRowOptions.map((subject) => subject.subject_user_id))),
+    ["user:eng-team-agent", "user:raw-route-subject"],
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(otherRowOptions.map((subject) => subject.subject_user_id))),
+    ["user:eng-team-agent"],
+  );
 });

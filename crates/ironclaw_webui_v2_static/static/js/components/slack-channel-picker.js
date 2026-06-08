@@ -31,7 +31,6 @@ export function SlackChannelPicker({ action }) {
   const subjects = subjectsQuery.data?.subjects || [];
   const subjectsReady = subjectsQuery.isSuccess;
   const hasRoutableSubjects = subjects.length > 0;
-  const subjectOptions = mergeSubjectOptions(subjects, channels);
   const defaultSubjectUserId = subjects[0]?.subject_user_id || "";
 
   React.useEffect(() => {
@@ -169,7 +168,7 @@ export function SlackChannelPicker({ action }) {
                         updateChannelSubject(channel.channel_id, event.target.value)}
                       className="h-8 rounded-md border border-white/10 bg-white/[0.04] px-2 text-xs text-iron-100 outline-none focus:border-signal/45"
                     >
-                      ${subjectOptions.map(
+                      ${subjectOptionsForChannel(subjects, channel).map(
                         (subject) => html`
                           <option key=${subject.subject_user_id} value=${subject.subject_user_id}>
                             ${subject.display_name}
@@ -223,7 +222,7 @@ export function SlackChannelPicker({ action }) {
   `;
 }
 
-function mergeSubjectOptions(subjects = [], channels = []) {
+function subjectOptionsForChannel(subjects = [], channel = {}) {
   const bySubjectUserId = new Map();
   for (const subject of subjects) {
     const subjectUserId = String(subject.subject_user_id || "").trim();
@@ -233,9 +232,8 @@ function mergeSubjectOptions(subjects = [], channels = []) {
       display_name: subject.display_name || subjectUserId,
     });
   }
-  for (const channel of channels) {
-    const subjectUserId = String(channel.subject_user_id || "").trim();
-    if (!subjectUserId || bySubjectUserId.has(subjectUserId)) continue;
+  const subjectUserId = String(channel.subject_user_id || "").trim();
+  if (subjectUserId && !bySubjectUserId.has(subjectUserId)) {
     bySubjectUserId.set(subjectUserId, {
       subject_user_id: subjectUserId,
       display_name: subjectUserId,
