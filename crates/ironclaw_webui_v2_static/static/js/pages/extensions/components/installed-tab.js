@@ -1,4 +1,5 @@
 import { html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import { ExtensionCard } from "./extension-card.js";
 
 function packageId(ext) {
@@ -6,6 +7,7 @@ function packageId(ext) {
 }
 
 export function InstalledTab({ extensions, onActivate, onConfigure, onRemove, isBusy }) {
+  const t = useT();
   if (extensions.length === 0) {
     return html`
       <div className="v2-panel rounded-[18px] p-6 sm:p-8">
@@ -20,7 +22,7 @@ export function InstalledTab({ extensions, onActivate, onConfigure, onRemove, is
   return html`
     <div className="v2-panel rounded-[18px] p-5 sm:p-6">
       <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
-        All installed extensions
+        ${t("extensions.allInstalled")}
       </h3>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
         ${extensions.map(

@@ -123,7 +123,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (primaryAction === "configure") {
     primaryActions.push({
       id: "configure",
-      label: ext.authenticated ? "Reconfigure" : "Configure",
+      label: ext.authenticated ? t("extensions.reconfigure") : t("extensions.configure"),
       run: () => onConfigure(configurePayload),
     });
   } else if (primaryAction === "activate") {
@@ -136,7 +136,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (canManage && (ext.needs_setup || ext.has_auth) && primaryAction !== "configure") {
     overflowActions.push({
       id: "configure",
-      label: ext.authenticated ? "Reconfigure" : "Configure",
+      label: ext.authenticated ? t("extensions.reconfigure") : t("extensions.configure"),
       icon: "settings",
       run: () => onConfigure(configurePayload),
     });

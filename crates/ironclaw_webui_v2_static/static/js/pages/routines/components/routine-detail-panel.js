@@ -2,6 +2,7 @@ import { useNavigate } from "react-router";
 import { Button } from "../../../design-system/button.js";
 import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import {
   formatRoutineDate,
   routineStatusTone,
@@ -59,7 +60,7 @@ export function RoutineDetailPanel({
   if (error || !routine) {
     return html`
       <${EmptyPanel}
-        title="Routine unavailable"
+        title={t("routine.unavailable")}
         description=${error?.message || "This routine no longer exists or is outside your access scope."}
       />
     `;
@@ -117,8 +118,8 @@ export function RoutineDetailPanel({
       `}
 
       <div className="mt-6 grid gap-6 xl:grid-cols-2">
-        <${JsonBlock} title="Trigger payload" value=${routine.trigger} />
-        <${JsonBlock} title="Action payload" value=${routine.action} />
+        <${JsonBlock} title={t("routine.triggerPayload")} value=${routine.trigger} />
+        <${JsonBlock} title={t("routine.actionPayload")} value=${routine.action} />
       </div>
 
       <div className="mt-6">

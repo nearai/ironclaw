@@ -1,5 +1,6 @@
 import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import { SlackChannelPicker } from "../../../components/slack-channel-picker.js";
 import { SlackPairingSection } from "../../../components/slack-pairing-section.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
@@ -95,7 +96,7 @@ export function ChannelsTab({
         <h3
           className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
         >
-          Built-in channels
+          ${t("channels.builtIn")}
         </h3>
         <${BuiltinRow}
           name="Web Gateway"

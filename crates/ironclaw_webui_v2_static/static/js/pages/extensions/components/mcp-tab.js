@@ -1,4 +1,5 @@
 import { html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 
 function packageId(item) {
@@ -34,7 +35,7 @@ export function McpTab({
           <h3
             className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
           >
-            Installed MCP servers
+            ${t("mcp.installed")}
           </h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
             ${mcpServers.map(
