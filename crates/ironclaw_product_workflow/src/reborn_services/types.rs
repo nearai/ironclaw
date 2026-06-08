@@ -641,28 +641,15 @@ pub enum RebornAutomationRunStatus {
 }
 
 /// Browser-visible status for an individual automation run.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornAutomationRecentRunStatus {
     Running,
     Ok,
-    #[default]
     Error,
-}
-
-impl<'de> Deserialize<'de> for RebornAutomationRecentRunStatus {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        Ok(match value.as_str() {
-            Some("running") => Self::Running,
-            Some("ok") => Self::Ok,
-            Some("error") => Self::Error,
-            _ => Self::Error,
-        })
-    }
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 /// Browser-safe automation run projection.

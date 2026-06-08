@@ -14,6 +14,7 @@ use crate::{
     TriggerId, TriggerRecord, TriggerRepository, TriggerRouteThreadId, TriggerRunHistoryStatus,
     TriggerRunRecord, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
     reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
+    trigger_run_history_status_text,
 };
 
 const TRIGGER_TABLE: &str = "trigger_records";
@@ -959,7 +960,7 @@ async fn upsert_run_history(
     run: &TriggerRunRecord,
 ) -> Result<(), TriggerError> {
     let run_id = run.run_id.as_ref().map(ToString::to_string);
-    let status = run_history_status_text(run.status);
+    let status = trigger_run_history_status_text(run.status);
     let submitted_at = fmt_ts(&run.submitted_at);
     let completed_at = run.completed_at.as_ref().map(fmt_ts);
     client
@@ -1005,15 +1006,16 @@ async fn complete_run_history(
     let thread_id =
         TriggerRunRecord::running(tenant_id.clone(), trigger_id, fire_slot, run_id, fire_slot)
             .thread_id;
-    let status = run_history_status_text(status);
+    let status = trigger_run_history_status_text(status);
     let fire_slot_text = fmt_ts(&fire_slot);
     let completed_at = fmt_ts(&completed_at);
+    let submitted_at_fallback = completed_at.clone();
     client
         .execute(
             &format!(
                 "INSERT INTO {TRIGGER_RUN_TABLE} (
                     tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
                     run_id = COALESCE(trigger_run_history.run_id, EXCLUDED.run_id),
                     status = EXCLUDED.status,
@@ -1026,6 +1028,7 @@ async fn complete_run_history(
                 &run_id_text,
                 &thread_id.as_str(),
                 &status,
+                &submitted_at_fallback,
                 &completed_at,
             ],
         )
@@ -1246,14 +1249,6 @@ fn parse_run_status(value: &str) -> Result<TriggerRunStatus, TriggerError> {
             "last_status",
             format!("unsupported trigger run status `{other}`"),
         )),
-    }
-}
-
-fn run_history_status_text(value: TriggerRunHistoryStatus) -> &'static str {
-    match value {
-        TriggerRunHistoryStatus::Running => "running",
-        TriggerRunHistoryStatus::Ok => "ok",
-        TriggerRunHistoryStatus::Error => "error",
     }
 }
 

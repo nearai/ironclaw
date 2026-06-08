@@ -1354,7 +1354,7 @@ impl RebornServicesApi for RebornServices {
             ));
         };
         let limit = clamp_automation_list_limit(request.limit);
-        let run_limit = clamp_automation_run_limit(request.run_limit);
+        let run_limit = resolve_automation_run_limit(request.run_limit);
         let automations = self
             .automation_facade
             .list_automations(caller, AutomationListRequest { limit, run_limit })
@@ -1706,14 +1706,29 @@ fn automation_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(true)
 }
 
+const AUTOMATION_TRIGGER_THREAD_SOURCE: &str = "automation_trigger";
+
 fn is_automation_trigger_thread(thread: &SessionThreadRecord) -> bool {
-    thread
-        .metadata_json
-        .as_deref()
-        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
-        .is_some_and(|metadata| {
-            metadata.get("source").and_then(serde_json::Value::as_str) == Some("automation_trigger")
-        })
+    let Some(metadata) = thread.metadata_json.as_deref() else {
+        return false;
+    };
+    if !metadata.contains(AUTOMATION_TRIGGER_THREAD_SOURCE) {
+        return false;
+    }
+    match serde_json::from_str::<serde_json::Value>(metadata) {
+        Ok(metadata) => {
+            metadata.get("source").and_then(serde_json::Value::as_str)
+                == Some(AUTOMATION_TRIGGER_THREAD_SOURCE)
+        }
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                thread_id = %thread.thread_id,
+                "failed to parse thread metadata_json for automation filter"
+            );
+            false
+        }
+    }
 }
 
 fn outbound_preferences_unavailable() -> RebornServicesError {
@@ -2416,8 +2431,9 @@ fn clamp_automation_list_limit(requested: Option<u32>) -> usize {
     clamped as usize
 }
 
-fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
+fn resolve_automation_run_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE);
+    // 0 is intentional: callers suppress embedded run history by passing run_limit=0.
     let clamped = raw.min(AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE);
     clamped as usize
 }

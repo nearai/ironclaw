@@ -4831,7 +4831,7 @@ fn reborn_automation_state_round_trips_serde_for_every_variant() {
 }
 
 #[test]
-fn reborn_automation_recent_run_info_round_trips_typed_ids_and_sanitizes_status() {
+fn reborn_automation_recent_run_info_round_trips_typed_ids_and_preserves_unknown_status() {
     let recent_run = RebornAutomationRecentRunInfo {
         run_id: Some(automation_run_id()),
         thread_id: ThreadId::new("thread-listed").expect("valid thread id"),
@@ -4857,14 +4857,36 @@ fn reborn_automation_recent_run_info_round_trips_typed_ids_and_sanitizes_status(
         serde_json::from_value(serialized).expect("deserialize recent run");
     assert_eq!(deserialized, recent_run);
 
-    let sanitized: RebornAutomationRecentRunInfo = serde_json::from_value(json!({
+    let future_status: RebornAutomationRecentRunInfo = serde_json::from_value(json!({
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "thread_id": "thread-listed",
+        "status": "cancelled",
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect("deserialize future recent run status");
+    assert_eq!(
+        future_status.status,
+        RebornAutomationRecentRunStatus::Unknown
+    );
+
+    let defaulted_status: RebornAutomationRecentRunInfo = serde_json::from_value(json!({
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "thread_id": "thread-listed",
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect("deserialize defaulted recent run status");
+    assert_eq!(
+        defaulted_status.status,
+        RebornAutomationRecentRunStatus::Unknown
+    );
+
+    serde_json::from_value::<RebornAutomationRecentRunInfo>(json!({
         "run_id": "11111111-1111-1111-1111-111111111111",
         "thread_id": "thread-listed",
         "status": { "backend": "future" },
         "submitted_at": "2026-06-03T09:00:01Z",
     }))
-    .expect("deserialize sanitized recent run");
-    assert_eq!(sanitized.status, RebornAutomationRecentRunStatus::Error);
+    .expect_err("recent run rejects malformed status");
 
     serde_json::from_value::<RebornAutomationRecentRunInfo>(json!({
         "run_id": "not-a-uuid",
@@ -5565,6 +5587,8 @@ async fn list_threads_hides_automation_trigger_threads() {
     let caller = caller();
     let visible_thread_id = ThreadId::new("thread-visible").expect("visible thread id");
     let automation_thread_id = ThreadId::new("thread-automation").expect("automation thread id");
+    let malformed_metadata_thread_id =
+        ThreadId::new("thread-malformed-metadata").expect("malformed metadata thread id");
 
     thread_service
         .ensure_thread(EnsureThreadRequest {
@@ -5592,6 +5616,16 @@ async fn list_threads_hides_automation_trigger_threads() {
         })
         .await
         .expect("automation thread");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(malformed_metadata_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Malformed metadata chat".to_string()),
+            metadata_json: Some(r#"{"source":"automation_trigger""#.to_string()),
+        })
+        .await
+        .expect("malformed metadata thread");
 
     let response = services
         .list_threads(caller, WebUiListThreadsRequest::default())
@@ -5603,7 +5637,9 @@ async fn list_threads_hides_automation_trigger_threads() {
         .map(|thread| thread.thread_id.clone())
         .collect::<Vec<_>>();
 
-    assert_eq!(thread_ids, vec![visible_thread_id]);
+    assert_eq!(thread_ids.len(), 2);
+    assert!(thread_ids.contains(&visible_thread_id));
+    assert!(thread_ids.contains(&malformed_metadata_thread_id));
     assert!(
         !thread_ids.contains(&automation_thread_id),
         "automation trigger threads should be accessible by direct id but hidden from the chat list",

@@ -20,6 +20,7 @@ use crate::{
     TriggerId, TriggerRecord, TriggerRepository, TriggerRouteThreadId, TriggerRunHistoryStatus,
     TriggerRunRecord, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
     reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
+    trigger_run_history_status_text,
 };
 
 #[cfg(feature = "libsql")]
@@ -1396,7 +1397,7 @@ async fn upsert_run_history(
             fmt_ts(&run.fire_slot),
             opt_turn_run_id(run.run_id.as_ref()),
             run.thread_id.as_str(),
-            run_history_status_text(run.status),
+            trigger_run_history_status_text(run.status),
             fmt_ts(&run.submitted_at),
             opt_ts(run.completed_at.as_ref()),
         ],
@@ -1457,7 +1458,7 @@ async fn complete_run_history(
             )
             .thread_id
             .as_str(),
-            run_history_status_text(status),
+            trigger_run_history_status_text(status),
             fmt_ts(&completed_at),
             fmt_ts(&completed_at),
         ],
@@ -1645,15 +1646,6 @@ fn parse_run_status(value: &str) -> Result<TriggerRunStatus, TriggerError> {
             "last_status",
             format!("unsupported trigger run status `{other}`"),
         )),
-    }
-}
-
-#[cfg(feature = "libsql")]
-fn run_history_status_text(value: TriggerRunHistoryStatus) -> &'static str {
-    match value {
-        TriggerRunHistoryStatus::Running => "running",
-        TriggerRunHistoryStatus::Ok => "ok",
-        TriggerRunHistoryStatus::Error => "error",
     }
 }
 

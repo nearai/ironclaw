@@ -403,6 +403,15 @@ pub enum TriggerRunHistoryStatus {
     Error,
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn trigger_run_history_status_text(value: TriggerRunHistoryStatus) -> &'static str {
+    match value {
+        TriggerRunHistoryStatus::Running => "running",
+        TriggerRunHistoryStatus::Ok => "ok",
+        TriggerRunHistoryStatus::Error => "error",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerRunRecord {
     pub tenant_id: TenantId,
@@ -796,11 +805,11 @@ pub trait TriggerRepository: Send + Sync {
     ///
     /// Each entry is ordered newest first by fire slot and truncated to `limit`.
     ///
-    /// The default implementation issues one serial
-    /// [`list_trigger_run_history`] call per trigger id. Storage-backed
-    /// repositories used by list-page or UI paths should override this with a
-    /// true batch query so callers do not accidentally introduce N sequential
-    /// round-trips.
+    /// The default implementation is a non-production fallback: it issues one
+    /// serial [`list_trigger_run_history`] call per trigger id and logs when it
+    /// is exercised. Storage-backed repositories used by list-page or UI paths
+    /// must override this with a true batch query so callers do not
+    /// accidentally introduce N sequential round-trips.
     async fn list_trigger_run_history_batch(
         &self,
         tenant_id: TenantId,
@@ -810,6 +819,12 @@ pub trait TriggerRepository: Send + Sync {
         let mut runs_by_trigger = HashMap::with_capacity(trigger_ids.len());
         if limit == 0 {
             return Ok(runs_by_trigger);
+        }
+        if !trigger_ids.is_empty() {
+            tracing::warn!(
+                trigger_count = trigger_ids.len(),
+                "default trigger run-history batch fallback is issuing serial per-trigger lookups"
+            );
         }
         for trigger_id in trigger_ids {
             runs_by_trigger.insert(

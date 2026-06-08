@@ -1094,6 +1094,131 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
 }
 
 #[tokio::test]
+async fn builtin_trigger_list_with_zero_run_limit_returns_empty_recent_runs() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Zero run limit trigger",
+            "prompt": "Create history rows",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let record = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap()
+        .pop()
+        .expect("persisted trigger");
+    seed_completed_trigger_runs(&repository, &record, 1).await;
+
+    let listed = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({ "run_limit": 0 }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(listed["triggers"][0]["recent_runs"], json!([]));
+}
+
+#[tokio::test]
+async fn builtin_trigger_list_clamps_oversized_run_limit_to_max() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Oversized run limit trigger",
+            "prompt": "Create many history rows",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let record = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap()
+        .pop()
+        .expect("persisted trigger");
+    seed_completed_trigger_runs(&repository, &record, 101).await;
+
+    let listed = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({ "run_limit": 200 }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        listed["triggers"][0]["recent_runs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        100
+    );
+}
+
+async fn seed_completed_trigger_runs(
+    repository: &InMemoryTriggerRepository,
+    record: &TriggerRecord,
+    count: usize,
+) {
+    for index in 0..count {
+        let fire_slot = record.next_run_at + chrono::Duration::minutes(index as i64);
+        let run_id = TurnRunId::new();
+        repository
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: record.tenant_id.clone(),
+                trigger_id: record.trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .unwrap();
+        repository
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: record.tenant_id.clone(),
+                trigger_id: record.trigger_id,
+                fire_slot,
+                run_id,
+                submitted_at: fire_slot + chrono::Duration::seconds(1),
+                next_run_at: fire_slot + chrono::Duration::minutes(1),
+            })
+            .await
+            .unwrap();
+        repository
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: record.tenant_id.clone(),
+                trigger_id: record.trigger_id,
+                fire_slot,
+                run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn builtin_trigger_remove_rejects_invalid_trigger_id() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository);
