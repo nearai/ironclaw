@@ -377,7 +377,9 @@ The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_re
   The shared service preserves the conversation store's mutation lock across
   both paths and avoids racing optimistic durable-state writes.
 - `trigger_list` is caller-scoped and surfaces the current schedule state plus
-  `last_status` and a bounded `recent_runs` projection when requested.
+  `last_status` and a bounded `recent_runs` projection. Omitted `run_limit`
+  defaults to 25 recent runs per trigger; callers that do not need embedded run
+  history pass `run_limit = 0`.
 - `trigger_remove` is caller-scoped delete.
 - Local-dev builds compiled with `libsql` store trigger records in the
   local-dev libSQL database (`reborn-local-dev.db`) through the same
