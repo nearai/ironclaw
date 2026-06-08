@@ -290,8 +290,12 @@ impl SessionThreadService for InMemorySessionThreadService {
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
         let provider_call = request.provider_call;
-        let envelope = ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary)
-            .map_err(SessionThreadError::Serialization)?;
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            request.result_ref,
+            request.safe_summary,
+            request.model_observation,
+        )
+        .map_err(SessionThreadError::Serialization)?;
         if let Some(existing) = thread.messages.iter_mut().find(|message| {
             message.kind == MessageKind::ToolResultReference
                 && message.status == MessageStatus::Finalized
@@ -311,6 +315,22 @@ impl SessionThreadService for InMemorySessionThreadService {
                                 .to_string(),
                         ));
                     }
+                }
+            }
+            if let Some(model_observation) = envelope.model_observation.as_ref() {
+                let content = existing.content.as_deref().ok_or_else(|| {
+                    SessionThreadError::Serialization(
+                        "tool result reference content is missing".to_string(),
+                    )
+                })?;
+                if let Some(content) =
+                    ToolResultReferenceEnvelope::merge_model_observation_content_if_absent(
+                        content,
+                        model_observation.clone(),
+                    )
+                    .map_err(SessionThreadError::Serialization)?
+                {
+                    existing.content = Some(content);
                 }
             }
             return Ok(existing.clone());
@@ -411,8 +431,14 @@ impl SessionThreadService for InMemorySessionThreadService {
                     request.result_ref, request.thread_id
                 ))
             })?;
-        let envelope = ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary)
-            .map_err(SessionThreadError::Serialization)?;
+        let content = message.content.as_deref().ok_or_else(|| {
+            SessionThreadError::Serialization(
+                "tool result reference content is missing".to_string(),
+            )
+        })?;
+        let envelope = ToolResultReferenceEnvelope::from_json_str(content)
+            .map_err(SessionThreadError::Serialization)?
+            .with_safe_summary(request.safe_summary);
         message.content = Some(
             serde_json::to_string(&envelope)
                 .map_err(|error| SessionThreadError::Serialization(error.to_string()))?,

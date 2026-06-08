@@ -1,3 +1,5 @@
+#[cfg(feature = "webui-v2-beta")]
+use std::io::BufRead;
 use std::{
     io::Write,
     path::Path,
@@ -83,6 +85,30 @@ fn help_mentions_reborn_commands() {
     #[cfg(feature = "webui-v2-beta")]
     assert!(stdout.contains("serve"), "stdout: {stdout}");
     assert!(stdout.contains("skills"), "stdout: {stdout}");
+}
+
+#[test]
+fn extension_search_does_not_seed_reborn_config() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .args(["extension", "search", "--json"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", temp.path().join("home"))
+        .output()
+        .expect("ironclaw-reborn extension search should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !reborn_home.join("config.toml").exists(),
+        "extension search must not seed runtime config"
+    );
 }
 
 #[test]
@@ -1025,6 +1051,80 @@ fn serve_fails_closed_when_env_user_id_var_is_unset() {
 
 #[cfg(feature = "webui-v2-beta")]
 #[test]
+fn serve_with_env_auth_seeds_reborn_config_before_binding() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let mut child = Command::new(reborn_bin())
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            if stderr_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut stderr_text = String::new();
+    loop {
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            panic!("serve exited before binding with {status}; stderr: {stderr_text}");
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not reach listener banner; stderr: {stderr_text}");
+        }
+        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                stderr_text.push_str(&line);
+                stderr_text.push('\n');
+                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                    break;
+                }
+            }
+            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("serve stderr closed before banner; stderr: {stderr_text}");
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let config = std::fs::read_to_string(reborn_home.join("config.toml"))
+        .expect("successful serve startup should seed config");
+    assert!(
+        config.contains("api_version = \"ironclaw.runtime/v1\""),
+        "seeded config should stamp api_version: {config}"
+    );
+    assert!(
+        config.contains("profile = \"local-dev\""),
+        "seeded config should preserve the safe default profile: {config}"
+    );
+    assert!(
+        !config.contains("[llm.default]"),
+        "serve seed must preserve no-LLM behavior: {config}"
+    );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
 fn serve_rejects_malformed_host_before_webui_handoff() {
     let temp = tempfile::tempdir().expect("tempdir");
 
@@ -1177,7 +1277,7 @@ fn repl_help_mentions_composed_runtime() {
 }
 
 #[test]
-fn repl_exit_command_exits_cleanly_without_touching_v1_state() {
+fn repl_exit_command_seeds_reborn_config() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     let home_dir = temp.path().join("home");
@@ -1223,6 +1323,25 @@ fn repl_exit_command_exits_cleanly_without_touching_v1_state() {
     assert!(
         !v1_base_dir.exists(),
         "repl should not create explicit v1 base directories"
+    );
+    let config_path = reborn_home.join("config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap_or_else(|err| {
+        panic!(
+            "first stateful repl start should seed {}: {err}",
+            config_path.display()
+        )
+    });
+    assert!(
+        config.contains("api_version = \"ironclaw.runtime/v1\""),
+        "seeded config should stamp api_version: {config}"
+    );
+    assert!(
+        config.contains("profile = \"local-dev\""),
+        "seeded config should record default profile: {config}"
+    );
+    assert!(
+        !config.contains("[llm.default]"),
+        "first-run seed must preserve no-LLM behavior: {config}"
     );
 }
 
@@ -1447,11 +1566,12 @@ fn run_help_command_prints_repl_commands_and_exits_on_quit() {
 #[test]
 fn repl_piped_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
 
     let mut child = Command::new(reborn_bin())
         .arg("repl")
         .env_clear()
-        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1479,18 +1599,38 @@ fn repl_piped_message_exits_nonzero_when_runtime_does_not_produce_reply() {
         stderr.contains("reborn run did not produce an assistant reply"),
         "stderr: {stderr}"
     );
+    let config_path = reborn_home.join("config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap_or_else(|err| {
+        panic!(
+            "first real repl input should seed {}: {err}",
+            config_path.display()
+        )
+    });
+    assert!(
+        config.contains("api_version = \"ironclaw.runtime/v1\""),
+        "seeded config should stamp api_version: {config}"
+    );
+    assert!(
+        config.contains("profile = \"local-dev\""),
+        "seeded config should record default profile: {config}"
+    );
+    assert!(
+        !config.contains("[llm.default]"),
+        "first-run seed must preserve no-LLM behavior: {config}"
+    );
 }
 
 #[test]
 fn run_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
 
     let output = Command::new(reborn_bin())
         .arg("run")
         .arg("--message")
         .arg("hello")
         .env_clear()
-        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .output()
         .expect("ironclaw-reborn run --message should run");
@@ -1505,6 +1645,26 @@ fn run_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     assert!(
         stderr.contains("reborn run did not produce an assistant reply"),
         "stderr: {stderr}"
+    );
+
+    let config_path = reborn_home.join("config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap_or_else(|err| {
+        panic!(
+            "first real run should seed {}: {err}",
+            config_path.display()
+        )
+    });
+    assert!(
+        config.contains("api_version = \"ironclaw.runtime/v1\""),
+        "seeded config should stamp api_version: {config}"
+    );
+    assert!(
+        config.contains("profile = \"local-dev\""),
+        "seeded config should record default profile: {config}"
+    );
+    assert!(
+        !config.contains("[llm.default]"),
+        "first-run seed must preserve no-LLM behavior: {config}"
     );
 }
 
@@ -2245,6 +2405,7 @@ fn run_warns_when_falling_back_to_stub_gateway() {
 #[test]
 fn run_confirm_host_access_flag_gates_local_dev_yolo() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
     let missing = local_yolo_command(&temp, &["run", "-m", "ping"])
         .output()
         .expect("ironclaw-reborn run should not crash");
@@ -2253,6 +2414,10 @@ fn run_confirm_host_access_flag_gates_local_dev_yolo() {
     assert!(
         missing_stderr.contains("requires explicit disclosure acknowledgement"),
         "stderr should require disclosure acknowledgement; got: {missing_stderr}"
+    );
+    assert!(
+        !reborn_home.join("config.toml").exists(),
+        "failed host-access preflight must not seed runtime config"
     );
 
     let confirmed = local_yolo_command(&temp, &["run", "--confirm-host-access", "-m", "ping"])
@@ -2263,6 +2428,12 @@ fn run_confirm_host_access_flag_gates_local_dev_yolo() {
         !confirmed_stderr.contains("requires explicit disclosure acknowledgement")
             && !confirmed_stderr.contains("requires --confirm-host-access"),
         "confirmed run should pass the host-access gate; got: {confirmed_stderr}"
+    );
+    let config = std::fs::read_to_string(reborn_home.join("config.toml"))
+        .expect("confirmed first runtime start should seed config");
+    assert!(
+        config.contains("profile = \"local-dev\""),
+        "env-selected local-dev-yolo must not become the persistent default: {config}"
     );
 }
 
@@ -2345,6 +2516,7 @@ fn repl_confirm_host_access_flag_gates_local_dev_yolo() {
 #[test]
 fn serve_confirm_host_access_flag_gates_local_dev_yolo() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
     let missing = local_yolo_command(&temp, &["serve"])
         .output()
         .expect("ironclaw-reborn serve should not crash");
@@ -2353,6 +2525,10 @@ fn serve_confirm_host_access_flag_gates_local_dev_yolo() {
     assert!(
         missing_stderr.contains("requires explicit disclosure acknowledgement"),
         "stderr should require disclosure acknowledgement; got: {missing_stderr}"
+    );
+    assert!(
+        !reborn_home.join("config.toml").exists(),
+        "failed host-access preflight must not seed runtime config"
     );
 
     let confirmed = local_yolo_command(&temp, &["serve", "--confirm-host-access"])
@@ -2367,6 +2543,10 @@ fn serve_confirm_host_access_flag_gates_local_dev_yolo() {
         !confirmed_stderr.contains("requires explicit disclosure acknowledgement")
             && !confirmed_stderr.contains("requires --confirm-host-access"),
         "confirmed serve should pass the host-access gate; got: {confirmed_stderr}"
+    );
+    assert!(
+        !reborn_home.join("config.toml").exists(),
+        "failed WebUI token preflight must not seed runtime config"
     );
     assert!(
         confirmed_stderr.contains("IRONCLAW_REBORN_WEBUI_TOKEN"),

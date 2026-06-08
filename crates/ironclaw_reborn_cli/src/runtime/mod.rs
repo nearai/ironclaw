@@ -16,7 +16,9 @@ use ironclaw_reborn_composition::{
     RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
     TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
 };
-use ironclaw_reborn_config::{REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile};
+use ironclaw_reborn_config::{
+    REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
+};
 use secrecy::SecretString;
 use tokio_util::sync::CancellationToken;
 
@@ -77,6 +79,8 @@ pub(crate) fn execute(
 ) -> anyhow::Result<()> {
     let runtime_input =
         build_runtime_input_with_options(context.boot_config(), RuntimeInputCaller::Run, options)?;
+    seed_default_config_file_if_missing(&context.boot_config().home().config_file_path())
+        .map_err(anyhow::Error::from)?;
     let boot_config = context.boot_config().clone();
 
     let rt = tokio::runtime::Builder::new_multi_thread()

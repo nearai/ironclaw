@@ -1046,6 +1046,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn nearai_login_state_is_single_use() {
         let store = NearAiLoginStateStore::new();

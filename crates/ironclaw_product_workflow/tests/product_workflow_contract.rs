@@ -3010,6 +3010,211 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
 }
 
 #[tokio::test]
+async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
+    let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
+    let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
+    let installation_id =
+        ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            tenant_id.clone(),
+            adapter_kind,
+            installation_id,
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations.clone();
+    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
+        conversations;
+    let subject_resolver = Arc::new(RecordingSubjectRouteResolver::default());
+    let actor_resolver = Arc::new(RecordingProductActorUserResolver::new([(
+        ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+        UserId::new("user:alice").expect("user"),
+    )]));
+    let scope = ProductInstallationScope::with_default_scope(
+        tenant_id,
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_default_subject_user_id(UserId::new("user:default-team").expect("default subject"))
+    .with_conversation_subject_route(
+        ProductConversationRouteKey::new(Some("T-team".to_string()), "C-static".to_string())
+            .expect("static route key"),
+        UserId::new("user:static-team").expect("static route subject"),
+    )
+    .with_conversation_subject_route_resolver(subject_resolver.clone())
+    .without_default_subject_for_unrouted_shared_conversations()
+    .with_actor_user_resolver(actor_resolver.clone(), actor_pairings);
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        scope,
+    )]);
+    let binding = ProductConversationBindingService::new(conversation_port.clone(), resolver);
+
+    let unrouted = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-default-disabled").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-ops", Some("thread-1"), Some("msg-1"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello unrouted", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+    let error = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&unrouted))
+        .await
+        .expect_err("unrouted shared binding must not fall back to default subject");
+    assert!(matches!(
+        error,
+        ProductWorkflowError::BindingRequired { reason }
+            if reason == "shared product route requires a configured subject user"
+    ));
+    assert!(
+        actor_resolver.calls().is_empty(),
+        "unrouted shared route must fail before actor resolver side effects"
+    );
+
+    let static_route = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-static-with-default-disabled").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-static", Some("thread-1"), Some("msg-2"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello static", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+    let resolved_static = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&static_route))
+        .await
+        .expect("static shared route still resolves without default fallback");
+    assert_eq!(
+        resolved_static.subject_user_id.as_ref().map(UserId::as_str),
+        Some("user:static-team")
+    );
+
+    subject_resolver.set_subject(UserId::new("user:dynamic-team").expect("dynamic route subject"));
+    let dynamic_route = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-with-default-disabled").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-dyn", Some("thread-1"), Some("msg-3"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello dynamic", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+    let resolved_dynamic = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&dynamic_route))
+        .await
+        .expect("dynamic shared route still resolves without default fallback");
+    assert_eq!(
+        resolved_dynamic
+            .subject_user_id
+            .as_ref()
+            .map(UserId::as_str),
+        Some("user:dynamic-team")
+    );
+
+    subject_resolver.set_subject(UserId::new("user:reassigned-team").expect("route subject"));
+    let reassigned_dynamic_route = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-with-default-disabled-reassigned").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-dyn", Some("thread-1"), Some("msg-4"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "hello reassigned dynamic",
+                vec![],
+                ProductTriggerReason::BotMention,
+            )
+            .expect("message"),
+        ),
+    );
+    let reassigned_error = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(
+            &reassigned_dynamic_route,
+        ))
+        .await
+        .expect_err("existing shared binding must not switch subjects without rebinding");
+    assert!(matches!(
+        reassigned_error,
+        ProductWorkflowError::BindingAccessDenied
+    ));
+
+    subject_resolver.clear_subject();
+    let deleted_dynamic_route = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-with-default-disabled-deleted").expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-dyn", Some("thread-1"), Some("msg-5"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "hello deleted dynamic",
+                vec![],
+                ProductTriggerReason::BotMention,
+            )
+            .expect("message"),
+        ),
+    );
+    let error = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&deleted_dynamic_route))
+        .await
+        .expect_err("existing shared binding must stop resolving after route removal");
+    assert!(matches!(
+        error,
+        ProductWorkflowError::BindingRequired { reason }
+            if reason == "shared product route requires a configured subject user"
+    ));
+
+    let deleted_dynamic_route_lookup = sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("adapter"),
+        AdapterInstallationId::new("install_alpha").expect("installation"),
+        ExternalEventId::new("evt:shared-dynamic-with-default-disabled-deleted-lookup")
+            .expect("event"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(Some("T-team"), "C-dyn", Some("thread-1"), Some("msg-6"))
+            .expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "lookup deleted dynamic",
+                vec![],
+                ProductTriggerReason::BotMention,
+            )
+            .expect("message"),
+        ),
+    );
+    let lookup_error = binding
+        .lookup_binding(ResolveBindingRequest::from_envelope(
+            &deleted_dynamic_route_lookup,
+        ))
+        .await
+        .expect_err("existing shared binding lookup must stop after route removal");
+    assert!(matches!(
+        lookup_error,
+        ProductWorkflowError::BindingRequired { reason }
+            if reason == "shared product route requires a configured subject user"
+    ));
+}
+
+#[tokio::test]
 async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_differs() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");

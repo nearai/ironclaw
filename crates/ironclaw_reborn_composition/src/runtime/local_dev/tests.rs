@@ -1761,6 +1761,7 @@ mod tests {
                     result_ref: "result:missing-typed-content".to_string(),
                     safe_summary: ToolResultSafeSummary::new("tool result available")
                         .expect("safe summary"),
+                    model_observation: None,
                 })
                 .expect("envelope serializes"),
                 content_ref: LoopMessageRef::new("msg:missing-typed-content").expect("content ref"),
