@@ -27,7 +27,7 @@ IronClaw Reborn today has none of these:
 
 Reference systems surveyed:
 
-- **pi** (`/Users/henry/Code/pi/packages/coding-agent/examples/extensions/`):
+- **pi** (the pi-mono extension examples (`packages/coding-agent/examples/extensions/`)):
   plan-mode extension + planner subagent (`planner.md`) returning
   Goal/Plan/Files/Risks structure; scout → planner → worker chain.
 - **opencode** (`sst/opencode`): first-class `plan` agent with `.opencode/plans/*.md`
