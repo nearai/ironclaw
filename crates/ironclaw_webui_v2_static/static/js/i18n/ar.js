@@ -416,6 +416,8 @@ registerPack("ar", {
   "channels.slackAccessLoading": "جارٍ تحميل قنوات Slack...",
   "channels.slackAccessEmpty": "لا يُسمح بقنوات Slack حتى الآن.",
   "channels.slackAccessAllow": "السماح بـ {channelId}",
+  "channels.slackAccessAutoSubject": "موضوع الفريق المُنشأ تلقائيًا",
+  "channels.slackAccessNoSubjects": "لا يوجد وكلاء فريق متاحون",
   "channels.slackAccessSave": "حفظ القنوات",
   "channels.slackAccessSaving": "جاري الحفظ...",
   "channels.slackAccessSuccess": "تم حفظ قنوات Slack.",

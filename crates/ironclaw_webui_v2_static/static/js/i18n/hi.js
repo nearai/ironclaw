@@ -416,6 +416,8 @@ registerPack("hi", {
   "channels.slackAccessLoading": "Slack चैनल लोड हो रहे हैं...",
   "channels.slackAccessEmpty": "अभी तक किसी Slack चैनल की अनुमति नहीं है।",
   "channels.slackAccessAllow": "{channelId} को अनुमति दें",
+  "channels.slackAccessAutoSubject": "स्वतः-जनित टीम विषय",
+  "channels.slackAccessNoSubjects": "कोई टीम एजेंट उपलब्ध नहीं",
   "channels.slackAccessSave": "चैनल सहेजें",
   "channels.slackAccessSaving": "सहेजा जा रहा है...",
   "channels.slackAccessSuccess": "Slack चैनल सहेजे गए।",

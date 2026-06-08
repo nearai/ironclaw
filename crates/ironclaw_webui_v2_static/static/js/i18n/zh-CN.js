@@ -416,6 +416,8 @@ registerPack("zh-CN", {
   "channels.slackAccessLoading": "正在加载 Slack 频道...",
   "channels.slackAccessEmpty": "暂无获批的 Slack 频道。",
   "channels.slackAccessAllow": "允许 {channelId}",
+  "channels.slackAccessAutoSubject": "自动生成的团队主题",
+  "channels.slackAccessNoSubjects": "没有可用的团队代理",
   "channels.slackAccessSave": "保存频道",
   "channels.slackAccessSaving": "保存中...",
   "channels.slackAccessSuccess": "Slack 频道配置已保存。",

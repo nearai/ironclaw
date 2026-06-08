@@ -416,6 +416,8 @@ registerPack("ko", {
   "channels.slackAccessLoading": "Slack 로드 중 채널...",
   "channels.slackAccessEmpty": "아직 Slack 채널이 허용되지 않습니다.",
   "channels.slackAccessAllow": "{channelId}",
+  "channels.slackAccessAutoSubject": "자동 생성된 팀 제목",
+  "channels.slackAccessNoSubjects": "사용 가능한 팀 에이전트가 없습니다",
   "channels.slackAccessSave": "채널 저장",
   "channels.slackAccessSaving": "저장...",
   "channels.slackAccessSuccess": "Slack 채널이 저장되었습니다.",

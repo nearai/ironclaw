@@ -416,6 +416,8 @@ registerPack("de", {
   "channels.slackAccessLoading": "Slack wird geladen Kanäle...",
   "channels.slackAccessEmpty": "Noch keine Slack-Kanäle erlaubt.",
   "channels.slackAccessAllow": "{channelId} zulassen",
+  "channels.slackAccessAutoSubject": "Automatisch generiertes Team-Thema",
+  "channels.slackAccessNoSubjects": "Keine Team-Agenten verfügbar",
   "channels.slackAccessSave": "Kanäle speichern",
   "channels.slackAccessSaving": "Speichern...",
   "channels.slackAccessSuccess": "Slack Kanäle gespeichert.",

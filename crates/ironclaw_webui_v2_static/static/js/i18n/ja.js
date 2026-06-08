@@ -416,6 +416,8 @@ registerPack("ja", {
   "channels.slackAccessLoading": "Slack チャネルをロード中...",
   "channels.slackAccessEmpty": "Slack チャネルはまだ許可されていません。",
   "channels.slackAccessAllow": "{channelId} を許可",
+  "channels.slackAccessAutoSubject": "自動生成されたチームの件名",
+  "channels.slackAccessNoSubjects": "利用可能なチームエージェントがありません",
   "channels.slackAccessSave": "チャンネルを保存",
   "channels.slackAccessSaving": "保存...",
   "channels.slackAccessSuccess": "Slack チャンネルが保存されました。",

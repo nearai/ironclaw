@@ -416,6 +416,8 @@ registerPack("es", {
   "channels.slackAccessLoading": "Cargando canales Slack...",
   "channels.slackAccessEmpty": "Aún no se permiten canales Slack.",
   "channels.slackAccessAllow": "Permitir {channelId}",
+  "channels.slackAccessAutoSubject": "Asunto de equipo generado automáticamente",
+  "channels.slackAccessNoSubjects": "No hay agentes de equipo disponibles",
   "channels.slackAccessSave": "Guardar canales",
   "channels.slackAccessSaving": "Guardando...",
   "channels.slackAccessSuccess": "Canales Slack guardados.",

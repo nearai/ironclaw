@@ -416,6 +416,8 @@ registerPack("uk", {
   "channels.slackAccessLoading": "Завантаження каналів Slack...",
   "channels.slackAccessEmpty": "Канали Slack ще не дозволено.",
   "channels.slackAccessAllow": "Дозволити {channelId}",
+  "channels.slackAccessAutoSubject": "Автоматично згенерована тема команди",
+  "channels.slackAccessNoSubjects": "Немає доступних агентів команди",
   "channels.slackAccessSave": "Зберегти канали",
   "channels.slackAccessSaving": "Збереження...",
   "channels.slackAccessSuccess": "Канали Slack збережено.",
