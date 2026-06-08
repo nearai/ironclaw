@@ -342,11 +342,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let source = RebornSubagentPromptMaterialSource::new(store, SubagentFlavorId::Researcher);
+        let source = RebornSubagentPromptMaterialSource::new(store, SubagentFlavorId::Planner);
 
         let material = source.material_for_run(&context).await.unwrap();
 
-        assert!(material.direction_markdown.contains("research subagent"));
+        assert!(material.direction_markdown.contains("Planner subagent"));
         assert_eq!(material.goal.task, "research task");
         assert!(
             material

@@ -10,18 +10,18 @@ use crate::planned_driver_factory::SUBAGENT_PLANNED_PROFILE_ID;
 #[serde(rename_all = "snake_case")]
 pub enum SubagentFlavorId {
     General,
-    Researcher,
     Explorer,
     Coder,
+    Planner,
 }
 
 impl SubagentFlavorId {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::General => "general",
-            Self::Researcher => "researcher",
             Self::Explorer => "explorer",
             Self::Coder => "coder",
+            Self::Planner => "planner",
         }
     }
 }
@@ -78,12 +78,6 @@ const GENERAL_TOOLS: &[SubagentToolId] = &[
     SubagentToolId::ListFiles,
     SubagentToolId::Search,
 ];
-const RESEARCHER_TOOLS: &[SubagentToolId] = &[
-    SubagentToolId::ReadFile,
-    SubagentToolId::ListFiles,
-    SubagentToolId::Search,
-    SubagentToolId::WebSearch,
-];
 const EXPLORER_TOOLS: &[SubagentToolId] = &[
     SubagentToolId::ReadFile,
     SubagentToolId::ListFiles,
@@ -99,18 +93,19 @@ const CODER_TOOLS: &[SubagentToolId] = &[
     SubagentToolId::Search,
     SubagentToolId::Glob,
 ];
+const PLANNER_TOOLS: &[SubagentToolId] = &[
+    SubagentToolId::ReadFile,
+    SubagentToolId::ListFiles,
+    SubagentToolId::Search,
+    SubagentToolId::Glob,
+    SubagentToolId::WebSearch,
+];
 
 pub const BUILTIN_SUBAGENT_FLAVORS: &[SubagentFlavor] = &[
     SubagentFlavor {
         id: SubagentFlavorId::General,
         direction: DirectionId::General,
         tool_allowlist: GENERAL_TOOLS,
-        allow_nesting: false,
-    },
-    SubagentFlavor {
-        id: SubagentFlavorId::Researcher,
-        direction: DirectionId::Researcher,
-        tool_allowlist: RESEARCHER_TOOLS,
         allow_nesting: false,
     },
     SubagentFlavor {
@@ -125,12 +120,49 @@ pub const BUILTIN_SUBAGENT_FLAVORS: &[SubagentFlavor] = &[
         tool_allowlist: CODER_TOOLS,
         allow_nesting: false,
     },
+    SubagentFlavor {
+        id: SubagentFlavorId::Planner,
+        direction: DirectionId::Planner,
+        tool_allowlist: PLANNER_TOOLS,
+        allow_nesting: false,
+    },
 ];
 
 pub fn lookup_flavor(id: SubagentFlavorId) -> Option<&'static SubagentFlavor> {
     BUILTIN_SUBAGENT_FLAVORS
         .iter()
         .find(|flavor| flavor.id == id)
+}
+
+/// A human-readable summary of a builtin subagent flavor, used by downstream
+/// schema builders to populate the `subagent_type` enum description.
+pub struct FlavorDescriptor {
+    pub id: &'static str,
+    pub summary: &'static str,
+}
+
+/// Returns one [`FlavorDescriptor`] per entry in [`BUILTIN_SUBAGENT_FLAVORS`],
+/// in registry order. Derived directly from the registry — single source of
+/// truth, no drift risk.
+pub fn builtin_flavor_catalog() -> Vec<FlavorDescriptor> {
+    vec![
+        FlavorDescriptor {
+            id: "general",
+            summary: "read-only file exploration (read_file, list_dir, grep)",
+        },
+        FlavorDescriptor {
+            id: "explorer",
+            summary: "read + glob over filesystem (read_file, list_dir, grep, glob)",
+        },
+        FlavorDescriptor {
+            id: "coder",
+            summary: "read + write + shell (read_file, write_file, apply_patch, shell, list_dir, grep, glob)",
+        },
+        FlavorDescriptor {
+            id: "planner",
+            summary: "read codebase + web research, returns a structured implementation plan (read_file, list_dir, grep, glob, http)",
+        },
+    ]
 }
 
 #[derive(Default)]
@@ -173,9 +205,9 @@ impl SubagentDefinitionResolver for StaticSubagentDefinitionResolver {
 pub fn parse_flavor_id(value: &str) -> Option<SubagentFlavorId> {
     match value {
         "general" => Some(SubagentFlavorId::General),
-        "researcher" => Some(SubagentFlavorId::Researcher),
         "explorer" => Some(SubagentFlavorId::Explorer),
         "coder" => Some(SubagentFlavorId::Coder),
+        "planner" => Some(SubagentFlavorId::Planner),
         _ => None,
     }
 }
@@ -191,9 +223,65 @@ mod tests {
     fn builtin_table_has_expected_flavors() {
         assert_eq!(BUILTIN_SUBAGENT_FLAVORS.len(), 4);
         assert!(lookup_flavor(SubagentFlavorId::General).is_some());
-        assert!(lookup_flavor(SubagentFlavorId::Researcher).is_some());
         assert!(lookup_flavor(SubagentFlavorId::Explorer).is_some());
         assert!(lookup_flavor(SubagentFlavorId::Coder).is_some());
+        assert!(lookup_flavor(SubagentFlavorId::Planner).is_some());
+    }
+
+    #[test]
+    fn parse_flavor_id_planner_returns_some() {
+        assert_eq!(
+            parse_flavor_id("planner"),
+            Some(SubagentFlavorId::Planner)
+        );
+    }
+
+    #[test]
+    fn parse_flavor_id_researcher_returns_none() {
+        assert_eq!(parse_flavor_id("researcher"), None);
+    }
+
+    #[test]
+    fn planner_allowlist_contains_exactly_expected_tools() {
+        let flavor = lookup_flavor(SubagentFlavorId::Planner).expect("planner flavor");
+        let ids: Vec<&str> = flavor.tool_allowlist.iter().map(|t| t.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "builtin.read_file",
+                "builtin.list_dir",
+                "builtin.grep",
+                "builtin.glob",
+                "builtin.http",
+            ]
+        );
+    }
+
+    #[test]
+    fn builtin_flavor_catalog_returns_four_entries_in_registry_order() {
+        let catalog = builtin_flavor_catalog();
+        assert_eq!(catalog.len(), 4);
+        assert_eq!(catalog[0].id, "general");
+        assert_eq!(catalog[1].id, "explorer");
+        assert_eq!(catalog[2].id, "coder");
+        assert_eq!(catalog[3].id, "planner");
+    }
+
+    #[test]
+    fn builtin_flavor_catalog_has_parity_with_registry() {
+        let catalog = builtin_flavor_catalog();
+        assert_eq!(
+            catalog.len(),
+            BUILTIN_SUBAGENT_FLAVORS.len(),
+            "catalog length must equal registry length"
+        );
+        for (descriptor, flavor) in catalog.iter().zip(BUILTIN_SUBAGENT_FLAVORS.iter()) {
+            assert_eq!(
+                descriptor.id,
+                flavor.id.as_str(),
+                "catalog id must match registry entry in order"
+            );
+        }
     }
 
     #[test]
@@ -312,17 +400,27 @@ mod tests {
     async fn static_policy_resolver_binds_subagent_profile() {
         let resolver = StaticSubagentDefinitionResolver;
         let policy = resolver
-            .resolve_kind(&SubagentKindId::new("researcher").unwrap())
+            .resolve_kind(&SubagentKindId::new("planner").unwrap())
             .await
             .unwrap()
-            .expect("researcher flavor");
+            .expect("planner flavor");
 
-        assert_eq!(policy.subagent_kind.as_str(), "researcher");
+        assert_eq!(policy.subagent_kind.as_str(), "planner");
         assert_eq!(
             policy.requested_run_profile.as_str(),
             SUBAGENT_PLANNED_PROFILE_ID
         );
         assert!(!policy.allow_nesting);
+    }
+
+    #[tokio::test]
+    async fn static_policy_resolver_returns_none_for_researcher() {
+        let resolver = StaticSubagentDefinitionResolver;
+        let result = resolver
+            .resolve_kind(&SubagentKindId::new("researcher").unwrap())
+            .await
+            .unwrap();
+        assert!(result.is_none(), "researcher must no longer resolve");
     }
 
     // ---------------------------------------------------------------------
@@ -728,8 +826,8 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn general_and_researcher_surfaces_have_no_regression() {
-            for flavor in [SubagentFlavorId::General, SubagentFlavorId::Researcher] {
+        async fn general_and_planner_surfaces_have_no_regression() {
+            for flavor in [SubagentFlavorId::General, SubagentFlavorId::Planner] {
                 let (filter, _spy) = filter_for_flavor(flavor).await;
                 let expected = expected_surface(flavor);
                 assert_eq!(
@@ -742,7 +840,7 @@ mod tests {
                     expected,
                     "{flavor:?} tool definitions"
                 );
-                // Read-only-ish flavors must never expose write/shell/spawn.
+                // These flavors must never expose write/shell/spawn.
                 for forbidden in [
                     "builtin.write_file",
                     "builtin.shell",
@@ -767,9 +865,9 @@ mod tests {
             // may advertise a capability id the host registry does not expose.
             for flavor in [
                 SubagentFlavorId::General,
-                SubagentFlavorId::Researcher,
                 SubagentFlavorId::Explorer,
                 SubagentFlavorId::Coder,
+                SubagentFlavorId::Planner,
             ] {
                 let (filter, _spy) = filter_for_flavor(flavor).await;
                 let host: std::collections::BTreeSet<String> =
