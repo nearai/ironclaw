@@ -405,6 +405,7 @@ impl NetworkPolicyKey {
 #[derive(Clone)]
 pub struct BuiltinObligationServices {
     audit_sink: Arc<dyn AuditSink>,
+    security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     network_policies: Arc<NetworkObligationPolicyStore>,
     secret_store: Arc<dyn SecretStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
@@ -436,6 +437,7 @@ impl BuiltinObligationServices {
     ) -> Self {
         Self {
             audit_sink,
+            security_audit_sink: None,
             network_policies,
             secret_store,
             secret_injections,
@@ -457,6 +459,11 @@ impl BuiltinObligationServices {
         resolver: Arc<dyn RuntimeCredentialAccountResolver>,
     ) -> Self {
         self.credential_account_resolver = Some(resolver);
+        self
+    }
+
+    pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.security_audit_sink = Some(sink);
         self
     }
 
@@ -495,13 +502,17 @@ impl BuiltinObligationServices {
         T: RuntimeHttpBodyStore + 'static,
     {
         let body_store: Arc<dyn RuntimeHttpBodyStore> = body_store;
-        crate::HostHttpEgressService::production(
+        let service = crate::HostHttpEgressService::production(
             network,
             SharedSecretStore(self.secret_store.clone()),
             self.network_policies.clone(),
             self.secret_injections.clone(),
             body_store,
-        )
+        );
+        match &self.security_audit_sink {
+            Some(sink) => service.with_security_audit_sink(Arc::clone(sink)),
+            None => service,
+        }
     }
 
     pub fn process_obligation_lifecycle_store<S>(
@@ -532,12 +543,15 @@ impl BuiltinObligationServices {
     }
 
     pub fn obligation_handler(&self) -> BuiltinObligationHandler {
-        let handler = BuiltinObligationHandler::new()
+        let mut handler = BuiltinObligationHandler::new()
             .with_audit_sink_dyn(self.audit_sink.clone())
             .with_network_policy_store(self.network_policies.clone())
             .with_secret_store_dyn(self.secret_store.clone())
             .with_secret_injection_store(self.secret_injections.clone())
             .with_resource_governor_dyn(self.resource_governor.clone());
+        if let Some(sink) = &self.security_audit_sink {
+            handler = handler.with_security_audit_sink(Arc::clone(sink));
+        }
         match &self.credential_account_resolver {
             Some(resolver) => handler.with_credential_account_resolver_dyn(Arc::clone(resolver)),
             None => handler,
@@ -550,6 +564,7 @@ impl fmt::Debug for BuiltinObligationServices {
         formatter
             .debug_struct("BuiltinObligationServices")
             .field("audit_sink", &"<audit_sink>")
+            .field("security_audit_sink", &self.security_audit_sink.is_some())
             .field("network_policies", &self.network_policies)
             .field("secret_store", &"[REDACTED]")
             .field("secret_injections", &self.secret_injections)

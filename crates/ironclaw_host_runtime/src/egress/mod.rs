@@ -4,6 +4,7 @@ mod pipeline;
 mod sanitize;
 
 use async_trait::async_trait;
+use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_host_api::{
     CapabilityId, NetworkPolicy, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
@@ -15,6 +16,11 @@ use std::{fmt, sync::Arc};
 
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 use crate::{ToolCallHttpEgress, http_body::RuntimeHttpBodyStore};
+
+const NO_EXPOSURE_SENSITIVE_HEADER_DENIED_CODE: &str = "no_exposure_sensitive_header_denied";
+const NO_EXPOSURE_MANUAL_CREDENTIALS_DENIED_CODE: &str = "no_exposure_manual_credentials_denied";
+const NO_EXPOSURE_REQUEST_LEAK_BLOCKED_CODE: &str = "no_exposure_request_leak_blocked";
+const NO_EXPOSURE_RESPONSE_LEAK_BLOCKED_CODE: &str = "no_exposure_response_leak_blocked";
 
 pub use host_port::{
     HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
@@ -28,6 +34,7 @@ pub struct HostHttpEgressService<N, S> {
     leak_detector: Arc<LeakDetector>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
+    security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     unsafe_raw_diagnostics_allowed: bool,
     body_store: Arc<dyn RuntimeHttpBodyStore>,
 }
@@ -44,6 +51,7 @@ where
             .field("leak_detector", &"<shared>")
             .field("network_policy_store", &self.network_policy_store)
             .field("secret_injections", &self.secret_injections)
+            .field("security_audit_sink", &self.security_audit_sink.is_some())
             .field(
                 "unsafe_raw_diagnostics_allowed",
                 &self.unsafe_raw_diagnostics_allowed,
@@ -67,9 +75,15 @@ impl<N, S> HostHttpEgressService<N, S> {
             leak_detector: Arc::new(LeakDetector::new()),
             network_policy_store,
             secret_injections,
+            security_audit_sink: None,
             unsafe_raw_diagnostics_allowed: false,
             body_store,
         }
+    }
+
+    pub(crate) fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.security_audit_sink = Some(sink);
+        self
     }
 
     pub(crate) fn with_unsafe_raw_diagnostics_allowed(mut self, allowed: bool) -> Self {
@@ -158,6 +172,29 @@ impl<N, S> HostHttpEgressService<N, S> {
     pub(super) fn body_store(&self) -> &dyn RuntimeHttpBodyStore {
         self.body_store.as_ref()
     }
+
+    fn record_no_exposure_block(
+        &self,
+        error: &RuntimeHttpEgressError,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) {
+        let Some(code) = no_exposure_audit_code(error) else {
+            return;
+        };
+        let Some(sink) = &self.security_audit_sink else {
+            return;
+        };
+        sink.record(
+            SecurityAuditEvent::new(
+                SecurityBoundary::NoExposureGuard,
+                SecurityDecision::Blocked,
+                code,
+            )
+            .with_capability_id(capability_id.clone())
+            .with_scope(scope.clone()),
+        );
+    }
 }
 
 #[async_trait]
@@ -176,6 +213,7 @@ where
         match result {
             Ok(response) => Ok(response),
             Err(error) => {
+                self.record_no_exposure_block(error.as_ref(), &scope, &capability_id);
                 if error.should_discard_staged_policy() {
                     self.discard_staged_policy(&scope, &capability_id);
                 }
@@ -204,6 +242,7 @@ where
         match result {
             Ok(response) => Ok(response),
             Err(error) => {
+                self.record_no_exposure_block(error.as_ref(), &scope, &capability_id);
                 if error.should_discard_staged_policy() {
                     self.discard_staged_policy(&scope, &capability_id);
                 }
@@ -257,6 +296,28 @@ impl PipelineError {
 
     fn into_inner(self) -> RuntimeHttpEgressError {
         self.error
+    }
+
+    fn as_ref(&self) -> &RuntimeHttpEgressError {
+        &self.error
+    }
+}
+
+fn no_exposure_audit_code(error: &RuntimeHttpEgressError) -> Option<&'static str> {
+    match error {
+        RuntimeHttpEgressError::Request { reason, .. } if reason == "sensitive_header_denied" => {
+            Some(NO_EXPOSURE_SENSITIVE_HEADER_DENIED_CODE)
+        }
+        RuntimeHttpEgressError::Request { reason, .. } if reason == "manual_credentials_denied" => {
+            Some(NO_EXPOSURE_MANUAL_CREDENTIALS_DENIED_CODE)
+        }
+        RuntimeHttpEgressError::Request { reason, .. } if reason == "credential_leak_blocked" => {
+            Some(NO_EXPOSURE_REQUEST_LEAK_BLOCKED_CODE)
+        }
+        RuntimeHttpEgressError::Response { reason, .. } if reason == "response_leak_blocked" => {
+            Some(NO_EXPOSURE_RESPONSE_LEAK_BLOCKED_CODE)
+        }
+        _ => None,
     }
 }
 
