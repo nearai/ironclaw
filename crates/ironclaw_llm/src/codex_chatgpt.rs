@@ -57,16 +57,20 @@ const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.137.0";
 /// Parse the version token out of `codex --version` output.
 ///
 /// Accepts shapes like `codex-cli 0.137.0` or `codex 0.140.1` and returns the
-/// first dotted, all-numeric token (`0.137.0`). Returns `None` when no
-/// version-like token is present.
+/// first dotted, all-numeric version (`0.137.0`). Any SemVer pre-release
+/// (`-beta`, `-rc.1`) or build-metadata (`+build.7`) suffix is stripped first,
+/// so pre-release / custom Codex builds resolve to their numeric release
+/// version. Returns `None` when no version-like token is present.
 fn parse_codex_cli_version(output: &str) -> Option<String> {
     output.split_whitespace().find_map(|token| {
-        let segments: Vec<&str> = token.split('.').collect();
+        // Drop any `-<pre-release>` / `+<build-metadata>` suffix before parsing.
+        let core = token.split(['-', '+']).next().unwrap_or(token);
+        let segments: Vec<&str> = core.split('.').collect();
         let is_version = segments.len() >= 2
             && segments
                 .iter()
                 .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()));
-        is_version.then(|| token.to_string())
+        is_version.then(|| core.to_string())
     })
 }
 
@@ -1075,6 +1079,27 @@ mod tests {
         assert_eq!(parse_codex_cli_version(""), None);
         // A bare integer is not a dotted version.
         assert_eq!(parse_codex_cli_version("codex 5"), None);
+    }
+
+    #[test]
+    fn parse_codex_cli_version_strips_prerelease_and_build_metadata() {
+        // SemVer pre-release and build-metadata suffixes resolve to the core.
+        assert_eq!(
+            parse_codex_cli_version("codex-cli 0.138.0-beta"),
+            Some("0.138.0".to_string())
+        );
+        assert_eq!(
+            parse_codex_cli_version("codex-cli 0.138.0+build.7"),
+            Some("0.138.0".to_string())
+        );
+        assert_eq!(
+            parse_codex_cli_version("codex 0.139.0-rc.1"),
+            Some("0.139.0".to_string())
+        );
+        assert_eq!(
+            parse_codex_cli_version("codex-cli 0.140.0-beta+exp.sha.5114f85"),
+            Some("0.140.0".to_string())
+        );
     }
 
     #[test]
