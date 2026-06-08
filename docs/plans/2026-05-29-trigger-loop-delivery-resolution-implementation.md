@@ -809,6 +809,17 @@ ready, connect trigger-origin final reply delivery:
 - validate with `OutboundPolicyService`.
 - send only through Reborn product-adapter outbound paths that are ready.
 
+Carry-forward finding from the default outbound preference service slice:
+Phase 2 composes a WebUI-usable `OutboundPreferencesProductFacade` backed by
+`RebornLocalRuntimeServices::outbound_preferences`, but Slack host-beta final
+reply delivery still constructs its own outbound state store inside
+`slack_host_beta.rs`. Before PR 19 claims Slack end-to-end delivery, the Slack
+integration must bridge this split by exposing Slack delivery targets through
+the composition-owned target inventory and making Slack final-reply delivery
+read the same communication preference repository used by the default outbound
+preference API. Do not encode WebUI rendering assumptions in this bridge; the
+API must remain usable by any authenticated product surface.
+
 If concrete Reborn product egress is not ready, leave this as fast-follow and
 ship trigger V1 as local persisted threads only.
 
