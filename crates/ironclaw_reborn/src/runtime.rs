@@ -770,4 +770,41 @@ mod tests {
             inner
         }
     }
+
+    // ── Gap 3: decorator non-empty catalog → schema enum present ─────────────
+
+    #[test]
+    fn builtin_flavor_catalog_threads_enum_into_schema() {
+        // Verifies that `builtin_flavor_catalog()` — the source-of-truth
+        // function the decorator wires into `SubagentSpawnCapabilityPort` — is
+        // non-empty AND that the resulting `build_spawn_subagent_parameters_schema`
+        // output includes an `enum` key containing all four expected flavor IDs
+        // in registry order.
+        //
+        // This indirectly proves the threading: if the decorator passes a
+        // non-empty catalog, the produced schema will have a satisfiable enum
+        // constraint. The companion empty-catalog test (gap 1, loop_support)
+        // confirms the absent-enum guard on the other side.
+        use ironclaw_loop_support::build_spawn_subagent_parameters_schema;
+
+        let catalog = crate::subagent::flavors::builtin_flavor_catalog();
+
+        assert!(
+            !catalog.is_empty(),
+            "builtin_flavor_catalog must be non-empty"
+        );
+        assert_eq!(catalog.len(), 4, "expected exactly 4 builtin flavors");
+
+        let schema = build_spawn_subagent_parameters_schema(&catalog);
+
+        let enum_vals = schema["properties"]["subagent_type"]["enum"]
+            .as_array()
+            .expect("schema must have an 'enum' key when catalog is non-empty");
+
+        assert_eq!(enum_vals.len(), 4);
+        assert_eq!(enum_vals[0], serde_json::json!("general"));
+        assert_eq!(enum_vals[1], serde_json::json!("explorer"));
+        assert_eq!(enum_vals[2], serde_json::json!("coder"));
+        assert_eq!(enum_vals[3], serde_json::json!("planner"));
+    }
 }

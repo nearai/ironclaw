@@ -2956,3 +2956,109 @@ fn spawn_subagent_description_contains_planner_nudge() {
         "SPAWN_SUBAGENT_DESCRIPTION must mention 'planner' to nudge parents toward planning"
     );
 }
+
+// ── Gap 1: empty catalog schema satisfiability ───────────────────────────────
+
+#[test]
+fn build_spawn_subagent_parameters_schema_empty_catalog_has_no_enum() {
+    // After the empty-enum guard (commit 2b2b739a4), passing an empty catalog
+    // must NOT emit an "enum" key — an `"enum": []` would make the schema
+    // unsatisfiable (JSON Schema §6.1.2).
+    let schema = build_spawn_subagent_parameters_schema(&[]);
+
+    let subagent_type = &schema["properties"]["subagent_type"];
+
+    // type and description must still be present so the model knows what to do.
+    assert_eq!(
+        subagent_type["type"].as_str().expect("type key"),
+        "string",
+        "subagent_type must be typed 'string' even for an empty catalog"
+    );
+    assert!(
+        !subagent_type["description"]
+            .as_str()
+            .expect("description key")
+            .is_empty(),
+        "subagent_type must carry a non-empty description"
+    );
+
+    // enum must be absent — not an empty array, not null.
+    assert!(
+        subagent_type.get("enum").is_none(),
+        "subagent_type must NOT have an 'enum' key when catalog is empty, \
+         got: {subagent_type}"
+    );
+}
+
+// ── Gap 2: invoke path accepts subagent_type as canonical wire key ────────────
+
+#[tokio::test]
+async fn spawn_provider_tool_call_registration_accepts_subagent_type_wire_key() {
+    // Exercises the full register→validate→invoke path using the canonical
+    // wire key `subagent_type` (not the legacy `flavor_id` alias).
+    // This catches wire-name handling bugs beyond the bare serde deser layer.
+    let context = test_run_context_with_agent_actor("spawn-wire-subagent-type").await;
+    let inner = Arc::new(StrictSpawnAuthPort::default());
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let port = SubagentSpawnCapabilityPort::new(
+        inner.clone(),
+        context.clone(),
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        Arc::new(SubagentSpawnDeps {
+            coordinator: Arc::new(StaticCoordinator),
+            child_runs: child_runs.clone(),
+            turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0)))),
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
+            goal_store: Arc::new(NoopGoalStore),
+            gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+            definition_resolver: Arc::new(StaticDefinitionResolver {
+                resolved: Some(subagent_definition(false)),
+                parent: None,
+            }),
+            spawn_input_codec: Arc::new(RegisteringSpawnInputCodec),
+            result_writer: Arc::new(NoopResultWriter),
+        }),
+        Vec::new(),
+    );
+
+    // Build a provider tool call using the canonical `subagent_type` key.
+    let mut call = spawn_provider_tool_call();
+    call.arguments = json!({
+        "subagent_type": "general",
+        "task": "investigate using canonical key"
+    });
+
+    // Register succeeds — validation accepts `subagent_type` as the wire key.
+    let candidate = port
+        .register_provider_tool_call(call)
+        .await
+        .expect("registration must succeed with subagent_type wire key");
+
+    assert_eq!(
+        candidate.capability_id.as_str(),
+        DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
+    );
+    assert_eq!(candidate.input_ref.as_str(), "input:spawn-provider");
+
+    // Invoke the registered capability and assert the spawn is dispatched.
+    let outcome = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: candidate.surface_version.clone(),
+            capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            input_ref: candidate.input_ref.clone(),
+        })
+        .await
+        .expect("invocation must succeed");
+
+    // A child run must have been submitted — the full invoke path ran.
+    assert!(
+        matches!(outcome, CapabilityOutcome::AwaitDependentRun { .. }),
+        "invoke must produce AwaitDependentRun, got: {outcome:?}"
+    );
+    assert_eq!(
+        child_runs.requests().len(),
+        1,
+        "exactly one child run must have been submitted"
+    );
+}
