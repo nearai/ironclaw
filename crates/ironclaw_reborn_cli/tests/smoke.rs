@@ -1573,7 +1573,12 @@ fn doctor_reports_explicit_profile() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("production"), "stdout: {stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.contains("profile") && line.contains("production")),
+        "expected a line containing both 'profile' and 'production', stdout: {stdout}"
+    );
 }
 
 #[test]
