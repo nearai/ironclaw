@@ -111,14 +111,13 @@ fn is_compaction_prefix_message(entry: &MessageIndexEntry) -> bool {
 mod tests {
     use super::*;
     use crate::state::{CompactionPromptSnapshot, LoopExecutionState, MessageIndexEntry};
+    use ironclaw_turns::run_profile::PromptContextTokenBudget;
 
     fn active_task_preserving_strategy(
         preserve_tail_tokens: u64,
     ) -> ActiveTaskPreservingCompactionStrategy {
         ActiveTaskPreservingCompactionStrategy::from(DefaultCompactionStrategy {
-            context_limit_tokens: 100,
-            reserve_tokens: 10,
-            main_loop_max_output_tokens: 0,
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
             preserve_tail_tokens,
             deadline_ms: 7,
         })

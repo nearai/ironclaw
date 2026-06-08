@@ -243,9 +243,10 @@ mod tests {
         run_profile::{
             CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
             ConcurrencyClass, ContextProfileId, LoopDriverId, LoopPromptBundleRequest,
-            LoopRunContext, ModelProfileId, PromptMode, RedactedRunProfileProvenance,
-            ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
-            RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+            LoopRunContext, ModelProfileId, PromptContextTokenBudget, PromptMode,
+            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
+            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
+            SchedulingClass, SteeringPolicy,
         },
     };
 
@@ -336,9 +337,7 @@ mod tests {
     fn builder_chain_overrides_compaction_strategy() {
         let planner = DefaultPlanner::compose_default().with_compaction(Arc::new(
             ActiveTaskPreservingCompactionStrategy::from(DefaultCompactionStrategy {
-                context_limit_tokens: 100,
-                reserve_tokens: 10,
-                main_loop_max_output_tokens: 0,
+                prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
             }),

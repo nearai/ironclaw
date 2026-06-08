@@ -26,6 +26,7 @@ use ironclaw_loop_support::{
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedToolResultContent,
     ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ThreadContextWindowCache,
 };
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::LoopModelUsage;
@@ -166,10 +167,12 @@ where
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(InMemoryInstructionMaterializationStore::default());
+        let context_window_cache = Arc::new(ThreadContextWindowCache::default());
         self.issue_host_prompt_bundle(
             &request.context,
             &request.request,
             Arc::clone(&instruction_materialization_store),
+            Arc::clone(&context_window_cache),
         )
         .await?;
         ThreadBackedLoopModelPort::new(
@@ -180,6 +183,7 @@ where
             self.max_messages,
         )
         .with_instruction_materialization_store(instruction_materialization_store)
+        .with_context_window_cache(context_window_cache)
         .stream_model(request.request)
         .await
         .map_err(host_error_to_model_gateway_error)
@@ -196,13 +200,17 @@ where
         context: &LoopRunContext,
         request: &LoopModelRequest,
         instruction_materialization_store: Arc<dyn InstructionMaterializationStore>,
+        context_window_cache: Arc<ThreadContextWindowCache>,
     ) -> Result<(), LoopModelGatewayError> {
-        let context_port = Arc::new(ThreadBackedLoopContextPort::new(
-            Arc::clone(&self.thread_service),
-            self.thread_scope.clone(),
-            context.clone(),
-            self.max_messages,
-        ));
+        let context_port = Arc::new(
+            ThreadBackedLoopContextPort::new(
+                Arc::clone(&self.thread_service),
+                self.thread_scope.clone(),
+                context.clone(),
+                self.max_messages,
+            )
+            .with_context_window_cache(context_window_cache),
+        );
         let prompt_port = HostManagedLoopPromptPort::new(
             context.clone(),
             context_port,
