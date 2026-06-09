@@ -24,6 +24,7 @@ use ironclaw_product_workflow::{
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigSetRequest,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
@@ -294,6 +295,7 @@ struct StubServices {
     // calling the facade, so this captures whatever the path
     // extractor delivered.
     resolve_gate_refs: Mutex<Vec<Option<String>>>,
+    operator_config_key_calls: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -582,6 +584,31 @@ impl RebornServicesApi for StubServices {
             fields: Vec::new(),
             onboarding: None,
         })
+    }
+
+    async fn get_operator_config_key(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        key: String,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        self.operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .push(format!("get:{key}"));
+        Err(service_unavailable_error(false))
+    }
+
+    async fn set_operator_config_key(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        key: String,
+        _request: RebornOperatorConfigSetRequest,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        self.operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .push(format!("set:{key}"));
+        Err(service_unavailable_error(false))
     }
 }
 
@@ -1597,6 +1624,125 @@ async fn operator_routes_are_not_mounted_for_multi_user_authenticator() {
             "{method} {uri} must not be mounted for non-operator auth"
         );
     }
+}
+
+#[tokio::test]
+async fn get_operator_config_key_returns_503_for_operator_caller() {
+    let (app, services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/config/provider.default")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot must complete");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        services
+            .operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        &[String::from("get:provider.default")]
+    );
+}
+
+#[tokio::test]
+async fn set_operator_config_key_returns_503_for_operator_caller() {
+    let (app, services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/operator/config/provider.default")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({"value": "gpt-4"}).to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot must complete");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        services
+            .operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        &[String::from("set:provider.default")]
+    );
+}
+
+#[tokio::test]
+async fn operator_config_key_rejects_invalid_and_reserved_keys_before_facade() {
+    let (app, services) = build_app();
+
+    for uri in [
+        "/api/webchat/v2/operator/config/Provider.Default",
+        "/api/webchat/v2/operator/config/validate",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot must complete");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
+
+    assert!(
+        services
+            .operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn set_operator_config_key_rejects_missing_body_before_facade() {
+    let (app, services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/operator/config/provider.default")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot must complete");
+
+    assert!(
+        matches!(
+            response.status(),
+            StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+        ),
+        "missing body returned {}",
+        response.status()
+    );
+    assert!(
+        services
+            .operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
 }
 
 fn expand_route_pattern(pattern: &str) -> String {

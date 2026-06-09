@@ -681,12 +681,41 @@ pub struct OperatorConfigKeyPath {
     pub key: String,
 }
 
+const OPERATOR_CONFIG_KEY_MAX_BYTES: usize = 128;
+const OPERATOR_CONFIG_RESERVED_VALIDATE_KEY: &str = "validate";
+
+fn validate_operator_config_key(key: String) -> Result<String, WebUiV2HttpError> {
+    let validation_code = if key.is_empty() {
+        Some(WebUiInboundValidationCode::Blank)
+    } else if key.len() > OPERATOR_CONFIG_KEY_MAX_BYTES {
+        Some(WebUiInboundValidationCode::TooLong)
+    } else if key == OPERATOR_CONFIG_RESERVED_VALIDATE_KEY {
+        Some(WebUiInboundValidationCode::InvalidValue)
+    } else if key.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
+    }) {
+        None
+    } else {
+        Some(WebUiInboundValidationCode::InvalidValue)
+    };
+
+    match validation_code {
+        None => Ok(key),
+        Some(code) => Err(operator_config_key_error(code)),
+    }
+}
+
+fn operator_config_key_error(code: WebUiInboundValidationCode) -> WebUiV2HttpError {
+    RebornServicesError::from(WebUiInboundValidationError::new("key", code)).into()
+}
+
 /// `GET /api/webchat/v2/operator/config/{key}`
 pub async fn get_operator_config_key(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(OperatorConfigKeyPath { key }): Path<OperatorConfigKeyPath>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    let key = validate_operator_config_key(key)?;
     let response = state
         .services()
         .get_operator_config_key(caller, key)
@@ -701,11 +730,22 @@ pub async fn set_operator_config_key(
     Path(OperatorConfigKeyPath { key }): Path<OperatorConfigKeyPath>,
     Json(body): Json<RebornOperatorConfigSetRequest>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    let key = validate_operator_config_key(key)?;
     let response = state
         .services()
         .set_operator_config_key(caller, key, body)
         .await?;
     Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/operator/config/validate`
+///
+/// `validate` is reserved for the validation operation and is not a readable
+/// config key. This explicit static-path handler keeps axum static route
+/// priority from surfacing an ambiguous 405.
+pub async fn reject_reserved_operator_config_key(
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    Err(operator_config_key_error(WebUiInboundValidationCode::InvalidValue))
 }
 
 /// `POST /api/webchat/v2/operator/config/validate`
