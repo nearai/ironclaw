@@ -3962,6 +3962,104 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    /// End-to-end Trace Commons auto-capture: a real runtime turn through
+    /// `send_user_message` must, for an enrolled owner scope, land a redacted
+    /// envelope in that scope's submission queue without any manual trace
+    /// command. This drives the full chain: turn completion → lifecycle bus →
+    /// best-effort capture sink → thread-history read → redact/score →
+    /// eligibility → queue (+ immediate flush attempt, which fails locally
+    /// against the closed loopback endpoint and must leave the entry queued).
+    #[tokio::test]
+    async fn send_user_message_auto_queues_trace_for_enrolled_scope() {
+        use ironclaw_reborn_traces::contribution as trace_contribution;
+
+        let owner = format!("runtime-trace-capture-owner-{}", uuid::Uuid::new_v4());
+        let policy = trace_contribution::StandingTraceContributionPolicy {
+            enabled: true,
+            // Closed loopback port: the immediate flush fails fast and
+            // locally; no traffic leaves the machine.
+            ingestion_endpoint: Some("https://127.0.0.1:1/v1/traces".to_string()),
+            min_submission_score: 0.0,
+            require_manual_approval_when_pii_detected: false,
+            auto_submit_high_value_traces: true,
+            ..trace_contribution::StandingTraceContributionPolicy::default()
+        };
+        trace_contribution::write_trace_policy_for_scope(Some(&owner), &policy)
+            .expect("write trace policy");
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "auto capture reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(&owner, root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trace-capture-tenant".to_string(),
+            agent_id: "runtime-trace-capture-agent".to_string(),
+            source_binding_id: "runtime-trace-capture-source".to_string(),
+            reply_target_binding_id: "runtime-trace-capture-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "capture this turn"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        // The capture task is detached from the lifecycle path; poll briefly.
+        let queue_dir =
+            trace_contribution::trace_contribution_dir_for_scope(Some(&owner)).join("queue");
+        let queued =
+            |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+                std::fs::read_dir(dir)
+                    .map(|entries| {
+                        entries
+                            .filter_map(|e| e.ok().map(|e| e.path()))
+                            .filter(|path| {
+                                path.file_name().and_then(|name| name.to_str()).is_some_and(
+                                    |name| name.ends_with(".json") && !name.ends_with(".held.json"),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+        let mut entries = Vec::new();
+        for _ in 0..150 {
+            entries = queued(&queue_dir);
+            if !entries.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            entries.len(),
+            1,
+            "a completed turn for an enrolled scope must auto-queue one trace envelope"
+        );
+        let body = std::fs::read_to_string(&entries[0]).expect("queued envelope readable");
+        let envelope: serde_json::Value = serde_json::from_str(&body).expect("envelope is JSON");
+        assert_eq!(envelope["outcome"]["task_success"], "success");
+
+        runtime.shutdown().await.expect("runtime shutdown");
+        let _ = std::fs::remove_dir_all(trace_contribution::trace_contribution_dir_for_scope(
+            Some(&owner),
+        ));
+    }
+
     #[tokio::test]
     async fn cancel_run_propagates_to_subagent_children() {
         let root = tempfile::tempdir().expect("tempdir");
