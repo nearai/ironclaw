@@ -191,6 +191,10 @@ pub use product_live_adapters::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use ironclaw_runtime_policy::{
+    ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
+};
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 #[cfg(feature = "root-llm-provider")]
 pub use provider_admin::{

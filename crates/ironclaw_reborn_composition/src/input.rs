@@ -378,16 +378,8 @@ impl RebornBuildInput {
 
     pub fn with_turn_run_wake_notifier<T>(mut self, notifier: Arc<T>) -> Self
     where
-        T: TurnRunWakeNotifier + 'static,
+        T: TurnRunWakeNotifier + ?Sized + 'static,
     {
-        self.turn_run_wake_notifier = Some(notifier);
-        self
-    }
-
-    pub fn with_turn_run_wake_notifier_dyn(
-        mut self,
-        notifier: Arc<dyn TurnRunWakeNotifier>,
-    ) -> Self {
         self.turn_run_wake_notifier = Some(notifier);
         self
     }

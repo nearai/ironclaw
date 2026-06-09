@@ -264,14 +264,16 @@ and an explicit runtime policy:
 [storage]
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
 default_profile = "secure_default"
 ```
 
-Set `IRONCLAW_REBORN_POSTGRES_URL` in the process environment. Remote managed
-PostgreSQL URLs must use TLS, for example `sslmode=require`. The standalone
+Set `IRONCLAW_REBORN_POSTGRES_URL` in the process environment, and set
+`IRONCLAW_REBORN_SECRET_MASTER_KEY` to independent cryptographic key material.
+Remote managed PostgreSQL URLs must use TLS, for example `sslmode=require`.
 CLI production launch path currently supports policies that do not require a
 tenant-sandbox process binding.
 

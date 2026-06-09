@@ -4924,7 +4924,6 @@ dependencies = [
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
  "ironclaw_reborn_webui_ingress",
- "ironclaw_runtime_policy",
  "reqwest",
  "secrecy",
  "serde",

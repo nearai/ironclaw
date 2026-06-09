@@ -148,14 +148,17 @@ may name the PostgreSQL URL variable, but must not contain the raw URL:
 [storage]
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
 default_profile = "secure_default"
 ```
 
-Set `IRONCLAW_REBORN_POSTGRES_URL` in the process environment. Managed remote
-PostgreSQL providers must use TLS, for example by appending `sslmode=require`.
+Set `IRONCLAW_REBORN_POSTGRES_URL` in the process environment, and set
+`IRONCLAW_REBORN_SECRET_MASTER_KEY` to independent cryptographic key material.
+Managed remote PostgreSQL providers must use TLS, for example by appending
+`sslmode=require`.
 Production `run` also requires an explicit `[policy]` section; choose a
 runtime profile such as `secure_default` that does not require a tenant-sandbox
 process binding for the standalone CLI launch path.
@@ -200,6 +203,7 @@ the current branch.
 | `IRONCLAW_REBORN_HOME` | Absolute Reborn state root. Defaults to `$HOME/.ironclaw/reborn`. The resolver rejects unsafe paths and v1 state-root aliases such as `$HOME/.ironclaw`. |
 | `IRONCLAW_REBORN_PROFILE` | Boot profile selector. Supported values: `local-dev`, `local-dev-yolo`, `production`, `migration-dry-run`. |
 | `IRONCLAW_REBORN_POSTGRES_URL` | Production PostgreSQL storage URL when `[storage].backend = "postgres"` and `[storage].url_env` names this variable. Keep it out of `config.toml`; remote providers must use TLS. |
+| `IRONCLAW_REBORN_SECRET_MASTER_KEY` | Production Reborn secret master key when `[storage].secret_master_key_env` names this variable. Keep it independent from the database URL and out of `config.toml`. |
 | `IRONCLAW_REBORN_LOG` | Tracing filter for the Reborn binary, for example `debug,ironclaw_reborn=trace`. |
 
 `run` and `repl` currently support `local-dev` and `local-dev-yolo` runtime

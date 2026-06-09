@@ -523,6 +523,7 @@ mod postgres_backed {
             Manager::from_config(pg_config, tls, manager_config)
         };
         Pool::builder(manager)
+            .max_size(16)
             .runtime(Runtime::Tokio1)
             .build()
             .map_err(|source| RebornEventStoreError::backend("postgres", "build pool", source))

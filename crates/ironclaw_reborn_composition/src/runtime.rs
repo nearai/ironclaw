@@ -123,15 +123,29 @@ const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
 #[derive(Default)]
 struct DeferredRuntimeWakeNotifier {
     inner: std::sync::Mutex<Option<Arc<dyn TurnRunWakeNotifier>>>,
+    pending: std::sync::Mutex<Vec<TurnRunWake>>,
 }
 
 impl DeferredRuntimeWakeNotifier {
     fn install(&self, notifier: Arc<dyn TurnRunWakeNotifier>) -> Result<(), RebornRuntimeError> {
-        let mut inner = self
-            .inner
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| RebornRuntimeError::WorkerStopped)?;
+            *inner = Some(Arc::clone(&notifier));
+        }
+        let pending = self
+            .pending
             .lock()
-            .map_err(|_| RebornRuntimeError::WorkerStopped)?;
-        *inner = Some(notifier);
+            .map_err(|_| RebornRuntimeError::WorkerStopped)?
+            .drain(..)
+            .collect::<Vec<_>>();
+        for wake in pending {
+            notifier
+                .notify_queued_run(wake)
+                .map_err(|_| RebornRuntimeError::WorkerStopped)?;
+        }
         Ok(())
     }
 }
@@ -148,10 +162,16 @@ impl TurnRunWakeNotifier for DeferredRuntimeWakeNotifier {
             .inner
             .lock()
             .map_err(|_| TurnRunWakeNotifyError::DeliveryUnavailable)?;
-        let Some(notifier) = inner.as_ref() else {
-            return Err(TurnRunWakeNotifyError::DeliveryUnavailable);
-        };
-        notifier.notify_queued_run(wake)
+        if let Some(notifier) = inner.as_ref() {
+            return notifier.notify_queued_run(wake);
+        }
+        drop(inner);
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| TurnRunWakeNotifyError::DeliveryUnavailable)?;
+        pending.push(wake);
+        Ok(())
     }
 }
 
@@ -276,6 +296,8 @@ fn production_capability_host_api_error(error: impl std::fmt::Display) -> AgentL
     )
 }
 
+/// Production launch is fail-closed until a real capability surface resolver is wired.
+/// Every resolution returns an empty allowlist and emits an audit-friendly warning.
 struct EmptyCapabilitySurfaceResolver;
 
 #[async_trait::async_trait]
@@ -284,6 +306,9 @@ impl CapabilitySurfaceProfileResolver for EmptyCapabilitySurfaceResolver {
         &self,
         _run_context: &LoopRunContext,
     ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        tracing::warn!(
+            "production capability surface resolver is fail-closed; returning empty allowlist"
+        );
         Ok(CapabilityAllowSet::allowlist(Vec::new()))
     }
 }
