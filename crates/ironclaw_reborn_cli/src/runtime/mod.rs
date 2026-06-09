@@ -30,6 +30,8 @@ mod trigger_poller;
 
 use trigger_poller::trigger_poller_settings;
 
+const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
+
 pub(crate) fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt;
@@ -398,31 +400,39 @@ pub(crate) fn build_services_input_with_options(
 
     let owner_id = default_owner_id(config_file.as_ref());
 
-    let local_dev_root: PathBuf = config.home().path().join("local-dev");
-
-    let workspace_root = std::env::current_dir()
-        .context("failed to resolve current directory for local-dev workspace")?;
     let profile = effective_profile(config, config_file.as_ref())?;
-    let mut services_input = local_runtime_build_input_with_options(
-        composition_profile(profile),
-        owner_id,
-        local_dev_root,
-        RebornLocalRuntimeProfileOptions {
-            confirm_host_access: options.confirm_host_access,
-        },
-    )
-    .with_context(|| {
-        format!(
-            "ironclaw-reborn run currently supports profile=local-dev or profile=local-dev-yolo; \
-                     got profile={profile}. Production wiring lands in a follow-up slice."
-        )
-    })?
-    .with_local_dev_workspace_root(workspace_root);
-    if services_input.requires_local_dev_confirmed_host_home_root() {
-        let host_home_root =
-            confirmed_host_home_root(options).context("local-dev-yolo host access")?;
-        services_input = services_input.with_local_dev_confirmed_host_home_root(host_home_root);
-    }
+    let mut services_input = match profile {
+        RebornProfile::LocalDev | RebornProfile::LocalDevYolo => {
+            let local_dev_root: PathBuf = config.home().path().join("local-dev");
+            let workspace_root = std::env::current_dir()
+                .context("failed to resolve current directory for local-dev workspace")?;
+            let mut services_input = local_runtime_build_input_with_options(
+                composition_profile(profile),
+                owner_id,
+                local_dev_root,
+                RebornLocalRuntimeProfileOptions {
+                    confirm_host_access: options.confirm_host_access,
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "ironclaw-reborn run currently supports profile=local-dev or profile=local-dev-yolo; \
+                     got profile={profile}."
+                )
+            })?
+            .with_local_dev_workspace_root(workspace_root);
+            if services_input.requires_local_dev_confirmed_host_home_root() {
+                let host_home_root =
+                    confirmed_host_home_root(options).context("local-dev-yolo host access")?;
+                services_input =
+                    services_input.with_local_dev_confirmed_host_home_root(host_home_root);
+            }
+            services_input
+        }
+        RebornProfile::Production | RebornProfile::MigrationDryRun => {
+            build_production_services_input(profile, owner_id, config_file.as_ref())?
+        }
+    };
     if let Some(ResolvedGoogleOAuthConfig {
         client,
         hosted_domain_hint: _hosted_domain_hint,
@@ -435,6 +445,65 @@ pub(crate) fn build_services_input_with_options(
         services_input,
         config_file,
     })
+}
+
+#[cfg(feature = "postgres")]
+fn build_production_services_input(
+    profile: RebornProfile,
+    owner_id: &str,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<RebornBuildInput> {
+    let storage = config_file
+        .and_then(|file| file.storage.as_ref())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "profile={profile} requires [storage] backend = \"postgres\" with url_env naming \
+                 an environment variable such as {DEFAULT_REBORN_POSTGRES_URL_ENV}"
+            )
+        })?;
+    let backend = storage.backend.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("profile={profile} requires [storage].backend = \"postgres\"")
+    })?;
+    if backend != "postgres" {
+        anyhow::bail!(
+            "profile={profile} supports only [storage].backend = \"postgres\" in this slice; got `{backend}`"
+        );
+    }
+    let url_env = storage
+        .url_env
+        .as_deref()
+        .unwrap_or(DEFAULT_REBORN_POSTGRES_URL_ENV);
+    let database_url = std::env::var(url_env).map_err(|_| {
+        anyhow::anyhow!(
+            "{url_env} must be set to the Reborn production PostgreSQL URL; \
+             config.toml may only name this env var via [storage].url_env, never contain the URL"
+        )
+    })?;
+    if database_url.trim().is_empty() {
+        anyhow::bail!("{url_env} must not be empty");
+    }
+    let pool = ironclaw_reborn_composition::open_reborn_postgres_pool(SecretString::from(
+        database_url.clone(),
+    ))
+    .context("failed to configure Reborn production PostgreSQL storage")?;
+    Ok(RebornBuildInput::postgres_with_resolved_secret_master_key(
+        composition_profile(profile),
+        owner_id,
+        pool,
+        SecretString::from(database_url),
+    ))
+}
+
+#[cfg(not(feature = "postgres"))]
+fn build_production_services_input(
+    profile: RebornProfile,
+    _owner_id: &str,
+    _config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<RebornBuildInput> {
+    anyhow::bail!(
+        "profile={profile} requires a binary built with the `postgres` feature for production \
+         storage; the default PostgreSQL URL env var is {DEFAULT_REBORN_POSTGRES_URL_ENV}"
+    )
 }
 
 pub(crate) fn resolve_google_oauth_config_from_env()
@@ -832,6 +901,170 @@ regex_activation_enabled = false
             "host_workspace_and_home"
         );
         assert_eq!(policy.secret_mode.as_str(), "inherited_env");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_requires_storage_section() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("production".into()),
+        )
+        .expect("boot config");
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("production requires explicit storage config");
+
+        assert!(
+            err.to_string().contains("[storage]"),
+            "error must mention storage config, got: {err:#}"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_requires_postgres_url_env_value() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("production".into()),
+        )
+        .expect("boot config");
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("missing Postgres URL env must fail closed");
+
+        assert!(
+            err.to_string().contains("IRONCLAW_REBORN_POSTGRES_URL"),
+            "error must mention missing env var name, got: {err:#}"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_rejects_remote_postgres_sslmode_disable_redacted() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=disable",
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("production".into()),
+        )
+        .expect("boot config");
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("sslmode=disable must fail closed before connecting");
+        let rendered = format!("{err:#}");
+
+        assert!(
+            rendered.contains("sslmode=require") && rendered.contains("sslmode=disable"),
+            "error should explain TLS requirement, got: {rendered}"
+        );
+        assert!(!rendered.contains("RAW_PASSWORD_SENTINEL_3162"));
+        assert!(!rendered.contains("postgres://"));
+        assert!(!rendered.contains("db.example.com"));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_constructs_postgres_services_input() {
+        let lock = lock_trigger_env();
+        let (enabled, interval) = clear_trigger_poller_env();
+        let postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[identity]
+default_owner = "prod-owner"
+
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("production".into()),
+        )
+        .expect("boot config");
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        let services = runtime_input.services.expect("services input");
+
+        assert_eq!(services.profile(), RebornCompositionProfile::Production);
+        assert_eq!(services.owner_id(), "prod-owner");
+
+        drop(postgres_url);
+        drop(interval);
+        drop(enabled);
+        drop(lock);
+
+        let err = block_on_cli(async move {
+            ironclaw_reborn_composition::build_reborn_services(services).await
+        })
+        .expect_err("production composition should now fail on missing production wiring");
+        assert!(
+            format!("{err:#}").contains("production trust policy"),
+            "production storage handoff should reach production composition wiring, got: {err:#}"
+        );
     }
 
     // Regression for the review point that `serve` rejected legitimate

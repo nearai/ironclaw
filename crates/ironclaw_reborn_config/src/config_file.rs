@@ -67,6 +67,11 @@ pub struct RebornConfigFile {
     pub runner: Option<RunnerSection>,
     /// Skill activation selection settings for local-dev runtime skill context.
     pub skills: Option<SkillsSection>,
+    /// Durable storage selection for production Reborn boot.
+    ///
+    /// Credential-bearing database URLs must stay env-only. This section names
+    /// the backend and the environment variable that contains the URL.
+    pub storage: Option<StorageSection>,
     /// Per-slot LLM selection. Keyed by Reborn model slot name. Today
     /// composition wires only the `default` slot; the `mission` slot
     /// becomes live when the planned driver lands. Operators are free
@@ -156,6 +161,20 @@ pub struct SkillsSection {
     /// When false, regex activation criteria no longer auto-load full skill context.
     /// Keyword/tag activation and explicit skill mentions still work.
     pub regex_activation_enabled: Option<bool>,
+}
+
+/// Durable storage selection for production Reborn boot.
+///
+/// `url_env` is an environment variable NAME, not a database URL. The parser
+/// rejects raw URL-shaped values so credentials cannot be pasted into
+/// `config.toml`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageSection {
+    /// Storage backend name. First production slice supports `"postgres"`.
+    pub backend: Option<String>,
+    /// Environment variable name containing the PostgreSQL connection URL.
+    pub url_env: Option<String>,
 }
 
 /// WebChat v2 HTTP gateway configuration.
@@ -642,6 +661,15 @@ impl RebornConfigFile {
                 }
             }
         }
+        if let Some(storage) = &self.storage {
+            if let Some(backend) = &storage.backend {
+                check_non_empty_trimmed(Cow::Borrowed("storage.backend"), backend)?;
+            }
+            if let Some(url_env) = &storage.url_env {
+                check_non_empty_trimmed(Cow::Borrowed("storage.url_env"), url_env)?;
+                validate_env_var_reference("storage.url_env", url_env, attributed_path)?;
+            }
+        }
         if let Some(webui) = &self.webui {
             if let Some(host) = &webui.listen_host {
                 check(Cow::Borrowed("webui.listen_host"), host)?;
@@ -979,6 +1007,26 @@ fn validate_api_version(found: &str, path: &Path) -> Result<(), RebornConfigFile
     Ok(())
 }
 
+fn validate_env_var_reference(
+    field: &str,
+    value: &str,
+    path: &Path,
+) -> Result<(), RebornConfigFileError> {
+    let mut chars = value.chars();
+    let valid = chars
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_');
+    if valid {
+        return Ok(());
+    }
+    Err(RebornConfigFileError::InvalidField {
+        path: path.display().to_string(),
+        field: field.to_string(),
+        reason: "must be an environment variable name, not an inline secret or URL".to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,6 +1054,7 @@ mod tests {
         assert!(cfg.harness.is_none());
         assert!(cfg.runner.is_none());
         assert!(cfg.skills.is_none());
+        assert!(cfg.storage.is_none());
         assert!(cfg.llm.is_none());
         assert!(cfg.slack.is_none());
     }
@@ -1041,6 +1090,10 @@ poll_interval_ms = 200
 
 [skills]
 regex_activation_enabled = false
+
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 
 [llm.default]
 provider_id = "openai"
@@ -1084,6 +1137,12 @@ subject_user_id = "eng-team-agent"
         assert_eq!(
             cfg.skills.as_ref().unwrap().regex_activation_enabled,
             Some(false)
+        );
+        let storage = cfg.storage.as_ref().expect("storage section present");
+        assert_eq!(storage.backend.as_deref(), Some("postgres"));
+        assert_eq!(
+            storage.url_env.as_deref(),
+            Some("IRONCLAW_REBORN_POSTGRES_URL")
         );
         let default_slot = cfg.default_llm_slot().expect("default slot present");
         assert_eq!(default_slot.provider_id.as_deref(), Some("openai"));
@@ -1256,6 +1315,43 @@ signing_secret_env = "sk-proj-1234567890abcdef1234567890"
         assert!(
             err.to_string().contains("slack.signing_secret_env"),
             "error should identify Slack field: {err}"
+        );
+    }
+
+    #[test]
+    fn parses_storage_postgres_env_reference() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("storage env reference must parse");
+        let storage = cfg.storage.expect("storage section");
+        assert_eq!(storage.backend.as_deref(), Some("postgres"));
+        assert_eq!(
+            storage.url_env.as_deref(),
+            Some("IRONCLAW_REBORN_POSTGRES_URL")
+        );
+    }
+
+    #[test]
+    fn rejects_inline_postgres_url_in_storage_url_env() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+url_env = "postgres://user:password@db.example.com/ironclaw?sslmode=require"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("storage url_env must not accept raw URLs");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.url_env"),
+            "error should identify storage.url_env: {err}"
+        );
+        assert!(
+            !err.to_string().contains("password"),
+            "error must not echo credential-bearing URL: {err}"
         );
     }
 
