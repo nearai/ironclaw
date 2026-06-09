@@ -1,4 +1,4 @@
-use ironclaw_host_api::{ApprovalRequestId, CorrelationId, InvocationId, ResourceEstimate};
+use ironclaw_host_api::{ApprovalRequestId, CorrelationId, ResourceEstimate};
 use ironclaw_turns::{
     LoopCancelledReasonKind, LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopFailureKind,
     LoopGateRef, LoopResultRef, TurnRunId,
@@ -6,13 +6,13 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
         CapabilityCallCandidate, CapabilityFailureDetail, CapabilityFailureKind,
         CapabilityInputIssue, CapabilityInputIssueCode, CapabilityInputRef, CapabilityInputRepair,
-        CapabilityOutcome, CapabilityRecoveryHint, CapabilityResultMessage, LoopCancelReasonKind,
-        LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
-        LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
-        ObservationTrust, ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay,
-        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
-        VisibleCapabilityRequest,
+        CapabilityOutcome, CapabilityRecoveryHint, CapabilityResultMessage, CapabilityResumeToken,
+        LoopCancelReasonKind, LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionResponse, LoopContextCompactionKind, LoopInput, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopRunInfoPort,
+        LoopSafeSummary, LoopSummaryArtifactId, ObservationTrust, ParentLoopOutput,
+        ProcessHandleSummary, ProviderToolCallReplay, SameCallRetryConstraint,
+        ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest,
     },
 };
 
@@ -1769,7 +1769,7 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
     let original_input_ref = CapabilityInputRef::new("input:demo").expect("valid");
     let approval_resume = CapabilityApprovalResume {
         approval_request_id: ApprovalRequestId::new(),
-        invocation_id: InvocationId::new(),
+        resume_token: CapabilityResumeToken::new("resume-token:demo").expect("valid token"),
         correlation_id: CorrelationId::new(),
         input_ref: original_input_ref.clone(),
         input: serde_json::json!({ "message": "hello" }),
@@ -1815,7 +1815,7 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
         pending_resume.approval_request_id,
         approval_resume.approval_request_id
     );
-    assert_eq!(pending_resume.invocation_id, approval_resume.invocation_id);
+    assert_eq!(pending_resume.resume_token, approval_resume.resume_token);
     assert_eq!(
         pending_resume.correlation_id,
         approval_resume.correlation_id

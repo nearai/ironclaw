@@ -666,13 +666,15 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
     let resume_requests = runtime.resume_requests();
     assert_eq!(resume_requests.len(), 1);
     assert_eq!(resume_requests[0].approval_request_id, approval_request_id);
+    let resume_invocation_id = ironclaw_host_api::InvocationId::parse(resume.resume_token.as_str())
+        .expect("resume token carries original invocation id");
     assert_eq!(
         resume_requests[0].context.invocation_id,
-        resume.invocation_id
+        resume_invocation_id
     );
     assert_eq!(
         resume_requests[0].context.resource_scope.invocation_id,
-        resume.invocation_id
+        resume_invocation_id
     );
     assert_eq!(
         resume_requests[0].context.correlation_id,

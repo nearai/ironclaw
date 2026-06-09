@@ -141,7 +141,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             .map(
                                 |resume| ironclaw_turns::run_profile::CapabilityApprovalResume {
                                     approval_request_id: resume.approval_request_id,
-                                    invocation_id: resume.invocation_id,
+                                    resume_token: resume.resume_token,
                                     correlation_id: resume.correlation_id,
                                     input_ref: resume.input_ref,
                                     input: resume.input,

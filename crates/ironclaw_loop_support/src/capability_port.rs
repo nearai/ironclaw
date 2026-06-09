@@ -21,11 +21,12 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind,
         CapabilityDescriptorView, CapabilityFailure, CapabilityFailureKind, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
-        LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
-        LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilityResumeToken,
+        ConcurrencyHint, LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind,
+        LoopHostMilestoneSink, LoopProcessRef, LoopRunContext, LoopSafeSummary,
+        ProcessHandleSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
+        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 use serde_json::Value;
@@ -1308,9 +1309,10 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             self.execution_mounts_for(&request.capability_id),
         )?;
         if let Some(resume) = request.approval_resume.as_ref() {
-            invocation_context.invocation_id = resume.invocation_id;
+            let resume_invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
+            invocation_context.invocation_id = resume_invocation_id;
             invocation_context.correlation_id = resume.correlation_id;
-            invocation_context.resource_scope.invocation_id = resume.invocation_id;
+            invocation_context.resource_scope.invocation_id = resume_invocation_id;
             invocation_context.validate().map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
@@ -1772,7 +1774,7 @@ fn invocation_idempotency_key(
         .map(|resume| {
             format!(
                 "resume:{}:{}",
-                resume.approval_request_id, resume.invocation_id
+                resume.approval_request_id, resume.resume_token
             )
         })
         .unwrap_or_else(|| "dispatch".to_string());
@@ -1894,7 +1896,7 @@ async fn runtime_outcome_to_loop(
                 safe_summary: blocked_summary(gate.reason).to_string(),
                 approval_resume: Some(ironclaw_turns::run_profile::CapabilityApprovalResume {
                     approval_request_id: gate.approval_request_id,
-                    invocation_id: conversion.invocation_id,
+                    resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
                     correlation_id: conversion.correlation_id,
                     input_ref: conversion.input_ref.clone(),
                     input: input.clone(),
@@ -2127,6 +2129,28 @@ fn blocked_summary(reason: RuntimeBlockedReason) -> &'static str {
         RuntimeBlockedReason::ResourceLimit => "capability is blocked by resource limits",
         RuntimeBlockedReason::ResourceUnavailable => "capability resources are unavailable",
     }
+}
+
+fn resume_token_from_invocation_id(
+    invocation_id: InvocationId,
+) -> Result<CapabilityResumeToken, AgentLoopHostError> {
+    CapabilityResumeToken::new(invocation_id.to_string()).map_err(|reason| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            format!("capability resume token is invalid: {reason}"),
+        )
+    })
+}
+
+fn invocation_id_from_resume_token(
+    resume_token: &CapabilityResumeToken,
+) -> Result<InvocationId, AgentLoopHostError> {
+    InvocationId::parse(resume_token.as_str()).map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "capability approval resume token is invalid",
+        )
+    })
 }
 
 fn host_runtime_error(error: HostRuntimeError) -> AgentLoopHostError {

@@ -17,14 +17,12 @@ pub use slots::{
     ReplyAdmissionStrategyState, StopStrategyState,
 };
 
-use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, InvocationId, ResourceEstimate,
-};
+use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, LoopResultRef,
     run_profile::{
-        CapabilityInputRef, CapabilitySurfaceVersion, LoopInputCursor, LoopRunContext,
-        ProviderToolCallReplay,
+        CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion, LoopInputCursor,
+        LoopRunContext, ProviderToolCallReplay,
     },
 };
 
@@ -94,7 +92,7 @@ pub struct PendingApprovalResume {
     pub gate_ref: LoopGateRef,
     pub capability_id: CapabilityId,
     pub approval_request_id: ApprovalRequestId,
-    pub invocation_id: InvocationId,
+    pub resume_token: CapabilityResumeToken,
     #[serde(default = "CorrelationId::new")]
     pub correlation_id: CorrelationId,
     pub surface_version: CapabilitySurfaceVersion,

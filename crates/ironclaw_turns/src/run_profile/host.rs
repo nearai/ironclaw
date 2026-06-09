@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ResourceEstimate,
+    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ResourceEstimate,
     RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -1385,10 +1385,46 @@ pub struct CapabilityInvocation {
     pub approval_resume: Option<CapabilityApprovalResume>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct CapabilityResumeToken(String);
+
+impl CapabilityResumeToken {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        validate_bounded_loop_string(value.into(), "capability resume token", 128).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl AsRef<str> for CapabilityResumeToken {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for CapabilityResumeToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CapabilityResumeToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityApprovalResume {
     pub approval_request_id: ApprovalRequestId,
-    pub invocation_id: InvocationId,
+    pub resume_token: CapabilityResumeToken,
     #[serde(default = "CorrelationId::new")]
     pub correlation_id: CorrelationId,
     pub input_ref: CapabilityInputRef,
