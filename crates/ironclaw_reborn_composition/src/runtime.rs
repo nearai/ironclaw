@@ -3491,7 +3491,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                super::RebornRuntimeError::MalformedConfig { reason }
+                super::RebornRuntimeError::MalformedConfig { ref reason }
                     if reason.contains("hook framework")
                         && reason.contains("production runtime launch")
             ),

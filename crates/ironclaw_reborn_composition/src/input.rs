@@ -21,11 +21,13 @@ use secrecy::SecretString;
 #[cfg(feature = "postgres")]
 use ironclaw_reborn_config::StorageBackend;
 
+#[cfg(feature = "postgres")]
+use crate::RebornBuildError;
 use crate::google_oauth::google_provider_spec;
 use crate::notion_oauth::notion_provider_spec;
 use crate::oauth_dcr::OAuthDcrProviderConfig;
 use crate::oauth_provider_client::HostOAuthProviderSpec;
-use crate::{RebornBuildError, RebornCompositionProfile, RebornProductAuthServicePorts};
+use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 #[cfg(feature = "postgres")]
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";

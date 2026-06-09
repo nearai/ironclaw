@@ -91,7 +91,7 @@ use ironclaw_reborn::{
     },
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
-        build_default_planned_runtime,
+        RuntimeTurnStateStore, build_default_planned_runtime,
     },
     turn_runner::{TurnRunnerWakeSender, TurnRunnerWorker, TurnRunnerWorkerConfig},
 };
@@ -884,8 +884,9 @@ impl RebornBinaryE2EHarness {
             loop_checkpoint_store: Arc::clone(&loop_checkpoint_store),
             accept_harness_blocked_evidence,
         });
+        let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
         let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
-            turn_state: Arc::clone(&turn_store),
+            turn_state: turn_state_for_runtime,
             thread_service: thread_harness.service.clone()
                 as Arc<dyn ironclaw_threads::SessionThreadService>,
             thread_scope: thread_scope.clone(),
@@ -967,7 +968,6 @@ impl RebornBinaryE2EHarness {
         capability_recorder: HarnessCapabilityRecorder,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
         composition: RebornRuntimeLoopComposition<
-            FilesystemTurnStateStore<LocalFilesystem>,
             dyn SessionThreadService,
             RebornTraceReplayModelGateway,
         >,

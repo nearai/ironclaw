@@ -34,7 +34,8 @@ use ironclaw_reborn::planned_driver_factory::{
     PLANNED_DEFAULT_PROFILE_ID, default_planned_run_profile_resolver,
 };
 use ironclaw_reborn::runtime::{
-    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_product_live_planned_runtime,
+    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RuntimeTurnStateStore,
+    build_product_live_planned_runtime,
 };
 use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 use ironclaw_threads::{
@@ -650,8 +651,9 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         ),
     );
     let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
+    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
-        turn_state: Arc::clone(&turn_store),
+        turn_state: turn_state_for_runtime,
         thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
@@ -818,8 +820,9 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         ),
     );
     let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
+    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
-        turn_state: Arc::clone(&turn_store),
+        turn_state: turn_state_for_runtime,
         thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
@@ -999,8 +1002,9 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         ),
     );
 
+    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
     let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
-        turn_state: turn_store,
+        turn_state: turn_state_for_runtime,
         thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
