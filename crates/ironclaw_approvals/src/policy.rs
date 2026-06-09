@@ -1,12 +1,13 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, RwLock},
 };
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem,
+    CasExpectation, ContentType, Entry, FilesystemError, RecordVersion, RootFilesystem,
+    ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
     Action, ApprovalRequestId, CapabilityGrant, CapabilityGrantId, CapabilityId, GrantConstraints,
@@ -28,6 +29,8 @@ pub enum PersistentApprovalPolicyError {
     UnsupportedScope,
     #[error("unknown persistent approval policy")]
     UnknownPolicy,
+    #[error("persistent approval policy changed concurrently")]
+    CasConflict,
     #[error("invalid storage path: {0}")]
     InvalidPath(String),
     #[error("filesystem error: {0}")]
@@ -38,6 +41,9 @@ pub enum PersistentApprovalPolicyError {
 
 impl From<FilesystemError> for PersistentApprovalPolicyError {
     fn from(error: FilesystemError) -> Self {
+        if matches!(error, FilesystemError::VersionMismatch { .. }) {
+            return Self::CasConflict;
+        }
         Self::Filesystem(error.to_string())
     }
 }
@@ -185,20 +191,12 @@ pub trait PersistentApprovalPolicyStore: Send + Sync {
 
 #[derive(Debug, Default)]
 pub struct InMemoryPersistentApprovalPolicyStore {
-    policies: Mutex<HashMap<PersistentApprovalPolicyKey, PersistentApprovalPolicy>>,
+    policies: RwLock<HashMap<PersistentApprovalPolicyKey, PersistentApprovalPolicy>>,
 }
 
 impl InMemoryPersistentApprovalPolicyStore {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    fn policies_guard(
-        &self,
-    ) -> MutexGuard<'_, HashMap<PersistentApprovalPolicyKey, PersistentApprovalPolicy>> {
-        self.policies
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -216,7 +214,10 @@ impl PersistentApprovalPolicyStore for InMemoryPersistentApprovalPolicyStore {
             input.capability_id,
             input.grantee,
         )?;
-        let mut policies = self.policies_guard();
+        let mut policies = self
+            .policies
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Utc::now();
         let created_at = policies
             .get(&key)
@@ -238,19 +239,28 @@ impl PersistentApprovalPolicyStore for InMemoryPersistentApprovalPolicyStore {
         &self,
         key: &PersistentApprovalPolicyKey,
     ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
-        Ok(self.policies_guard().get(key).cloned())
+        Ok(self
+            .policies
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .cloned())
     }
 
     async fn revoke(
         &self,
         key: &PersistentApprovalPolicyKey,
     ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
-        let mut policies = self.policies_guard();
+        let mut policies = self
+            .policies
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let policy = policies
             .get_mut(key)
             .ok_or(PersistentApprovalPolicyError::UnknownPolicy)?;
-        policy.revoked_at = Some(Utc::now());
-        policy.updated_at = Utc::now();
+        let now = Utc::now();
+        policy.revoked_at = Some(now);
+        policy.updated_at = now;
         Ok(policy.clone())
     }
 }
@@ -295,24 +305,24 @@ where
             input.grantee,
         )?;
         let path = policy_path(&key)?;
-        let existing = self.lookup(&key).await?;
+        let existing = self.lookup_versioned(&key).await?;
         let now = Utc::now();
+        let (created_at, cas) = existing
+            .as_ref()
+            .map_or((now, CasExpectation::Absent), |(policy, version)| {
+                (policy.created_at, CasExpectation::Version(*version))
+            });
         let policy = PersistentApprovalPolicy {
             key,
             approved_by: input.approved_by,
             constraints: input.constraints,
             source_approval_request_id: input.source_approval_request_id,
-            created_at: existing.as_ref().map_or(now, |policy| policy.created_at),
+            created_at,
             updated_at: now,
             revoked_at: None,
         };
         self.filesystem
-            .put(
-                &scope,
-                &path,
-                Self::record_entry(&policy)?,
-                CasExpectation::Any,
-            )
+            .put(&scope, &path, Self::record_entry(&policy)?, cas)
             .await?;
         Ok(policy)
     }
@@ -321,25 +331,18 @@ where
         &self,
         key: &PersistentApprovalPolicyKey,
     ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
-        let path = policy_path(key)?;
-        let scope = resource_scope_for_policy_key(key);
-        let Some(versioned) = self.filesystem.get(&scope, &path).await? else {
-            return Ok(None);
-        };
-        let policy = deserialize::<PersistentApprovalPolicy>(&versioned.entry.body)?;
-        if &policy.key == key {
-            Ok(Some(policy))
-        } else {
-            Ok(None)
-        }
+        Ok(self
+            .lookup_versioned(key)
+            .await?
+            .map(|(policy, _version)| policy))
     }
 
     async fn revoke(
         &self,
         key: &PersistentApprovalPolicyKey,
     ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
-        let mut policy = self
-            .lookup(key)
+        let (mut policy, version) = self
+            .lookup_versioned(key)
             .await?
             .ok_or(PersistentApprovalPolicyError::UnknownPolicy)?;
         let now = Utc::now();
@@ -351,10 +354,40 @@ where
                 &scope,
                 &policy_path(key)?,
                 Self::record_entry(&policy)?,
-                CasExpectation::Any,
+                CasExpectation::Version(version),
             )
             .await?;
         Ok(policy)
+    }
+}
+
+impl<F> FilesystemPersistentApprovalPolicyStore<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn lookup_versioned(
+        &self,
+        key: &PersistentApprovalPolicyKey,
+    ) -> Result<Option<(PersistentApprovalPolicy, RecordVersion)>, PersistentApprovalPolicyError>
+    {
+        let path = policy_path(key)?;
+        let scope = resource_scope_for_policy_key(key);
+        let Some(versioned) = self.filesystem.get(&scope, &path).await? else {
+            return Ok(None);
+        };
+        deserialize_versioned_policy(key, versioned)
+    }
+}
+
+fn deserialize_versioned_policy(
+    key: &PersistentApprovalPolicyKey,
+    versioned: VersionedEntry,
+) -> Result<Option<(PersistentApprovalPolicy, RecordVersion)>, PersistentApprovalPolicyError> {
+    let policy = deserialize::<PersistentApprovalPolicy>(&versioned.entry.body)?;
+    if &policy.key == key {
+        Ok(Some((policy, versioned.version)))
+    } else {
+        Ok(None)
     }
 }
 
@@ -506,6 +539,28 @@ mod tests {
             PersistentApprovalScope::from_resource_scope(&scope_a).unwrap(),
             PersistentApprovalScope::from_resource_scope(&scope_b).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn active_grant_returns_none_for_expired_policy() {
+        let store = InMemoryPersistentApprovalPolicyStore::new();
+        let scope = scope(None, Some("thread-a"));
+        let mut input = input(scope);
+        input.constraints.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+
+        let policy = store.allow(input).await.expect("allow policy");
+
+        assert!(policy.active_grant().is_none());
+    }
+
+    #[tokio::test]
+    async fn from_resource_scope_errs_without_project_or_thread() {
+        let scope = scope(None, None);
+
+        assert!(matches!(
+            PersistentApprovalScope::from_resource_scope(&scope),
+            Err(PersistentApprovalPolicyError::UnsupportedScope)
+        ));
     }
 
     fn input(scope: ResourceScope) -> PersistentApprovalPolicyInput {

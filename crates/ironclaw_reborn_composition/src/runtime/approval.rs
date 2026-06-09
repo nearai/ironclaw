@@ -327,5 +327,4 @@ mod tests {
         )
         .expect("approval gate record")
     }
-
 }

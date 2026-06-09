@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::future::join_all;
 use ironclaw_approvals::{
     PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
     PersistentApprovalScope, permission_mode_allows_persistent_approval,
@@ -987,14 +988,21 @@ impl DefaultHostRuntime {
                 return;
             }
         };
-        for grantee in persistent_approval_grantees(context) {
-            let key = PersistentApprovalPolicyKey {
-                scope: scope.clone(),
-                action,
-                capability_id: capability_id.clone(),
-                grantee,
-            };
-            let policy = match policies.lookup(&key).await {
+        let lookup_results = join_all(persistent_approval_grantees(context).into_iter().map(
+            |grantee| {
+                let policies = Arc::clone(policies);
+                let key = PersistentApprovalPolicyKey {
+                    scope: scope.clone(),
+                    action,
+                    capability_id: capability_id.clone(),
+                    grantee,
+                };
+                async move { policies.lookup(&key).await }
+            },
+        ))
+        .await;
+        for policy in lookup_results {
+            let policy = match policy {
                 Ok(policy) => policy,
                 Err(error) => {
                     tracing::warn!(
@@ -1016,6 +1024,7 @@ impl DefaultHostRuntime {
                 "persistent approval policy matched; injecting scoped grant"
             );
             context.grants.grants.push(grant);
+            break;
         }
     }
 

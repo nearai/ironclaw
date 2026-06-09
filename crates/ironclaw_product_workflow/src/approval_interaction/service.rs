@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_approvals::{
     DenyApproval, PersistentApprovalAction, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyStore,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
 };
 use ironclaw_host_api::{Action, Principal};
 use ironclaw_run_state::ApprovalStatus;
@@ -154,42 +154,52 @@ impl DefaultApprovalInteractionService {
         }
         let mut terms = self.lease_terms_provider.lease_terms_for(&gate).await?;
         terms.issued_by = Principal::User(request.actor.user_id.clone());
-        if persistent {
+        let persisted_policy_key = if persistent {
             self.lease_terms_provider
                 .persistent_approval_allowed(&gate)
                 .await?;
-            self.persist_allow_policy(&request, &gate, terms.clone())
-                .await?;
-        }
-        match (status, action) {
+            Some(
+                self.persist_allow_policy(&request, &gate, terms.clone())
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let resolution = match (status, action) {
             (ApprovalStatus::Pending, ApprovalCapabilityAction::Dispatch) => {
                 self.resolver
                     .approve_dispatch(gate.resource_scope(), gate.request().id, terms)
-                    .await?;
+                    .await
             }
             (ApprovalStatus::Pending, ApprovalCapabilityAction::Spawn) => {
                 self.resolver
                     .approve_spawn(gate.resource_scope(), gate.request().id, terms)
-                    .await?;
+                    .await
             }
             (ApprovalStatus::Approved, ApprovalCapabilityAction::Dispatch) => {
                 self.resolver
                     .ensure_dispatch_lease(gate.resource_scope(), gate.request().id, terms)
-                    .await?;
+                    .await
             }
             (ApprovalStatus::Approved, ApprovalCapabilityAction::Spawn) => {
                 self.resolver
                     .ensure_spawn_lease(gate.resource_scope(), gate.request().id, terms)
-                    .await?;
+                    .await
             }
             (ApprovalStatus::Denied | ApprovalStatus::Expired, _) => {
                 return Err(approval_rejected(
                     ApprovalInteractionRejectionKind::StaleGate,
                 ));
             }
+        };
+        if let Err(error) = resolution {
+            if let Some(policy_key) = &persisted_policy_key {
+                self.rollback_persistent_allow_policy(policy_key).await;
+            }
+            return Err(error);
         }
 
-        let response = self
+        let response = match self
             .turn_coordinator
             .resume_turn(ResumeTurnRequest {
                 scope: request.scope,
@@ -202,7 +212,16 @@ impl DefaultApprovalInteractionService {
                 idempotency_key: request.idempotency_key,
             })
             .await
-            .map_err(map_approval_resume_error)?;
+            .map_err(map_approval_resume_error)
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(policy_key) = &persisted_policy_key {
+                    self.rollback_persistent_allow_policy(policy_key).await;
+                }
+                return Err(error);
+            }
+        };
         Ok(ResolveApprovalInteractionResponse::Approved(response))
     }
 
@@ -211,7 +230,7 @@ impl DefaultApprovalInteractionService {
         request: &ResolveApprovalInteractionRequest,
         gate: &ApprovalGateRecord,
         terms: ironclaw_approvals::LeaseApproval,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<PersistentApprovalPolicyKey, ProductWorkflowError> {
         let Some(persistent_policies) = self.persistent_policies.as_ref() else {
             return Err(approval_rejected(
                 ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
@@ -243,7 +262,7 @@ impl DefaultApprovalInteractionService {
                 source_approval_request_id: Some(gate.request().id),
             })
             .await
-            .map(|_| ())
+            .map(|policy| policy.key)
             .map_err(|error| {
                 tracing::warn!(
                     error = %error,
@@ -254,6 +273,20 @@ impl DefaultApprovalInteractionService {
                     reason: "persistent approval policy unavailable".to_string(),
                 }
             })
+    }
+
+    async fn rollback_persistent_allow_policy(&self, key: &PersistentApprovalPolicyKey) {
+        let Some(persistent_policies) = self.persistent_policies.as_ref() else {
+            return;
+        };
+        if let Err(error) = persistent_policies.revoke(key).await {
+            tracing::warn!(
+                error = %error,
+                capability_id = %key.capability_id,
+                action = ?key.action,
+                "persistent approval policy rollback failed"
+            );
+        }
     }
 
     async fn deny_gate(
@@ -399,8 +432,16 @@ impl ApprovalInteractionService for DefaultApprovalInteractionService {
                 self.lease_terms_provider
                     .persistent_approval_allowed(&gate)
                     .await?;
-                self.persist_allow_policy(&request, &gate, terms).await?;
-                self.replay_approved_gate(request, run_id).await
+                let persisted_policy_key =
+                    self.persist_allow_policy(&request, &gate, terms).await?;
+                match self.replay_approved_gate(request, run_id).await {
+                    Ok(response) => Ok(response),
+                    Err(error) => {
+                        self.rollback_persistent_allow_policy(&persisted_policy_key)
+                            .await;
+                        Err(error)
+                    }
+                }
             }
             (
                 BlockedGateState::NotParkedOnGate,

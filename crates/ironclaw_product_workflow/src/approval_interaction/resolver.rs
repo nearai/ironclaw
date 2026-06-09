@@ -21,7 +21,9 @@ pub trait ApprovalLeaseTermsProvider: Send + Sync {
         &self,
         _gate: &ApprovalGateRecord,
     ) -> Result<(), ProductWorkflowError> {
-        Ok(())
+        Err(approval_rejected(
+            ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
+        ))
     }
 }
 
