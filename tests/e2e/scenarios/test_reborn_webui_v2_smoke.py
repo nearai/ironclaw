@@ -31,6 +31,7 @@ import socket
 import uuid
 from pathlib import Path
 
+import aiohttp
 import httpx
 import pytest
 from playwright.async_api import async_playwright, expect
@@ -432,3 +433,42 @@ async def test_reborn_v2_timeline_pagination(reborn_v2_server):
         assert page1_seq.isdisjoint(page2_seq), (
             f"paged messages must not overlap: page1={page1_seq} page2={page2_seq}"
         )
+
+
+async def test_reborn_v2_sse_streams_run_lifecycle(reborn_v2_server):
+    """The SSE stream opens via the `?token=` shim and reports the run reaching completion.
+
+    The browser's `EventSource` cannot set an `Authorization` header, so
+    `GET /events` accepts `?token=` instead of a bearer (the only v2 route that
+    does). The stream is projection-based: it carries run lifecycle status
+    (`queued` -> `running` -> `completed`), not the reply text.
+    """
+    bearer = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=bearer) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+
+    events_url = (
+        f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/events"
+        f"?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    client_timeout = aiohttp.ClientTimeout(total=45, sock_read=45)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        # No Authorization header — only the `?token=` query shim authenticates.
+        async with session.get(
+            events_url, headers={"Accept": "text/event-stream"}
+        ) as response:
+            assert response.status == 200, (
+                f"events stream must open via ?token= shim, got {response.status}"
+            )
+
+            # Submit the turn now that the stream is live, then read lifecycle frames.
+            async with httpx.AsyncClient(headers=bearer) as client:
+                await _send_message(client, reborn_v2_server, thread_id, "hello sse")
+
+            async with asyncio.timeout(45):
+                while True:
+                    raw = await response.content.readline()
+                    assert raw, "SSE stream closed before the run completed"
+                    line = raw.decode("utf-8", errors="replace")
+                    if '"status":"completed"' in line:
+                        return
