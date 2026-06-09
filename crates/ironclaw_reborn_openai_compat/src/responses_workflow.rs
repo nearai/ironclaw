@@ -82,11 +82,6 @@ impl OpenAiResponsesWorkflow {
         idempotency_key: Option<OpenAiCompatIdempotencyKey>,
         surface: OpenAiCompatRouteSurface,
     ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError> {
-        if raw_body.len() > MAX_RESPONSES_BODY_BYTES {
-            return Err(OpenAiCompatHttpError::invalid_request(Some(
-                "body".to_string(),
-            )));
-        }
         let request = parse_response_create_request(raw_body)?;
         validate_responses_request(&request)?;
 
@@ -804,6 +799,11 @@ fn response_public_id(
 fn parse_response_create_request(
     raw_body: &[u8],
 ) -> Result<OpenAiResponsesCreateRequest, OpenAiCompatHttpError> {
+    if raw_body.len() > MAX_RESPONSES_BODY_BYTES {
+        return Err(OpenAiCompatHttpError::invalid_request(Some(
+            "body".to_string(),
+        )));
+    }
     serde_json::from_slice(raw_body)
         .map_err(|_| OpenAiCompatHttpError::invalid_request(Some("body".to_string())))
 }
