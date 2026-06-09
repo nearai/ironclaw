@@ -147,6 +147,10 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 outbound_delivery_target_providers,
             )),
         )));
+    } else if !outbound_delivery_target_providers.is_empty() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "outbound delivery target providers require local runtime services".to_string(),
+        });
     }
     if let Some(connectable_channels) = connectable_channels {
         api = api.with_connectable_channels_facade(connectable_channels);

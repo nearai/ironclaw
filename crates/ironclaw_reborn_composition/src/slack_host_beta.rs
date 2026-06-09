@@ -74,6 +74,8 @@ const SLACK_WEBHOOK_WORKFLOW_TIMEOUT: Duration = Duration::from_secs(2);
 const SLACK_MAX_IN_FLIGHT_WEBHOOKS: usize = 64;
 const SLACK_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const SLACK_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
+// `ReplyTargetBindingRef` permits 256 bytes; this raw cap leaves room for the
+// `reply:` prefix that is added before constructing the typed ref.
 const SLACK_BINDING_REF_RAW_MAX_BYTES: usize = 240;
 const SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE: usize = 500;
 
@@ -473,6 +475,11 @@ impl SlackHostBetaOutboundTargetProvider {
             let Some(next_cursor) = stored.next_cursor else {
                 break;
             };
+            if next_cursor <= cursor {
+                return Err(map_slack_target_route_error(
+                    SlackChannelRouteError::StoreUnavailable,
+                ));
+            }
             cursor = next_cursor;
         }
         routes.extend(
@@ -516,6 +523,23 @@ impl SlackHostBetaOutboundTargetProvider {
             )?,
         })
     }
+
+    async fn resolve_for_channel_id(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        channel_id: &str,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        if caller.tenant_id != self.tenant_id {
+            return Ok(None);
+        }
+        let Some(route) = self.shared_channel_route_for_channel(channel_id).await? else {
+            return Ok(None);
+        };
+        if route.subject_user_id != caller.user_id {
+            return Ok(None);
+        }
+        self.entry_for_shared_channel_route(&route).map(Some)
+    }
 }
 
 #[async_trait::async_trait]
@@ -545,19 +569,10 @@ impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
         caller: &WebUiAuthenticatedCaller,
         target_id: &RebornOutboundDeliveryTargetId,
     ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        if caller.tenant_id != self.tenant_id {
-            return Ok(None);
-        }
         let Some(channel_id) = self.channel_id_for_target_id(target_id) else {
             return Ok(None);
         };
-        let Some(route) = self.shared_channel_route_for_channel(channel_id).await? else {
-            return Ok(None);
-        };
-        if route.subject_user_id != caller.user_id {
-            return Ok(None);
-        }
-        self.entry_for_shared_channel_route(&route).map(Some)
+        self.resolve_for_channel_id(caller, channel_id).await
     }
 
     async fn resolve_reply_target_binding(
@@ -565,19 +580,10 @@ impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
         caller: &WebUiAuthenticatedCaller,
         target: &ReplyTargetBindingRef,
     ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        if caller.tenant_id != self.tenant_id {
-            return Ok(None);
-        }
         let Some(channel_id) = self.channel_id_for_reply_target_binding_ref(target) else {
             return Ok(None);
         };
-        let Some(route) = self.shared_channel_route_for_channel(channel_id).await? else {
-            return Ok(None);
-        };
-        if route.subject_user_id != caller.user_id {
-            return Ok(None);
-        }
-        self.entry_for_shared_channel_route(&route).map(Some)
+        self.resolve_for_channel_id(caller, channel_id).await
     }
 }
 
@@ -754,6 +760,12 @@ fn slack_shared_channel_reply_target_binding_ref(
         product_binding_segment("project", project_id.map_or("", |id| id.as_str())),
         conversation.conversation_fingerprint()
     );
+    slack_reply_target_binding_ref_from_raw(raw)
+}
+
+fn slack_reply_target_binding_ref_from_raw(
+    raw: String,
+) -> Result<ReplyTargetBindingRef, RebornServicesError> {
     if raw.len() > SLACK_BINDING_REF_RAW_MAX_BYTES
         || raw.chars().any(|c| c == '\0' || c.is_control())
     {
@@ -762,6 +774,8 @@ fn slack_shared_channel_reply_target_binding_ref(
     ReplyTargetBindingRef::new(format!("reply:{raw}")).map_err(|_| slack_target_backend_error())
 }
 
+// Keep this segment format in parity with
+// `ExternalConversationRef::conversation_fingerprint`.
 fn product_binding_segment(name: &str, value: &str) -> String {
     format!("{name}:{}:{value};", value.len())
 }
@@ -966,9 +980,9 @@ mod tests {
 
     use super::*;
     use crate::slack_channel_routes::{
-        InMemorySlackChannelRouteStore, SlackChannelRouteAdminRouteMount,
-        WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
-        slack_channel_route_admin_route_mount,
+        InMemorySlackChannelRouteStore, SlackChannelRoute, SlackChannelRouteAdminRouteMount,
+        SlackChannelRouteListPage, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
+        WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, slack_channel_route_admin_route_mount,
     };
     use crate::slack_connectable_channel::{
         SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
@@ -977,9 +991,9 @@ mod tests {
         WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
     };
     use crate::{
-        RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, SLACK_EVENTS_PATH,
-        WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime, local_dev_runtime_policy,
-        webui_v2_app,
+        RebornBuildError, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput,
+        SLACK_EVENTS_PATH, WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime,
+        local_dev_runtime_policy, webui_v2_app,
     };
 
     const TENANT: &str = "tenant:slack-host";
@@ -1022,6 +1036,58 @@ mod tests {
             } else {
                 None
             }
+        }
+    }
+
+    #[derive(Debug)]
+    struct NonAdvancingCursorRouteStore;
+
+    #[async_trait]
+    impl SlackChannelRouteStore for NonAdvancingCursorRouteStore {
+        async fn list_routes(
+            &self,
+            _tenant_id: &TenantId,
+            _installation_id: &AdapterInstallationId,
+            _team_id: &str,
+            cursor: usize,
+            _limit: usize,
+        ) -> Result<SlackChannelRouteListPage, SlackChannelRouteError> {
+            Ok(SlackChannelRouteListPage {
+                routes: Vec::new(),
+                next_cursor: Some(cursor),
+            })
+        }
+
+        async fn upsert_route(
+            &self,
+            _key: SlackChannelRouteKey,
+            _subject_user_id: UserId,
+        ) -> Result<SlackChannelRoute, SlackChannelRouteError> {
+            Err(SlackChannelRouteError::StoreUnavailable)
+        }
+
+        async fn delete_route(
+            &self,
+            _key: &SlackChannelRouteKey,
+        ) -> Result<bool, SlackChannelRouteError> {
+            Err(SlackChannelRouteError::StoreUnavailable)
+        }
+
+        async fn replace_managed_routes(
+            &self,
+            _tenant_id: &TenantId,
+            _installation_id: &AdapterInstallationId,
+            _team_id: &str,
+            _assignments: Vec<crate::slack_channel_routes::SlackChannelRouteAssignment>,
+        ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
+            Err(SlackChannelRouteError::StoreUnavailable)
+        }
+
+        async fn resolve_subject_user_id(
+            &self,
+            _key: &SlackChannelRouteKey,
+        ) -> Result<Option<UserId>, SlackChannelRouteError> {
+            Err(SlackChannelRouteError::StoreUnavailable)
         }
     }
 
@@ -1132,6 +1198,28 @@ mod tests {
         assert!(matches!(
             error,
             SlackHostBetaBuildError::DurableHostStateUnavailable
+        ));
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn slack_outbound_targets_fail_build_when_local_runtime_missing() {
+        let (mut runtime, _root) = runtime().await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
+        runtime.clear_local_runtime_for_test();
+
+        let error = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Hidden,
+        )
+        .expect_err("outbound target providers require local runtime wiring");
+
+        assert!(matches!(
+            error,
+            RebornBuildError::InvalidConfig { reason }
+                if reason.contains("outbound delivery target providers require local runtime")
         ));
         runtime.shutdown().await.expect("runtime shuts down");
     }
@@ -1986,6 +2074,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slack_host_beta_targets_page_multiple_route_store_pages() {
+        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let tenant_id = TenantId::new(TENANT).expect("tenant");
+        let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
+        let subject_user_id = UserId::new(SHARED_SUBJECT).expect("shared subject");
+        for index in 0..=SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE {
+            let channel_id = format!("C{index:04}");
+            let key = SlackChannelRouteKey::new(
+                tenant_id.clone(),
+                installation_id.clone(),
+                TEAM.to_string(),
+                channel_id,
+            )
+            .expect("route key");
+            store
+                .upsert_route(key, subject_user_id.clone())
+                .await
+                .expect("route upserts");
+        }
+        let provider =
+            SlackHostBetaOutboundTargetProvider::new(config_without_channel_routes(), store);
+
+        let targets = provider
+            .list_outbound_delivery_targets(&shared_subject_caller())
+            .await
+            .expect("paged target list");
+
+        assert_eq!(
+            targets.len(),
+            SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE + 1,
+            "provider should walk beyond the first route-store page"
+        );
+        assert_eq!(
+            targets
+                .last()
+                .map(|target| target.summary.target_id.as_str()),
+            Some("slack:shared-channel:T0HOST:C0500")
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_host_beta_targets_reject_non_advancing_route_cursor() {
+        let provider = SlackHostBetaOutboundTargetProvider::new(
+            config_without_channel_routes(),
+            Arc::new(NonAdvancingCursorRouteStore),
+        );
+
+        let error = provider
+            .list_outbound_delivery_targets(&shared_subject_caller())
+            .await
+            .expect_err("non-advancing cursor must fail closed");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
+    }
+
+    #[tokio::test]
     async fn slack_host_beta_targets_ignore_other_tenant_callers() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
@@ -2056,6 +2203,38 @@ mod tests {
         assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
         assert_eq!(error.status_code, 503);
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn slack_shared_channel_reply_target_binding_ref_rejects_control_char_in_raw() {
+        let error = slack_reply_target_binding_ref_from_raw("adapter:5:slack;\x01".to_string())
+            .expect_err("control char must fail closed");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
+    }
+
+    #[test]
+    fn slack_shared_channel_reply_target_binding_ref_round_trips_channel_id() {
+        let provider = SlackHostBetaOutboundTargetProvider::new(
+            config(),
+            Arc::new(InMemorySlackChannelRouteStore::new()),
+        );
+        let binding_ref = slack_shared_channel_reply_target_binding_ref(
+            &AdapterInstallationId::new(INSTALLATION).expect("installation"),
+            &AgentId::new(AGENT).expect("agent"),
+            Some(&ProjectId::new(PROJECT).expect("project")),
+            &SlackTeamId::new(TEAM),
+            "C0HOST",
+        )
+        .expect("binding ref builds");
+
+        assert_eq!(
+            provider.channel_id_for_reply_target_binding_ref(&binding_ref),
+            Some("C0HOST")
+        );
     }
 
     #[test]
