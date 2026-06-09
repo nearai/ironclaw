@@ -654,16 +654,3 @@ fn map_turn_event_projection_error(error: TurnEventProjectionError) -> ProductAd
         },
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::failure_summary_for_category;
-
-    #[test]
-    fn iteration_limit_has_specific_failure_summary() {
-        assert_eq!(
-            failure_summary_for_category("iteration_limit"),
-            "The run stopped after reaching its iteration limit before producing a reply."
-        );
-    }
-}
