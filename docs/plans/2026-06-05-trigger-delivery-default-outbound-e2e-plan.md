@@ -499,21 +499,56 @@ Exit criteria:
 Goal: implement Slack as the first channel using the channel-neutral target
 provider and authority resolver.
 
+Current implementation status:
+
+- PR C1 is the active Phase 4 slice: shared-agent Slack channel targets backed
+  by admin-managed Slack channel routes.
+- PR C1 treats persisted admin routes as authoritative over static seeded
+  Slack channel fallback when the same channel has a stored owner.
+- PR C2 remains the next Slack slice: personal Slack DM targets need durable
+  provider authority for the concrete Slack DM conversation id returned by
+  `conversations.open`.
+- Static seeded Slack channel deletion needs explicit tombstone/disabled-route
+  state before delete can override startup fallback. PR C1 does not invent that
+  persistence contract; keep it as a follow-up if static seeded routes must be
+  revocable from the admin UI.
+- PR C1 keeps shared-channel target authority in the Slack host-beta composition
+  module to avoid refactor churn. Follow up by moving the provider into
+  `slack_channel_routes` or a dedicated Slack route-authority module if the
+  target-provider implementation grows beyond this first shared-channel slice.
+- PR C1 pages through the existing route-store API for shared-channel target
+  inventory so stored routes past the first page still override static fallback.
+  Follow up with a subject-scoped route-store query if route inventory scans
+  become too expensive for tenants with many Slack channel routes.
+- PR C1 keeps the Slack reply-target binding formatter local. Follow up with a
+  shared bounded binding-ref helper only if another provider needs the same
+  formatter shape; do not move crate APIs just for this first Slack target.
+- Slack pairing-code redemption remains identity-only. It must not synthesize a
+  personal default, write preferences, or treat a paired Slack user id as a
+  deliverable DM target.
+
 Deliverables:
 
 - Shared-agent Slack channel target backed by admin-managed Slack channel
-  routes.
-- Personal Slack DM target backed by durable Slack identity/DM target
-  authority.
-- Slack route deletion/owner-change tests.
+  routes. Implemented in PR C1.
+- Personal Slack DM target backed by durable Slack identity/DM target authority.
+  Deferred to PR C2 until Slack-owned durable DM target state exists.
+- Slack route deletion/owner-change tests. Covered in PR C1 for admin-managed
+  shared-channel targets, plus persisted-owner override for static seeded
+  channels. Static seeded delete-over-fallback needs tombstone state.
+- Shared-channel target provider placement, subject-scoped listing, and shared
+  binding-ref helper extraction are documented follow-ups, not PR C1 blockers.
 - Pairing-code redemption tests proving it remains identity-only.
 - First-inbound/DM target tests proving only a concrete target can become a
-  personal default.
+  personal default. Deferred to PR C2 with durable DM target state.
 
 Exit criteria:
 
-- Shared tenant agents can target an admin-configured Slack channel.
+- Shared tenant agents can target an admin-configured Slack channel. PR C1
+  covers listing, preference selection, deletion revocation, and owner-change
+  authority movement.
 - Personal agents can target the owner's Slack DM after DM authority exists.
+  Deferred to PR C2.
 - No target is synthesized from arbitrary client input.
 - Slack final reply delivery still uses `chat.postMessage`.
 
@@ -604,8 +639,10 @@ Exit criteria:
 
 If Slack authority exposes unexpected storage gaps, split PR C into:
 
-- PR C1: Slack shared-channel target authority
-- PR C2: Slack personal DM target authority
+- PR C1: Slack shared-channel target authority. Active/current slice.
+- PR C2: Slack personal DM target authority. Required follow-up because current
+  pairing persists identity only and does not persist a concrete Slack DM
+  conversation target.
 
 ## Implementation Plan
 
