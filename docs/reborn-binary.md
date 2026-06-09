@@ -38,6 +38,7 @@ ironclaw-reborn models set-provider openai --model gpt-5-mini
 ironclaw-reborn onboard
 ironclaw-reborn onboard --dry-run
 ironclaw-reborn onboard --force
+ironclaw-reborn onboard --import-history
 ironclaw-reborn profile list
 ironclaw-reborn profile list --json
 ironclaw-reborn repl
@@ -115,8 +116,11 @@ Then open **`http://127.0.0.1:3000/v2`** and log in with the
 `IRONCLAW_REBORN_WEBUI_TOKEN` value.
 
 `--host` / `--port` override the defaults (`127.0.0.1` / `3000`), or set
-`[webui].listen_host` / `[webui].listen_port` in `config.toml`. `--port 0` lets
-the kernel pick a free port. For the Slack host-beta ingress, build with
+`[webui].listen_host` / `[webui].listen_port` in `config.toml`. `--port 0`
+(the **CLI flag only**) tells the OS to pick a free ephemeral port — useful for
+test harnesses, though the banner still prints `:0`. `[webui].listen_port = 0`
+in `config.toml` is **rejected**, since a config-driven ephemeral port is almost
+always a mistake. For the Slack host-beta ingress, build with
 `--features slack-v2-host-beta` (it includes `webui-v2-beta`).
 
 ### Choose your model provider
@@ -376,6 +380,7 @@ var to export for it — handy for confirming setup before `serve`/`run`:
 - `default.provider_known` (`yes` once the provider id resolves in the catalog)
 - `default.model`
 - `default.api_key_env` (the env var that must hold your key, e.g. `NEARAI_API_KEY`)
+- `default.base_url` (only when the route configures one)
 - `v1_state: not-used`
 
 Those are the **text** field names. `models status --json` serializes the
