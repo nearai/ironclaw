@@ -32,7 +32,7 @@ Plus: introduce the `CapabilityResultStore` trait (does not exist today). Introd
 | 10 | Re-flip (OFF → ON → OFF → ON) → idempotency ledger blocks double-delivery via `(run_id, child_run_id, terminal_kind)` UNIQUE constraint. | Plan WU-B "Concurrent settlement" + plan Part 1 Soft corrections. |
 | 11 | Idempotency ledger is **two-phase** (`delivered_at` NULL = pencil, NOT NULL = sealed). Pencil insert claims ownership; gate-store write completes delivery; seal UPDATE marks final. Pencil rows surviving a crash become `retryable` on next boot. | D1 fix. Resolves "crash between ledger insert and gate-store write silently strands the parent loop" bug surfaced by multi-agent review. Matches `IdempotencyLedger::begin_or_replay` precedent. |
 | 12 | Reconciler handles **orphan settlement log rows** (gate cleaned up before delivery) by writing a tombstone + sealing the ledger row in one pass. Counts as `skipped_orphan`, not `failed`. | D9 fix. Resolves "every boot counts cleaned-up gates as `failed` forever" bug. Preserves settlement log append-only invariant. |
-| 13 | `ReplayReport` has five operator-meaningful counters: `redelivered`, `skipped_idempotent`, `retryable`, `skipped_orphan`, `failed`. Only `failed > 0` is actionable. | D1+D9. Eliminates "what does `skipped` actually mean here" alert ambiguity. |
+| 13 | `ReplayReport` has six operator-meaningful counters: `redelivered`, `skipped_idempotent`, `retryable`, `skipped_orphan`, `skipped_tombstoned`, `failed`. Only `failed > 0` is actionable. Split between `skipped_orphan` (gate cleaned up) and `skipped_tombstoned` (child pre-tombstoned, gate live) lets operators distinguish gate-cleanup spikes from parent-cancel spikes. | D1+D9. Eliminates "what does `skipped` actually mean here" alert ambiguity. |
 | 14 | Reconciler replay algorithm is **batch-phased**: Phase 0 (bound input via LEFT JOIN), Phase 1 (preflight batch read), Phase 2 (multi-row ledger writes), Phase 3 (parallel capability loads via `buffer_unordered(replay_pool_size)`), Phase 4 (per-row deliver+seal). Phases 0–3 issue O(1) DB calls regardless of pending-row count. | D4 fix. Resolves N+1 query problem surfaced by review. Phase 0 LEFT JOIN bounds replay input by outstanding work, not historical log size — addresses long-term concern (settlement log growth). |
 | 15 | Reconciler runs in a **background `tokio::spawn` task**, not synchronously at boot. Foreground traffic (incl. blocking subagent calls) is NEVER blocked by replay. Background-mode spawn admission is gated **per-scope** by `ReplayState[scope].completed_at` — rejected with `SubagentSpawnError::ReplayInProgress { try_again_after_ms }` until complete. | D5 fix. Preserves <100 ms foreground cold start regardless of replay backlog. Multi-tenant safe: tenant A's recovery does not gate tenant B's admissions. Background-mode default is OFF through WU-G so user impact is bounded. |
 | 16 | Reconciler uses a **dedicated `replay_pool`** (default 4 DB connections, configurable via `RebornEventStoreConfig.replay_pool_size`), separate from the main runtime connection pool. Prevents replay from starving foreground writes during a recovery storm. | D5 fix. Operationally observable as a distinct metric. Sizing controlled by operator. |
@@ -1042,6 +1042,13 @@ pub struct ReplayReport {
     /// tombstones the child and seals the ledger row — no further replay
     /// will attempt redelivery for these entries.
     pub skipped_orphan: u32,
+    /// Settlement-log entries where the child had an EXPLICIT pre-existing
+    /// tombstone (parent cancelled but gate row still live). Distinct from
+    /// `skipped_orphan` (gate row gone). Operators can use the split to
+    /// differentiate parent-cancel spikes (high `skipped_tombstoned`) from
+    /// gate-cleanup spikes (high `skipped_orphan`) — different root causes,
+    /// different remediations.
+    pub skipped_tombstoned: u32,
     /// Real delivery failures (backend error, missing capability result,
     /// tombstoned-result race). Each failure is logged at `warn!` level
     /// and the reconciler continues. `failed > 0` is operator-actionable.
@@ -1060,6 +1067,97 @@ pub enum ReconcilerError {
 ```
 
 `TurnScope` (from `crates/ironclaw_turns/src/scope.rs`) carries `tenant_id`, `agent_id`, `project_id`, `thread_id` — already threaded through every Reborn runtime call site. Using it directly avoids introducing a new `Scope` wrapper.
+
+WU-C MUST expose both single-key `seal` and multi-row `seal_batch` on the idempotency ledger trait. Phase 4's seal step uses `seal_batch` (single multi-row UPDATE) — per-row `seal` calls in a loop reintroduce the N+1 cost the rest of the algorithm eliminates. Single-key `seal` is retained for the orphan / tombstone paths in Phase 2a which already have their own batching call (`upsert_sealed_batch`).
+
+### 5.2.1 Batch method signatures (reconciler-facing)
+
+The replay algorithm (§5.3) calls 8 batch methods on three stores. WU-C MUST expose each with the signature below. All are async; all return their natural plural shape (`Set`, `Vec`, `Result<()>`).
+
+```rust
+// crates/ironclaw_reborn_event_store — extends SubagentGateResolutionStore
+trait SubagentGateResolutionStore {
+    // ... existing methods ...
+    async fn gates_exist_batch(
+        &self,
+        scope: &TurnScope,
+        gate_refs: Vec<GateRef>,
+    ) -> Result<HashSet<GateRef>, StoreError>;
+}
+
+// extends SubagentResultTombstoneStore
+trait SubagentResultTombstoneStore {
+    // ... existing single-row methods ...
+    async fn read_tombstones_batch(
+        &self,
+        scope: &TurnScope,
+        child_run_ids: Vec<TurnRunId>,
+    ) -> Result<HashSet<TurnRunId>, TombstoneStoreError>;
+
+    async fn write_tombstones_batch(
+        &self,
+        scope: &TurnScope,
+        tombstones: Vec<SubagentResultTombstone>,
+    ) -> Result<(), TombstoneStoreError>;
+}
+
+// extends SubagentIdempotencyLedger
+trait SubagentIdempotencyLedger {
+    // single-row methods (existing + new):
+    async fn try_insert(
+        &self,
+        key: LedgerKey,
+        delivery_node: String,
+    ) -> Result<bool, LedgerError>;  // returns true if inserted, false if pre-existing
+    async fn read(&self, scope: &TurnScope, key: LedgerKey)
+        -> Result<Option<LedgerRow>, LedgerError>;
+    async fn seal(&self, scope: &TurnScope, key: LedgerKey)
+        -> Result<(), LedgerError>;  // UPDATE SET delivered_at = NOW() WHERE delivered_at IS NULL
+
+    // batch methods (new):
+    async fn upsert_sealed_batch(
+        &self,
+        scope: &TurnScope,
+        rows: Vec<LedgerKey>,
+        delivery_node: String,
+    ) -> Result<(), LedgerError>;
+    async fn insert_pencil_batch(
+        &self,
+        scope: &TurnScope,
+        rows: Vec<LedgerKey>,
+        delivery_node: String,
+    ) -> Result<HashSet<LedgerKey>, LedgerError>;  // returns the set actually inserted
+    async fn read_batch(
+        &self,
+        scope: &TurnScope,
+        keys: Vec<LedgerKey>,
+    ) -> Result<HashMap<LedgerKey, LedgerRow>, LedgerError>;
+    async fn seal_batch(
+        &self,
+        scope: &TurnScope,
+        keys: Vec<LedgerKey>,
+    ) -> Result<(), LedgerError>;  // multi-row UPDATE; idempotent per-row via delivered_at IS NULL guard
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LedgerKey {
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub run_id: TurnRunId,        // parent run
+    pub child_run_id: TurnRunId,
+    pub terminal_kind: TerminalKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct LedgerRow {
+    pub key: LedgerKey,
+    pub delivered_at: Option<DateTime<Utc>>,  // None = pencil receipt; Some = sealed
+    pub delivery_node: String,
+}
+```
+
+**WU-C MUST land all 8 batch methods + their backing SQL** before the §5.3 algorithm can be implemented. Single-row variants stay for the orphan / tombstone paths in Phase 2a and for the §5.10-flagged manual operator interventions on stuck rows. Pseudocode in §5.3 uses bare method names; backends bind these signatures.
 
 ### 5.3 Replay algorithm
 
@@ -1085,7 +1183,8 @@ fn replay(scope: &TurnScope) -> ReplayReport:
     return ReplayReport::zero()
 
   redelivered = 0; skipped_idempotent = 0
-  retryable = 0; skipped_orphan = 0; failed = 0
+  retryable = 0; skipped_orphan = 0
+  skipped_tombstoned = 0; failed = 0
 
   // ── Phase 1 — preflight (two batched reads) ──
   // Partition `pending` rows into live / orphan / explicit-tombstoned.
@@ -1124,7 +1223,8 @@ fn replay(scope: &TurnScope) -> ReplayReport:
   //     SET delivered_at = COALESCE(subagent_idempotency_ledger.delivered_at, NOW());
   idempotency_ledger.upsert_sealed_batch(
     scope, orphan_rows ++ tombstoned_rows, delivery_node=self.node_id)
-  skipped_orphan = orphan_rows.len() + tombstoned_rows.len()
+  skipped_orphan = orphan_rows.len()
+  skipped_tombstoned = tombstoned_rows.len()
 
   // ── Phase 2b — pencil claim (one multi-row write) ──
   // INSERT OR IGNORE / ON CONFLICT DO NOTHING. Leaves delivered_at NULL.
@@ -1163,9 +1263,12 @@ fn replay(scope: &TurnScope) -> ReplayReport:
                  .collect::<Vec<_>>()
                  .await
 
-  // ── Phase 4 — per-row deliver + seal (sequential per row, parallel-OK) ──
+  // ── Phase 4 — per-row deliver (sequential per row), batched seal ──
   // Per-row because each row delivers to a different parent's mailbox.
-  // The seal UPDATE is the single point of truth for "is this final?"
+  // The seal UPDATE is the single point of truth — but we batch the
+  // seals into one multi-row UPDATE at the end to avoid N round-trips
+  // through the 4-conn replay_pool.
+  sealed_keys = Vec::new()
   for (row, load_result) in to_attempt.zip(load_results):
     match load_result:
       Err(_) | Ok(None) =>
@@ -1178,17 +1281,21 @@ fn replay(scope: &TurnScope) -> ReplayReport:
         match gate_store.record_background_settlement(
                 scope, row.parent_run_id, row.child_run_id, payload):
           Ok(_) =>
-            // SEAL — single-row UPDATE keyed on the ledger PK.
-            // Sets delivered_at = NOW() WHERE delivered_at IS NULL.
-            idempotency_ledger.seal(scope, row.key())
+            sealed_keys.push(row.key())
             redelivered += 1
           Err(e) =>
             warn!("reconciler: gate-store re-delivery failed: {e}")
             failed += 1
             // Leave pencil receipt; next boot will retry.
 
+  // Single multi-row UPDATE to seal all successfully-delivered rows.
+  // The `delivered_at IS NULL` guard on each row makes this idempotent
+  // even if a concurrent reconciler on another replica also tries.
+  if !sealed_keys.is_empty():
+    idempotency_ledger.seal_batch(scope, sealed_keys)
+
   return ReplayReport { redelivered, skipped_idempotent, retryable,
-                        skipped_orphan, failed }
+                        skipped_orphan, skipped_tombstoned, failed }
 ```
 
 **Performance shape (D4).** The replay algorithm is phase-batched: each phase issues O(1) DB calls regardless of `len(pending)`. Phase 0 bounds input to outstanding work via a LEFT JOIN against the ledger — historical settled log rows never enter the algorithm. Phase 1 batches both preflight reads. Phase 2 batches both ledger writes (orphan-seal + pencil-claim). Phase 3 parallelizes capability loads via `buffer_unordered(replay_pool_size)` — MUST NOT use `join_all`, which is unbounded and would starve foreground writes when fan-out exceeds the connection pool. Only Phase 4 (deliver + seal) is per-row, and only because each row's gate-store target differs — within Phase 4 the work can be further sharded across a `tokio::JoinSet` if profiling demands it. Net cost is dominated by Phase 4's per-row delivery (~5–30 ms per row depending on backend latency) rather than the historical N+1 round-trip cost. Implementations MUST cap Phase 3 concurrency at the durable backend's connection-pool size via `buffer_unordered(replay_pool_size)`. See §5.6 for the dedicated replay pool guidance. Phase 2a's tombstone writes MUST use `write_tombstones_batch` — a single round-trip for all orphans — not a per-row `write_tombstone` loop. The trait `SubagentResultTombstoneStore` is extended in WU-C with a `write_tombstones_batch(&self, scope: &TurnScope, tombstones: Vec<SubagentResultTombstone>) -> Result<(), TombstoneStoreError>` method. Phase 0's input-bound query MUST include the §1.6 conditional `<agent_predicate>` on `s.agent_id` — agent-scoped callers must not surface settlement-log rows belonging to other agents under the same `(tenant_id, user_id)`. Bind position varies per backend; pass `scope.agent_id` only when `Some`.
@@ -1330,7 +1437,7 @@ RebornEventKind::SubagentReplayCompleted {
 |---|---|---|---|
 | `reborn_subagent_replay_duration_seconds` | Histogram | `tenant_id`, `agent_id` | Wall-clock per-scope replay. P50/P95/P99 buckets. |
 | `reborn_subagent_replay_pending_rows`     | Gauge     | `tenant_id`, `agent_id` | Live count of pending rows (Phase 0 output). Sampled per replay. |
-| `reborn_subagent_replay_outcomes_total`   | Counter   | `tenant_id`, `agent_id`, `outcome ∈ {redelivered, skipped_idempotent, retryable, skipped_orphan, failed}` | Cumulative per-outcome counter. |
+| `reborn_subagent_replay_outcomes_total`   | Counter   | `tenant_id`, `agent_id`, `outcome ∈ {redelivered, skipped_idempotent, retryable, skipped_orphan, skipped_tombstoned, failed}` | Cumulative per-outcome counter. |
 | `reborn_subagent_pencil_age_seconds`      | Gauge     | `tenant_id`, `agent_id` | Max age of any pencil-receipt row in the ledger. Sampled per replay. |
 | `reborn_subagent_replay_in_progress`      | Gauge     | `tenant_id`, `agent_id` | 0 or 1. Tracks the background task. |
 
@@ -1384,8 +1491,8 @@ Per `.claude/rules/testing.md` "Test Through the Caller" rule — unit tests on 
 1. Write settlement log entry + capability result.
 2. Write tombstone for child_run_id (simulates parent-cancel after settle, before crash).
 3. Boot + replay.
-4. Assert report.skipped_orphan == 1, redelivered == 0, failed == 0.
-   // Tombstone detected in Phase 1 → moved to tombstoned_rows → sealed+skipped.
+4. Assert report.skipped_tombstoned == 1, skipped_orphan == 0, redelivered == 0, failed == 0.
+   // Tombstone detected in Phase 1 — gate still live but child pre-tombstoned.
 5. Assert gate store has no entry for child_run_id.
 6. Assert the idempotency ledger row exists with delivered_at NOT NULL (sealed).
 ```
@@ -1765,6 +1872,9 @@ All DDL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` for i
 - [ ] WU-C implements `CapabilityResultStore` trait with `Vec<u8>` payload (D8-A). Executor calls `serde_json::to_vec` exactly once; backend INSERTs the bytes directly into BLOB / JSONB without re-serializing. `read()` returns bytes; callers deserialize lazily.
 - [ ] WU-C adds `RebornEventStoreConfig.reconciler_replay_jitter_ms: u64` (default 5000) and applies it via `tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % jitter))` immediately before launching the per-process replay task (A.A).
 - [ ] §5.11 HA leader election is a tracked follow-up; NOT WU-C scope. WU-C ships the spec-documented invariants without it; promotion gated on the §5.7 metric trigger.
+- [ ] WU-C lands `seal_batch(scope, Vec<LedgerKey>)` on the idempotency ledger trait + backing SQL (libSQL + PostgreSQL). Phase 4 of §5.3 algorithm requires single multi-row UPDATE seal — per-row seal in a loop reintroduces the N+1 cost.
+- [ ] WU-C lands all 8 reconciler-facing batch methods per §5.2.1 trait signatures: `gates_exist_batch`, `read_tombstones_batch`, `write_tombstones_batch`, `upsert_sealed_batch`, `insert_pencil_batch`, `read_batch`, `seal`, `seal_batch`.
+- [ ] WU-C extends `ReplayReport` with `skipped_tombstoned: u32` (was merged into `skipped_orphan` in earlier drafts). Operator dashboards use the split for alert tuning.
 
 ## References
 
