@@ -16,7 +16,7 @@ use ironclaw_turns::{
 };
 
 use crate::{
-    state::{CapabilityCallSignature, LoopExecutionState},
+    state::{CapabilityCallSignature, LoopExecutionState, PendingApprovalResume},
     strategies::{CapabilityCallSummary, CapabilityErrorSummary, CapabilityFilter, GateKind},
 };
 
@@ -34,6 +34,19 @@ pub(super) fn capability_invocation_from_candidate(
         capability_id: call.capability_id,
         input_ref: call.input_ref,
         approval_resume,
+    }
+}
+
+pub(super) fn pending_approval_resume_candidate(
+    resume: &PendingApprovalResume,
+    surface_version: CapabilitySurfaceVersion,
+) -> CapabilityCallCandidate {
+    CapabilityCallCandidate {
+        surface_version,
+        capability_id: resume.capability_id.clone(),
+        input_ref: resume.input_ref.clone(),
+        effective_capability_ids: resume.effective_capability_ids.clone(),
+        provider_replay: resume.provider_replay.clone(),
     }
 }
 

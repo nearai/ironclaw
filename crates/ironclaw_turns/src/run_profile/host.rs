@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, ResourceEstimate,
+    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ResourceEstimate,
     RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -1389,6 +1389,8 @@ pub struct CapabilityInvocation {
 pub struct CapabilityApprovalResume {
     pub approval_request_id: ApprovalRequestId,
     pub invocation_id: InvocationId,
+    #[serde(default = "CorrelationId::new")]
+    pub correlation_id: CorrelationId,
     pub input_ref: CapabilityInputRef,
     pub input: serde_json::Value,
     pub estimate: ResourceEstimate,

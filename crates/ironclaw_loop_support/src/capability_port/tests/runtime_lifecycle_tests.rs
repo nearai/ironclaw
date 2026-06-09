@@ -674,6 +674,10 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
         resume_requests[0].context.resource_scope.invocation_id,
         resume.invocation_id
     );
+    assert_eq!(
+        resume_requests[0].context.correlation_id,
+        resume.correlation_id
+    );
     assert_eq!(resume.input_ref, first_invocation.input_ref);
     assert_eq!(
         resume_requests[0].input,

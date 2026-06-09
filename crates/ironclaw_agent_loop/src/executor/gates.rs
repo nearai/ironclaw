@@ -67,7 +67,11 @@ impl ExecutorStage<GateInput> for GateStage {
                         capability_id: call.capability_id.clone(),
                         approval_request_id: resume.approval_request_id,
                         invocation_id: resume.invocation_id,
+                        correlation_id: resume.correlation_id,
+                        surface_version: call.surface_version.clone(),
                         input_ref: resume.input_ref,
+                        effective_capability_ids: call.effective_capability_ids.clone(),
+                        provider_replay: call.provider_replay.clone(),
                         input: resume.input,
                         estimate: resume.estimate,
                     });

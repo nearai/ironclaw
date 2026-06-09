@@ -1,4 +1,4 @@
-use ironclaw_host_api::{ApprovalRequestId, InvocationId, ResourceEstimate};
+use ironclaw_host_api::{ApprovalRequestId, CorrelationId, InvocationId, ResourceEstimate};
 use ironclaw_turns::{
     LoopCancelledReasonKind, LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopFailureKind,
     LoopGateRef, LoopResultRef, TurnRunId,
@@ -1761,22 +1761,16 @@ async fn gate_blocks_with_before_block_checkpoint() {
 #[tokio::test]
 async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
     let original_input_ref = CapabilityInputRef::new("input:demo").expect("valid");
-    let replayed_input_ref = CapabilityInputRef::new("input:replayed").expect("valid");
     let approval_resume = CapabilityApprovalResume {
         approval_request_id: ApprovalRequestId::new(),
         invocation_id: InvocationId::new(),
+        correlation_id: CorrelationId::new(),
         input_ref: original_input_ref.clone(),
         input: serde_json::json!({ "message": "hello" }),
         estimate: ResourceEstimate::default(),
     };
     let completed_ref = LoopResultRef::new("result:approval-resumed").expect("valid");
-    let mut replayed_response = calls_response();
-    if let ParentLoopOutput::CapabilityCalls(calls) = &mut replayed_response.output {
-        calls[0].input_ref = replayed_input_ref.clone();
-    } else {
-        panic!("expected capability calls fixture");
-    }
-    let host = MockHost::new(vec![calls_response(), replayed_response]).with_batch_outcomes(vec![
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::ApprovalRequired {
                 gate_ref: LoopGateRef::new("gate:approval").expect("valid"),
@@ -1805,6 +1799,7 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
         .expect("first execute blocks");
 
     assert!(matches!(first_exit, LoopExit::Blocked(_)));
+    assert_eq!(host.model_requests().len(), 1);
     let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
     let pending_resume = before_block_state
         .pending_approval_resume
@@ -1815,8 +1810,17 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
         approval_resume.approval_request_id
     );
     assert_eq!(pending_resume.invocation_id, approval_resume.invocation_id);
+    assert_eq!(
+        pending_resume.correlation_id,
+        approval_resume.correlation_id
+    );
     assert_eq!(pending_resume.input, approval_resume.input);
     assert_eq!(pending_resume.estimate, approval_resume.estimate);
+    assert_eq!(pending_resume.surface_version, surface_version());
+    assert_eq!(
+        pending_resume.effective_capability_ids,
+        vec![capability_id()]
+    );
 
     let second_exit = executor
         .execute_family(&crate::families::default(), &host, before_block_state)
@@ -1824,6 +1828,11 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
         .expect("second execute resumes");
 
     assert!(matches!(second_exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "approval resume must dispatch the saved invocation before asking the model again"
+    );
     let batch_invocations = host.batch_invocations();
     assert_eq!(batch_invocations.len(), 2);
     assert_eq!(batch_invocations[0].invocations[0].approval_resume, None);
@@ -1833,7 +1842,7 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
     );
     assert_eq!(
         batch_invocations[1].invocations[0].input_ref,
-        replayed_input_ref
+        original_input_ref
     );
     assert_eq!(
         batch_invocations[1].invocations[0]

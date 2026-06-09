@@ -142,6 +142,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                                 |resume| ironclaw_turns::run_profile::CapabilityApprovalResume {
                                     approval_request_id: resume.approval_request_id,
                                     invocation_id: resume.invocation_id,
+                                    correlation_id: resume.correlation_id,
                                     input_ref: resume.input_ref,
                                     input: resume.input,
                                     estimate: resume.estimate,
@@ -200,6 +201,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 match outcome {
                     CapabilityOutcome::Completed(result) => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        clear_matching_pending_approval_resume(&mut state, &call);
                         append_completed_capability_result(
                             ctx.host,
                             &mut state,
@@ -216,6 +218,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         ..
                     } => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        clear_matching_pending_approval_resume(&mut state, &call);
                         append_spawned_child_result(
                             ctx.host,
                             &mut state,
@@ -237,6 +240,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         .is_some_and(|(gate, _)| gate == &gate_ref) =>
                     {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        clear_matching_pending_approval_resume(&mut state, &call);
                         let result = CapabilityResultMessage {
                             result_ref,
                             safe_summary,
@@ -560,6 +564,7 @@ impl CapabilityStage {
         mut model_observation: Option<ironclaw_turns::run_profile::ModelVisibleToolObservation>,
         capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
+        clear_matching_pending_approval_resume(&mut state, &call);
         for _ in 0..MAX_CAPABILITY_RETRIES {
             match ctx
                 .planner

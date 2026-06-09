@@ -153,7 +153,15 @@ async fn reborn_trace_file_write_local_dev_approval_gate_bubbles() {
         .assert_final_reply("approval gate resumed")
         .await
         .expect("final reply");
-    assert_eq!(harness.capability_invocations().len(), 1);
+    let invocations = harness.capability_invocations();
+    assert_eq!(invocations.len(), 2);
+    assert_eq!(invocations[0].capability_id, write_file);
+    assert!(invocations[0].approval_resume.is_none());
+    assert_eq!(invocations[1].capability_id, write_file);
+    assert!(
+        invocations[1].approval_resume.is_some(),
+        "approved gate should resume the original blocked capability, not ask the model for a new tool call"
+    );
 
     harness.shutdown().await;
 }

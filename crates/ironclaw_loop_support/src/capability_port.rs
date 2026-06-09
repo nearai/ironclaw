@@ -322,6 +322,7 @@ enum DispatchRecord {
     },
     RuntimeCompleted {
         invocation_id: InvocationId,
+        correlation_id: CorrelationId,
         requested_capability_id: CapabilityId,
         outcome: RuntimeCapabilityOutcome,
     },
@@ -337,6 +338,7 @@ struct RuntimeOutcomeCompletion<'a> {
     input: Option<&'a Value>,
     estimate: Option<&'a ResourceEstimate>,
     invocation_id: InvocationId,
+    correlation_id: CorrelationId,
     requested_capability_id: &'a CapabilityId,
     provider: ExtensionId,
     runtime: RuntimeKind,
@@ -348,6 +350,7 @@ struct RuntimeOutcomeConversion<'a> {
     input: Option<&'a Value>,
     estimate: Option<&'a ResourceEstimate>,
     invocation_id: InvocationId,
+    correlation_id: CorrelationId,
     requested_capability_id: &'a CapabilityId,
     outcome: RuntimeCapabilityOutcome,
 }
@@ -359,6 +362,7 @@ impl<'a> RuntimeOutcomeCompletion<'a> {
             input: self.input,
             estimate: self.estimate,
             invocation_id: self.invocation_id,
+            correlation_id: self.correlation_id,
             requested_capability_id: self.requested_capability_id,
             outcome: self.outcome.clone(),
         }
@@ -378,6 +382,7 @@ impl DispatchRecordStore {
             Some(DispatchRecord::InFlight { notify }) => Ok(DispatchReservation::Wait(notify)),
             Some(DispatchRecord::RuntimeCompleted {
                 invocation_id,
+                correlation_id,
                 requested_capability_id,
                 outcome,
             }) => {
@@ -389,6 +394,7 @@ impl DispatchRecordStore {
                 );
                 Ok(DispatchReservation::RuntimeCompleted {
                     invocation_id,
+                    correlation_id,
                     requested_capability_id,
                     outcome,
                 })
@@ -477,6 +483,7 @@ enum DispatchReservation {
     Wait(Arc<Notify>),
     RuntimeCompleted {
         invocation_id: InvocationId,
+        correlation_id: CorrelationId,
         requested_capability_id: CapabilityId,
         outcome: RuntimeCapabilityOutcome,
     },
@@ -703,6 +710,7 @@ impl HostRuntimeLoopCapabilityPort {
         &self,
         key: &IdempotencyKey,
         invocation_id: InvocationId,
+        correlation_id: CorrelationId,
         requested_capability_id: CapabilityId,
         outcome: RuntimeCapabilityOutcome,
     ) -> Result<(), AgentLoopHostError> {
@@ -710,6 +718,7 @@ impl HostRuntimeLoopCapabilityPort {
             key,
             DispatchRecord::RuntimeCompleted {
                 invocation_id,
+                correlation_id,
                 requested_capability_id,
                 outcome,
             },
@@ -844,6 +853,7 @@ impl HostRuntimeLoopCapabilityPort {
             self.record_runtime_completed(
                 key,
                 completion.invocation_id,
+                completion.correlation_id,
                 completion.requested_capability_id.clone(),
                 completion.outcome,
             )?;
@@ -1176,6 +1186,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 }
                 DispatchReservation::RuntimeCompleted {
                     invocation_id,
+                    correlation_id,
                     requested_capability_id,
                     outcome,
                 } => {
@@ -1188,6 +1199,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                                     input: None,
                                     estimate: None,
                                     invocation_id,
+                                    correlation_id,
                                     requested_capability_id: &requested_capability_id,
                                     provider: capability.provider.clone(),
                                     runtime: capability.runtime,
@@ -1204,6 +1216,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                             input: None,
                             estimate: None,
                             invocation_id,
+                            correlation_id,
                             requested_capability_id: &requested_capability_id,
                             outcome,
                         },
@@ -1296,6 +1309,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         )?;
         if let Some(resume) = request.approval_resume.as_ref() {
             invocation_context.invocation_id = resume.invocation_id;
+            invocation_context.correlation_id = resume.correlation_id;
             invocation_context.resource_scope.invocation_id = resume.invocation_id;
             invocation_context.validate().map_err(|_| {
                 AgentLoopHostError::new(
@@ -1305,6 +1319,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             })?;
         }
         let invocation_id = invocation_context.invocation_id;
+        let correlation_id = invocation_context.correlation_id;
         let requested_capability_id = request.capability_id.clone();
         let provider = capability.provider.clone();
         let runtime = capability.runtime;
@@ -1368,6 +1383,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 input: Some(&input),
                 estimate: Some(&estimate),
                 invocation_id,
+                correlation_id,
                 requested_capability_id: &requested_capability_id,
                 provider,
                 runtime,
@@ -1879,6 +1895,7 @@ async fn runtime_outcome_to_loop(
                 approval_resume: Some(ironclaw_turns::run_profile::CapabilityApprovalResume {
                     approval_request_id: gate.approval_request_id,
                     invocation_id: conversion.invocation_id,
+                    correlation_id: conversion.correlation_id,
                     input_ref: conversion.input_ref.clone(),
                     input: input.clone(),
                     estimate: estimate.clone(),
