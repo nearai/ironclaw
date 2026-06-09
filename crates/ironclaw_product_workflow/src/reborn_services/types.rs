@@ -256,6 +256,7 @@ pub struct RebornListAutomationsResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RebornOutboundPreferencesResponseWire")]
 pub struct RebornOutboundPreferencesResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_reply_target: Option<RebornOutboundDeliveryTargetSummary>,
@@ -271,6 +272,35 @@ impl Default for RebornOutboundPreferencesResponse {
             final_reply_target: None,
             final_reply_target_status: RebornOutboundDeliveryTargetStatus::NoneConfigured,
             default_modality: RebornOutboundDeliveryModality::Text,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct RebornOutboundPreferencesResponseWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    final_reply_target: Option<RebornOutboundDeliveryTargetSummary>,
+    #[serde(default)]
+    final_reply_target_status: Option<RebornOutboundDeliveryTargetStatus>,
+    #[serde(default)]
+    default_modality: Option<RebornOutboundDeliveryModality>,
+}
+
+impl From<RebornOutboundPreferencesResponseWire> for RebornOutboundPreferencesResponse {
+    fn from(value: RebornOutboundPreferencesResponseWire) -> Self {
+        let final_reply_target_status = match (
+            value.final_reply_target.as_ref(),
+            value.final_reply_target_status,
+        ) {
+            (Some(_), None) => RebornOutboundDeliveryTargetStatus::Available,
+            (_, Some(status)) => status,
+            (None, None) => RebornOutboundDeliveryTargetStatus::NoneConfigured,
+        };
+
+        Self {
+            final_reply_target: value.final_reply_target,
+            final_reply_target_status,
+            default_modality: value.default_modality.unwrap_or_default(),
         }
     }
 }

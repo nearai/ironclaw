@@ -4166,6 +4166,30 @@ fn outbound_preferences_response_empty_json_defaults_to_text_without_target() {
 }
 
 #[test]
+fn outbound_preferences_response_missing_status_defaults_to_available_when_target_present() {
+    let response: RebornOutboundPreferencesResponse = serde_json::from_value(json!({
+        "final_reply_target": {
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        },
+        "default_modality": "text",
+    }))
+    .expect("deserialize legacy preferences response");
+
+    assert_eq!(
+        response.final_reply_target_status,
+        RebornOutboundDeliveryTargetStatus::Available
+    );
+    assert!(response.final_reply_target.is_some());
+    assert_eq!(
+        response.default_modality,
+        RebornOutboundDeliveryModality::Text
+    );
+}
+
+#[test]
 fn outbound_preferences_response_serializes_unavailable_status_without_target() {
     let response = RebornOutboundPreferencesResponse {
         final_reply_target: None,
@@ -4186,6 +4210,25 @@ fn outbound_preferences_response_serializes_unavailable_status_without_target() 
     let deserialized: RebornOutboundPreferencesResponse =
         serde_json::from_value(serialized).expect("deserialize unavailable preferences response");
     assert_eq!(deserialized, response);
+}
+
+#[test]
+fn outbound_preferences_response_serializes_none_configured_status_explicitly() {
+    let response = RebornOutboundPreferencesResponse {
+        final_reply_target: None,
+        final_reply_target_status: RebornOutboundDeliveryTargetStatus::NoneConfigured,
+        default_modality: RebornOutboundDeliveryModality::Text,
+    };
+
+    let serialized =
+        serde_json::to_value(&response).expect("serialize none configured preferences response");
+    assert_eq!(
+        serialized,
+        json!({
+            "final_reply_target_status": "none_configured",
+            "default_modality": "text",
+        })
+    );
 }
 
 #[test]
