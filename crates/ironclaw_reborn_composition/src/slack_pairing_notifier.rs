@@ -9,12 +9,12 @@ use ironclaw_product_adapters::{
 use ironclaw_slack_v2_adapter::SLACK_API_HOST;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use crate::slack_dm_open::open_slack_dm_channel;
 use crate::slack_personal_binding_pairing::{
     SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
     SlackPersonalBindingPairingNotifier,
 };
 
-const SLACK_CONVERSATIONS_OPEN_PATH: &str = "/api/conversations.open";
 const SLACK_POST_MESSAGE_PATH: &str = "/api/chat.postMessage";
 const SLACK_API_RESPONSE_LIMIT: usize = 64 * 1024;
 
@@ -66,30 +66,13 @@ impl SlackPairingChallengeHttpNotifier {
         &self,
         slack_user_id: &str,
     ) -> Result<String, SlackPersonalBindingPairingError> {
-        let body = serde_json::to_vec(&SlackConversationsOpenRequest {
-            users: slack_user_id.to_string(),
-        })
-        .map_err(|error| SlackPersonalBindingPairingError::Backend(error.to_string()))?;
-        let response = self
-            .send_slack_request(SLACK_CONVERSATIONS_OPEN_PATH, body)
-            .await?;
-        let opened: SlackConversationsOpenResponse =
-            slack_json_response("Slack conversations.open", response.body())?;
-        if !opened.ok {
-            return Err(SlackPersonalBindingPairingError::Backend(format!(
-                "Slack rejected conversations.open ({})",
-                opened.error.unwrap_or_else(|| "unknown_error".into())
-            )));
-        }
-        opened
-            .channel
-            .map(|channel| channel.id)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| {
-                SlackPersonalBindingPairingError::Backend(
-                    "Slack conversations.open response did not include a channel id".into(),
-                )
-            })
+        open_slack_dm_channel(
+            self.egress.as_ref(),
+            self.credential_handle.clone(),
+            slack_user_id,
+        )
+        .await
+        .map_err(|error| SlackPersonalBindingPairingError::Backend(error.to_string()))
     }
 
     async fn send_slack_request(
@@ -111,23 +94,6 @@ impl SlackPairingChallengeHttpNotifier {
         }
         Ok(response)
     }
-}
-
-#[derive(Debug, Serialize)]
-struct SlackConversationsOpenRequest {
-    users: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SlackConversationsOpenResponse {
-    ok: bool,
-    error: Option<String>,
-    channel: Option<SlackConversationsOpenChannel>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SlackConversationsOpenChannel {
-    id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -223,7 +189,7 @@ mod tests {
 
         let calls = egress.calls();
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].path().as_str(), SLACK_CONVERSATIONS_OPEN_PATH);
+        assert_eq!(calls[0].path().as_str(), "/api/conversations.open");
         let open_body: serde_json::Value = serde_json::from_slice(calls[0].body()).unwrap();
         assert_eq!(open_body["users"], "U123");
         assert_eq!(calls[1].path().as_str(), SLACK_POST_MESSAGE_PATH);
@@ -337,7 +303,7 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(request);
             let response = match self.calls().last().map(|request| request.path().as_str()) {
-                Some(SLACK_CONVERSATIONS_OPEN_PATH) => {
+                Some("/api/conversations.open") => {
                     br#"{"ok":true,"channel":{"id":"D123"}}"#.to_vec()
                 }
                 _ => br#"{"ok":true}"#.to_vec(),

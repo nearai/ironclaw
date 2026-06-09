@@ -94,11 +94,15 @@ mod slack_connectable_channel;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_delivery;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_dm_open;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_egress;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_beta;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_state;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_outbound_targets;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_pairing_notifier;
 #[cfg(feature = "slack-v2-host-beta")]
