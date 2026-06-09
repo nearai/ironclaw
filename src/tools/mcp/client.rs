@@ -23,6 +23,7 @@ use crate::tools::mcp::protocol::{
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::mcp::transport::McpTransport;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+use uuid::Uuid;
 
 /// Tag identifying which constructor produced an `McpClient`.
 ///
@@ -81,6 +82,14 @@ pub struct McpClient {
 
     /// User ID for secrets lookup.
     user_id: String,
+
+    /// Thread ID for thread-scoped MCP session keys and context headers.
+    ///
+    /// `None` for user-scoped paths (test fixtures, CLI, shutdown);
+    /// `Some(uuid)` when the call is rooted in a specific IronClaw Thread,
+    /// ensuring each Thread gets its own `Mcp-Session-Id` slot and that
+    /// `X-Ironclaw-Thread-Id` / `X-Ironclaw-User-Id` are forwarded.
+    thread_id: Option<Uuid>,
 
     /// Server configuration (for token secret name lookup).
     server_config: Option<McpServerConfig>,
@@ -143,6 +152,7 @@ impl McpClient {
             user_id: "<unset>".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
+            thread_id: None,
             initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Plain,
@@ -185,6 +195,7 @@ impl McpClient {
             user_id: "<unset>".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
+            thread_id: None,
             initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::PlainNamed,
@@ -246,6 +257,7 @@ impl McpClient {
             // create_client_from_config() for production paths
             user_id: "<unset>".to_string(),
             custom_headers: config.headers.clone(),
+            thread_id: None,
             initialized: tokio::sync::OnceCell::new(),
             server_config: Some(config),
             #[cfg(test)]
@@ -261,6 +273,7 @@ impl McpClient {
         session_manager: Arc<McpSessionManager>,
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         user_id: impl Into<String>,
+        thread_id: Option<Uuid>,
     ) -> Self {
         // Validate the config-supplied name once and pass the canonical
         // form into both the transport and the client's typed field. If
@@ -283,7 +296,7 @@ impl McpClient {
         let user_id_str: String = user_id.into();
         let transport = Arc::new(
             HttpMcpTransport::new(config.url.clone(), validated_name.as_str())
-                .with_session_manager(session_manager.clone(), &user_id_str),
+                .with_session_manager(session_manager.clone(), &user_id_str, thread_id),
         );
 
         let custom_headers = config.headers.clone();
@@ -299,6 +312,7 @@ impl McpClient {
             user_id: user_id_str,
             server_config: Some(config),
             custom_headers,
+            thread_id,
             initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Authenticated,
@@ -315,6 +329,7 @@ impl McpClient {
         secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
         user_id: impl Into<String>,
         server_config: Option<McpServerConfig>,
+        thread_id: Option<Uuid>,
     ) -> Self {
         // The production caller (factory) hands us an already-validated
         // name, but the signature accepts `impl Into<String>` which means
@@ -356,6 +371,7 @@ impl McpClient {
             user_id: user_id.into(),
             server_config,
             custom_headers,
+            thread_id,
             initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::WithTransport,
@@ -396,6 +412,73 @@ impl McpClient {
     /// Whether this client has a session manager attached.
     pub fn has_session_manager(&self) -> bool {
         self.session_manager.is_some()
+    }
+
+    /// Get the thread id associated with this client.
+    ///
+    /// `None` for user-scoped (test fixtures, CLI, boot-time base clients).
+    /// `Some(uuid)` when the client was materialised for a specific Thread.
+    #[cfg(test)]
+    pub(crate) fn thread_id(&self) -> Option<uuid::Uuid> {
+        self.thread_id
+    }
+
+    /// Materialise a thread-scoped sibling of this client.
+    ///
+    /// The sibling shares server config, secrets, and session manager with the
+    /// parent but receives:
+    /// - its own `thread_id = Some(thread_id)` so `inject_meta_context` and
+    ///   `McpSessionManager` use the correct thread-scoped key.
+    /// - a fresh `initialized` cell so the MCP server issues a new
+    ///   `Mcp-Session-Id` for this Thread's first call (required so any
+    ///   server-side state the upstream binds to the session id is
+    ///   partitioned per Thread, not shared across all of a user's Threads).
+    /// - a fresh transport (for HTTP transports) so response-header session-id
+    ///   captures are stored under the correct thread-scoped slot rather than
+    ///   the parent's user-scoped slot.
+    pub fn for_thread(&self, thread_id: Uuid) -> Self {
+        // HTTP transports store `session_thread_id` at construction time and
+        // use it to bucket `Mcp-Session-Id` response headers into the right
+        // session slot.  Sharing the parent's transport would route Thread
+        // A's session-id responses into Thread B's slot — defeating the
+        // per-Thread `McpSessionKey` partition. Rebuild the transport with
+        // the new thread id when HTTP features are in use.
+        //
+        // Stdio and Unix transports do not use session_thread_id in their
+        // `send` implementation (they operate over a shared process/socket
+        // and session state is managed by McpSessionManager alone), so
+        // sharing the Arc is correct and avoids spawning a duplicate process.
+        let forked_transport: Arc<dyn McpTransport> = if self.transport.supports_http_features() {
+            let mut t = HttpMcpTransport::new(self.server_url.clone(), self.server_name.as_str());
+            if let Some(ref sm) = self.session_manager {
+                t = t.with_session_manager(Arc::clone(sm), &self.user_id, Some(thread_id));
+            }
+            Arc::new(t)
+        } else {
+            Arc::clone(&self.transport)
+        };
+        tracing::debug!(
+            server = %self.server_name,
+            thread_id = %thread_id,
+            user_id = %self.user_id,
+            "MCP client forked for thread"
+        );
+        Self {
+            transport: forked_transport,
+            server_url: self.server_url.clone(),
+            server_name: self.server_name.clone(),
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
+            session_manager: self.session_manager.clone(),
+            secrets: self.secrets.clone(),
+            user_id: self.user_id.clone(),
+            server_config: self.server_config.clone(),
+            custom_headers: self.custom_headers.clone(),
+            thread_id: Some(thread_id),
+            initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: self.constructor_kind,
+        }
     }
 
     /// Get the underlying transport (test-only).
@@ -492,7 +575,7 @@ impl McpClient {
         }
         if let Some(ref session_manager) = self.session_manager
             && let Some(session_id) = session_manager
-                .get_session_id(&self.user_id, &self.server_name)
+                .get_session_id(&self.user_id, &self.server_name, self.thread_id)
                 .await
         {
             headers.insert("Mcp-Session-Id".to_string(), session_id);
@@ -507,14 +590,20 @@ impl McpClient {
     async fn reinitialize_session(&self) -> Result<InitializeResult, ToolError> {
         if let Some(ref session_manager) = self.session_manager {
             session_manager
-                .terminate(&self.user_id, &self.server_name)
+                .terminate(&self.user_id, &self.server_name, self.thread_id)
                 .await;
             session_manager
-                .get_or_create(&self.user_id, &self.server_name, &self.server_url)
+                .get_or_create(
+                    &self.user_id,
+                    &self.server_name,
+                    &self.server_url,
+                    self.thread_id,
+                )
                 .await;
         }
 
-        let request = McpRequest::initialize(self.next_request_id());
+        let request = McpRequest::initialize(self.next_request_id())
+            .inject_meta_context(self.thread_id, &self.user_id);
         let response = self
             .transport
             .send(&request, &self.build_request_headers().await?)
@@ -540,19 +629,21 @@ impl McpClient {
 
         if let Some(ref session_manager) = self.session_manager {
             session_manager
-                .mark_initialized(&self.user_id, &self.server_name)
+                .mark_initialized(&self.user_id, &self.server_name, self.thread_id)
                 .await;
         }
 
-        let notification = McpRequest::initialized_notification();
+        let notification = McpRequest::initialized_notification()
+            .inject_meta_context(self.thread_id, &self.user_id);
         if let Err(e) = self
             .transport
             .send(&notification, &self.build_request_headers().await?)
             .await
         {
             tracing::debug!(
-                "Failed to send initialized notification to '{}': {}",
-                self.server_name,
+                server = %self.server_name,
+                thread_id = ?self.thread_id,
+                "Failed to send initialized notification: {}",
                 e
             );
         }
@@ -592,8 +683,9 @@ impl McpClient {
                         && Self::is_session_expiry_error(msg) =>
                 {
                     tracing::debug!(
-                        "MCP session expired, attempting reinitialize for '{}'",
-                        self.server_name
+                        server = %self.server_name,
+                        thread_id = ?self.thread_id,
+                        "MCP session expired, attempting reinitialize"
                     );
                     self.reinitialize_session().await?;
                     continue;
@@ -604,18 +696,20 @@ impl McpClient {
                         && let Some(ref config) = self.server_config
                     {
                         tracing::debug!(
-                            "MCP token expired, attempting refresh for '{}'",
-                            self.server_name
+                            server = %self.server_name,
+                            thread_id = ?self.thread_id,
+                            "MCP token expired, attempting refresh"
                         );
                         match refresh_access_token(config, secrets, &self.user_id).await {
                             Ok(_) => {
-                                tracing::info!("MCP token refreshed for '{}'", self.server_name);
+                                tracing::info!(server = %self.server_name, thread_id = ?self.thread_id, "MCP token refreshed");
                                 continue;
                             }
                             Err(e) => {
                                 tracing::debug!(
-                                    "Token refresh failed for '{}': {}",
-                                    self.server_name,
+                                    server = %self.server_name,
+                                    thread_id = ?self.thread_id,
+                                    "Token refresh failed: {}",
                                     e
                                 );
                             }
@@ -658,7 +752,7 @@ impl McpClient {
             .get_or_try_init(|| async {
                 if let Some(ref session_manager) = self.session_manager
                     && session_manager
-                        .is_initialized(&self.user_id, &self.server_name)
+                        .is_initialized(&self.user_id, &self.server_name, self.thread_id)
                         .await
                 {
                     return Ok(InitializeResult::default());
@@ -677,7 +771,8 @@ impl McpClient {
         }
         self.initialize().await?;
 
-        let request = McpRequest::list_tools(self.next_request_id());
+        let request = McpRequest::list_tools(self.next_request_id())
+            .inject_meta_context(self.thread_id, &self.user_id);
         let response = self.send_request(request).await?;
 
         if let Some(error) = response.error {
@@ -707,7 +802,8 @@ impl McpClient {
     ) -> Result<CallToolResult, ToolError> {
         self.initialize().await?;
 
-        let request = McpRequest::call_tool(self.next_request_id(), name, arguments);
+        let request = McpRequest::call_tool(self.next_request_id(), name, arguments)
+            .inject_meta_context(self.thread_id, &self.user_id);
         let response = self.send_request(request).await?;
 
         if let Some(error) = response.error {
@@ -829,6 +925,7 @@ impl Clone for McpClient {
             user_id: self.user_id.clone(),
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
+            thread_id: self.thread_id,
             initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: self.constructor_kind,
@@ -931,7 +1028,7 @@ impl Tool for McpToolWrapper {
 
         let client = self
             .client_store
-            .get(&ctx.user_id, &self.server_name)
+            .resolve_for_thread(&ctx.user_id, &self.server_name, ctx.conversation_id)
             .await
             .ok_or_else(|| {
                 ToolError::ExternalService(format!(
@@ -1196,6 +1293,246 @@ mod tests {
         assert!(client.has_session_manager());
     }
 
+    // ── for_thread tests ───────────────────────────────────────────────────
+
+    /// `for_thread` sets `thread_id = Some(uuid)` on the sibling client.
+    #[test]
+    fn for_thread_sets_thread_id() {
+        use uuid::Uuid;
+        let base = McpClient::new("http://localhost:8080");
+        let tid = Uuid::from_u128(0xDEAD_BEEF);
+        let forked = base.for_thread(tid);
+        assert_eq!(forked.thread_id(), Some(tid));
+    }
+
+    /// `for_thread` produces a fresh init cell — the sibling will perform
+    /// its own MCP initialize handshake, getting a new `Mcp-Session-Id`.
+    #[tokio::test]
+    async fn for_thread_fresh_init_state() {
+        use uuid::Uuid;
+        let base = McpClient::new("http://localhost:8080");
+        let tid = Uuid::from_u128(0xCAFE_BABE);
+        let forked = base.for_thread(tid);
+        assert!(
+            forked.initialized.get().is_none(),
+            "forked client must have a fresh (unset) OnceCell for initialized"
+        );
+    }
+
+    /// `for_thread` inherits the session manager from the base client.
+    #[test]
+    fn for_thread_inherits_session_manager() {
+        use uuid::Uuid;
+        let session_manager = Arc::new(McpSessionManager::new());
+        let base = McpClient::new("http://localhost:8080").with_session_manager(session_manager);
+        let tid = Uuid::from_u128(1);
+        let forked = base.for_thread(tid);
+        assert!(
+            forked.has_session_manager(),
+            "forked client must inherit the parent's session manager"
+        );
+    }
+
+    /// `new_with_transport` with `thread_id = Some(tid)` must produce a
+    /// client whose `inject_meta_context` embeds the runtime keys — closes
+    /// the API symmetry with `new_authenticated`.
+    #[test]
+    fn new_with_transport_with_thread_id_injects_meta_keys() {
+        use crate::tools::mcp::protocol::McpRequest;
+        use uuid::Uuid;
+        let transport = Arc::new(MockTransport::new(false, vec![]));
+        let tid = Uuid::from_u128(0xdead_beef);
+        let client = McpClient::new_with_transport(
+            "test_server",
+            transport as Arc<dyn McpTransport>,
+            None,
+            None,
+            "alice",
+            None,
+            Some(tid),
+        );
+        let req = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({"name": "ping", "arguments": {}})),
+        };
+        let injected = req.inject_meta_context(client.thread_id(), &"alice".to_string());
+        let meta = injected
+            .params
+            .as_ref()
+            .and_then(|p| p.get("_meta"))
+            .expect("_meta must be present");
+        assert_eq!(
+            meta.get("io.ironclaw/threadId").and_then(|v| v.as_str()),
+            Some(tid.to_string().as_str()),
+            "threadId must match the thread_id passed to new_with_transport"
+        );
+        assert_eq!(
+            meta.get("io.ironclaw/userId").and_then(|v| v.as_str()),
+            Some("alice"),
+            "userId must reflect the user passed to new_with_transport"
+        );
+    }
+
+    // ── Cross-Thread integration tests ────────────────────────────────────
+
+    /// End-to-end: two thread-scoped sibling clients produced by `for_thread`
+    /// inject distinct `io.ironclaw/threadId` values into `params._meta` on
+    /// every `call_tool` request, while sharing the same `user_id`.
+    ///
+    /// Verifies:
+    /// - `params._meta["io.ironclaw/threadId"]` == thread UUID
+    /// - `params._meta["io.ironclaw/userId"]` == user id
+    /// - Two siblings with distinct thread UUIDs produce distinct `threadId` values
+    /// - A pre-existing `_meta` key (e.g. `traceparent`) is preserved (merge semantics)
+    #[tokio::test]
+    async fn thread_scoped_clients_inject_distinct_meta_per_thread() {
+        use uuid::Uuid;
+
+        let tid_a = Uuid::from_u128(0xAAAA_0001);
+        let tid_b = Uuid::from_u128(0xBBBB_0002);
+
+        fn make_responses() -> Vec<McpResponse> {
+            let init = McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(1),
+                result: Some(serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "serverInfo": {"name": "svc", "version": "1.0"}
+                })),
+                error: None,
+            };
+            let notif_ack = McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: None,
+                result: None,
+                error: None,
+            };
+            let call_result = McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(2),
+                result: Some(
+                    serde_json::json!({"content": [{"type": "text", "text": "ok"}], "isError": false}),
+                ),
+                error: None,
+            };
+            vec![init, notif_ack, call_result]
+        }
+
+        let transport_a = Arc::new(BodyCaptureMockTransport::new(make_responses()));
+        let transport_b = Arc::new(BodyCaptureMockTransport::new(make_responses()));
+
+        // Build two clients: client_a carries tid_a, client_b carries tid_b.
+        let client_a = McpClient::new_with_transport(
+            "svc",
+            transport_a.clone() as Arc<dyn McpTransport>,
+            None,
+            None,
+            "alice",
+            None,
+            Some(tid_a),
+        );
+        let client_b = McpClient::new_with_transport(
+            "svc",
+            transport_b.clone() as Arc<dyn McpTransport>,
+            None,
+            None,
+            "alice",
+            None,
+            Some(tid_b),
+        );
+
+        client_a
+            .call_tool("ping", serde_json::json!({}))
+            .await
+            .expect("call_tool client_a");
+        client_b
+            .call_tool("ping", serde_json::json!({}))
+            .await
+            .expect("call_tool client_b");
+
+        let reqs_a = transport_a.captured_requests();
+        let reqs_b = transport_b.captured_requests();
+        // All 3 captured requests carry _meta.io.ironclaw/threadId per SEP-414:
+        //   index 0 = initialize, index 1 = initialized notification,
+        //   index 2 = tools/call.
+        // Downstream MCP servers that bind state to the initial handshake
+        // (rate limits, per-conversation sessions, audit attribution) need
+        // the context on the very first request, not just on tools/call.
+        assert_eq!(reqs_a.len(), 3, "expected 3 requests from client_a");
+        assert_eq!(reqs_b.len(), 3, "expected 3 requests from client_b");
+
+        /// Extract the `io.ironclaw/threadId` and `io.ironclaw/userId` from a
+        /// request's `params._meta`, panicking with a contextual message when
+        /// either is missing.
+        fn extract_meta_pair<'a>(
+            req: &'a crate::tools::mcp::protocol::McpRequest,
+            label: &str,
+        ) -> (&'a str, &'a str) {
+            let meta = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("_meta"))
+                .unwrap_or_else(|| panic!("{label}: params._meta must be present"));
+            let tid = meta
+                .get("io.ironclaw/threadId")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("{label}: io.ironclaw/threadId must be a string"));
+            let uid = meta
+                .get("io.ironclaw/userId")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("{label}: io.ironclaw/userId must be a string"));
+            (tid, uid)
+        }
+
+        // Every request from client_a must carry tid_a + "alice".
+        for (idx, req) in reqs_a.iter().enumerate() {
+            let (tid, uid) = extract_meta_pair(req, &format!("client_a/req[{idx}]"));
+            assert_eq!(
+                tid,
+                tid_a.to_string(),
+                "client_a/req[{idx}] ({method}): threadId must be tid_a",
+                method = req.method
+            );
+            assert_eq!(
+                uid,
+                "alice",
+                "client_a/req[{idx}] ({method}): userId must be alice",
+                method = req.method
+            );
+        }
+
+        // Every request from client_b must carry tid_b + "alice".
+        for (idx, req) in reqs_b.iter().enumerate() {
+            let (tid, uid) = extract_meta_pair(req, &format!("client_b/req[{idx}]"));
+            assert_eq!(
+                tid,
+                tid_b.to_string(),
+                "client_b/req[{idx}] ({method}): threadId must be tid_b",
+                method = req.method
+            );
+            assert_eq!(
+                uid,
+                "alice",
+                "client_b/req[{idx}] ({method}): userId must be alice",
+                method = req.method
+            );
+        }
+
+        // Cross-Thread isolation: the two clients never share a threadId on
+        // any matching request index.
+        for (idx, (req_a, req_b)) in reqs_a.iter().zip(reqs_b.iter()).enumerate() {
+            let (tid_a_seen, _) = extract_meta_pair(req_a, "cross/A");
+            let (tid_b_seen, _) = extract_meta_pair(req_b, "cross/B");
+            assert_ne!(
+                tid_a_seen, tid_b_seen,
+                "req[{idx}]: client_a and client_b must carry distinct threadId values"
+            );
+        }
+    }
+
     #[test]
     fn test_next_request_id_monotonically_increasing() {
         let client = McpClient::new("http://localhost:1234");
@@ -1342,6 +1679,46 @@ mod tests {
         }
     }
 
+    /// Mock transport that captures the full `McpRequest` body for assertions
+    /// about `params._meta` injection.
+    struct BodyCaptureMockTransport {
+        responses: std::sync::Mutex<Vec<McpResponse>>,
+        captured_requests: std::sync::Mutex<Vec<McpRequest>>,
+    }
+
+    impl BodyCaptureMockTransport {
+        fn new(responses: Vec<McpResponse>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses),
+                captured_requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn captured_requests(&self) -> Vec<McpRequest> {
+            self.captured_requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl McpTransport for BodyCaptureMockTransport {
+        async fn send(
+            &self,
+            request: &McpRequest,
+            _headers: &HashMap<String, String>,
+        ) -> Result<McpResponse, ToolError> {
+            self.captured_requests.lock().unwrap().push(request.clone());
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                return Err(ToolError::ExternalService(
+                    "No more mock responses".to_string(),
+                ));
+            }
+            Ok(responses.remove(0))
+        }
+        async fn shutdown(&self) -> Result<(), ToolError> {
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn test_non_http_transport_skips_401_retry() {
         // initialize response, then notification ack (consumed but ignored),
@@ -1378,6 +1755,7 @@ mod tests {
             None,
             None,
             "default",
+            None,
             None,
         );
         let result = client.list_tools().await;
@@ -1428,6 +1806,7 @@ mod tests {
             None, // no session manager
             None,
             "default",
+            None,
             None,
         );
 
@@ -1503,6 +1882,7 @@ mod tests {
             None,
             "default",
             None,
+            None,
         );
 
         client.initialize().await.expect("initial handshake");
@@ -1570,7 +1950,7 @@ mod tests {
         // Slashes are outside the `McpServerName` allowlist, so the
         // fallback path must engage rather than storing the raw value.
         let client =
-            McpClient::new_with_transport("bad/name", transport, None, None, "default", None);
+            McpClient::new_with_transport("bad/name", transport, None, None, "default", None, None);
         let name = McpServerName::new(client.server_name())
             .expect("stored server_name must satisfy the allowlist after the fix");
         assert_eq!(
@@ -1583,8 +1963,15 @@ mod tests {
     #[test]
     fn new_with_transport_preserves_valid_server_name() {
         let transport = Arc::new(MockTransport::new(false, vec![]));
-        let client =
-            McpClient::new_with_transport("good_name123", transport, None, None, "default", None);
+        let client = McpClient::new_with_transport(
+            "good_name123",
+            transport,
+            None,
+            None,
+            "default",
+            None,
+            None,
+        );
         assert_eq!(client.server_name(), "good_name123");
     }
 
@@ -1631,7 +2018,8 @@ mod tests {
             Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
 
         let config = McpServerConfig::new("bad name", "https://api.example.com");
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        let client =
+            McpClient::new_authenticated(config, session_manager, secrets, "test-user", None);
         assert_eq!(
             client.server_name(),
             "unknown",
@@ -1649,7 +2037,8 @@ mod tests {
             Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
 
         let config = McpServerConfig::new("good_name123", "https://api.example.com");
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        let client =
+            McpClient::new_authenticated(config, session_manager, secrets, "test-user", None);
         assert_eq!(client.server_name(), "good_name123");
     }
 
@@ -1865,8 +2254,15 @@ mod tests {
             false,
             vec![init_response, notification_ack, list_response],
         ));
-        let client =
-            McpClient::new_with_transport("notion", transport.clone(), None, None, "default", None);
+        let client = McpClient::new_with_transport(
+            "notion",
+            transport.clone(),
+            None,
+            None,
+            "default",
+            None,
+            None,
+        );
 
         let store = Arc::new(crate::tools::mcp::McpClientStore::new());
         let tools = client
@@ -1932,8 +2328,15 @@ mod tests {
             false,
             vec![init_response, notification_ack, list_response],
         ));
-        let client =
-            McpClient::new_with_transport("demo", transport.clone(), None, None, "default", None);
+        let client = McpClient::new_with_transport(
+            "demo",
+            transport.clone(),
+            None,
+            None,
+            "default",
+            None,
+            None,
+        );
 
         let store = Arc::new(crate::tools::mcp::McpClientStore::new());
         let tools = client
@@ -2011,8 +2414,15 @@ mod tests {
             false,
             vec![init_response, notification_ack, list_response],
         ));
-        let client =
-            McpClient::new_with_transport("notion", transport.clone(), None, None, "default", None);
+        let client = McpClient::new_with_transport(
+            "notion",
+            transport.clone(),
+            None,
+            None,
+            "default",
+            None,
+            None,
+        );
 
         let registry = ToolRegistry::new();
         let store = Arc::new(crate::tools::mcp::McpClientStore::new());
@@ -2101,7 +2511,8 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(EmptyTokenStore);
 
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        let client =
+            McpClient::new_authenticated(config, session_manager, secrets, "test-user", None);
 
         let headers = client.build_request_headers().await.unwrap(); // safety: test
         assert!(
@@ -2166,7 +2577,8 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(PaddedTokenStore);
 
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        let client =
+            McpClient::new_authenticated(config, session_manager, secrets, "test-user", None);
 
         let headers = client.build_request_headers().await.unwrap(); // safety: test
         assert_eq!(
