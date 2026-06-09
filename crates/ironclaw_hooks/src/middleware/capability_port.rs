@@ -680,6 +680,7 @@ mod tests {
                 safe_summary: format!("ran {}", request.capability_id),
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
+                byte_len: 0,
             }))
         }
 

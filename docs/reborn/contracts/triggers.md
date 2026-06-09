@@ -287,6 +287,27 @@ The turn pipeline remains the source of truth for admission, active-lock handlin
 In V1, `last_status` reflects submit outcome only. It is separate from the
 active-fire claim and does not become an in-flight sentinel.
 
+V1 also persists bounded per-trigger run-history rows for product-surface inspection:
+
+- each row is scoped by `(tenant_id, trigger_id, fire_slot)` and records the
+  deterministic trigger route thread id, optional submitted `TurnRunId`,
+  status, `submitted_at`, and optional `completed_at`;
+- `Running` means the fire was claimed or submitted and no terminal cleanup has
+  completed for that `fire_slot`;
+- `Ok` means active-run cleanup observed a completed terminal turn and cleared
+  the exact active fire;
+- `Error` means poller-owned claim or submit processing failed before an active
+  run could complete, or observed a failed, cancelled, or recovery-required
+  terminal turn;
+- list APIs return newest rows first and clamp caller limits to the repository
+  maximum. A zero limit returns no rows. User-facing list paths must use the
+  batched repository query when loading histories for multiple triggers;
+- durable repositories retain only the newest 500 run-history rows per trigger.
+
+Run-history rows are observational. They must not be used as the idempotency
+ledger for fire replay; deterministic fire identity and the trusted conversation
+binding remain the replay source of truth.
+
 Replay of an already accepted/submitted slot returns the original accepted
 message and turn submission. If that submitted turn later reaches a terminal
 failure, V1 does not mint a second turn for the same `fire_slot`; retry-on-run-
@@ -355,7 +376,10 @@ The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_re
   services between `trigger_create` pairing and trigger-poller fire submission.
   The shared service preserves the conversation store's mutation lock across
   both paths and avoids racing optimistic durable-state writes.
-- `trigger_list` is caller-scoped and surfaces the current schedule state plus `last_status`.
+- `trigger_list` is caller-scoped and surfaces the current schedule state plus
+  `last_status` and a bounded `recent_runs` projection. Omitted `run_limit`
+  defaults to 25 recent runs per trigger; callers that do not need embedded run
+  history pass `run_limit = 0`.
 - `trigger_remove` is caller-scoped delete.
 - Local-dev builds compiled with `libsql` store trigger records in the
   local-dev libSQL database (`reborn-local-dev.db`) through the same

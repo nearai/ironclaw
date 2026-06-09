@@ -46,6 +46,81 @@ fn sanitize_tool_name(name: &str) -> String {
         .collect()
 }
 
+/// Default Codex CLI client version reported to the `/models` endpoint when the
+/// installed `codex` binary can't be queried and no override is set.
+///
+/// The Codex backend gates newer models behind the reported `client_version`,
+/// so this must track a reasonably recent Codex CLI release. It is only the
+/// last-resort fallback — the installed binary's real version is preferred.
+const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.137.0";
+
+/// Parse the version token out of `codex --version` output.
+///
+/// Accepts shapes like `codex-cli 0.137.0` or `codex 0.140.1` and returns the
+/// first dotted, all-numeric version (`0.137.0`). Any SemVer pre-release
+/// (`-beta`, `-rc.1`) or build-metadata (`+build.7`) suffix is stripped first,
+/// so pre-release / custom Codex builds resolve to their numeric release
+/// version. Returns `None` when no version-like token is present.
+fn parse_codex_cli_version(output: &str) -> Option<String> {
+    output.split_whitespace().find_map(|token| {
+        // Drop any `-<pre-release>` / `+<build-metadata>` suffix before parsing.
+        let core = token.split(['-', '+']).next().unwrap_or(token);
+        let segments: Vec<&str> = core.split('.').collect();
+        let is_version = segments.len() >= 2
+            && segments
+                .iter()
+                .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()));
+        is_version.then(|| core.to_string())
+    })
+}
+
+/// Max time to wait for `codex --version` before giving up and using the
+/// default. The command is effectively instant; the bound only guards against a
+/// wedged or slow binary stalling provider construction.
+const CODEX_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Query the installed `codex` binary for its version (e.g. `0.137.0`).
+///
+/// Returns `None` if the binary is absent, times out, exits non-zero, or its
+/// output has no parseable version. Spawned via async `tokio::process` under a
+/// timeout so it never blocks the runtime or stalls startup; runs at most once
+/// per provider instance via the caller's `OnceCell`.
+async fn detect_installed_codex_version() -> Option<String> {
+    let output = tokio::time::timeout(
+        CODEX_VERSION_PROBE_TIMEOUT,
+        tokio::process::Command::new("codex")
+            .arg("--version")
+            .output(),
+    )
+    .await
+    .ok()? // timed out
+    .ok()?; // spawn / I/O error (e.g. binary not found)
+    if !output.status.success() {
+        return None;
+    }
+    parse_codex_cli_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Resolve the `client_version` to report to the Codex `/models` endpoint:
+/// the version detected from the installed `codex` binary, or
+/// [`DEFAULT_CODEX_CLIENT_VERSION`] when it is unavailable or blank. Split from
+/// [`codex_client_version`] so the fallback logic is unit-testable without
+/// spawning a process.
+fn resolve_codex_client_version(detected: Option<&str>) -> String {
+    detected
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(DEFAULT_CODEX_CLIENT_VERSION)
+        .to_string()
+}
+
+/// Determine the `client_version` to report, auto-detecting it from the
+/// installed Codex CLI so newly released models (gated behind newer client
+/// versions) are not silently hidden by a stale hardcoded constant.
+async fn codex_client_version() -> String {
+    resolve_codex_client_version(detect_installed_codex_version().await.as_deref())
+}
+
 fn convert_tool_definition(tool: &ToolDefinition) -> Value {
     use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 
@@ -207,14 +282,20 @@ impl CodexChatGptProvider {
             .await
     }
 
-    /// Query `/models?client_version=0.111.0` and return the list of available
+    /// Query `/models?client_version=<ver>` and return the list of available
     /// model slugs, ordered by priority (highest first).
+    ///
+    /// The Codex backend gates newer models (e.g. `gpt-5.5`) behind the
+    /// reported `client_version`, so a stale value silently hides models the
+    /// account is entitled to. The version is auto-detected from the installed
+    /// `codex` binary (see [`codex_client_version`]).
     async fn fetch_available_models(
         client: &Client,
         base_url: &str,
         api_key: &SecretString,
     ) -> Vec<String> {
-        let url = format!("{base_url}/models?client_version=0.111.0");
+        let client_version = codex_client_version().await;
+        let url = format!("{base_url}/models?client_version={client_version}");
         let resp = match client
             .get(&url)
             .bearer_auth(api_key.expose_secret())
@@ -939,6 +1020,7 @@ impl LlmProvider for CodexChatGptProvider {
                     arguments: args,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -971,6 +1053,133 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use futures::stream;
+
+    #[test]
+    fn parse_codex_cli_version_standard_output() {
+        assert_eq!(
+            parse_codex_cli_version("codex-cli 0.137.0"),
+            Some("0.137.0".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_codex_cli_version_tolerates_alt_shapes() {
+        assert_eq!(
+            parse_codex_cli_version("codex 0.140.1\n"),
+            Some("0.140.1".to_string())
+        );
+        assert_eq!(
+            parse_codex_cli_version("  codex-cli   1.2.3  "),
+            Some("1.2.3".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_codex_cli_version_none_when_absent() {
+        assert_eq!(parse_codex_cli_version("codex-cli unknown"), None);
+        assert_eq!(parse_codex_cli_version(""), None);
+        // A bare integer is not a dotted version.
+        assert_eq!(parse_codex_cli_version("codex 5"), None);
+    }
+
+    #[test]
+    fn parse_codex_cli_version_strips_prerelease_and_build_metadata() {
+        // SemVer pre-release and build-metadata suffixes resolve to the core.
+        assert_eq!(
+            parse_codex_cli_version("codex-cli 0.138.0-beta"),
+            Some("0.138.0".to_string())
+        );
+        assert_eq!(
+            parse_codex_cli_version("codex-cli 0.138.0+build.7"),
+            Some("0.138.0".to_string())
+        );
+        assert_eq!(
+            parse_codex_cli_version("codex 0.139.0-rc.1"),
+            Some("0.139.0".to_string())
+        );
+        assert_eq!(
+            parse_codex_cli_version("codex-cli 0.140.0-beta+exp.sha.5114f85"),
+            Some("0.140.0".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_client_version_uses_detected() {
+        assert_eq!(resolve_codex_client_version(Some("0.140.1")), "0.140.1");
+    }
+
+    #[test]
+    fn resolve_client_version_falls_back_to_default() {
+        assert_eq!(
+            resolve_codex_client_version(None),
+            DEFAULT_CODEX_CLIENT_VERSION
+        );
+    }
+
+    #[test]
+    fn resolve_client_version_ignores_blank_detected() {
+        assert_eq!(
+            resolve_codex_client_version(Some("   ")),
+            DEFAULT_CODEX_CLIENT_VERSION
+        );
+    }
+
+    /// Caller-level test: drives `fetch_available_models` against a loopback
+    /// server and asserts both that it parses the returned slugs AND that the
+    /// resolved `client_version` actually reaches the request URL (the side
+    /// effect the version value gates). Covers the wrapper the pure
+    /// `resolve_codex_client_version` unit tests can't reach.
+    #[tokio::test]
+    async fn fetch_available_models_sends_resolved_client_version() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut buf = [0u8; 4096];
+            let n = socket.read(&mut buf).await.expect("read request");
+            let request_line = String::from_utf8_lossy(&buf[..n])
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            let body = r#"{"models":[{"slug":"gpt-5.5"},{"slug":"gpt-5.4"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            let _ = tx.send(request_line);
+        });
+
+        let base_url = format!("http://{addr}");
+        let models = CodexChatGptProvider::fetch_available_models(
+            &reqwest::Client::new(),
+            &base_url,
+            &SecretString::from("test-token".to_string()),
+        )
+        .await;
+
+        // Output: slugs are parsed from the /models response, in order.
+        assert_eq!(models, vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()]);
+
+        // Side-effect input: the resolved client_version reached the request URL.
+        let request_line = rx.await.expect("server captured the request");
+        let expected = codex_client_version().await;
+        assert!(
+            request_line.contains(&format!("client_version={expected}")),
+            "expected client_version={expected} in request line; got: {request_line}"
+        );
+    }
 
     #[test]
     fn test_message_conversion_user() {
@@ -1035,6 +1244,7 @@ mod tests {
             arguments: json!({"query": "rust"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking...".into()), vec![tc]);
         let items = CodexChatGptProvider::message_to_input_items(&msg);
@@ -1054,6 +1264,7 @@ mod tests {
             arguments: json!({"input": "hello"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let items = CodexChatGptProvider::message_to_input_items(&msg);

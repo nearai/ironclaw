@@ -65,6 +65,7 @@ async fn capability_io_writes_display_preview_to_durable_history() {
             }),
         })
         .await
+        .map(|_| ())
         .expect("result stages");
 
     let history = thread_service

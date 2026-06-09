@@ -33,12 +33,14 @@ use ironclaw_product_workflow::{
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -435,14 +437,18 @@ pub struct ListThreadsQuery {
 /// `GET /api/webchat/v2/automations`
 ///
 /// Lists the caller-scoped schedule automations visible to the browser. The
-/// optional `?limit=N` query is capped by the product workflow facade; the
-/// response is a single bounded page and does not include a cursor.
+/// optional `?limit=N` and `?run_limit=N` queries are capped by the product
+/// workflow facade; the response is a single bounded page and does not include
+/// a cursor.
 pub async fn list_automations(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Query(query): Query<ListAutomationsQuery>,
 ) -> Result<Json<RebornListAutomationsResponse>, WebUiV2HttpError> {
-    let request = WebUiListAutomationsRequest { limit: query.limit };
+    let request = WebUiListAutomationsRequest {
+        limit: query.limit,
+        run_limit: query.run_limit,
+    };
     let response = state.services().list_automations(caller, request).await?;
     Ok(Json(response))
 }
@@ -452,6 +458,9 @@ pub struct ListAutomationsQuery {
     /// Optional maximum number of schedule automations to return.
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Optional maximum number of recent runs to return per automation row.
+    #[serde(default)]
+    pub run_limit: Option<u32>,
 }
 
 /// `GET /api/webchat/v2/channels/connectable`
@@ -469,6 +478,72 @@ pub async fn list_extensions(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornExtensionListResponse>, WebUiV2HttpError> {
     let response = state.services().list_extensions(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/skills`
+pub async fn list_skills(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornSkillListResponse>, WebUiV2HttpError> {
+    let response = state.services().list_skills(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/search`
+pub async fn search_skills(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<SearchSkillsBody>,
+) -> Result<Json<RebornSkillSearchResponse>, WebUiV2HttpError> {
+    let response = state.services().search_skills(caller, body.query).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/install`
+pub async fn install_skill(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<InstallSkillBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .install_skill(caller, body.name, body.content)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/skills/{name}`
+pub async fn get_skill_content(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+) -> Result<Json<RebornSkillContentResponse>, WebUiV2HttpError> {
+    let response = state.services().read_skill_content(caller, name).await?;
+    Ok(Json(response))
+}
+
+/// `PUT /api/webchat/v2/skills/{name}`
+pub async fn update_skill(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+    Json(body): Json<UpdateSkillBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .update_skill(caller, name, body.content)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/skills/{name}`
+pub async fn remove_skill(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state.services().remove_skill(caller, name).await?;
     Ok(Json(response))
 }
 
@@ -802,6 +877,27 @@ pub struct ExtensionPackagePath {
 #[derive(Debug, Deserialize)]
 pub struct InstallExtensionBody {
     pub package_ref: LifecyclePackageRef,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillPath {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchSkillsBody {
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstallSkillBody {
+    pub name: String,
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSkillBody {
+    pub content: String,
 }
 
 fn extension_package_ref_for_request(

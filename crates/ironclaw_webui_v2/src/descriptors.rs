@@ -32,6 +32,12 @@ pub const WEBUI_V2_ROUTE_ACTIVATE_EXTENSION: &str = "webui.v2.activate_extension
 pub const WEBUI_V2_ROUTE_REMOVE_EXTENSION: &str = "webui.v2.remove_extension";
 pub const WEBUI_V2_ROUTE_GET_EXTENSION_SETUP: &str = "webui.v2.get_extension_setup";
 pub const WEBUI_V2_ROUTE_SETUP_EXTENSION: &str = "webui.v2.setup_extension";
+pub const WEBUI_V2_ROUTE_LIST_SKILLS: &str = "webui.v2.list_skills";
+pub const WEBUI_V2_ROUTE_SEARCH_SKILLS: &str = "webui.v2.search_skills";
+pub const WEBUI_V2_ROUTE_INSTALL_SKILL: &str = "webui.v2.install_skill";
+pub const WEBUI_V2_ROUTE_GET_SKILL: &str = "webui.v2.get_skill";
+pub const WEBUI_V2_ROUTE_UPDATE_SKILL: &str = "webui.v2.update_skill";
+pub const WEBUI_V2_ROUTE_REMOVE_SKILL: &str = "webui.v2.remove_skill";
 pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
@@ -75,6 +81,10 @@ pub const WEBUI_V2_PATTERN_ACTIVATE_EXTENSION: &str =
 pub const WEBUI_V2_PATTERN_REMOVE_EXTENSION: &str =
     "/api/webchat/v2/extensions/{package_id}/remove";
 pub const WEBUI_V2_PATTERN_SETUP_EXTENSION: &str = "/api/webchat/v2/extensions/{package_id}/setup";
+pub const WEBUI_V2_PATTERN_LIST_SKILLS: &str = "/api/webchat/v2/skills";
+pub const WEBUI_V2_PATTERN_SEARCH_SKILLS: &str = "/api/webchat/v2/skills/search";
+pub const WEBUI_V2_PATTERN_INSTALL_SKILL: &str = "/api/webchat/v2/skills/install";
+pub const WEBUI_V2_PATTERN_SKILL_DETAIL: &str = "/api/webchat/v2/skills/{name}";
 pub const WEBUI_V2_PATTERN_GET_LLM_CONFIG: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
@@ -122,6 +132,12 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         remove_extension_descriptor(),
         get_extension_setup_descriptor(),
         setup_extension_descriptor(),
+        list_skills_descriptor(),
+        search_skills_descriptor(),
+        install_skill_descriptor(),
+        get_skill_descriptor(),
+        update_skill_descriptor(),
+        remove_skill_descriptor(),
         get_llm_config_descriptor(),
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
@@ -441,6 +457,90 @@ fn setup_extension_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_PATTERN_SETUP_EXTENSION,
         mutation_policy(
             body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn list_skills_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_SKILLS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_SKILLS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn search_skills_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SEARCH_SKILLS,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SEARCH_SKILLS,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn install_skill_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_INSTALL_SKILL,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_INSTALL_SKILL,
+        mutation_policy(
+            body_limit_kib(128),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn get_skill_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_SKILL,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SKILL_DETAIL,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn update_skill_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_UPDATE_SKILL,
+        NetworkMethod::Put,
+        WEBUI_V2_PATTERN_SKILL_DETAIL,
+        mutation_policy(
+            body_limit_kib(128),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn remove_skill_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_REMOVE_SKILL,
+        NetworkMethod::Delete,
+        WEBUI_V2_PATTERN_SKILL_DETAIL,
+        mutation_policy(
+            body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductWorkflow,

@@ -594,6 +594,7 @@ async fn cancellation_after_capability_batch_preserves_completed_result() {
                 safe_summary: "completed before cancellation".to_string(),
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
+                byte_len: 0,
             })],
             stopped_on_suspension: false,
         }])

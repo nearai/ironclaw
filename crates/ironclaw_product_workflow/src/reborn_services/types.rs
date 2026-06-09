@@ -245,7 +245,7 @@ pub struct RebornListThreadsResponse {
     pub next_cursor: Option<String>,
 }
 
-/// Bounded browser projection for caller-scoped automations.
+/// Bounded product projection for caller-scoped automations.
 ///
 /// The beta API currently returns one capped page without a cursor. Future
 /// pagination can extend this response with an optional cursor without changing
@@ -256,9 +256,12 @@ pub struct RebornListAutomationsResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RebornOutboundPreferencesResponseWire")]
 pub struct RebornOutboundPreferencesResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_reply_target: Option<RebornOutboundDeliveryTargetSummary>,
+    #[serde(default)]
+    pub final_reply_target_status: RebornOutboundDeliveryTargetStatus,
     #[serde(default)]
     pub default_modality: RebornOutboundDeliveryModality,
 }
@@ -267,9 +270,53 @@ impl Default for RebornOutboundPreferencesResponse {
     fn default() -> Self {
         Self {
             final_reply_target: None,
+            final_reply_target_status: RebornOutboundDeliveryTargetStatus::NoneConfigured,
             default_modality: RebornOutboundDeliveryModality::Text,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct RebornOutboundPreferencesResponseWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    final_reply_target: Option<RebornOutboundDeliveryTargetSummary>,
+    #[serde(default)]
+    final_reply_target_status: Option<RebornOutboundDeliveryTargetStatus>,
+    #[serde(default)]
+    default_modality: Option<RebornOutboundDeliveryModality>,
+}
+
+impl From<RebornOutboundPreferencesResponseWire> for RebornOutboundPreferencesResponse {
+    fn from(value: RebornOutboundPreferencesResponseWire) -> Self {
+        let final_reply_target_status = match (
+            value.final_reply_target.as_ref(),
+            value.final_reply_target_status,
+        ) {
+            (Some(_), None) => RebornOutboundDeliveryTargetStatus::Available,
+            (_, Some(status)) => status,
+            (None, None) => RebornOutboundDeliveryTargetStatus::NoneConfigured,
+        };
+
+        Self {
+            final_reply_target: value.final_reply_target,
+            final_reply_target_status,
+            default_modality: value.default_modality.unwrap_or_default(),
+        }
+    }
+}
+
+/// Product-safe status for a saved outbound delivery target.
+///
+/// This is channel-neutral: it describes whether the configured default can be
+/// resolved through the target authority layer, not how any particular product
+/// surface should render that state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornOutboundDeliveryTargetStatus {
+    #[default]
+    NoneConfigured,
+    Available,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -640,9 +687,36 @@ pub enum RebornAutomationRunStatus {
     Error,
 }
 
-/// Allowlisted browser-visible state for automation list projections.
+/// Client-visible status for an individual automation run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationRecentRunStatus {
+    Running,
+    Ok,
+    Error,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// Client-safe automation run projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationRecentRunInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<TurnRunId>,
+    pub thread_id: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire_slot: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub status: RebornAutomationRecentRunStatus,
+    pub submitted_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Allowlisted client-visible state for automation list projections.
 ///
-/// Unknown runtime states are collapsed to `unknown` so the browser DTO stays
+/// Unknown runtime states are collapsed to `unknown` so the client DTO stays
 /// typed without surfacing raw backend strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -700,8 +774,9 @@ impl<'de> Deserialize<'de> for RebornAutomationState {
 
 /// Browser-safe automation row returned by the WebUI facade.
 ///
-/// This deliberately exposes source, state, run timestamps, and sanitized
-/// status only; trigger repository internals remain behind the product facade.
+/// This deliberately exposes source, state, run timestamps, sanitized status,
+/// and bounded recent-run history; trigger repository internals remain behind
+/// the product facade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornAutomationInfo {
     pub automation_id: String,
@@ -714,6 +789,8 @@ pub struct RebornAutomationInfo {
     pub last_run_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_status: Option<RebornAutomationRunStatus>,
+    #[serde(default)]
+    pub recent_runs: Vec<RebornAutomationRecentRunInfo>,
     #[serde(default)]
     pub is_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -734,6 +811,80 @@ pub enum RebornAutomationSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornExtensionListResponse {
     pub extensions: Vec<RebornExtensionInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSkillListResponse {
+    pub skills: Vec<RebornSkillInfo>,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSkillContentResponse {
+    pub name: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSkillSearchResponse {
+    #[serde(default)]
+    pub catalog: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub installed: Vec<RebornSkillInfo>,
+    #[serde(default)]
+    pub registry_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSkillActionResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSkillInfo {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub trust: RebornSkillTrustLevel,
+    pub source: RebornSkillSourceKind,
+    pub source_kind: RebornSkillSourceKind,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_source_url: Option<String>,
+    #[serde(default)]
+    pub has_requirements: bool,
+    #[serde(default)]
+    pub has_scripts: bool,
+    #[serde(default)]
+    pub can_edit: bool,
+    #[serde(default)]
+    pub can_delete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornSkillTrustLevel {
+    Trusted,
+    Installed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornSkillSourceKind {
+    User,
+    Installed,
+    Workspace,
+    System,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

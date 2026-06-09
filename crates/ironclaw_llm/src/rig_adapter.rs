@@ -440,6 +440,7 @@ fn extract_response(
                     // them. Without this, Gemini 2.5+ rejects the next
                     // request with HTTP 400. See #3225.
                     signature: tc.signature.clone(),
+                    arguments_parse_error: None,
                 });
             }
             AssistantContent::Reasoning(r) if !r.reasoning.is_empty() => {
@@ -1620,6 +1621,7 @@ mod tests {
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking".to_string()), vec![tc]);
         let messages = vec![msg];
@@ -1812,6 +1814,7 @@ mod tests {
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -1845,6 +1848,7 @@ mod tests {
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -1880,6 +1884,7 @@ mod tests {
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let assistant_msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let tool_result_msg = ChatMessage {
@@ -2202,6 +2207,7 @@ mod tests {
             arguments: serde_json::json!({"q": "rust"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let tc2 = IronToolCall {
             id: "call_b".to_string(),
@@ -2209,6 +2215,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let assistant = ChatMessage::assistant_with_tool_calls(None, vec![tc1, tc2]);
         let result_a = ChatMessage::tool_result("call_a", "search", "search results");

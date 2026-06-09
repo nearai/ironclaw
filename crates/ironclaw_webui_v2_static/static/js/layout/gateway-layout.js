@@ -2,6 +2,7 @@ import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
 import { useInterfaceTheme } from "../design-system/theme.js";
 import { useGatewayStatus } from "../hooks/useGatewayStatus.js";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders.js";
+import { shouldRouteToOnboarding } from "../lib/onboarding-gate.js";
 import { useSidebar } from "../hooks/useSidebar.js";
 import { html } from "../lib/html.js";
 import { useT } from "../lib/i18n.js";
@@ -36,8 +37,19 @@ export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onS
     gatewayStatus: status,
     enabled: isAdmin,
   });
+  // Onboarding is admin-only; non-admins never see the first-run gate.
+  // Even for an admin, skip onboarding when the providers query errored —
+  // under multi-user / SSO auth the operator LLM-config route is gated
+  // (404), the provider is configured operator-side at boot, and `/welcome`
+  // can't reach the gated config UI, so a failed query must not trap an
+  // admin SSO user on `/welcome`.
   const needsOnboarding =
-    isAdmin && !llmProviders.isLoading && !llmProviders.hasActiveProvider;
+    isAdmin &&
+    shouldRouteToOnboarding({
+      isLoading: llmProviders.isLoading,
+      hasActiveProvider: llmProviders.hasActiveProvider,
+      isError: llmProviders.isError,
+    });
   const onboardingExempt =
     location.pathname === "/welcome" || location.pathname.startsWith("/settings");
 
