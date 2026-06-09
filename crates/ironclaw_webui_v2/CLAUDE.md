@@ -81,10 +81,12 @@ scope source. The host's bearer middleware is responsible for
 constructing the `WebUiAuthenticatedCaller` and injecting it as an
 axum `Extension` before the handler runs.
 
-The LLM configuration routes are operator-wide. Host composition must only
-mount them for authenticators that represent a single trusted operator; multi-
-user session/OIDC authenticators should leave those routes unmounted until an
-admin role boundary exists in `WebUiAuthenticatedCaller`.
+The LLM configuration and operator command-plane routes are operator-wide. Host
+composition must only mount them for authenticators that represent a single
+trusted operator; multi-user session/OIDC authenticators should leave those
+routes unmounted until an admin role boundary exists in `WebUiAuthenticatedCaller`.
+The operator command-plane group currently covers status, logs query, and local
+service lifecycle control via the `RebornServicesApi` facade.
 
 ### List-threads
 

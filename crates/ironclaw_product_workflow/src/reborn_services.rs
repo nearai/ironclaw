@@ -77,15 +77,18 @@ pub use types::{
     RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
     RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornOutboundDeliveryModality,
+    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
+    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetSummary,
     RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -123,6 +126,104 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
     ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
         Ok(RebornConnectableChannelListResponse {
             channels: self.channels.iter().cloned().collect(),
+        })
+    }
+}
+
+#[async_trait]
+pub trait OperatorStatusService: Send + Sync {
+    async fn status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticOperatorStatusService {
+    response: RebornOperatorStatusResponse,
+}
+
+impl StaticOperatorStatusService {
+    pub fn new(response: RebornOperatorStatusResponse) -> Self {
+        Self { response }
+    }
+}
+
+#[async_trait]
+impl OperatorStatusService for StaticOperatorStatusService {
+    async fn status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        let mut response = self.response.clone();
+        response.generated_at = Utc::now();
+        Ok(response)
+    }
+}
+
+#[derive(Debug)]
+pub struct UnsupportedOperatorStatusService;
+
+#[async_trait]
+impl OperatorStatusService for UnsupportedOperatorStatusService {
+    async fn status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        Err(operator_surface_unavailable())
+    }
+}
+
+#[async_trait]
+pub trait OperatorLogsService: Send + Sync {
+    async fn query_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError>;
+}
+
+#[derive(Debug)]
+pub struct UnsupportedOperatorLogsService;
+
+#[async_trait]
+impl OperatorLogsService for UnsupportedOperatorLogsService {
+    async fn query_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        Err(operator_surface_unavailable())
+    }
+}
+
+#[async_trait]
+pub trait OperatorServiceLifecycleService: Send + Sync {
+    async fn control_service(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError>;
+}
+
+#[derive(Debug)]
+pub struct UnsupportedOperatorServiceLifecycleService;
+
+#[async_trait]
+impl OperatorServiceLifecycleService for UnsupportedOperatorServiceLifecycleService {
+    async fn control_service(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+        Ok(RebornServiceLifecycleResponse {
+            action: request.action,
+            state: RebornServiceLifecycleState::Unsupported,
+            message: "local service lifecycle management is not wired for this runtime".to_string(),
+            remediation: Some(
+                "use the host process manager directly until a platform lifecycle backend is configured"
+                    .to_string(),
+            ),
         })
     }
 }
@@ -494,6 +595,40 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
 
+    async fn get_operator_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        let _ = caller;
+        Err(operator_surface_unavailable())
+    }
+
+    async fn query_operator_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(operator_surface_unavailable())
+    }
+
+    async fn control_operator_service(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+        let _ = caller;
+        Ok(RebornServiceLifecycleResponse {
+            action: request.action,
+            state: RebornServiceLifecycleState::Unsupported,
+            message: "local service lifecycle management is not wired for this runtime".to_string(),
+            remediation: Some(
+                "use the host process manager directly until a platform lifecycle backend is configured"
+                    .to_string(),
+            ),
+        })
+    }
+
     /// LLM provider configuration: merged catalog + active selection.
     ///
     /// The six LLM-config methods default to "service unavailable" so facade
@@ -597,6 +732,9 @@ pub struct RebornServices {
     automation_facade: Arc<dyn AutomationProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
+    operator_status: Arc<dyn OperatorStatusService>,
+    operator_logs: Arc<dyn OperatorLogsService>,
+    operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
@@ -623,6 +761,9 @@ impl RebornServices {
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
             ),
+            operator_status: Arc::new(UnsupportedOperatorStatusService),
+            operator_logs: Arc::new(UnsupportedOperatorLogsService),
+            operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             extension_credentials: None,
@@ -672,6 +813,30 @@ impl RebornServices {
         outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     ) -> Self {
         self.outbound_preferences_facade = outbound_preferences_facade;
+        self
+    }
+
+    pub fn with_operator_status_service(
+        mut self,
+        operator_status: Arc<dyn OperatorStatusService>,
+    ) -> Self {
+        self.operator_status = operator_status;
+        self
+    }
+
+    pub fn with_operator_logs_service(
+        mut self,
+        operator_logs: Arc<dyn OperatorLogsService>,
+    ) -> Self {
+        self.operator_logs = operator_logs;
+        self
+    }
+
+    pub fn with_operator_service_lifecycle_service(
+        mut self,
+        operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
+    ) -> Self {
+        self.operator_service_lifecycle = operator_service_lifecycle;
         self
     }
 
@@ -1322,6 +1487,31 @@ impl RebornServicesApi for RebornServices {
         .await
     }
 
+    async fn get_operator_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        self.operator_status.status(caller).await
+    }
+
+    async fn query_operator_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        self.operator_logs.query_logs(caller, request).await
+    }
+
+    async fn control_operator_service(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+        self.operator_service_lifecycle
+            .control_service(caller, request)
+            .await
+    }
+
     async fn get_llm_config(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1525,6 +1715,10 @@ fn automation_unavailable() -> RebornServicesError {
 }
 
 fn outbound_preferences_unavailable() -> RebornServicesError {
+    RebornServicesError::service_unavailable(false)
+}
+
+fn operator_surface_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(false)
 }
 
