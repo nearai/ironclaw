@@ -112,8 +112,8 @@ use crate::product_auth_providers::{OAuthProviderComposition, compose_provider_c
 use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessState,
-    RebornWorkerReadiness,
+    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessDiagnostic,
+    RebornReadinessState, RebornWorkerReadiness,
 };
 use crate::{
     available_extensions::{
@@ -2971,6 +2971,15 @@ fn readiness_for(
         RebornCompositionProfile::Production => RebornReadinessState::ProductionValidated,
         RebornCompositionProfile::MigrationDryRun => RebornReadinessState::MigrationDryRunValidated,
     };
+    let diagnostics = match profile {
+        RebornCompositionProfile::Disabled => vec![RebornReadinessDiagnostic::disabled()],
+        RebornCompositionProfile::LocalDev => vec![RebornReadinessDiagnostic::local_dev()],
+        RebornCompositionProfile::LocalDevYolo => vec![RebornReadinessDiagnostic::local_dev_yolo()],
+        RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun => {
+            Vec::new()
+        }
+    };
+
     RebornReadiness {
         profile,
         state,
@@ -2983,6 +2992,7 @@ fn readiness_for(
             turn_runner: false,
             trigger_poller: false,
         },
+        diagnostics,
     }
 }
 

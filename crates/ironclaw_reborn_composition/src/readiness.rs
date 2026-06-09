@@ -25,17 +25,122 @@ pub struct RebornWorkerReadiness {
     pub trigger_poller: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RebornReadinessDiagnosticStatus {
+    Info,
+    Warning,
+    Blocking,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RebornReadinessDiagnosticReason {
+    Disabled,
+    DevOnlyProfile,
+    Missing,
+    LocalOnly,
+    Unverified,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornReadinessDiagnosticComponent {
+    CompositionProfile,
+    RuntimeBackend,
+    RuntimePolicy,
+    TrustPolicy,
+    Filesystem,
+    ResourceGovernor,
+    ProcessStore,
+    ProcessResultStore,
+    RunState,
+    ApprovalRequests,
+    CapabilityLeases,
+    EventSink,
+    AuditSink,
+    SecretStore,
+    CredentialAccountStore,
+    CredentialSessionStore,
+    RuntimeHttpEgress,
+    RuntimeProcessPort,
+    WasmCredentialProvider,
+    ScriptRuntime,
+    McpRuntime,
+    WasmRuntime,
+    FirstPartyRuntime,
+    TurnState,
+    RunProfileResolver,
+    TurnRunWakeNotifier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornReadinessDiagnostic {
+    pub profile: RebornCompositionProfile,
+    pub component: RebornReadinessDiagnosticComponent,
+    pub reason: RebornReadinessDiagnosticReason,
+    pub status: RebornReadinessDiagnosticStatus,
+    pub blocks_production: bool,
+}
+
+impl RebornReadinessDiagnostic {
+    pub fn disabled() -> Self {
+        Self {
+            profile: RebornCompositionProfile::Disabled,
+            component: RebornReadinessDiagnosticComponent::CompositionProfile,
+            reason: RebornReadinessDiagnosticReason::Disabled,
+            status: RebornReadinessDiagnosticStatus::Info,
+            blocks_production: false,
+        }
+    }
+
+    pub fn local_dev() -> Self {
+        Self::dev_only_profile(RebornCompositionProfile::LocalDev)
+    }
+
+    pub fn local_dev_yolo() -> Self {
+        Self::dev_only_profile(RebornCompositionProfile::LocalDevYolo)
+    }
+
+    fn dev_only_profile(profile: RebornCompositionProfile) -> Self {
+        Self {
+            profile,
+            component: RebornReadinessDiagnosticComponent::CompositionProfile,
+            reason: RebornReadinessDiagnosticReason::DevOnlyProfile,
+            status: RebornReadinessDiagnosticStatus::Warning,
+            blocks_production: true,
+        }
+    }
+
+    pub fn production_blocker(
+        profile: RebornCompositionProfile,
+        component: RebornReadinessDiagnosticComponent,
+        reason: RebornReadinessDiagnosticReason,
+    ) -> Self {
+        Self {
+            profile,
+            component,
+            reason,
+            status: RebornReadinessDiagnosticStatus::Blocking,
+            blocks_production: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornReadiness {
     pub profile: RebornCompositionProfile,
     pub state: RebornReadinessState,
     pub facades: RebornFacadeReadiness,
     #[serde(default)]
     pub workers: RebornWorkerReadiness,
+    #[serde(default)]
+    pub diagnostics: Vec<RebornReadinessDiagnostic>,
 }
 
 impl RebornReadiness {
-    pub const fn disabled() -> Self {
+    pub fn disabled() -> Self {
         Self {
             profile: RebornCompositionProfile::Disabled,
             state: RebornReadinessState::Disabled,
@@ -48,6 +153,7 @@ impl RebornReadiness {
                 turn_runner: false,
                 trigger_poller: false,
             },
+            diagnostics: vec![RebornReadinessDiagnostic::disabled()],
         }
     }
 }
@@ -74,5 +180,6 @@ mod tests {
         assert_eq!(readiness.profile, RebornCompositionProfile::LocalDev);
         assert_eq!(readiness.state, RebornReadinessState::DevOnly);
         assert_eq!(readiness.workers, RebornWorkerReadiness::default());
+        assert!(readiness.diagnostics.is_empty());
     }
 }
