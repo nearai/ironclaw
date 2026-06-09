@@ -186,21 +186,6 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             WEBUI_V2_PATTERN_SETUP_EXTENSION,
             get(handlers::get_extension_setup).post(handlers::setup_extension),
         );
-    if options.mount_operator_control_routes {
-        router = router
-            .route(
-                WEBUI_V2_PATTERN_GET_OPERATOR_STATUS,
-                get(handlers::get_operator_status),
-            )
-            .route(
-                WEBUI_V2_PATTERN_QUERY_OPERATOR_LOGS,
-                post(handlers::query_operator_logs),
-            )
-            .route(
-                WEBUI_V2_PATTERN_CONTROL_OPERATOR_SERVICE,
-                post(handlers::control_operator_service),
-            );
-    }
     if options.mount_llm_config_routes {
         router = router
             // `WEBUI_V2_PATTERN_GET_LLM_CONFIG == WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER`

@@ -711,40 +711,6 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
 
-    async fn get_operator_status(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
-        let _ = caller;
-        Err(operator_surface_unavailable())
-    }
-
-    async fn query_operator_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(operator_surface_unavailable())
-    }
-
-    async fn control_operator_service(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornServiceLifecycleRequest,
-    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
-        let _ = caller;
-        Ok(RebornServiceLifecycleResponse {
-            action: request.action,
-            state: RebornServiceLifecycleState::Unsupported,
-            message: "local service lifecycle management is not wired for this runtime".to_string(),
-            remediation: Some(
-                "use the host process manager directly until a platform lifecycle backend is configured"
-                    .to_string(),
-            ),
-        })
-    }
-
     /// LLM provider configuration: merged catalog + active selection.
     ///
     /// The six LLM-config methods default to "service unavailable" so facade
@@ -1724,26 +1690,79 @@ impl RebornServicesApi for RebornServices {
     async fn get_operator_status(
         &self,
         caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
-        self.operator_status.status(caller).await
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let status = self.operator_status.status(caller).await?;
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::Status,
+            status: RebornOperatorSurfaceStatus::Available,
+            message: "operator status is available".to_string(),
+            operator_status: Some(status),
+            logs: None,
+            service_lifecycle: None,
+        })
     }
 
     async fn query_operator_logs(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
-        self.operator_logs.query_logs(caller, request).await
+        query: RebornOperatorLogsQuery,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let request = RebornLogQueryRequest {
+            limit: query.limit,
+            cursor: query.cursor,
+            level: query.level,
+            target: query.target,
+            tail: query.tail,
+        };
+        let logs = self.operator_logs.query_logs(caller, request).await?;
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::Logs,
+            status: RebornOperatorSurfaceStatus::Available,
+            message: "operator logs query completed".to_string(),
+            operator_status: None,
+            logs: Some(logs),
+            service_lifecycle: None,
+        })
     }
 
-    async fn control_operator_service(
+    async fn run_operator_service_lifecycle(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornServiceLifecycleRequest,
-    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
-        self.operator_service_lifecycle
+        request: RebornOperatorServiceLifecycleRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let request = RebornServiceLifecycleRequest {
+            action: match request.action {
+                RebornOperatorServiceLifecycleAction::Install => {
+                    RebornServiceLifecycleAction::Install
+                }
+                RebornOperatorServiceLifecycleAction::Start => RebornServiceLifecycleAction::Start,
+                RebornOperatorServiceLifecycleAction::Stop => RebornServiceLifecycleAction::Stop,
+                RebornOperatorServiceLifecycleAction::Status => {
+                    RebornServiceLifecycleAction::Status
+                }
+            },
+        };
+        let service_lifecycle = self
+            .operator_service_lifecycle
             .control_service(caller, request)
-            .await
+            .await?;
+        let status = match service_lifecycle.state {
+            RebornServiceLifecycleState::Installed
+            | RebornServiceLifecycleState::Running
+            | RebornServiceLifecycleState::Stopped
+            | RebornServiceLifecycleState::Unknown => RebornOperatorSurfaceStatus::Available,
+            RebornServiceLifecycleState::Unsupported | RebornServiceLifecycleState::Failed => {
+                RebornOperatorSurfaceStatus::Unavailable
+            }
+        };
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::ServiceLifecycle,
+            status,
+            message: service_lifecycle.message.clone(),
+            operator_status: None,
+            logs: None,
+            service_lifecycle: Some(service_lifecycle),
+        })
     }
 
     async fn get_llm_config(

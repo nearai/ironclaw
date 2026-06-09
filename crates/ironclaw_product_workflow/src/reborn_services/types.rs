@@ -1162,6 +1162,12 @@ pub struct RebornOperatorCommandPlaneResponse {
     pub area: RebornOperatorArea,
     pub status: RebornOperatorSurfaceStatus,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_status: Option<RebornOperatorStatusResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<RebornLogQueryResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_lifecycle: Option<RebornServiceLifecycleResponse>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1193,6 +1199,12 @@ pub struct RebornOperatorLogsQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub level: Option<RebornLogLevel>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub tail: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -35,17 +35,14 @@ use ironclaw_product_workflow::{
     RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
     RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogEntry, RebornLogLevel,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornListAutomationsResponse, RebornListThreadsResponse,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
@@ -113,9 +110,6 @@ struct StubServices {
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
     list_connectable_channels_calls: Mutex<usize>,
     next_list_connectable_channels_error: Mutex<Option<RebornServicesError>>,
-    get_operator_status_calls: Mutex<usize>,
-    query_operator_logs_calls: Mutex<Vec<RebornLogQueryRequest>>,
-    control_operator_service_calls: Mutex<Vec<RebornServiceLifecycleRequest>>,
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
@@ -475,65 +469,6 @@ impl RebornServicesApi for StubServices {
                 },
                 command_aliases: vec!["slack".to_string()],
             }],
-        })
-    }
-
-    async fn get_operator_status(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
-        *self.get_operator_status_calls.lock().expect("lock") += 1;
-        Ok(RebornOperatorStatusResponse {
-            generated_at: chrono::Utc::now(),
-            overall: RebornOperatorStatusState::Degraded,
-            checks: vec![RebornOperatorStatusCheck {
-                id: "runtime".to_string(),
-                status: RebornOperatorStatusState::Degraded,
-                severity: RebornOperatorStatusSeverity::Warning,
-                summary: "runtime degraded".to_string(),
-                remediation: Some("finish setup".to_string()),
-            }],
-        })
-    }
-
-    async fn query_operator_logs(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
-        self.query_operator_logs_calls
-            .lock()
-            .expect("lock")
-            .push(request.clone());
-        Ok(RebornLogQueryResponse {
-            source: "test".to_string(),
-            entries: vec![RebornLogEntry {
-                id: "log-1".to_string(),
-                timestamp: chrono::Utc::now(),
-                level: RebornLogLevel::Info,
-                target: "ironclaw_test".to_string(),
-                message: "ready".to_string(),
-            }],
-            next_cursor: Some("log-1".to_string()),
-            tail_supported: true,
-            follow_supported: false,
-        })
-    }
-
-    async fn control_operator_service(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornServiceLifecycleRequest,
-    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
-        self.control_operator_service_calls
-            .lock()
-            .expect("lock")
-            .push(request.clone());
-        Ok(RebornServiceLifecycleResponse {
-            action: request.action,
-            state: RebornServiceLifecycleState::Unsupported,
-            message: "unsupported in test".to_string(),
-            remediation: Some("use host service manager".to_string()),
         })
     }
 
