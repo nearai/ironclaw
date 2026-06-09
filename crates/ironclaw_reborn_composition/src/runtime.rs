@@ -2797,7 +2797,6 @@ mod tests {
     };
     use rust_decimal_macros::dec;
 
-    use crate::RebornReadinessState;
     #[cfg(feature = "libsql")]
     use crate::hooks::HooksActivationConfig;
     use crate::input::RebornBuildInput;
@@ -2807,6 +2806,7 @@ mod tests {
         TriggerPollerSettings,
     };
     use crate::webui::build_webui_services;
+    use crate::{RebornReadinessState, RebornRuntimeProcessBinding};
 
     use super::{
         RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND,
@@ -3465,12 +3465,17 @@ mod tests {
                 requested_profile: RuntimeProfile::SecureDefault,
                 resolved_profile: RuntimeProfile::SecureDefault,
                 filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-                process_backend: ProcessBackendKind::None,
+                process_backend: ProcessBackendKind::TenantSandbox,
                 network_mode: NetworkMode::Deny,
                 secret_mode: SecretMode::BrokeredHandles,
                 approval_policy: ApprovalPolicy::AskAlways,
                 audit_mode: AuditMode::Standard,
-            }),
+            })
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
+                ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
+                    RecordingSandboxTransport,
+                )),
+            ))),
         )
         .with_identity(RebornRuntimeIdentity {
             tenant_id: "runtime-production-hooks-tenant".to_string(),
@@ -3497,6 +3502,28 @@ mod tests {
             ),
             "expected malformed hook config error, got {err:#}"
         );
+    }
+
+    #[derive(Debug)]
+    struct RecordingSandboxTransport;
+
+    #[async_trait]
+    impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
+        async fn run_command(
+            &self,
+            _request: ironclaw_host_runtime::CommandExecutionRequest,
+        ) -> Result<
+            ironclaw_host_runtime::CommandExecutionOutput,
+            ironclaw_host_runtime::RuntimeProcessError,
+        > {
+            Ok(ironclaw_host_runtime::CommandExecutionOutput {
+                output: String::new(),
+                saved_output: None,
+                exit_code: 0,
+                sandboxed: true,
+                duration: Duration::ZERO,
+            })
+        }
     }
 
     #[tokio::test]
