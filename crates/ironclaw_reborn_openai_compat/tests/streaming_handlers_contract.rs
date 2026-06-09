@@ -8,12 +8,13 @@ use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::{TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalConversationRef, FakeProductWorkflow,
     FinalReplyView, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
     ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
-    ProductProjectionState, ProductWorkflow, ProjectionCursor, ProtocolAuthEvidence,
+    ProductProjectionState, ProductProjectionSubscribeInput, ProductWorkflow, ProjectionCursor,
+    ProjectionSubscriptionRequest, ProtocolAuthEvidence,
 };
 use ironclaw_reborn_openai_compat::{
     InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection,
@@ -25,7 +26,7 @@ use ironclaw_reborn_openai_compat::{
     OpenAiResponseWaitRequest, OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow,
     openai_compat_router_with_state,
 };
-use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnRunId};
+use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -461,6 +462,7 @@ async fn chat_stream_idempotency_replay_uses_recorded_ack_without_resubmit() {
     streamer.push_chat(vec![run_status_envelope("first-done", "completed")]);
     streamer.push_chat(vec![run_status_envelope("replay-done", "completed")]);
     let workflow = Arc::new(FakeProductWorkflow::new());
+    workflow.program_projection_resolution(sample_projection_subscription_request());
     let router = router_with_workflow(streamer.clone(), workflow.clone());
     let body = json!({
         "model": "gpt-reborn",
@@ -635,6 +637,13 @@ impl ProductWorkflow for FixedAckWorkflow {
             .push(envelope);
         Ok(self.ack.clone())
     }
+
+    async fn subscribe_projection(
+        &self,
+        _request: ProductProjectionSubscribeInput,
+    ) -> Result<ProjectionSubscriptionRequest, ironclaw_product_adapters::ProductAdapterError> {
+        Ok(sample_projection_subscription_request())
+    }
 }
 
 struct StaticChatReader;
@@ -675,15 +684,11 @@ impl OpenAiResponsesProjectionReader for StaticResponsesReader {
 }
 
 fn router(streamer: Arc<QueuedStreamer>) -> axum::Router {
-    router_with_workflow(streamer, Arc::new(FakeProductWorkflow::new()))
+    router_with_workflow(streamer, fake_workflow())
 }
 
 fn router_with_wait_timeout(streamer: Arc<QueuedStreamer>, wait_timeout: Duration) -> axum::Router {
-    router_with_options(
-        Some(streamer),
-        Arc::new(FakeProductWorkflow::new()),
-        wait_timeout,
-    )
+    router_with_options(Some(streamer), fake_workflow(), wait_timeout)
 }
 
 fn router_with_workflow(
@@ -694,11 +699,7 @@ fn router_with_workflow(
 }
 
 fn router_without_streamer() -> axum::Router {
-    router_with_options(
-        None,
-        Arc::new(FakeProductWorkflow::new()),
-        Duration::from_secs(30),
-    )
+    router_with_options(None, fake_workflow(), Duration::from_secs(30))
 }
 
 fn router_with_options(
@@ -725,6 +726,26 @@ fn router_with_options(
             .with_chat_completions_workflow(Arc::new(chat))
             .with_responses_workflow(Arc::new(responses)),
     )
+}
+
+fn fake_workflow() -> Arc<FakeProductWorkflow> {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    workflow.program_projection_resolution(sample_projection_subscription_request());
+    workflow
+}
+
+fn sample_projection_subscription_request() -> ProjectionSubscriptionRequest {
+    ProjectionSubscriptionRequest {
+        actor: TurnActor::new(UserId::new("user-a").expect("user")),
+        scope: TurnScope::new_with_owner(
+            TenantId::new("tenant-a").expect("tenant"),
+            None,
+            None,
+            ThreadId::new("thread-openai-stream").expect("thread"),
+            Some(UserId::new("user-a").expect("user")),
+        ),
+        after_cursor: None,
+    }
 }
 
 fn post_json(path: &str, body: serde_json::Value) -> Request<Body> {
