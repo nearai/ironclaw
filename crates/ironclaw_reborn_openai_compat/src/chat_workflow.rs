@@ -162,7 +162,7 @@ impl OpenAiChatCompletionsWorkflow {
             .map(|response| Json(response).into_response())
     }
 
-    pub(crate) async fn complete_chat_request(
+    async fn complete_chat_request(
         &self,
         caller: OpenAiCompatAuthenticatedCaller,
         request: OpenAiChatCompletionRequest,
@@ -301,7 +301,7 @@ impl OpenAiChatCompletionsWorkflow {
             .await
     }
 
-    pub(crate) async fn stream_chat_request(
+    async fn stream_chat_request(
         &self,
         caller: OpenAiCompatAuthenticatedCaller,
         request: OpenAiChatCompletionRequest,
@@ -363,7 +363,7 @@ impl OpenAiChatCompletionsWorkflow {
             return Err(OpenAiCompatHttpError::internal());
         };
         let mapping = self
-            .bind_base_internal_refs(caller.scope().clone(), public_id.clone(), &accepted_ack)
+            .bind_internal_refs_from_ack(caller.scope().clone(), public_id.clone(), &accepted_ack)
             .await?
             .unwrap_or(mapping);
 
@@ -402,7 +402,7 @@ impl OpenAiChatCompletionsWorkflow {
         Ok(accepted_ack)
     }
 
-    async fn bind_base_internal_refs(
+    async fn bind_internal_refs_from_ack(
         &self,
         owner: OpenAiCompatActorScope,
         public_id: OpenAiChatCompletionId,

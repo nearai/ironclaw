@@ -124,7 +124,7 @@ impl OpenAiResponsesWorkflow {
             .map(|response| Json(response).into_response())
     }
 
-    pub(crate) async fn create_response_request(
+    async fn create_response_request(
         &self,
         caller: OpenAiCompatAuthenticatedCaller,
         request: OpenAiResponsesCreateRequest,
@@ -266,7 +266,7 @@ impl OpenAiResponsesWorkflow {
             .await
     }
 
-    pub(crate) async fn stream_response_request(
+    async fn stream_response_request(
         &self,
         caller: OpenAiCompatAuthenticatedCaller,
         request: OpenAiResponsesCreateRequest,
@@ -457,6 +457,9 @@ impl OpenAiResponsesWorkflow {
         )?;
         let ack = self.product_workflow.submit_inbound(envelope).await?;
         let accepted_ack = accepted_ack_from_ack(ack)?;
+        // Persist accepted acks for both streaming and non-streaming creates so
+        // idempotency replay can reuse the canonical product turn without
+        // submitting another inbound request.
         let mapping = self
             .ref_store
             .record_accepted_ack(OpenAiCompatRecordAcceptedAck::new(
