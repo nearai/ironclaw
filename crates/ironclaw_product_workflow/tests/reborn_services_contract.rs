@@ -52,8 +52,9 @@ use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, InMemorySessionThreadService, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    EnsureThreadRequest, InMemorySessionThreadService, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
@@ -1177,12 +1178,15 @@ impl SessionThreadService for ScopeMismatchThreadStub {
 enum ScriptedThreadBehavior {
     BackendHistory,
     History(Box<ThreadHistory>),
+    ListPages,
     SubmittedReplay { turn_run_id: Option<String> },
 }
 
 struct ScriptedThreadService {
     behavior: ScriptedThreadBehavior,
     history_requests: Mutex<Vec<ThreadHistoryRequest>>,
+    list_requests: Mutex<Vec<ListThreadsForScopeRequest>>,
+    list_responses: Mutex<Vec<ListThreadsForScopeResponse>>,
 }
 
 impl ScriptedThreadService {
@@ -1190,6 +1194,8 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::BackendHistory,
             history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
         }
     }
 
@@ -1197,6 +1203,17 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::History(Box::new(history)),
             history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn list_pages(responses: Vec<ListThreadsForScopeResponse>) -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::ListPages,
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(responses),
         }
     }
 
@@ -1204,11 +1221,17 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::SubmittedReplay { turn_run_id },
             history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
         }
     }
 
     fn history_requests(&self) -> Vec<ThreadHistoryRequest> {
         self.history_requests.lock().expect("lock").clone()
+    }
+
+    fn list_requests(&self) -> Vec<ListThreadsForScopeRequest> {
+        self.list_requests.lock().expect("lock").clone()
     }
 }
 
@@ -1227,6 +1250,7 @@ impl SessionThreadService for ScriptedThreadService {
                 "backend detail /host/path secret-token".to_string(),
             )),
             ScriptedThreadBehavior::History(history) => Ok(history.as_ref().clone()),
+            ScriptedThreadBehavior::ListPages => scripted_stub_unreachable("list_thread_history"),
             ScriptedThreadBehavior::SubmittedReplay { .. } => Ok(ThreadHistory {
                 thread: SessionThreadRecord {
                     scope: request.scope,
@@ -1274,7 +1298,9 @@ impl SessionThreadService for ScriptedThreadService {
                     turn_run_id: turn_run_id.clone(),
                 }))
             }
-            ScriptedThreadBehavior::BackendHistory | ScriptedThreadBehavior::History(_) => {
+            ScriptedThreadBehavior::BackendHistory
+            | ScriptedThreadBehavior::History(_)
+            | ScriptedThreadBehavior::ListPages => {
                 scripted_stub_unreachable("replay_accepted_inbound_message")
             }
         }
@@ -1371,6 +1397,23 @@ impl SessionThreadService for ScriptedThreadService {
         _request: CreateSummaryArtifactRequest,
     ) -> Result<SummaryArtifact, SessionThreadError> {
         scripted_stub_unreachable("create_summary_artifact")
+    }
+
+    async fn list_threads_for_scope(
+        &self,
+        request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        match &self.behavior {
+            ScriptedThreadBehavior::ListPages => {
+                self.list_requests.lock().expect("lock").push(request);
+                let mut responses = self.list_responses.lock().expect("lock");
+                if responses.is_empty() {
+                    scripted_stub_unreachable("list_threads_for_scope");
+                }
+                Ok(responses.remove(0))
+            }
+            _ => scripted_stub_unreachable("list_threads_for_scope"),
+        }
     }
 }
 
@@ -5641,6 +5684,128 @@ async fn list_threads_hides_automation_trigger_threads() {
     assert!(
         !thread_ids.contains(&automation_thread_id),
         "automation trigger threads should be accessible by direct id but hidden from the chat list",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_threads() {
+    let caller = caller();
+    let scope = thread_scope_for(&caller);
+    let automation_thread = |thread_id: &str| SessionThreadRecord {
+        scope: scope.clone(),
+        thread_id: ThreadId::new(thread_id).expect("automation thread id"),
+        created_by_actor_id: caller.user_id.as_str().to_string(),
+        title: Some(format!("Automation run {thread_id}")),
+        metadata_json: Some(automation_trigger_thread_metadata_json(
+            "trigger-scheduled-summary",
+        )),
+        goal: None,
+    };
+    let stalled_cursor = "cursor-stalled".to_string();
+    let thread_service = Arc::new(ScriptedThreadService::list_pages(vec![
+        ListThreadsForScopeResponse {
+            threads: vec![automation_thread("thread-automation-stall-1")],
+            next_cursor: Some(stalled_cursor.clone()),
+        },
+        ListThreadsForScopeResponse {
+            threads: vec![automation_thread("thread-automation-stall-2")],
+            next_cursor: Some(stalled_cursor.clone()),
+        },
+    ]));
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        services.list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                limit: Some(2),
+                cursor: None,
+            },
+        ),
+    )
+    .await
+    .expect("list_threads should terminate when backend cursor stalls")
+    .expect("list threads");
+
+    assert!(
+        response.threads.is_empty(),
+        "automation trigger threads must stay hidden even when every fetched page is filtered",
+    );
+    assert_eq!(
+        response.next_cursor, None,
+        "stalled cursor must be cleared so callers do not keep replaying the same filtered page",
+    );
+    let list_requests = thread_service.list_requests();
+    assert_eq!(
+        list_requests.len(),
+        2,
+        "facade should fetch the stalled page once and then break on the repeated cursor",
+    );
+    assert_eq!(list_requests[0].cursor, None);
+    assert_eq!(list_requests[1].cursor.as_deref(), Some("cursor-stalled"));
+}
+
+#[tokio::test]
+async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
+    let caller = caller();
+    let scope = thread_scope_for(&caller);
+    let automation_thread = |index: usize| SessionThreadRecord {
+        scope: scope.clone(),
+        thread_id: ThreadId::new(format!("thread-automation-budget-{index:02}"))
+            .expect("automation thread id"),
+        created_by_actor_id: caller.user_id.as_str().to_string(),
+        title: Some(format!("Automation run {index}")),
+        metadata_json: Some(automation_trigger_thread_metadata_json(
+            "trigger-scheduled-summary",
+        )),
+        goal: None,
+    };
+    let responses = (0..20)
+        .map(|index| ListThreadsForScopeResponse {
+            threads: vec![automation_thread(index)],
+            next_cursor: Some(format!("cursor-{index:02}")),
+        })
+        .collect::<Vec<_>>();
+    let thread_service = Arc::new(ScriptedThreadService::list_pages(responses));
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                limit: Some(1),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("list threads");
+
+    assert!(
+        response.threads.is_empty(),
+        "automation trigger threads must stay hidden when filter pages are exhausted",
+    );
+    assert_eq!(
+        response.next_cursor, None,
+        "filter page budget exhaustion must clear the cursor so callers do not keep scanning",
+    );
+    let list_requests = thread_service.list_requests();
+    assert_eq!(
+        list_requests.len(),
+        20,
+        "facade must enforce a hard cap on filtered backend pages",
+    );
+    assert!(
+        list_requests
+            .iter()
+            .all(|request| request.limit == Some(50)),
+        "facade should use a fixed candidate page size instead of shrinking toward one"
     );
 }
 

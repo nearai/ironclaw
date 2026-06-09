@@ -1338,7 +1338,7 @@ impl RebornServicesApi for RebornServices {
             ));
         };
         let limit = clamp_automation_list_limit(request.limit);
-        let run_limit = resolve_automation_run_limit(request.run_limit);
+        let run_limit = clamp_automation_run_limit(request.run_limit);
         let automations = self
             .automation_facade
             .list_automations(caller, AutomationListRequest { limit, run_limit })
@@ -1628,18 +1628,34 @@ impl RebornServices {
         scope: ThreadScope,
         request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        let visible_limit = resolve_thread_list_limit(request.limit);
+        let visible_limit = clamp_thread_list_limit(request.limit);
+        let fetch_limit = visible_limit
+            .max(THREAD_LIST_FILTER_MIN_FETCH_SIZE)
+            .min(THREAD_LIST_MAX_PAGE_SIZE as usize);
         let mut cursor = request.cursor;
         let mut visible_threads = Vec::with_capacity(visible_limit);
         let mut next_cursor = None;
+        let mut pages_fetched = 0usize;
 
         while visible_threads.len() < visible_limit {
-            let remaining = visible_limit - visible_threads.len();
+            if pages_fetched >= THREAD_LIST_FILTER_MAX_PAGES {
+                tracing::warn!(
+                    cursor = ?cursor,
+                    pages_fetched,
+                    max_pages = THREAD_LIST_FILTER_MAX_PAGES,
+                    visible_threads = visible_threads.len(),
+                    visible_limit,
+                    "thread listing filter page budget exhausted while skipping automation threads"
+                );
+                next_cursor = None;
+                break;
+            }
+            pages_fetched += 1;
             let response = self
                 .thread_service
                 .list_threads_for_scope(ironclaw_threads::ListThreadsForScopeRequest {
                     scope: scope.clone(),
-                    limit: Some(remaining as u32),
+                    limit: Some(fetch_limit as u32),
                     cursor: cursor.clone(),
                 })
                 .await
@@ -1663,6 +1679,13 @@ impl RebornServices {
                 break;
             }
             cursor = Some(next);
+        }
+
+        if visible_threads.len() > visible_limit {
+            next_cursor = visible_threads
+                .get(visible_limit.saturating_sub(1))
+                .map(|thread| thread.thread_id.as_str().to_string());
+            visible_threads.truncate(visible_limit);
         }
 
         Ok(RebornListThreadsResponse {
@@ -2445,6 +2468,8 @@ const TIMELINE_MAX_SUMMARY_ARTIFACTS: usize = 200;
 
 const THREAD_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
 const THREAD_LIST_MAX_PAGE_SIZE: u32 = 200;
+const THREAD_LIST_FILTER_MIN_FETCH_SIZE: usize = 50;
+const THREAD_LIST_FILTER_MAX_PAGES: usize = 20;
 
 fn clamp_timeline_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(TIMELINE_DEFAULT_PAGE_SIZE);
@@ -2452,7 +2477,7 @@ fn clamp_timeline_limit(requested: Option<u32>) -> usize {
     clamped as usize
 }
 
-fn resolve_thread_list_limit(requested: Option<u32>) -> usize {
+fn clamp_thread_list_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(THREAD_LIST_DEFAULT_PAGE_SIZE);
     let clamped = raw.clamp(1, THREAD_LIST_MAX_PAGE_SIZE);
     clamped as usize
@@ -2464,7 +2489,7 @@ fn clamp_automation_list_limit(requested: Option<u32>) -> usize {
     clamped as usize
 }
 
-fn resolve_automation_run_limit(requested: Option<u32>) -> usize {
+fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE);
     // 0 is intentional: callers suppress embedded run history by passing run_limit=0.
     let clamped = raw.min(AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE);
