@@ -162,6 +162,10 @@ pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,
 };
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use ironclaw_runtime_policy::{
+    ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
+};
 pub use ironclaw_skills::{
     ManagedSkillSource as RebornSkillSource, SkillSummary as RebornSkillSummary,
     skill_summary_json as reborn_skill_summary_json,
@@ -191,10 +195,6 @@ pub use product_live_adapters::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub use ironclaw_runtime_policy::{
-    ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
-};
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 #[cfg(feature = "root-llm-provider")]
 pub use provider_admin::{
@@ -879,6 +879,16 @@ pub fn open_reborn_postgres_pool(
     url: secrecy::SecretString,
 ) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
     Ok(ironclaw_reborn_event_store::open_postgres_pool(url)?)
+}
+
+/// Open a PostgreSQL pool for Reborn production storage with an explicit
+/// maximum connection count.
+#[cfg(feature = "postgres")]
+pub fn open_reborn_postgres_pool_with_max_size(
+    url: secrecy::SecretString,
+    max_size: usize,
+) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
+    Ok(ironclaw_reborn_event_store::open_postgres_pool_with_max_size(url, max_size)?)
 }
 
 #[cfg(all(test, any(feature = "libsql", feature = "postgres")))]

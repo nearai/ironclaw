@@ -149,6 +149,9 @@ may name the PostgreSQL URL variable, but must not contain the raw URL:
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+# Optional; defaults to 16. Keep below the PostgreSQL server's max_connections
+# after reserving capacity for migrations and operator sessions.
+pool_max_size = 16
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -159,9 +162,9 @@ Set `IRONCLAW_REBORN_POSTGRES_URL` in the process environment, and set
 `IRONCLAW_REBORN_SECRET_MASTER_KEY` to independent cryptographic key material.
 Managed remote PostgreSQL providers must use TLS, for example by appending
 `sslmode=require`.
-Production `run` also requires an explicit `[policy]` section; choose a
-runtime profile such as `secure_default` that does not require a tenant-sandbox
-process binding for the standalone CLI launch path.
+Production `run` also requires an explicit `[policy]` section. The first
+production launch slice supports runtime policies that do not require a
+tenant-sandbox process binding.
 
 Once `[llm.default]` exists, that config selects the provider. `LLM_BACKEND` is
 only an env fallback when no default LLM slot is configured. To switch providers

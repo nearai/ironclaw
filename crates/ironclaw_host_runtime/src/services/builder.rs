@@ -479,9 +479,21 @@ where
 
     pub fn with_turn_run_wake_notifier<T>(mut self, notifier: Arc<T>) -> Self
     where
-        T: TurnRunWakeNotifier + ?Sized + 'static,
+        T: TurnRunWakeNotifier + 'static,
     {
         self.component_types.turn_run_wake_notifier = Some(ProductionComponentType::of::<T>());
+        self.turn_run_wake_notifier = Some(notifier);
+        self
+    }
+
+    pub fn with_turn_run_wake_notifier_dyn(
+        mut self,
+        notifier: Arc<dyn TurnRunWakeNotifier>,
+    ) -> Self {
+        self.component_types.turn_run_wake_notifier = Some(ProductionComponentType::named(
+            "dyn TurnRunWakeNotifier",
+            ProductionImplementationReadiness::ProductionCandidate,
+        ));
         self.turn_run_wake_notifier = Some(notifier);
         self
     }

@@ -54,6 +54,8 @@ use crate::{
     },
 };
 
+type PlannedRuntimeWakeChannel = (TurnRunnerWakeSender, TurnRunnerWakeReceiver);
+
 #[derive(Debug, Clone, Default)]
 pub struct DefaultPlannedRuntimeConfig {
     pub worker: TurnRunnerWorkerConfig,
@@ -335,6 +337,32 @@ pub fn build_default_planned_runtime<G>(
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
+    build_default_planned_runtime_with_optional_wake_channel(parts, None)
+}
+
+pub fn build_default_planned_runtime_with_wake_channel<G>(
+    parts: DefaultPlannedRuntimeParts<G>,
+    wake_channel: PlannedRuntimeWakeChannel,
+) -> Result<
+    RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
+    DefaultPlannedRuntimeBuildError,
+>
+where
+    G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
+{
+    build_default_planned_runtime_with_optional_wake_channel(parts, Some(wake_channel))
+}
+
+fn build_default_planned_runtime_with_optional_wake_channel<G>(
+    parts: DefaultPlannedRuntimeParts<G>,
+    wake_channel: Option<PlannedRuntimeWakeChannel>,
+) -> Result<
+    RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
+    DefaultPlannedRuntimeBuildError,
+>
+where
+    G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
+{
     let mut registry = DriverRegistry::new();
     register_default_text_only_driver(&mut registry, parts.config.text_only_driver)?;
     let family_registry = build_loop_family_registry().map_err(|error| {
@@ -356,7 +384,7 @@ where
     );
     let run_profile_resolver: Arc<dyn RunProfileResolver> = resolver;
 
-    let (wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let (wake_sender, wake_receiver) = wake_channel.unwrap_or_else(TurnRunnerWakeReceiver::new);
     let worker_wake_notifier: Arc<dyn TurnRunWakeNotifier> = Arc::new(wake_sender.clone());
     // When a cancellation factory is supplied, fan-out each coordinator wake to
     // BOTH the worker AND the factory's `notify_run_wake` observer. Without

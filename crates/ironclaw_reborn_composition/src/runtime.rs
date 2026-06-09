@@ -41,28 +41,21 @@ use ironclaw_first_party_extension_ports::{
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityId, CapabilitySet, CorrelationId, DecisionSummary, EffectKind, ExecutionContext,
-    InvocationId, ResourceScope, RuntimeKind, TenantId, ThreadId, TrustClass, UserId,
-};
-use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
-    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId, ResourceScope,
+    TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, FilesystemSkillBundleSource, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostSkillContextSource,
+    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+    FilesystemSkillBundleSource, HostIdentityContextSource, HostSkillContextSource,
     JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
     LoopCapabilityResultWriter, ModelGatewayBackedSystemInferencePort,
-    loop_driver_execution_extension_id,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
-    DefaultApprovalInteractionService, DefaultAuthInteractionService, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ProductWorkflowError, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, RunStateApprovalInteractionReadModel,
+    DefaultApprovalInteractionService, DefaultAuthInteractionService,
+    RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
 use ironclaw_reborn::milestone_events::{
@@ -71,6 +64,7 @@ use ironclaw_reborn::milestone_events::{
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
     RuntimeSubagentGoalStore, RuntimeTurnStateStore, build_default_planned_runtime,
+    build_default_planned_runtime_with_wake_channel,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn::subagent::goal_store::FilesystemSubagentGoalStore;
@@ -79,22 +73,20 @@ use ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
 use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
 };
-use ironclaw_reborn::turn_runner::{TurnRunnerWakeSender, TurnRunnerWorkerConfig};
+use ironclaw_reborn::turn_runner::{
+    TurnRunnerWakeReceiver, TurnRunnerWakeSender, TurnRunnerWorkerConfig,
+};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    LoopResultRef, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
-    TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnScope, TurnSpawnTreeStateStore,
-    TurnStatus,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopHostMilestoneSink,
-        LoopRunContext, PromptMode,
-    },
+    TurnScope, TurnSpawnTreeStateStore, TurnStatus,
+    run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
@@ -117,226 +109,13 @@ use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
     build_reborn_services,
 };
+use production::{
+    EmptyCapabilitySurfaceResolver, EmptyIdentityContextSource,
+    UnavailableApprovalInteractionService, UnavailableCapabilityIo,
+    UnavailableCapabilityPortFactory,
+};
 
 const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
-
-#[derive(Default)]
-struct DeferredRuntimeWakeNotifier {
-    inner: std::sync::Mutex<Option<Arc<dyn TurnRunWakeNotifier>>>,
-    pending: std::sync::Mutex<Vec<TurnRunWake>>,
-}
-
-impl DeferredRuntimeWakeNotifier {
-    fn install(&self, notifier: Arc<dyn TurnRunWakeNotifier>) -> Result<(), RebornRuntimeError> {
-        {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| RebornRuntimeError::WorkerStopped)?;
-            *inner = Some(Arc::clone(&notifier));
-        }
-        let pending = self
-            .pending
-            .lock()
-            .map_err(|_| RebornRuntimeError::WorkerStopped)?
-            .drain(..)
-            .collect::<Vec<_>>();
-        for wake in pending {
-            notifier
-                .notify_queued_run(wake)
-                .map_err(|_| RebornRuntimeError::WorkerStopped)?;
-        }
-        Ok(())
-    }
-}
-
-impl std::fmt::Debug for DeferredRuntimeWakeNotifier {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("DeferredRuntimeWakeNotifier")
-    }
-}
-
-impl TurnRunWakeNotifier for DeferredRuntimeWakeNotifier {
-    fn notify_queued_run(&self, wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|_| TurnRunWakeNotifyError::DeliveryUnavailable)?;
-        if let Some(notifier) = inner.as_ref() {
-            return notifier.notify_queued_run(wake);
-        }
-        drop(inner);
-        let mut pending = self
-            .pending
-            .lock()
-            .map_err(|_| TurnRunWakeNotifyError::DeliveryUnavailable)?;
-        pending.push(wake);
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct EmptyIdentityContextSource;
-
-#[async_trait::async_trait]
-impl HostIdentityContextSource for EmptyIdentityContextSource {
-    async fn load_identity_candidates(
-        &self,
-        _run_context: &LoopRunContext,
-        _mode: PromptMode,
-    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
-        Ok(Vec::new())
-    }
-}
-
-#[derive(Default)]
-struct UnavailableCapabilityIo;
-
-#[async_trait::async_trait]
-impl LoopCapabilityInputResolver for UnavailableCapabilityIo {
-    async fn resolve_capability_input(
-        &self,
-        _run_context: &LoopRunContext,
-        _input_ref: &CapabilityInputRef,
-    ) -> Result<serde_json::Value, AgentLoopHostError> {
-        Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Unavailable,
-            "capability input resolver is unavailable for production runtime launch",
-        ))
-    }
-}
-
-#[async_trait::async_trait]
-impl LoopCapabilityResultWriter for UnavailableCapabilityIo {
-    async fn write_capability_result(
-        &self,
-        _write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
-        Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Unavailable,
-            "capability result writer is unavailable for production runtime launch",
-        ))
-    }
-}
-
-#[derive(Clone)]
-struct ProductionCapabilityPortFactory {
-    runtime: Arc<dyn HostRuntime>,
-    user_id: UserId,
-    input_resolver: Arc<dyn LoopCapabilityInputResolver>,
-    result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-}
-
-impl ProductionCapabilityPortFactory {
-    fn new(
-        runtime: Arc<dyn HostRuntime>,
-        user_id: UserId,
-        input_resolver: Arc<dyn LoopCapabilityInputResolver>,
-        result_writer: Arc<dyn LoopCapabilityResultWriter>,
-        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-    ) -> Self {
-        Self {
-            runtime,
-            user_id,
-            input_resolver,
-            result_writer,
-            milestone_sink,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl LoopCapabilityPortFactory for ProductionCapabilityPortFactory {
-    async fn create_capability_port(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
-        let extension_id = loop_driver_execution_extension_id(run_context)?;
-        let mut context = ExecutionContext::local_default(
-            self.user_id.clone(),
-            extension_id,
-            RuntimeKind::FirstParty,
-            TrustClass::UserTrusted,
-            CapabilitySet::default(),
-            Default::default(),
-        )
-        .map_err(production_capability_host_api_error)?;
-        context.tenant_id = run_context.scope.tenant_id.clone();
-        context.agent_id = run_context.scope.agent_id.clone();
-        context.project_id = run_context.scope.project_id.clone();
-        context.thread_id = Some(run_context.thread_id.clone());
-        context.resource_scope.tenant_id = context.tenant_id.clone();
-        context.resource_scope.agent_id = context.agent_id.clone();
-        context.resource_scope.project_id = context.project_id.clone();
-        context.resource_scope.thread_id = context.thread_id.clone();
-        context
-            .validate()
-            .map_err(production_capability_host_api_error)?;
-        let visible_request = HostVisibleCapabilityRequest::new(
-            context,
-            SurfaceKind::new("agent_loop").map_err(production_capability_host_api_error)?,
-        )
-        .with_policy(CapabilitySurfacePolicy::default());
-        let factory = ironclaw_loop_support::HostRuntimeLoopCapabilityPortFactory::new(
-            Arc::clone(&self.runtime),
-            visible_request,
-            Arc::clone(&self.input_resolver),
-            Arc::clone(&self.result_writer),
-            Arc::clone(&self.milestone_sink),
-        );
-        Ok(factory.for_run_context(run_context.clone()))
-    }
-}
-
-fn production_capability_host_api_error(error: impl std::fmt::Display) -> AgentLoopHostError {
-    AgentLoopHostError::new(
-        AgentLoopHostErrorKind::InvalidInvocation,
-        format!("production capability scope is invalid: {error}"),
-    )
-}
-
-/// Production launch is fail-closed until a real capability surface resolver is wired.
-/// Every resolution returns an empty allowlist and emits an audit-friendly warning.
-struct EmptyCapabilitySurfaceResolver;
-
-#[async_trait::async_trait]
-impl CapabilitySurfaceProfileResolver for EmptyCapabilitySurfaceResolver {
-    async fn resolve(
-        &self,
-        _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-        tracing::warn!(
-            "production capability surface resolver is fail-closed; returning empty allowlist"
-        );
-        Ok(CapabilityAllowSet::allowlist(Vec::new()))
-    }
-}
-
-struct UnavailableApprovalInteractionService;
-
-#[async_trait::async_trait]
-impl ApprovalInteractionService for UnavailableApprovalInteractionService {
-    async fn list_pending(
-        &self,
-        _request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
-        Err(ProductWorkflowError::Transient {
-            reason: "approval interaction service is not wired for production runtime launch"
-                .to_string(),
-        })
-    }
-
-    async fn resolve(
-        &self,
-        _request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
-        Err(ProductWorkflowError::Transient {
-            reason: "approval interaction service is not wired for production runtime launch"
-                .to_string(),
-        })
-    }
-}
 
 struct RuntimeStoreParts<'a> {
     local_runtime: Option<&'a crate::factory::RebornLocalRuntimeServices>,
@@ -351,6 +130,33 @@ struct RuntimeStoreParts<'a> {
     broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     subagent_goal_store: Arc<dyn RuntimeSubagentGoalStore>,
     trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
+}
+
+fn local_runtime_parts(
+    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+) -> RuntimeStoreParts<'_> {
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
+        &local_runtime.subagent_goal_filesystem,
+    ))) as Arc<dyn RuntimeSubagentGoalStore>;
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let subagent_goal_store =
+        Arc::new(InMemoryBoundedSubagentGoalStore::new()) as Arc<dyn RuntimeSubagentGoalStore>;
+
+    RuntimeStoreParts {
+        local_runtime: Some(local_runtime),
+        turn_state_store: Arc::clone(&local_runtime.turn_state) as Arc<dyn RuntimeTurnStateStore>,
+        checkpoint_state_store: Arc::clone(&local_runtime.checkpoint_state_store),
+        loop_checkpoint_store: Arc::clone(&local_runtime.loop_checkpoint_store),
+        thread_service: Arc::clone(&local_runtime.thread_service),
+        event_log: Arc::clone(&local_runtime.event_log),
+        audit_log: Arc::clone(&local_runtime.audit_log),
+        resource_governor: Arc::clone(&local_runtime.resource_governor),
+        budget_gate_store: Arc::clone(&local_runtime.budget_gate_store),
+        broadcast_budget_event_sink: Arc::clone(&local_runtime.broadcast_budget_event_sink),
+        subagent_goal_store,
+        trigger_repository: Some(Arc::clone(&local_runtime.trigger_repository)),
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -388,6 +194,7 @@ mod auth_interaction_tests;
 #[path = "runtime/tests/default_system_prompt.rs"]
 mod default_system_prompt_tests;
 mod local_dev;
+mod production;
 mod skills;
 
 #[cfg(test)]
@@ -1825,12 +1632,12 @@ pub async fn build_reborn_runtime(
         });
     }
 
-    let deferred_wake_notifier = if profile == RebornCompositionProfile::Production
+    let planned_runtime_wake_channel = if profile == RebornCompositionProfile::Production
         && services_input.turn_run_wake_notifier.is_none()
     {
-        let notifier = Arc::new(DeferredRuntimeWakeNotifier::default());
-        services_input = services_input.with_turn_run_wake_notifier_dyn(notifier.clone());
-        Some(notifier)
+        let (wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+        services_input = services_input.with_turn_run_wake_notifier(Arc::new(wake_sender.clone()));
+        Some((wake_sender, wake_receiver))
     } else {
         None
     };
@@ -1849,28 +1656,7 @@ pub async fn build_reborn_runtime(
                         reason: "local-dev RebornServices did not provide runtime substrate"
                             .to_string(),
                     })?;
-            #[cfg(any(feature = "libsql", feature = "postgres"))]
-            let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
-                &local_runtime.subagent_goal_filesystem,
-            ))) as Arc<dyn RuntimeSubagentGoalStore>;
-            #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-            let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new())
-                as Arc<dyn RuntimeSubagentGoalStore>;
-            RuntimeStoreParts {
-                local_runtime: Some(local_runtime),
-                turn_state_store: Arc::clone(&local_runtime.turn_state)
-                    as Arc<dyn RuntimeTurnStateStore>,
-                checkpoint_state_store: Arc::clone(&local_runtime.checkpoint_state_store),
-                loop_checkpoint_store: Arc::clone(&local_runtime.loop_checkpoint_store),
-                thread_service: Arc::clone(&local_runtime.thread_service),
-                event_log: Arc::clone(&local_runtime.event_log),
-                audit_log: Arc::clone(&local_runtime.audit_log),
-                resource_governor: Arc::clone(&local_runtime.resource_governor),
-                budget_gate_store: Arc::clone(&local_runtime.budget_gate_store),
-                broadcast_budget_event_sink: Arc::clone(&local_runtime.broadcast_budget_event_sink),
-                subagent_goal_store,
-                trigger_repository: Some(Arc::clone(&local_runtime.trigger_repository)),
-            }
+            local_runtime_parts(local_runtime)
         }
         RebornCompositionProfile::Production => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -2146,21 +1932,11 @@ pub async fn build_reborn_runtime(
             Some(local_dev_capabilities.display_previews),
         )
     } else {
-        let host_runtime = services
-            .host_runtime
-            .clone()
-            .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         let capability_io = Arc::new(UnavailableCapabilityIo);
         let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io;
         let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
-            Arc::new(ProductionCapabilityPortFactory::new(
-                host_runtime,
-                actor_user_id.clone(),
-                Arc::clone(&capability_input_resolver),
-                Arc::clone(&capability_result_writer),
-                milestone_sink.clone(),
-            ));
+            Arc::new(UnavailableCapabilityPortFactory);
         (
             capability_factory,
             capability_input_resolver,
@@ -2213,7 +1989,7 @@ pub async fn build_reborn_runtime(
         None
     };
 
-    let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
+    let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
         thread_scope: thread_scope.clone(),
@@ -2266,7 +2042,13 @@ pub async fn build_reborn_runtime(
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
         turn_event_sink: None,
         hook_dispatcher_builder_factory,
-    })?;
+    };
+    let composition = match planned_runtime_wake_channel {
+        Some(wake_channel) => {
+            build_default_planned_runtime_with_wake_channel(planned_runtime_parts, wake_channel)
+        }
+        None => build_default_planned_runtime(planned_runtime_parts),
+    }?;
     let default_resolved_run_profile = composition
         .run_profile_resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -2429,9 +2211,6 @@ pub async fn build_reborn_runtime(
     services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
     let turn_coordinator = planned_turn_coordinator;
     let wake_sender = composition.wake_sender.clone();
-    if let Some(deferred_wake_notifier) = deferred_wake_notifier {
-        deferred_wake_notifier.install(Arc::new(wake_sender.clone()))?;
-    }
 
     // Spawn the budget-event projection task as the production owner
     // of the broadcast sink — review feedback Thermo-Nuclear #3
@@ -2971,8 +2750,9 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use crate::RebornReadinessState;
-    use crate::input::RebornBuildInput;
+    #[cfg(feature = "libsql")]
     use crate::hooks::HooksActivationConfig;
+    use crate::input::RebornBuildInput;
     use crate::runtime_input::{
         PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
         TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,

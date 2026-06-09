@@ -64,7 +64,7 @@ use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_resources::InMemoryResourceGovernor;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{
-    BroadcastBudgetEventSink, BudgetEventSink, BudgetGateStore, FilesystemBudgetGateStore,
+    BroadcastBudgetEventSink, BudgetGateStore, FilesystemBudgetGateStore,
     FilesystemResourceGovernorStore, PersistentResourceGovernor, ResourceGovernor,
 };
 #[cfg(feature = "libsql")]
@@ -335,6 +335,7 @@ pub struct RebornServices {
     pub(crate) skill_management: Option<Arc<RebornLocalSkillManagementPort>>,
     pub(crate) local_runtime: Option<Arc<RebornLocalRuntimeServices>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
+    // arch-exempt: optional_arc, local-dev vs production split pending RebornServices split, plan #4471
     pub(crate) production_runtime: Option<RebornProductionRuntimeServices>,
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
@@ -458,6 +459,7 @@ where
 {
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<F>>,
     /// Registry used by the production host runtime for extension descriptors.
+    #[allow(dead_code)]
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
     pub(crate) turn_state: Arc<FilesystemTurnStateStore<F>>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
@@ -2480,12 +2482,6 @@ where
     )));
     let (runtime_policy, process_binding) = runtime_policy.into_parts();
 
-    let host_resource_governor = Arc::new(
-        PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
-            &stores.scoped_filesystem,
-        )))
-        .with_event_sink(Arc::clone(&budget_event_sink)),
-    );
     let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         filesystem,
@@ -2698,6 +2694,11 @@ where
         &stores.scoped_filesystem,
     )));
     let extension_registry = Arc::new(builtin_extension_registry()?);
+    let BudgetSinks {
+        budget_event_sink,
+        broadcast_budget_event_sink,
+        ..
+    } = build_budget_sinks();
     let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
@@ -2707,12 +2708,13 @@ where
     let thread_service: Arc<dyn SessionThreadService> = Arc::new(
         FilesystemSessionThreadService::new(Arc::clone(&stores.scoped_filesystem)),
     );
-    let resource_governor: Arc<dyn ResourceGovernor> = Arc::new(
+    let resource_governor = Arc::new(
         PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
             &stores.scoped_filesystem,
         )))
         .with_event_sink(Arc::clone(&budget_event_sink)),
     );
+    let production_resource_governor: Arc<dyn ResourceGovernor> = resource_governor.clone();
     let budget_gate_store: Arc<dyn BudgetGateStore> = Arc::new(FilesystemBudgetGateStore::new(
         Arc::clone(&stores.scoped_filesystem),
     ));
@@ -2730,7 +2732,7 @@ where
         checkpoint_state_store: Arc::clone(&checkpoint_state_store),
         thread_service,
         trigger_repository: Arc::clone(&trigger_repository),
-        resource_governor,
+        resource_governor: production_resource_governor,
         budget_gate_store,
         broadcast_budget_event_sink,
         event_log,
@@ -2742,12 +2744,6 @@ where
         trigger_create_hook,
     )?;
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
-    let host_resource_governor = Arc::new(
-        PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
-            &stores.scoped_filesystem,
-        )))
-        .with_event_sink(Arc::clone(&budget_event_sink)),
-    );
     let services = HostRuntimeServices::new(
         Arc::clone(&extension_registry),
         Arc::clone(&stores.filesystem),
@@ -2768,12 +2764,12 @@ where
         ),
         Arc::clone(&stores.scoped_filesystem),
     )?
-    .with_resource_governor(host_resource_governor)
+    .with_resource_governor(Arc::clone(&resource_governor))
     .with_production_reborn_event_stores(event_stores)
     .with_filesystem_run_state(Arc::clone(&stores.scoped_filesystem))
     .with_turn_state_and_transition_port(Arc::clone(&turn_state))
     .with_run_profile_resolver(planned_run_profile_resolver()?)
-    .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+    .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
     let provider_composition = compose_provider_client(
@@ -3440,12 +3436,6 @@ mod tests {
     /// runtime attachment so the rest of the composition continues.
     #[test]
     fn attach_hosted_mcp_runtime_skips_services_without_http_egress() {
-    let host_resource_governor = Arc::new(
-        PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
-            &stores.scoped_filesystem,
-        )))
-        .with_event_sink(Arc::clone(&budget_event_sink)),
-    );
         let services = HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
             Arc::new(LocalFilesystem::new()),
@@ -3753,12 +3743,6 @@ mod tests {
 
     #[test]
     fn attach_hosted_mcp_runtime_skips_services_without_runtime_http_egress() {
-    let host_resource_governor = Arc::new(
-        PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
-            &stores.scoped_filesystem,
-        )))
-        .with_event_sink(Arc::clone(&budget_event_sink)),
-    );
         let services = HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
             Arc::new(LocalFilesystem::new()),
