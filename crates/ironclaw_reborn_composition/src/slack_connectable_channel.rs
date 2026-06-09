@@ -39,13 +39,24 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
             SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement
         }
     };
-    build_webui_services_with_slack_connectable_channel(runtime, event_stream, visibility)
+    let outbound_delivery_target_providers = slack_mounts
+        .map(|mounts| vec![Arc::clone(&mounts.outbound_delivery_target_provider)])
+        .unwrap_or_default();
+    build_webui_services_with_slack_connectable_channel(
+        runtime,
+        event_stream,
+        visibility,
+        outbound_delivery_target_providers,
+    )
 }
 
 fn build_webui_services_with_slack_connectable_channel(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     visibility: SlackConnectableChannelVisibility,
+    outbound_delivery_target_providers: Vec<
+        Arc<dyn crate::outbound_preferences::OutboundDeliveryTargetProvider>,
+    >,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let connectable_channels =
         (visibility != SlackConnectableChannelVisibility::Hidden).then(|| {
@@ -58,7 +69,12 @@ fn build_webui_services_with_slack_connectable_channel(
             Arc::new(StaticConnectableChannelsProductFacade::new(channels))
                 as Arc<dyn ConnectableChannelsProductFacade>
         });
-    build_webui_services_with_connectable_channels(runtime, event_stream, connectable_channels)
+    build_webui_services_with_connectable_channels(
+        runtime,
+        event_stream,
+        connectable_channels,
+        outbound_delivery_target_providers,
+    )
 }
 
 fn slack_inbound_proof_code_connectable_channel() -> RebornConnectableChannelInfo {
@@ -177,6 +193,7 @@ mod tests {
             &runtime,
             None,
             SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement,
+            Vec::new(),
         )
         .expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
@@ -231,6 +248,7 @@ mod tests {
             &runtime,
             None,
             SlackConnectableChannelVisibility::PersonalPairing,
+            Vec::new(),
         )
         .expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
