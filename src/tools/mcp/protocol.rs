@@ -1,6 +1,7 @@
 //! MCP protocol types.
 
 use serde::{Deserialize, Deserializer, Serialize};
+use uuid::Uuid;
 
 /// Flexibly deserialize a JSON-RPC id that may be a number, string, or null.
 fn deserialize_flexible_id<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -164,6 +165,58 @@ impl McpRequest {
                 "arguments": arguments
             })),
         )
+    }
+
+    /// Inject IronClaw thread context into `params._meta` when `thread_id` is
+    /// `Some`.
+    ///
+    /// Follows SEP-414 / SEP-2575: context propagation happens inside the
+    /// JSON-RPC payload's `_meta` field under the `io.ironclaw/` reverse-domain
+    /// namespace, keeping the approach transport-agnostic (HTTP, stdio, Unix
+    /// sockets all carry the same JSON-RPC envelope).
+    ///
+    /// Merge semantics: pre-existing `_meta` keys (e.g. a future `traceparent`
+    /// from OpenTelemetry) are preserved — only `io.ironclaw/threadId` and
+    /// `io.ironclaw/userId` are set.
+    ///
+    /// When `thread_id` is `None` the request is returned unchanged, preserving
+    /// backward-compatible behaviour for user-scoped paths and test fixtures.
+    pub fn inject_meta_context(mut self, thread_id: Option<Uuid>, user_id: &str) -> Self {
+        let Some(tid) = thread_id else {
+            return self;
+        };
+        // Materialise an empty object when params is absent so notifications
+        // and future param-less methods (e.g. tools/list) still carry _meta.
+        if self.params.is_none() {
+            self.params = Some(serde_json::Value::Object(Default::default()));
+        }
+        let Some(ref mut params) = self.params else {
+            // SAFETY: we just inserted Some above; this branch is unreachable.
+            return self;
+        };
+        let meta = params
+            .as_object_mut()
+            .and_then(|obj| {
+                if !obj.contains_key("_meta") {
+                    obj.insert(
+                        "_meta".to_string(),
+                        serde_json::Value::Object(Default::default()),
+                    );
+                }
+                obj.get_mut("_meta")
+            })
+            .and_then(|v| v.as_object_mut());
+        if let Some(meta_obj) = meta {
+            meta_obj.insert(
+                "io.ironclaw/threadId".to_string(),
+                serde_json::Value::String(tid.to_string()),
+            );
+            meta_obj.insert(
+                "io.ironclaw/userId".to_string(),
+                serde_json::Value::String(user_id.to_string()),
+            );
+        }
+        self
     }
 }
 
@@ -719,6 +772,113 @@ mod tests {
         let resp: McpResponse =
             serde_json::from_value(json).expect("deserialize non-numeric string id");
         assert_eq!(resp.id, None);
+    }
+
+    // ── _meta injection tests (SEP-414 alignment) ──────────────────────────
+
+    /// When `thread_id` is `Some`, `inject_meta_context` populates both
+    /// `io.ironclaw/threadId` and `io.ironclaw/userId` inside `params._meta`.
+    #[test]
+    fn inject_meta_context_sets_keys_when_thread_id_is_some() {
+        use uuid::Uuid;
+
+        let thread_id = Uuid::from_u128(0xdeadbeef_cafe_4200_8000_aabbccddeeff);
+        let req = McpRequest::call_tool(1, "search", serde_json::json!({"q": "rust"}))
+            .inject_meta_context(Some(thread_id), "user-42");
+
+        let params = req.params.expect("call_tool has params");
+        let meta = params.get("_meta").expect("_meta must be present");
+
+        assert_eq!(
+            meta.get("io.ironclaw/threadId").and_then(|v| v.as_str()),
+            Some(thread_id.to_string().as_str()),
+            "io.ironclaw/threadId must equal the thread UUID"
+        );
+        assert_eq!(
+            meta.get("io.ironclaw/userId").and_then(|v| v.as_str()),
+            Some("user-42"),
+            "io.ironclaw/userId must equal the user id"
+        );
+    }
+
+    /// When `thread_id` is `None`, `inject_meta_context` is a no-op: `params`
+    /// must not grow a `_meta` key at all.
+    #[test]
+    fn inject_meta_context_is_noop_when_thread_id_is_none() {
+        let req = McpRequest::call_tool(2, "ping", serde_json::json!({}))
+            .inject_meta_context(None, "user-99");
+
+        let params = req.params.expect("call_tool has params");
+        assert!(
+            params.get("_meta").is_none(),
+            "_meta must not appear when thread_id is None"
+        );
+    }
+
+    /// Pre-existing `_meta` keys (e.g. a future `traceparent`) survive
+    /// `inject_meta_context` — the injection merges, never replaces.
+    #[test]
+    fn inject_meta_context_merges_existing_meta_keys() {
+        use uuid::Uuid;
+
+        let thread_id = Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
+
+        // Build a request that already carries a _meta object with traceparent.
+        let req = McpRequest::new(
+            3,
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "trace_tool",
+                "arguments": {},
+                "_meta": {
+                    "traceparent": "00-abc123-def456-01"
+                }
+            })),
+        )
+        .inject_meta_context(Some(thread_id), "user-7");
+
+        let params = req.params.expect("params present");
+        let meta = params.get("_meta").expect("_meta must be present");
+
+        // Original key survives.
+        assert_eq!(
+            meta.get("traceparent").and_then(|v| v.as_str()),
+            Some("00-abc123-def456-01"),
+            "pre-existing traceparent must not be clobbered"
+        );
+        // New keys are added.
+        assert_eq!(
+            meta.get("io.ironclaw/threadId").and_then(|v| v.as_str()),
+            Some(thread_id.to_string().as_str()),
+        );
+        assert_eq!(
+            meta.get("io.ironclaw/userId").and_then(|v| v.as_str()),
+            Some("user-7"),
+        );
+    }
+
+    /// `inject_meta_context` must set `_meta` even when the request was
+    /// constructed with `params: None` (e.g. `tools/list`, notifications):
+    /// the method materialises a fresh `params` object so context propagation
+    /// is uniform across all outbound message types.
+    #[test]
+    fn inject_meta_context_materialises_params_when_none() {
+        use uuid::Uuid;
+
+        let tid = Uuid::from_u128(0xDEAD_BEEF);
+        let req = McpRequest::new(1, "tools/list", None).inject_meta_context(Some(tid), "carol");
+
+        let params = req.params.expect("params must be materialised");
+        let meta = params.get("_meta").expect("_meta must be present");
+        assert_eq!(
+            meta.get("io.ironclaw/threadId").and_then(|v| v.as_str()),
+            Some(tid.to_string().as_str()),
+            "threadId must be injected into materialised params"
+        );
+        assert_eq!(
+            meta.get("io.ironclaw/userId").and_then(|v| v.as_str()),
+            Some("carol"),
+        );
     }
 
     #[test]
