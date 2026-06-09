@@ -1376,7 +1376,7 @@ async fn operator_logs_query_dispatches_body_through_facade() {
     let calls = services.query_operator_logs_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].limit, Some(5));
-    assert_eq!(calls[0].tail, true);
+    assert!(calls[0].tail);
 }
 
 #[tokio::test]
