@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Launch IronClaw Reborn with the WebChat v2 web UI for local testing.
+#
+# Handles the setup footguns from docs/reborn-binary.md for you:
+#   - keeps the Reborn home OUTSIDE the repo (serve uses the cwd as the
+#     local-dev workspace root and rejects overlap with it);
+#   - configures the model route via `models set-provider`;
+#   - generates the WebUI bearer token and matches the WebUI user to the
+#     config identity owner so serve doesn't refuse to start.
+#
+# Usage:
+#   scripts/run-reborn-webui.sh                 # NEAR AI defaults
+#   PROVIDER=openai scripts/run-reborn-webui.sh
+#   PROVIDER=anthropic MODEL=claude-sonnet-4-20250514 scripts/run-reborn-webui.sh
+#
+# Before running, export your provider's API key, e.g.:
+#   export NEARAI_API_KEY=...      # or OPENAI_API_KEY / ANTHROPIC_API_KEY
+#
+# Overridable via environment:
+#   PROVIDER   provider id           (default: nearai)
+#   MODEL      model id              (default: provider catalog default)
+#   HOST       listen host           (default: 127.0.0.1)
+#   PORT       listen port           (default: 3000)
+#   IRONCLAW_REBORN_HOME             (default: $HOME/.ironclaw-reborn-demo)
+#   IRONCLAW_REBORN_WEBUI_USER_ID    (default: reborn-cli)
+#   IRONCLAW_REBORN_WEBUI_TOKEN      (default: generated and printed)
+
+set -euo pipefail
+
+PROVIDER="${PROVIDER:-nearai}"
+MODEL="${MODEL:-}"
+HOST="${HOST:-127.0.0.1}"
+PORT="${PORT:-3000}"
+
+# Run cargo from the workspace root regardless of where the script is invoked.
+REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+export IRONCLAW_REBORN_HOME="${IRONCLAW_REBORN_HOME:-$HOME/.ironclaw-reborn-demo}"
+export IRONCLAW_REBORN_WEBUI_USER_ID="${IRONCLAW_REBORN_WEBUI_USER_ID:-reborn-cli}"
+
+# Resolve the home to an absolute path and reject any path inside the repo,
+# which would trip the workspace/skill-root overlap validation in serve.
+case "$IRONCLAW_REBORN_HOME" in
+  /*) home_abs="$IRONCLAW_REBORN_HOME" ;;
+  *)  home_abs="$PWD/$IRONCLAW_REBORN_HOME" ;;
+esac
+case "$home_abs/" in
+  "$REPO_ROOT"/*)
+    echo "error: IRONCLAW_REBORN_HOME ($home_abs) is inside the repo ($REPO_ROOT)." >&2
+    echo "       serve uses the cwd as the workspace root and rejects overlap." >&2
+    echo "       Point it somewhere else, e.g. \$HOME/.ironclaw-reborn-demo." >&2
+    exit 1
+    ;;
+esac
+
+# Generate a WebUI bearer token if the caller didn't supply one.
+if [ -z "${IRONCLAW_REBORN_WEBUI_TOKEN:-}" ]; then
+  export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
+fi
+
+CARGO=(cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn --)
+
+# Configure the model route (compiles the binary on first run).
+set_provider_args=(models set-provider "$PROVIDER")
+if [ -n "$MODEL" ]; then
+  set_provider_args+=(--model "$MODEL")
+fi
+echo "==> Configuring model route: provider=$PROVIDER ${MODEL:+model=$MODEL}"
+"${CARGO[@]}" "${set_provider_args[@]}"
+
+# Discover the credential env var for this provider and warn if it is unset.
+key_env="$("${CARGO[@]}" models status 2>/dev/null \
+  | sed -n 's/^default.api_key_env: //p' || true)"
+if [ -n "$key_env" ] && [ -z "${!key_env:-}" ]; then
+  echo "warning: $key_env is not set. Required-key providers (openai, anthropic, …)" >&2
+  echo "         fail at startup; export it before turns will work." >&2
+fi
+
+cat <<EOF
+
+==> Starting WebChat v2 on http://$HOST:$PORT/v2
+    login token : $IRONCLAW_REBORN_WEBUI_TOKEN
+    login user  : $IRONCLAW_REBORN_WEBUI_USER_ID
+    reborn home : $IRONCLAW_REBORN_HOME
+
+EOF
+
+exec "${CARGO[@]}" serve --host "$HOST" --port "$PORT"

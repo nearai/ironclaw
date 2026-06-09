@@ -72,6 +72,20 @@ surface, not a production gateway. See
 browser. This is the fastest way to exercise the full loop (ingress → turn
 runner → LLM provider → timeline) end to end.
 
+**Shortcut:** `scripts/run-reborn-webui.sh` wraps the steps below — it keeps the
+Reborn home outside the repo, configures the route, generates the WebUI token,
+and launches `serve`. Export your provider key first, then run it:
+
+```bash
+export NEARAI_API_KEY=...                 # or OPENAI_API_KEY / ANTHROPIC_API_KEY
+scripts/run-reborn-webui.sh               # NEAR AI default
+PROVIDER=openai scripts/run-reborn-webui.sh
+```
+
+It prints the login token and the `http://127.0.0.1:3000/v2` URL. Override
+`PROVIDER`, `MODEL`, `HOST`, `PORT`, or `IRONCLAW_REBORN_HOME` via the
+environment. The manual steps below are equivalent.
+
 ### Quick start
 
 ```bash
