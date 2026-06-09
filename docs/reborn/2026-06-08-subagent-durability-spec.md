@@ -30,6 +30,9 @@ Plus: introduce the `CapabilityResultStore` trait (does not exist today). Introd
 | 8 | In-flight RAM state at deploy → accept loss. Feature toggle (`subagent.background_enabled`, default false) gates user impact. | Plan WU-B "Migration of in-flight RAM state at deploy" — explicit recommendation. |
 | 9 | Rollback (toggle OFF after ON) → leave durable rows in place. No GC in WU-C. `SubagentRestartReconciler` runs as no-op. | Plan Cross-cutting + LLM-data-never-deleted invariant from `CLAUDE.md`. |
 | 10 | Re-flip (OFF → ON → OFF → ON) → idempotency ledger blocks double-delivery via `(run_id, child_run_id, terminal_kind)` UNIQUE constraint. | Plan WU-B "Concurrent settlement" + plan Part 1 Soft corrections. |
+| 11 | Idempotency ledger is **two-phase** (`delivered_at` NULL = pencil, NOT NULL = sealed). Pencil insert claims ownership; gate-store write completes delivery; seal UPDATE marks final. Pencil rows surviving a crash become `retryable` on next boot. | D1 fix. Resolves "crash between ledger insert and gate-store write silently strands the parent loop" bug surfaced by multi-agent review. Matches `IdempotencyLedger::begin_or_replay` precedent. |
+| 12 | Reconciler handles **orphan settlement log rows** (gate cleaned up before delivery) by writing a tombstone + sealing the ledger row in one pass. Counts as `skipped_orphan`, not `failed`. | D9 fix. Resolves "every boot counts cleaned-up gates as `failed` forever" bug. Preserves settlement log append-only invariant. |
+| 13 | `ReplayReport` has five operator-meaningful counters: `redelivered`, `skipped_idempotent`, `retryable`, `skipped_orphan`, `failed`. Only `failed > 0` is actionable. | D1+D9. Eliminates "what does `skipped` actually mean here" alert ambiguity. |
 
 The rest of this document fills in mechanics for each store.
 
@@ -841,14 +844,23 @@ pub trait SubagentRestartReconciler: Send + Sync {
 /// Summary returned by a completed replay pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayReport {
-    /// Results successfully re-delivered to the parent gate store.
+    /// Results successfully re-delivered to the parent gate store this pass.
     pub redelivered: u32,
-    /// Results skipped because an idempotency ledger row already existed
-    /// (another node already delivered them, or this process already ran).
+    /// Results skipped because an idempotency ledger row was already sealed
+    /// (delivered_at IS NOT NULL) by a previous pass or another node.
     pub skipped_idempotent: u32,
-    /// Results that could not be re-delivered (backend error, tombstoned
-    /// result, or missing capability result). Each failure is logged at
-    /// `debug!` level; the reconciler continues past individual failures.
+    /// Pencil-receipt rows found (delivered_at IS NULL) from a previous
+    /// reconciler that crashed between ledger insert and gate-store write.
+    /// The current pass re-attempts delivery for these.
+    pub retryable: u32,
+    /// Settlement-log entries whose gate was cleaned up before delivery
+    /// completed (parent cancelled, gate row removed). The reconciler
+    /// tombstones the child and seals the ledger row — no further replay
+    /// will attempt redelivery for these entries.
+    pub skipped_orphan: u32,
+    /// Real delivery failures (backend error, missing capability result,
+    /// tombstoned-result race). Each failure is logged at `warn!` level
+    /// and the reconciler continues. `failed > 0` is operator-actionable.
     pub failed: u32,
 }
 
@@ -869,39 +881,72 @@ pub enum ReconcilerError {
 
 ```
 fn replay(scope: &TurnScope) -> ReplayReport:
-  // Reconciler reads ALL settlement-log rows for the scope and checks the
-  // idempotency ledger per row to decide replay. The log itself carries no
-  // delivery flag — no WHERE delivered_at IS NULL or equivalent filter here.
-  log entries = settlement_event_log.read_all(scope)
+  log_entries = settlement_event_log.read_all(scope)
                   WHERE event_kind IN (Completed, Failed, Cancelled)
                   AND   child_run_id IS NOT NULL
 
-  redelivered = 0; skipped = 0; failed = 0
+  redelivered = 0; skipped_idempotent = 0
+  retryable = 0; skipped_orphan = 0; failed = 0
 
-  for entry in log entries:
+  for entry in log_entries:
     key = (entry.run_id, entry.child_run_id, entry.terminal_kind)
 
-    // --- first-writer-wins: atomic ledger reservation ---
+    // --- D9: detect orphan (parent cancelled, gate row deleted) ---
+    if !gate_store.gate_exists(scope, entry.gate_ref):
+      // Parent moved out. Tombstone child + seal ledger so no future boot
+      // re-attempts. This branch handles its own ledger writes.
+      tombstone_store.write_tombstone(
+        scope, SubagentResultTombstone {
+          child_run_id: entry.child_run_id,
+          terminal_status: entry.terminal_status,
+          disposition: SubagentResultDisposition::DiscardedParentGone,
+        })
+      ledger_inserted = idempotency_ledger.try_insert(key, delivery_node=self.node_id)
+      idempotency_ledger.seal(key)   // delivered_at = NOW()
+      skipped_orphan += 1
+      continue
+
+    // --- check tombstone BEFORE ledger claim (avoids race) ---
+    tombstone = tombstone_store.read_tombstone(scope, entry.child_run_id)
+    if tombstone is Some:
+      // Already explicitly discarded by parent cancel. Seal ledger to
+      // prevent future replay; counts as orphan-style cleanup.
+      idempotency_ledger.try_insert(key, delivery_node=self.node_id)
+      idempotency_ledger.seal(key)
+      skipped_orphan += 1
+      continue
+
+    // --- pencil-receipt insert (claim ownership) ---
     inserted = idempotency_ledger.try_insert(key, delivery_node=self.node_id)
     // INSERT OR IGNORE (libsql) / ON CONFLICT DO NOTHING (postgres)
+    // leaves delivered_at NULL
 
     if not inserted:
-      skipped += 1
-      continue   // another node (or this boot) already delivered
+      // Row already exists. Is it sealed (delivered_at NOT NULL) or pencil?
+      existing = idempotency_ledger.read(key)
+      if existing.delivered_at is Some:
+        skipped_idempotent += 1   // already sealed; nothing to do
+      else:
+        // Pencil receipt from prior crash. Race: another node may be
+        // re-attempting concurrently. The seal UPDATE in step 2 is the
+        // single point of truth — only one node's UPDATE will set delivered_at
+        // (we do not UPDATE if delivered_at IS NOT NULL).
+        retryable += 1
+        // Fall through to attempt delivery + seal.
+        attempt_delivery = true
+    else:
+      retryable += 0   // fresh pencil receipt; first attempt
+      attempt_delivery = true
 
-    // --- check tombstone: parent-cancel already discarded ---
-    tombstone = tombstone_store.read_tombstone(entry.child_run_id)
-    if tombstone is Some:
-      // intentionally discarded; ledger row stays (prevents re-try)
-      failed += 1
-      continue
+    if not attempt_delivery: continue
 
     // --- load capability result ---
     result = capability_result_store.load(scope, entry.result_ref)
     if result is Err or None:
-      // result may have been GC'd; log at debug!, do not panic
       debug!("reconciler: capability result missing for child_run_id={}", entry.child_run_id)
       failed += 1
+      // Do NOT seal the ledger — leaves pencil receipt for a future
+      // boot to retry (if result becomes available e.g. via backfill).
       continue
 
     // --- re-deliver to parent's gate store ---
@@ -909,17 +954,20 @@ fn replay(scope: &TurnScope) -> ReplayReport:
         scope, entry.parent_run_id, entry.child_run_id, result,
     )
     match outcome:
-      Ok(_)  => redelivered += 1
+      Ok(_) =>
+        // SEAL the ledger row (pen receipt) — only now is delivery final.
+        idempotency_ledger.seal(key)
+        redelivered += 1
       Err(e) =>
-        debug!("reconciler: gate store re-delivery failed: {e}")
+        warn!("reconciler: gate store re-delivery failed: {e}")
         failed += 1
-        // do NOT remove the ledger row: insertion already happened;
-        // a future retry pass must not re-attempt this entry
+        // Do NOT seal. Future boot will see pencil receipt + retry.
 
-  return ReplayReport { redelivered, skipped_idempotent: skipped, failed }
+  return ReplayReport { redelivered, skipped_idempotent, retryable,
+                        skipped_orphan, failed }
 ```
 
-Concurrency safety lives entirely in the ledger write. Two nodes racing on the same `(run_id, child_run_id, terminal_kind)` both attempt `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING`. Exactly one writer sees a row inserted; the other sees zero rows affected → `skipped` branch. Tombstone check + capability load happen after ledger insertion → inserting node owns delivery. If that node crashes between insertion and gate store write, ledger row blocks future redeliver (entry is counted as `failed` on next boot pass). Acceptable tradeoff: ledger prevents duplicate delivery at the cost of one missed delivery per crash-between-insert-and-deliver. A background compaction job (outside WU-B scope) may later tombstone ledger rows older than a configurable TTL.
+Concurrency safety lives in two ledger writes. Two nodes racing on the same `(run_id, child_run_id, terminal_kind)` both attempt `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING`. Exactly one writer sees a row inserted (delivered_at NULL); the other sees zero rows affected. Either node may then attempt delivery — the gate store is idempotent in the same way (first-writer-wins on its own primary key, per §1). Whichever node completes its gate write first calls `seal(key)` which sets `delivered_at = NOW()` only if it is currently NULL. The seal UPDATE is the single point of truth: once a row is sealed, future passes count it as `skipped_idempotent` and never retry. Pencil receipts (delivered_at NULL) found on subsequent boots are evidence of a crash between insert and seal — the reconciler counts them as `retryable` and re-attempts delivery + seal. A duplicate delivery cannot occur because both gate store and seal are idempotent at the row level. A missed delivery cannot occur because pencil receipts survive crashes and trigger retry on the next boot. The compaction job mentioned in earlier drafts is no longer required for correctness — it remains a future optimization for GC of long-completed rows.
 
 ### 5.4 Idempotency ledger schema (libSQL)
 
@@ -934,7 +982,7 @@ CREATE TABLE IF NOT EXISTS subagent_idempotency_ledger (
     run_id             TEXT NOT NULL,              -- parent run (UUID string)
     child_run_id       TEXT NOT NULL,              -- child TurnRunId (UUID string)
     terminal_kind      TEXT NOT NULL,              -- "completed" | "failed" | "cancelled"
-    delivered_at       TEXT NOT NULL,              -- ISO-8601 UTC
+    delivered_at       TEXT,                       -- ISO-8601 UTC; NULL = pencil receipt (mid-flight, retryable on next boot)
     delivery_node      TEXT NOT NULL,              -- ops debug: hostname or pod identity
     UNIQUE (run_id, child_run_id, terminal_kind)
 );
@@ -946,11 +994,18 @@ CREATE INDEX IF NOT EXISTS idx_sil_scope
 Insert:
 
 ```sql
+-- Step 1: pencil-receipt insert (claim ownership; mid-flight marker).
 INSERT OR IGNORE INTO subagent_idempotency_ledger
     (tenant_id, user_id, agent_id, run_id, child_run_id, terminal_kind,
-     delivered_at, delivery_node)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?);
--- Inspect changes() == 0 to detect the "already present" (skipped) case.
+     delivery_node)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+-- Inspect changes() == 0 to detect the "already claimed by another node" case.
+
+-- Step 2: pen-receipt seal (after successful gate-store write).
+UPDATE subagent_idempotency_ledger
+   SET delivered_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+ WHERE tenant_id = ? AND run_id = ? AND child_run_id = ? AND terminal_kind = ?
+   AND delivered_at IS NULL;
 ```
 
 ### 5.5 Idempotency ledger schema (PostgreSQL)
@@ -966,7 +1021,7 @@ CREATE TABLE IF NOT EXISTS subagent_idempotency_ledger (
     run_id             TEXT NOT NULL,
     child_run_id       TEXT NOT NULL,
     terminal_kind      TEXT NOT NULL,
-    delivered_at       TIMESTAMPTZ NOT NULL,
+    delivered_at       TIMESTAMPTZ,                -- NULL = pencil receipt (mid-flight, retryable on next boot)
     delivery_node      TEXT NOT NULL,
     UNIQUE (run_id, child_run_id, terminal_kind)
 );
@@ -978,12 +1033,19 @@ CREATE INDEX IF NOT EXISTS idx_sil_scope
 Insert:
 
 ```sql
+-- Step 1: pencil-receipt insert (claim ownership; mid-flight marker).
 INSERT INTO subagent_idempotency_ledger
     (tenant_id, user_id, agent_id, run_id, child_run_id, terminal_kind,
-     delivered_at, delivery_node)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     delivery_node)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (run_id, child_run_id, terminal_kind) DO NOTHING;
--- Inspect rows_affected() == 0 to detect the "already present" (skipped) case.
+-- Inspect rows_affected() == 0 to detect the "already claimed by another node" case.
+
+-- Step 2: pen-receipt seal (after successful gate-store write).
+UPDATE subagent_idempotency_ledger
+   SET delivered_at = NOW()
+ WHERE tenant_id = $1 AND run_id = $2 AND child_run_id = $3 AND terminal_kind = $4
+   AND delivered_at IS NULL;
 ```
 
 Both dialects match the in-memory settlement semantics already established in `gate_resolution.rs` where `mark_child_delivered` skips re-recording an already-delivered child (first-writer-wins).
@@ -1059,14 +1121,31 @@ Per `.claude/rules/testing.md` "Test Through the Caller" rule — unit tests on 
 
 ```
 1. Write settlement log entry + capability result + capability result store row.
-2. Pre-insert an idempotency ledger row for the same (run_id, child_run_id, terminal_kind) — simulates the post-crash state after ledger insert but before gate delivery.
+2. Pre-insert an idempotency ledger row for the same (run_id, child_run_id, terminal_kind) — simulates the post-crash state after ledger insert but before gate delivery (delivered_at IS NULL, pencil receipt).
 3. Drop all in-memory state. Boot a fresh reconciler against the same durable backend.
 4. Call reconciler.replay(&scope).await.
-5. Assert report.redelivered == 0, report.skipped_idempotent == 1, report.failed == 0.
-6. Assert gate store has no entry for child_run_id (delivery was never completed — the row is stuck).
+5. Assert report.retryable == 1, report.redelivered == 1, report.failed == 0.
+6. Assert gate store has an entry for child_run_id (delivery was completed on retry).
+7. Assert idempotency ledger row has delivered_at IS NOT NULL (sealed after successful re-delivery).
 ```
 
-This test documents and guards the spec's acknowledged tradeoff in §5.3: a node that crashes between ledger insert and gate-store write leaves the entry permanently unrecoverable until a future GC pass tombstones the ledger row.
+This test guards the two-phase ledger fix (D1): pencil receipts left by a crash are detected and retried, not permanently skipped.
+
+**Orphan-gate test:**
+
+```
+1. Write settlement log entry + capability result for (parent_run_id, child_run_id).
+2. Delete the parent gate row (simulates parent-cancel cleanup after settlement was logged).
+3. Boot fresh reconciler against the same durable backend.
+4. Call reconciler.replay(&scope).await.
+5. Assert report.skipped_orphan == 1, redelivered == 0, failed == 0.
+6. Assert a tombstone was written for child_run_id with disposition == DiscardedParentGone.
+7. Assert the idempotency ledger row exists with delivered_at NOT NULL (sealed).
+8. Call reconciler.replay(&scope).await a second time.
+9. Assert report.skipped_orphan == 0 (row is sealed, no further work), skipped_idempotent == 1.
+```
+
+Guards D9: orphan rows are cleaned up exactly once and never reprocessed.
 
 **Dual-backend parity test** (libSQL vs PostgreSQL, part of WU-G #4431): run all four bodies against both `RebornLibSqlIdempotencyLedger` and `RebornPostgresIdempotencyLedger`, matching the pattern of `assert_settled_action_survives_reopen_and_replays` in `crates/ironclaw_product_workflow_storage/tests/support/mod.rs`.
 
@@ -1075,8 +1154,8 @@ All tests go in `crates/ironclaw_reborn_event_store/tests/` (contract-test tier,
 ### 5.9 Risks / open questions
 
 - **Replay throughput.** Crash mid-flight on large fan-out (e.g., 100 children all settled) → reconciler reads 100 log entries, 100 ledger `INSERT OR IGNORE` attempts, 100 gate store writes synchronously with boot. Bounded by `SubagentSpawnLimits.max_depth` = 1 + future `max_concurrent_background_children` cap → per-boot replay time bounded. If concurrent cap is raised significantly, reconciler should be made non-blocking (run in background task, gate new background spawn acceptance until replay completes). Track as follow-up when WU-D sets the concurrent cap.
-- **Stale-children GC.** `BoundedSubagentResultTombstoneStore` evicts beyond 4096. If tombstone was evicted before replay, reconciler re-delivers a result the parent had already cancelled. Durable tombstone store removes capacity bound but a time-based TTL GC will be needed for long-lived deployments. Safe default for WU-C: no GC; retain all tombstone rows. Introduce TTL GC as a follow-on.
-- **Capability result tombstoned between settle and replay.** If result at `result_ref` was GC'd between child settled and replay (e.g., result store has TTL), `capability_result_store.load` returns `None` → entry counted `failed`. Ledger row remains, preventing future re-attempt. Correct behavior — a GC'd result cannot be re-delivered — but surfaces as non-zero `failed` in `ReplayReport`. Operators see `warn!`. Documentation for `ReplayReport.failed` must call this out. For WU-C the in-memory `CapabilityResultStore` has no TTL → cannot occur; only materializes if future durable store adds TTL eviction.
+- **Stale-children GC.** Orphan cleanup (D9) handles the case where the parent run is gone by the time the reconciler runs — those entries are tombstoned and sealed in one pass. Stale tombstones from a deployment where `BoundedSubagentResultTombstoneStore` evicted entries before the durable migration are a separate concern; the durable `FilesystemSubagentTombstoneStore` (§3) eliminates eviction by construction. A time-based TTL GC for long-completed ledger rows is a future optimization, not a correctness requirement under A+A.
+- **Capability result tombstoned between settle and replay.** If result at `result_ref` was GC'd between child settled and replay (e.g., result store has TTL), `capability_result_store.load` returns `None` → entry counted `failed`. Ledger row remains, preventing future re-attempt. Correct behavior — a GC'd result cannot be re-delivered — but surfaces as non-zero `failed` in `ReplayReport`. Operators see `warn!`. Documentation for `ReplayReport.failed` must call this out. For WU-C the in-memory `CapabilityResultStore` has no TTL → cannot occur; only materializes if future durable store adds TTL eviction. The reconciler counts this as `failed` (not `skipped`) and the pencil receipt remains in the ledger, so the next boot will retry the capability load. If the result remains missing across N consecutive boots, an operator may manually tombstone the entry; automated stale-pencil GC is a follow-up, not WU-C scope.
 - **Feature toggle interaction.** While `subagent.background_enabled` is `false` (default until WU-G), no settlement log entries for background children are written → replay always returns zero `ReplayReport`. When toggle flips back `false` after `true` (rollback), durable rows from ON-period remain; replay on next boot returns `failed` entries for each settled child whose parent loop no longer expects results (gate store entry for blocking-mode parent does not accept background deliveries). Safe — `failed` count increments, ledger row blocks future re-attempt, parent loop unaffected.
 
 ---
@@ -1127,12 +1206,20 @@ Rows in durable subagent stores (goal, gate_resolution, tombstone, capability_re
 
 When `subagent.background_enabled` flips back `true` after a rollback period:
 
-1. `SubagentRestartReconciler` runs at boot, scans `subagent_gate_settlement_log` for rows from previous ON-period whose parent run is still active.
-2. For each row, reconciler attempts `INSERT OR IGNORE` into `subagent_idempotency_ledger` keyed on `(run_id, child_run_id, terminal_kind)`. A row already present (rows_affected = 0) means a previous reconciler pass already delivered this entry — skip.
-3. Rows where the ledger insert succeeded are replayed: reconciler synthesizes `SettledChild` notification, injects into parent loop's mailbox as if child had just settled.
-4. If the parent run is no longer active (terminal `TurnStatus`), reconciler writes a tombstone via `SubagentResultTombstoneStore` and treats the ledger row as the final-delivered marker — no further replay for this entry on subsequent boots.
+1. `SubagentRestartReconciler` runs at boot, scans `subagent_gate_settlement_log` for rows from previous ON-period whose parent run may still be active.
+2. For each row, reconciler runs the §5.3 algorithm:
+   - If the gate is gone (`!gate_store.gate_exists`), tombstone the child + seal the ledger row + count as `skipped_orphan`. This is the rollback-period cleanup path.
+   - If a sealed ledger row exists (`delivered_at IS NOT NULL`), count as `skipped_idempotent` and skip. Previous ON-period already delivered.
+   - If a pencil ledger row exists (`delivered_at IS NULL`), count as `retryable` and re-attempt delivery + seal. Previous ON-period crashed mid-flight.
+   - Otherwise insert pencil receipt, deliver, seal. Counts as `redelivered`.
+3. Rows that successfully replay become live `SettledChild` notifications in the parent's mailbox.
+4. Failures (missing capability result, gate-store error) leave the pencil receipt in place and count as `failed` — the next boot retries.
 
-**Idempotency invariant:** the ledger's `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` semantics ensure reconciler replay racing with live delivery produces exactly one winner. The loser observes zero rows affected and treats the row as already delivered. The ledger has no `Pending` state today — a row's presence is sufficient evidence of completed delivery. A two-phase ledger with an explicit pending/delivered status is an open design question (see §5.9).
+**Idempotency invariant.** The two-phase ledger (D1) provides the single point of truth for "is this delivery final?":
+- `delivered_at IS NOT NULL` → sealed → final → never retry.
+- `delivered_at IS NULL` → pencil receipt → mid-flight → retry on every boot until sealed or tombstoned.
+
+Both the seal UPDATE and the gate store's own primary-key idempotency prevent duplicate delivery. The `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` on the pencil row prevents two nodes from claiming the same delivery simultaneously. Together: at most one delivery per `(run_id, child_run_id, terminal_kind)` tuple regardless of node count, crash count, or rollback count.
 
 ---
 
@@ -1330,6 +1417,9 @@ All DDL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` for i
 - [ ] WU-C corrects in-memory tombstone store to first-writer-wins (§3.6).
 - [ ] WU-G adds parity test at `crates/ironclaw_reborn_event_store/tests/parity.rs` per §7.
 - [ ] WU-C lands the `SubagentResultTombstoneStore::write_tombstone` scope-parameter signature change BEFORE implementing `FilesystemSubagentTombstoneStore` (§3.7).
+- [ ] WU-C lands the two-phase idempotency ledger (D1): `delivered_at NULL` column nullable; pencil-insert + pen-seal pattern; matches the existing `IdempotencyLedger::begin_or_replay` precedent in `crates/ironclaw_product_workflow/src/ledger.rs`.
+- [ ] WU-C lands orphan-gate handling (D9): reconciler tombstones + seals when `gate_store.gate_exists(gate_ref)` returns false; `gate_exists` becomes a required method on the gate store trait.
+- [ ] WU-C extends `ReplayReport` with `retryable: u32` and `skipped_orphan: u32` counters and updates operator dashboards (`warn!` on `failed > 0` only).
 
 ## References
 
