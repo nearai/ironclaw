@@ -37,7 +37,7 @@ use ironclaw_reborn::{
     },
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
-        build_product_live_planned_runtime,
+        RuntimeTurnStateStore, build_product_live_planned_runtime,
     },
 };
 use ironclaw_reborn_composition::{
@@ -77,11 +77,7 @@ pub struct ProductLiveAgentLoopHarness {
     thread_service: InMemorySessionThreadService,
     turn_store: Arc<InMemoryTurnStateStore>,
     cancellation_factory: Arc<ReadyRunCancellationFactory>,
-    composition: RebornRuntimeLoopComposition<
-        InMemoryTurnStateStore,
-        dyn SessionThreadService,
-        RecordingModelGateway,
-    >,
+    composition: RebornRuntimeLoopComposition<dyn SessionThreadService, RecordingModelGateway>,
     model_requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
     capability_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
     capability_results: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -261,8 +257,9 @@ impl ProductLiveAgentLoopHarness {
         );
         let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> =
             Arc::new(ProductLiveCapabilityIo::default());
+        let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
-            turn_state: Arc::clone(&turn_store),
+            turn_state: turn_state_for_runtime,
             thread_service: Arc::new(thread_service.clone()),
             thread_scope: thread_scope.clone(),
             model_gateway,

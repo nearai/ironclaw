@@ -362,6 +362,11 @@ async fn callback_success_creates_session_and_redirects_with_login_ticket() {
         !landing.contains("#token="),
         "callback Location must not carry the bearer: {landing}",
     );
+    assert!(
+        callback.headers().get(header::SET_COOKIE).is_none(),
+        "v2 OAuth callback must not set a session cookie — transport is the one-time \
+         login_ticket only (#4116 cookie-transport beta-break)",
+    );
     assert_eq!(store_inner.len(), 1, "session should be persisted");
 
     // The provider should have received the original PKCE verifier

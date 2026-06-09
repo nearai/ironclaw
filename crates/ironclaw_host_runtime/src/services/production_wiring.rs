@@ -237,7 +237,7 @@ pub(super) struct ProductionComponentType {
 }
 
 impl ProductionComponentType {
-    pub(super) fn of<T: 'static>() -> Self {
+    pub(super) fn of<T: ?Sized + 'static>() -> Self {
         Self {
             implementation: type_name::<T>(),
             readiness: classify_component_type::<T>(),
@@ -266,7 +266,7 @@ pub(super) fn component_name(component: Option<ProductionComponentType>) -> Opti
     component.map(|component| component.implementation)
 }
 
-fn classify_component_type<T: 'static>() -> ProductionImplementationReadiness {
+fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationReadiness {
     let type_id = TypeId::of::<T>();
     match () {
         () if type_id == TypeId::of::<LocalFilesystem>()

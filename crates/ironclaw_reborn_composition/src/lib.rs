@@ -153,7 +153,7 @@ pub use extension_lifecycle_command::{
 };
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
-pub use factory::{RebornServices, build_reborn_services};
+pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use hooks::{
     HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
@@ -168,6 +168,10 @@ pub use ironclaw_auth::GoogleOAuthRouteConfig;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,
+};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use ironclaw_runtime_policy::{
+    ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
 };
 pub use ironclaw_skills::{
     ManagedSkillSource as RebornSkillSource, SkillSummary as RebornSkillSummary,
@@ -873,6 +877,29 @@ where
     TWake: TurnRunWakeNotifier + 'static,
 {
     factory::build_postgres_production_host_runtime_services(config).await
+}
+
+/// Open a PostgreSQL pool for Reborn production storage using the same
+/// TLS/cleartext policy enforced by the production event-store backend.
+///
+/// Callers are responsible for validating that production boot selected the
+/// PostgreSQL storage backend and that the URL came from an env-only config
+/// reference before passing it here.
+#[cfg(feature = "postgres")]
+pub fn open_reborn_postgres_pool(
+    url: secrecy::SecretString,
+) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
+    Ok(ironclaw_reborn_event_store::open_postgres_pool(url)?)
+}
+
+/// Open a PostgreSQL pool for Reborn production storage with an explicit
+/// maximum connection count.
+#[cfg(feature = "postgres")]
+pub fn open_reborn_postgres_pool_with_max_size(
+    url: secrecy::SecretString,
+    max_size: usize,
+) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
+    Ok(ironclaw_reborn_event_store::open_postgres_pool_with_max_size(url, max_size)?)
 }
 
 #[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
