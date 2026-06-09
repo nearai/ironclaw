@@ -125,10 +125,11 @@ tracked follow-up.
 - Expand public modality support in a dedicated API phase before surfacing
   non-text defaults. The outbound repository can store more modalities than
   the current product response DTO intentionally exposes.
-- Add a product-safe stale-target representation before UI treats unavailable
-  targets as first-class state. Preferred low-churn shape: keep the current
-  selected-target summary field and add a sibling status such as
-  `none_configured`, `available`, or `unavailable`.
+- Phase 3 adds a product-safe stale-target status DTO surface through
+  `RebornOutboundDeliveryTargetStatus`. The low-churn response shape keeps the
+  current selected-target summary field and adds the sibling
+  `final_reply_target_status` value: `none_configured`, `available`, or
+  `unavailable`.
 - Keep route/UI state out of backend DTOs. Backend status may describe target
   availability and validation errors; it must not encode Automations panel
   layout, button labels, saved/loading state, or WebUI copy.

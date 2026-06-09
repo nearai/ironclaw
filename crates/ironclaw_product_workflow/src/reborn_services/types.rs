@@ -260,6 +260,8 @@ pub struct RebornOutboundPreferencesResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_reply_target: Option<RebornOutboundDeliveryTargetSummary>,
     #[serde(default)]
+    pub final_reply_target_status: RebornOutboundDeliveryTargetStatus,
+    #[serde(default)]
     pub default_modality: RebornOutboundDeliveryModality,
 }
 
@@ -267,9 +269,24 @@ impl Default for RebornOutboundPreferencesResponse {
     fn default() -> Self {
         Self {
             final_reply_target: None,
+            final_reply_target_status: RebornOutboundDeliveryTargetStatus::NoneConfigured,
             default_modality: RebornOutboundDeliveryModality::Text,
         }
     }
+}
+
+/// Product-safe status for a saved outbound delivery target.
+///
+/// This is channel-neutral: it describes whether the configured default can be
+/// resolved through the target authority layer, not how any particular product
+/// surface should render that state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornOutboundDeliveryTargetStatus {
+    #[default]
+    NoneConfigured,
+    Available,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

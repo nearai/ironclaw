@@ -11,9 +11,9 @@ use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    WebUiAuthenticatedCaller,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 
@@ -30,6 +30,36 @@ pub(crate) trait OutboundDeliveryTargetProvider: Send + Sync {
         &self,
         caller: &WebUiAuthenticatedCaller,
     ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError>;
+
+    async fn resolve_outbound_delivery_target(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target_id: &RebornOutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        Ok(self
+            .list_outbound_delivery_targets(caller)
+            .await?
+            .into_iter()
+            .find(|entry| {
+                entry.capabilities.final_replies
+                    && entry.summary.target_id.as_str() == target_id.as_str()
+            }))
+    }
+
+    async fn resolve_reply_target_binding(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target: &ReplyTargetBindingRef,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        Ok(self
+            .list_outbound_delivery_targets(caller)
+            .await?
+            .into_iter()
+            .find(|entry| {
+                entry.capabilities.final_replies
+                    && entry.reply_target_binding_ref.as_str() == target.as_str()
+            }))
+    }
 }
 
 pub(crate) struct OutboundDeliveryTargetRegistry {
@@ -65,6 +95,40 @@ impl OutboundDeliveryTargetProvider for OutboundDeliveryTargetRegistry {
         .await?;
         Ok(target_groups.into_iter().flatten().collect())
     }
+
+    async fn resolve_outbound_delivery_target(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target_id: &RebornOutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        let target_groups = try_join_all(
+            self.providers
+                .iter()
+                .map(|provider| provider.resolve_outbound_delivery_target(caller, target_id)),
+        )
+        .await?;
+        Ok(target_groups
+            .into_iter()
+            .flatten()
+            .find(|entry| entry.capabilities.final_replies))
+    }
+
+    async fn resolve_reply_target_binding(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target: &ReplyTargetBindingRef,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        let target_groups = try_join_all(
+            self.providers
+                .iter()
+                .map(|provider| provider.resolve_reply_target_binding(caller, target)),
+        )
+        .await?;
+        Ok(target_groups
+            .into_iter()
+            .flatten()
+            .find(|entry| entry.capabilities.final_replies))
+    }
 }
 
 pub(crate) struct RebornOutboundPreferencesFacade {
@@ -98,13 +162,17 @@ impl RebornOutboundPreferencesFacade {
         caller: &WebUiAuthenticatedCaller,
         record: Option<&CommunicationPreferenceRecord>,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        let final_reply_target = match record.and_then(|record| record.final_reply_target.as_ref())
-        {
-            Some(target) => self.summary_for_reply_target(caller, target).await?,
-            None => None,
-        };
+        let (final_reply_target, final_reply_target_status) =
+            match record.and_then(|record| record.final_reply_target.as_ref()) {
+                Some(target) => match self.summary_for_reply_target(caller, target).await? {
+                    Some(target) => (Some(target), RebornOutboundDeliveryTargetStatus::Available),
+                    None => (None, RebornOutboundDeliveryTargetStatus::Unavailable),
+                },
+                None => (None, RebornOutboundDeliveryTargetStatus::NoneConfigured),
+            };
         Ok(RebornOutboundPreferencesResponse {
             final_reply_target,
+            final_reply_target_status,
             default_modality: RebornOutboundDeliveryModality::Text,
         })
     }
@@ -115,9 +183,8 @@ impl RebornOutboundPreferencesFacade {
         target: &ReplyTargetBindingRef,
     ) -> Result<Option<RebornOutboundDeliveryTargetSummary>, RebornServicesError> {
         Ok(self
-            .find_target_entry(caller, |entry| {
-                entry.reply_target_binding_ref.as_str() == target.as_str()
-            })
+            .targets
+            .resolve_reply_target_binding(caller, target)
             .await?
             .map(|entry| entry.summary))
     }
@@ -127,22 +194,10 @@ impl RebornOutboundPreferencesFacade {
         caller: &WebUiAuthenticatedCaller,
         target_id: &RebornOutboundDeliveryTargetId,
     ) -> Result<OutboundDeliveryTargetEntry, RebornServicesError> {
-        self.find_target_entry(caller, |entry| {
-            entry.summary.target_id.as_str() == target_id.as_str()
-        })
-        .await?
-        .ok_or_else(outbound_target_not_found)
-    }
-
-    async fn find_target_entry(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-        predicate: impl Fn(&OutboundDeliveryTargetEntry) -> bool,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        let targets = self.targets.list_outbound_delivery_targets(caller).await?;
-        Ok(targets
-            .into_iter()
-            .find(|entry| entry.capabilities.final_replies && predicate(entry)))
+        self.targets
+            .resolve_outbound_delivery_target(caller, target_id)
+            .await?
+            .ok_or_else(outbound_target_not_found)
     }
 
     /// Invariant: `WebUiAuthenticatedCaller` must come from the authenticated
@@ -343,14 +398,82 @@ mod tests {
             &self,
             _caller: &WebUiAuthenticatedCaller,
         ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
-            Err(RebornServicesError {
-                code: RebornServicesErrorCode::Unavailable,
-                kind: RebornServicesErrorKind::ServiceUnavailable,
-                status_code: 503,
-                retryable: true,
-                field: None,
-                validation_code: None,
-            })
+            Err(service_unavailable_error())
+        }
+    }
+
+    struct ResolvingOnlyTargetProvider {
+        entry: OutboundDeliveryTargetEntry,
+    }
+
+    #[async_trait]
+    impl OutboundDeliveryTargetProvider for ResolvingOnlyTargetProvider {
+        async fn list_outbound_delivery_targets(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            Ok(Vec::new())
+        }
+
+        async fn resolve_outbound_delivery_target(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+            target_id: &RebornOutboundDeliveryTargetId,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            Ok(
+                (self.entry.summary.target_id.as_str() == target_id.as_str())
+                    .then(|| self.entry.clone()),
+            )
+        }
+
+        async fn resolve_reply_target_binding(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+            target: &ReplyTargetBindingRef,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            Ok(
+                (self.entry.reply_target_binding_ref.as_str() == target.as_str())
+                    .then(|| self.entry.clone()),
+            )
+        }
+    }
+
+    struct ResolveFailingTargetProvider;
+
+    #[async_trait]
+    impl OutboundDeliveryTargetProvider for ResolveFailingTargetProvider {
+        async fn list_outbound_delivery_targets(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            Ok(Vec::new())
+        }
+
+        async fn resolve_outbound_delivery_target(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+            _target_id: &RebornOutboundDeliveryTargetId,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            Err(service_unavailable_error())
+        }
+
+        async fn resolve_reply_target_binding(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+            _target: &ReplyTargetBindingRef,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            Err(service_unavailable_error())
+        }
+    }
+
+    fn service_unavailable_error() -> RebornServicesError {
+        RebornServicesError {
+            code: RebornServicesErrorCode::Unavailable,
+            kind: RebornServicesErrorKind::ServiceUnavailable,
+            status_code: 503,
+            retryable: true,
+            field: None,
+            validation_code: None,
         }
     }
 
@@ -476,12 +599,20 @@ mod tests {
                 .map(|target| target.target_id.as_str()),
             Some("slack-alpha")
         );
+        assert_eq!(
+            response.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::Available
+        );
 
         let other_user = facade
             .get_outbound_preferences(caller("tenant-alpha", "user-bravo"))
             .await
             .expect("other user preferences");
         assert!(other_user.final_reply_target.is_none());
+        assert_eq!(
+            other_user.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::NoneConfigured
+        );
     }
 
     #[tokio::test]
@@ -503,6 +634,10 @@ mod tests {
             .expect("preferences response");
 
         assert!(response.final_reply_target.is_none());
+        assert_eq!(
+            response.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::Unavailable
+        );
     }
 
     #[tokio::test]
@@ -546,6 +681,10 @@ mod tests {
                 .as_ref()
                 .map(|target| target.target_id.as_str()),
             Some("slack-alpha")
+        );
+        assert_eq!(
+            response.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::Available
         );
         let stored = store
             .load_communication_preference(CommunicationPreferenceKey::new(
@@ -673,6 +812,10 @@ mod tests {
             .expect("new-user clear");
 
         assert!(response.final_reply_target.is_none());
+        assert_eq!(
+            response.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::NoneConfigured
+        );
         let stored = store
             .load_communication_preference(CommunicationPreferenceKey::new(
                 tenant("tenant-alpha"),
@@ -816,6 +959,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preference_facade_uses_authority_resolver_not_public_target_list_for_write_and_read() {
+        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let provider = Arc::new(ResolvingOnlyTargetProvider {
+            entry: target_entry("slack-alpha", "reply:slack-alpha", true),
+        });
+        let facade = RebornOutboundPreferencesFacade::new(store.clone(), provider);
+
+        let listed = facade
+            .list_outbound_delivery_targets(caller("tenant-alpha", "user-alpha"))
+            .await
+            .expect("list targets");
+        assert!(listed.targets.is_empty());
+
+        let set_response = facade
+            .set_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(target_id("slack-alpha")),
+                },
+            )
+            .await
+            .expect("set target through resolver");
+        assert_eq!(
+            set_response.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::Available
+        );
+
+        let stored = store
+            .load_communication_preference(CommunicationPreferenceKey::new(
+                tenant("tenant-alpha"),
+                user("user-alpha"),
+            ))
+            .await
+            .expect("load stored record")
+            .expect("stored record");
+        assert_eq!(
+            stored
+                .record
+                .final_reply_target
+                .as_ref()
+                .map(|target| target.as_str()),
+            Some("reply:slack-alpha")
+        );
+
+        let get_response = facade
+            .get_outbound_preferences(caller("tenant-alpha", "user-alpha"))
+            .await
+            .expect("get target through resolver");
+        assert_eq!(
+            get_response.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::Available
+        );
+        assert_eq!(
+            get_response
+                .final_reply_target
+                .as_ref()
+                .map(|target| target.target_id.as_str()),
+            Some("slack-alpha")
+        );
+    }
+
+    #[tokio::test]
     async fn target_registry_aggregates_channel_neutral_providers_for_default_selection() {
         let store = Arc::new(InMemoryOutboundStateStore::default());
         let slack_provider = Arc::new(FakeTargetProvider::default());
@@ -887,6 +1092,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn target_registry_filters_non_final_reply_resolver_results() {
+        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let registry = Arc::new(OutboundDeliveryTargetRegistry::new(vec![Arc::new(
+            ResolvingOnlyTargetProvider {
+                entry: target_entry("slack-progress", "reply:slack-progress", false),
+            },
+        )]));
+        let facade = RebornOutboundPreferencesFacade::new(store.clone(), registry);
+
+        let error = facade
+            .set_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(target_id("slack-progress")),
+                },
+            )
+            .await
+            .expect_err("non-final target resolver result is rejected");
+        assert_eq!(error.code, RebornServicesErrorCode::NotFound);
+        assert_eq!(error.field.as_deref(), Some("final_reply_target_id"));
+        assert!(
+            store
+                .load_communication_preference(CommunicationPreferenceKey::new(
+                    tenant("tenant-alpha"),
+                    user("user-alpha"),
+                ))
+                .await
+                .expect("load preference")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn target_registry_propagates_provider_failure() {
         let registry = OutboundDeliveryTargetRegistry::new(vec![Arc::new(FailingTargetProvider)]);
 
@@ -896,6 +1134,37 @@ mod tests {
             .expect_err("provider failure");
 
         assert_unavailable_backend_error(error);
+    }
+
+    #[tokio::test]
+    async fn target_registry_propagates_resolver_failure_for_get_and_set() {
+        let store = Arc::new(InMemoryOutboundStateStore::default());
+        seed_record(
+            store.as_ref(),
+            "tenant-alpha",
+            "user-alpha",
+            Some(reply_ref("reply:slack-alpha")),
+        )
+        .await;
+        let facade =
+            RebornOutboundPreferencesFacade::new(store, Arc::new(ResolveFailingTargetProvider));
+
+        let get_error = facade
+            .get_outbound_preferences(caller("tenant-alpha", "user-alpha"))
+            .await
+            .expect_err("get target resolver failure");
+        assert_unavailable_backend_error(get_error);
+
+        let set_error = facade
+            .set_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(target_id("slack-alpha")),
+                },
+            )
+            .await
+            .expect_err("set target resolver failure");
+        assert_unavailable_backend_error(set_error);
     }
 
     #[test]
