@@ -127,7 +127,7 @@ mod tests {
         );
         assert_eq!(
             channel.action.instructions,
-            "Choose the Slack channels this tenant app is allowed to answer in."
+            "Map Slack channels to the team agents that should answer there."
         );
         assert!(channel.command_aliases.is_empty());
     }

@@ -1185,11 +1185,13 @@ mod tests {
             serde_json::json!([
                 {
                     "channel_id":"C0HOST",
-                    "subject_user_id": save_body["channels"][0]["subject_user_id"].clone()
+                    "subject_user_id": save_body["channels"][0]["subject_user_id"].clone(),
+                    "subject_display_name": save_body["channels"][0]["subject_display_name"].clone()
                 },
                 {
                     "channel_id":"C0OPS",
-                    "subject_user_id": save_body["channels"][1]["subject_user_id"].clone()
+                    "subject_user_id": save_body["channels"][1]["subject_user_id"].clone(),
+                    "subject_display_name": save_body["channels"][1]["subject_display_name"].clone()
                 }
             ])
         );
