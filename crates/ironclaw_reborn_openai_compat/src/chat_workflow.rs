@@ -139,11 +139,6 @@ impl OpenAiChatCompletionsWorkflow {
         raw_body: &[u8],
         idempotency_key: Option<OpenAiCompatIdempotencyKey>,
     ) -> Result<OpenAiChatCompletionResponse, OpenAiCompatHttpError> {
-        if raw_body.len() > MAX_CHAT_BODY_BYTES {
-            return Err(OpenAiCompatHttpError::invalid_request(Some(
-                "body".to_string(),
-            )));
-        }
         let request = parse_chat_request(raw_body)?;
         self.complete_chat_request(caller, request, raw_body, idempotency_key)
             .await
@@ -645,6 +640,11 @@ fn error_from_rejection(rejection: ProductRejection) -> OpenAiCompatHttpError {
 pub(crate) fn parse_chat_request(
     raw_body: &[u8],
 ) -> Result<OpenAiChatCompletionRequest, OpenAiCompatHttpError> {
+    if raw_body.len() > MAX_CHAT_BODY_BYTES {
+        return Err(OpenAiCompatHttpError::invalid_request(Some(
+            "body".to_string(),
+        )));
+    }
     serde_json::from_slice(raw_body)
         .map_err(|_| OpenAiCompatHttpError::invalid_request(Some("body".to_string())))
 }
