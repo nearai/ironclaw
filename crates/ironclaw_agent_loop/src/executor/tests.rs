@@ -1,17 +1,18 @@
+use ironclaw_host_api::{ApprovalRequestId, CorrelationId, ResourceEstimate};
 use ironclaw_turns::{
     LoopCancelledReasonKind, LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopFailureKind,
     LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
-        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInputRepair, CapabilityOutcome,
-        CapabilityRecoveryHint, CapabilityResultMessage, LoopCancelReasonKind, LoopCheckpointKind,
-        LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
-        LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
-        ObservationTrust, ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay,
-        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
-        VisibleCapabilityRequest,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
+        CapabilityCallCandidate, CapabilityFailureDetail, CapabilityFailureKind,
+        CapabilityInputIssue, CapabilityInputIssueCode, CapabilityInputRef, CapabilityInputRepair,
+        CapabilityOutcome, CapabilityRecoveryHint, CapabilityResultMessage, CapabilityResumeToken,
+        LoopCancelReasonKind, LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionResponse, LoopContextCompactionKind, LoopInput, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopRunInfoPort,
+        LoopSafeSummary, LoopSummaryArtifactId, ObservationTrust, ParentLoopOutput,
+        ProcessHandleSummary, ProviderToolCallReplay, SameCallRetryConstraint,
+        ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest,
     },
 };
 
@@ -262,6 +263,7 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 2);
@@ -337,6 +339,7 @@ async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 1);
@@ -419,6 +422,7 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
@@ -504,6 +508,7 @@ async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
@@ -555,6 +560,7 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
             assert!(cancelled.checkpoint_id.is_some());
         }
         PromptStep::Prepared(_) => panic!("expected cancelled exit"),
+        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
         PromptStep::Exit(exit) => panic!("expected cancelled exit, got {exit:?}"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     }
@@ -657,6 +663,7 @@ async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
             assert!(failed.checkpoint_id.is_some());
         }
         PromptStep::Prepared(_) => panic!("security rejection should end the run"),
+        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
         PromptStep::Exit(exit) => panic!("expected failed exit, got {exit:?}"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     }
@@ -1705,6 +1712,7 @@ async fn gate_blocks_with_before_block_checkpoint() {
             outcomes: vec![CapabilityOutcome::ApprovalRequired {
                 gate_ref: LoopGateRef::new("gate:approval").expect("valid"),
                 safe_summary: "approval required".to_string(),
+                approval_resume: None,
             }],
             stopped_on_suspension: true,
         },
@@ -1757,6 +1765,103 @@ async fn gate_blocks_with_before_block_checkpoint() {
 }
 
 #[tokio::test]
+async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
+    let original_input_ref = CapabilityInputRef::new("input:demo").expect("valid");
+    let approval_resume = CapabilityApprovalResume {
+        approval_request_id: ApprovalRequestId::new(),
+        resume_token: CapabilityResumeToken::new("resume-token:demo").expect("valid token"),
+        correlation_id: CorrelationId::new(),
+        input_ref: original_input_ref.clone(),
+        input: serde_json::json!({ "message": "hello" }),
+        estimate: ResourceEstimate::default(),
+    };
+    let completed_ref = LoopResultRef::new("result:approval-resumed").expect("valid");
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:approval").expect("valid"),
+                safe_summary: "approval required".to_string(),
+                approval_resume: Some(approval_resume.clone()),
+            }],
+            stopped_on_suspension: true,
+        },
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: completed_ref.clone(),
+                safe_summary: "approval resumed".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: true,
+                byte_len: 0,
+            })],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let first_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("first execute blocks");
+
+    assert!(matches!(first_exit, LoopExit::Blocked(_)));
+    assert_eq!(host.model_requests().len(), 1);
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    let pending_resume = before_block_state
+        .pending_approval_resume
+        .as_ref()
+        .expect("blocked checkpoint carries pending approval resume");
+    assert_eq!(
+        pending_resume.approval_request_id,
+        approval_resume.approval_request_id
+    );
+    assert_eq!(pending_resume.resume_token, approval_resume.resume_token);
+    assert_eq!(
+        pending_resume.correlation_id,
+        approval_resume.correlation_id
+    );
+    assert_eq!(pending_resume.input, approval_resume.input);
+    assert_eq!(pending_resume.estimate, approval_resume.estimate);
+    assert_eq!(pending_resume.surface_version, surface_version());
+    assert_eq!(
+        pending_resume.effective_capability_ids,
+        vec![capability_id()]
+    );
+
+    let second_exit = executor
+        .execute_family(&crate::families::default(), &host, before_block_state)
+        .await
+        .expect("second execute resumes");
+
+    assert!(matches!(second_exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "approval resume must dispatch the saved invocation before asking the model again"
+    );
+    let batch_invocations = host.batch_invocations();
+    assert_eq!(batch_invocations.len(), 2);
+    assert_eq!(batch_invocations[0].invocations[0].approval_resume, None);
+    assert_eq!(
+        batch_invocations[1].invocations[0].approval_resume,
+        Some(approval_resume)
+    );
+    assert_eq!(
+        batch_invocations[1].invocations[0].input_ref,
+        original_input_ref
+    );
+    assert_eq!(
+        batch_invocations[1].invocations[0]
+            .approval_resume
+            .as_ref()
+            .expect("resume metadata")
+            .input_ref,
+        original_input_ref
+    );
+    assert_eq!(final_staged_state(&host).result_refs, vec![completed_ref]);
+}
+
+#[tokio::test]
 async fn gate_stage_skips_and_continues_records_skipped_summary() {
     let family = family_with_gate_outcome(GateOutcome::SkipAndContinue {
         gate: empty_gate_state(),
@@ -1782,6 +1887,7 @@ async fn gate_stage_skips_and_continues_records_skipped_summary() {
                 kind: GateKind::Auth,
                 gate_ref,
                 credential_requirements: Vec::new(),
+                approval_resume: None,
             },
         )
         .await
@@ -1825,6 +1931,7 @@ async fn gate_stage_aborts_returns_failed_exit() {
                 kind: GateKind::Auth,
                 gate_ref,
                 credential_requirements: Vec::new(),
+                approval_resume: None,
             },
         )
         .await
@@ -1852,6 +1959,7 @@ async fn parallel_batch_records_completed_results_before_blocking_on_suspension(
                 CapabilityOutcome::ApprovalRequired {
                     gate_ref: LoopGateRef::new("gate:approval").expect("valid"), // safety: test-only fixture
                     safe_summary: "approval required".to_string(),
+                    approval_resume: None,
                 },
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: completed_ref.clone(),
@@ -2690,6 +2798,7 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
     let returned_state = match step {
         PromptStep::SkipModel(state, _ack) => *state,
         PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
+        PromptStep::ResumeApproval(_) => panic!("expected SkipModel, got ResumeApproval"),
         PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
     };
 
@@ -2749,6 +2858,7 @@ async fn prompt_stage_skip_model_carries_pending_input_ack() {
     let mut carried_ack = match step {
         PromptStep::SkipModel(_state, ack) => ack,
         PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
+        PromptStep::ResumeApproval(_) => panic!("expected SkipModel, got ResumeApproval"),
         PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
     };
 

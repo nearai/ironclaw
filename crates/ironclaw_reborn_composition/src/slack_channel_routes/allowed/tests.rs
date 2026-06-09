@@ -91,7 +91,8 @@ async fn allowed_channel_admin_saves_replaces_and_lists_channel_routes() {
         serde_json::json!([
             {
                 "channel_id": "C0OPS",
-                "subject_user_id": replace_body["channels"][0]["subject_user_id"].clone()
+                "subject_user_id": replace_body["channels"][0]["subject_user_id"].clone(),
+                "subject_display_name": replace_body["channels"][0]["subject_display_name"].clone()
             }
         ])
     );
@@ -123,7 +124,8 @@ async fn allowed_channel_admin_replaces_with_selected_team_subjects() {
         serde_json::json!([
             {
                 "channel_id": "C0PRODUCT",
-                "subject_user_id": "user:eng-team-agent"
+                "subject_user_id": "user:eng-team-agent",
+                "subject_display_name": "Eng"
             }
         ])
     );
@@ -351,11 +353,13 @@ async fn allowed_channel_admin_preserves_existing_unmanaged_subject_for_same_cha
         serde_json::json!([
             {
                 "channel_id": "C0ENG",
-                "subject_user_id": "user:eng-team-agent"
+                "subject_user_id": "user:eng-team-agent",
+                "subject_display_name": "Eng"
             },
             {
                 "channel_id": "C0RAW",
-                "subject_user_id": "user:raw-route-subject"
+                "subject_user_id": "user:raw-route-subject",
+                "subject_display_name": "Raw Route Subject"
             }
         ])
     );
@@ -400,7 +404,8 @@ async fn allowed_channel_admin_generates_only_missing_explicit_subjects() {
         body["channels"][1],
         serde_json::json!({
             "channel_id": "C0RAW",
-            "subject_user_id": "user:raw-route-subject"
+            "subject_user_id": "user:raw-route-subject",
+            "subject_display_name": "Raw Route Subject"
         })
     );
     let generated_subject = body["channels"][0]["subject_user_id"]

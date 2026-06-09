@@ -2,15 +2,17 @@ use std::sync::Arc;
 
 use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RecordKind, RootFilesystem};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId, VirtualPath};
+use ironclaw_product_adapters::ProductInboundAck;
 use ironclaw_reborn_openai_compat::{
     OpenAiCompatActorScope, OpenAiCompatBindInternalRefs, OpenAiCompatIdempotencyKey,
     OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
-    OpenAiCompatPublicId, OpenAiCompatRefLookup, OpenAiCompatRefOperation,
-    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore,
-    OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding, OpenAiCompatRouteSurface,
-    OpenAiCompatTurnRunRef, OpenAiResponseId,
+    OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck, OpenAiCompatRefLookup,
+    OpenAiCompatRefOperation, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
+    OpenAiCompatRefStore, OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding,
+    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId,
 };
 use ironclaw_reborn_openai_compat_storage::FilesystemOpenAiCompatRefStore;
+use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -25,6 +27,79 @@ async fn durable_store_replays_same_idempotency_key_after_reopen() {
 
     assert_eq!(replayed.public_id, created.public_id);
     assert_eq!(replayed.request_fingerprint, created.request_fingerprint);
+}
+
+#[tokio::test]
+async fn durable_store_persists_accepted_ack_for_idempotency_replay_after_reopen() {
+    let (filesystem, root, store) = test_store("accepted-ack");
+    let request = reservation("tenant-a", "alice", "same-key", b"same body");
+    let created = expect_created(store.reserve(request.clone()).await);
+    let ack = accepted_ack("msg:accepted");
+
+    let updated = store
+        .record_accepted_ack(OpenAiCompatRecordAcceptedAck::new(
+            actor("tenant-a", "alice"),
+            created.public_id.clone(),
+            ack.clone(),
+        ))
+        .await
+        .expect("record accepted ack")
+        .expect("mapping should exist");
+
+    assert_eq!(updated.accepted_ack, Some(ack.clone()));
+
+    let reopened = FilesystemOpenAiCompatRefStore::with_root(filesystem, root);
+    let replayed = expect_replayed(reopened.reserve(request).await);
+
+    assert_eq!(replayed.public_id, created.public_id);
+    assert_eq!(replayed.accepted_ack, Some(ack));
+}
+
+#[tokio::test]
+async fn durable_store_same_key_distinct_actors_create_distinct_refs() {
+    let (_, _, store) = test_store("same-key-distinct-actors");
+    let alice_request = reservation("tenant-a", "alice", "same-key", b"same body");
+    let bob_request = reservation("tenant-a", "bob", "same-key", b"same body");
+
+    let alice = expect_created(store.reserve(alice_request.clone()).await);
+    let bob = expect_created(store.reserve(bob_request.clone()).await);
+    let alice_replay = expect_replayed(store.reserve(alice_request).await);
+    let bob_replay = expect_replayed(store.reserve(bob_request).await);
+
+    assert_ne!(alice.public_id, bob.public_id);
+    assert_eq!(alice_replay.public_id, alice.public_id);
+    assert_eq!(bob_replay.public_id, bob.public_id);
+}
+
+#[tokio::test]
+async fn durable_store_record_accepted_ack_wrong_owner_is_missing() {
+    let (_, _, store) = test_store("accepted-ack-auth");
+    let created = expect_created(
+        store
+            .reserve(reservation("tenant-a", "alice", "same-key", b"same body"))
+            .await,
+    );
+
+    let denied = store
+        .record_accepted_ack(OpenAiCompatRecordAcceptedAck::new(
+            actor("tenant-a", "bob"),
+            created.public_id.clone(),
+            accepted_ack("msg:denied"),
+        ))
+        .await
+        .expect("record accepted ack");
+
+    assert!(denied.is_none());
+    let loaded = store
+        .lookup_authorized(OpenAiCompatRefLookup::new(
+            actor("tenant-a", "alice"),
+            created.public_id,
+            OpenAiCompatRefOperation::Retrieve,
+        ))
+        .await
+        .expect("lookup")
+        .expect("mapping exists");
+    assert!(loaded.accepted_ack.is_none());
 }
 
 #[tokio::test]
@@ -531,6 +606,13 @@ fn actor(tenant_id: &str, user_id: &str) -> OpenAiCompatActorScope {
         Some(AgentId::new("agent-a").expect("valid agent")),
         Some(ProjectId::new("project-a").expect("valid project")),
     )
+}
+
+fn accepted_ack(message_ref: &str) -> ProductInboundAck {
+    ProductInboundAck::Accepted {
+        accepted_message_ref: AcceptedMessageRef::new(message_ref).expect("valid accepted ref"),
+        submitted_run_id: TurnRunId::new(),
+    }
 }
 
 fn expect_created(
