@@ -1,5 +1,6 @@
 #![cfg(feature = "openai-compat-beta")]
 
+use std::future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -25,6 +26,7 @@ use ironclaw_reborn_openai_compat::{
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -445,6 +447,29 @@ async fn responses_wait_timeout_detaches_without_resubmitting() {
         .expect("response");
 
     assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(workflow.accepted_count(), 1);
+}
+
+#[tokio::test]
+async fn dropping_response_create_future_cancels_projection_wait() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let reader = Arc::new(DropAwareResponsesReader::default());
+    let router = test_router(workflow.clone(), reader.clone());
+
+    let mut request = Box::pin(router.oneshot(response_create_request(
+        "/api/v1/responses",
+        json!({"model": "gpt-reborn", "input": "hello"}),
+        None,
+    )));
+    tokio::select! {
+        result = &mut request => panic!("request completed before projection wait was dropped: {result:?}"),
+        () = reader.entered.notified() => {}
+    }
+    drop(request);
+
+    tokio::time::timeout(Duration::from_secs(1), reader.dropped.notified())
+        .await
+        .expect("projection wait future should be dropped with handler future");
     assert_eq!(workflow.accepted_count(), 1);
 }
 
@@ -887,6 +912,46 @@ impl OpenAiResponsesProjectionReader for NeverResponsesReader {
         request: OpenAiResponseReadRequest,
     ) -> Result<OpenAiResponseObject, ironclaw_reborn_openai_compat::OpenAiCompatHttpError> {
         Ok(completed_response(request.public_id, "late"))
+    }
+}
+
+#[derive(Default)]
+struct DropAwareResponsesReader {
+    entered: Arc<Notify>,
+    dropped: Arc<Notify>,
+}
+
+struct NotifyOnDrop {
+    notify: Arc<Notify>,
+}
+
+impl Drop for NotifyOnDrop {
+    fn drop(&mut self) {
+        self.notify.notify_one();
+    }
+}
+
+#[async_trait]
+impl OpenAiResponsesProjectionReader for DropAwareResponsesReader {
+    async fn wait_for_response_completion(
+        &self,
+        _request: OpenAiResponseWaitRequest,
+    ) -> Result<OpenAiResponseProjection, ironclaw_reborn_openai_compat::OpenAiCompatHttpError>
+    {
+        let guard = NotifyOnDrop {
+            notify: Arc::clone(&self.dropped),
+        };
+        self.entered.notify_waiters();
+        future::pending::<()>().await;
+        drop(guard);
+        unreachable!("pending projection wait completed")
+    }
+
+    async fn read_response(
+        &self,
+        request: OpenAiResponseReadRequest,
+    ) -> Result<OpenAiResponseObject, ironclaw_reborn_openai_compat::OpenAiCompatHttpError> {
+        Ok(completed_response(request.public_id, "drop-aware"))
     }
 }
 
