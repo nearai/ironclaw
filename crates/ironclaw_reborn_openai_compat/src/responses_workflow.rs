@@ -41,7 +41,6 @@ use ironclaw_product_adapters::{
     ProjectionReadRequest, ProjectionSubscriptionRequest, TrustedInboundContext,
     UserMessagePayload,
 };
-use ironclaw_turns::{TurnActor, TurnScope};
 
 const DEFAULT_RESPONSES_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -665,15 +664,13 @@ impl OpenAiResponsesWorkflow {
         previous_mapping: Option<&OpenAiCompatResourceMapping>,
     ) -> Result<ProductProjectionSubject, OpenAiCompatHttpError> {
         if let Some(thread_id) = projection_thread_id(mapping)? {
-            return Ok(ProductProjectionSubject::canonical(
-                TurnActor::new(caller.scope().user_id().clone()),
-                TurnScope::new_with_owner(
-                    caller.scope().tenant_id().clone(),
-                    caller.scope().agent_id().cloned(),
-                    caller.scope().project_id().cloned(),
-                    thread_id,
-                    Some(caller.scope().user_id().clone()),
-                ),
+            return Ok(ProductProjectionSubject::canonical_thread_scope(
+                caller.scope().user_id().clone(),
+                caller.scope().tenant_id().clone(),
+                caller.scope().agent_id().cloned(),
+                caller.scope().project_id().cloned(),
+                thread_id,
+                Some(caller.scope().user_id().clone()),
             ));
         }
 
