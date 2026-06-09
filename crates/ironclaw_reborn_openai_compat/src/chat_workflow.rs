@@ -30,6 +30,7 @@ use ironclaw_product_adapters::{
 
 const DEFAULT_CHAT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_CHAT_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CHAT_COMPLETION_MESSAGES: usize = 1_000;
 const OPENAI_COMPAT_ADAPTER_ID: &str = "openai_compat";
 const OPENAI_COMPAT_INSTALLATION_ID: &str = "openai_compat_default";
@@ -59,7 +60,7 @@ impl OpenAiCompatAuthenticatedCaller {
             return Err(OpenAiCompatHttpError::from_kind(
                 403,
                 false,
-                crate::OpenAiCompatErrorKind::Authentication,
+                crate::OpenAiCompatErrorKind::PermissionDenied,
                 None,
             ));
         }
@@ -117,6 +118,11 @@ impl OpenAiChatCompletionsWorkflow {
         raw_body: &[u8],
         idempotency_key: Option<OpenAiCompatIdempotencyKey>,
     ) -> Result<OpenAiChatCompletionResponse, OpenAiCompatHttpError> {
+        if raw_body.len() > MAX_CHAT_BODY_BYTES {
+            return Err(OpenAiCompatHttpError::invalid_request(Some(
+                "body".to_string(),
+            )));
+        }
         let request = parse_chat_request(raw_body)?;
         if request.stream.unwrap_or(false) {
             return Err(OpenAiCompatHttpError::invalid_request(Some(
@@ -249,7 +255,7 @@ impl OpenAiChatCompletionsWorkflow {
                 accepted_ack.clone(),
             ))
             .await?
-            .ok_or_else(OpenAiCompatHttpError::internal)?;
+            .ok_or_else(|| OpenAiCompatHttpError::not_found(None))?;
         Ok(accepted_ack)
     }
 
@@ -421,30 +427,33 @@ fn chat_messages_to_product_text(
             "messages".to_string(),
         )));
     }
-    let mut lines = Vec::with_capacity(request.messages.len() + 1);
+    let mut rendered_messages = Vec::with_capacity(request.messages.len());
     for message in &request.messages {
-        let role = match message.role {
-            OpenAiChatMessageRole::Developer => "developer",
-            OpenAiChatMessageRole::System => "system",
-            OpenAiChatMessageRole::User => "user",
-            OpenAiChatMessageRole::Assistant => "assistant",
-            OpenAiChatMessageRole::Tool => "tool",
-        };
-        lines.push(format!(
-            "{role}: {}",
-            content_value_to_text(message.content.as_ref())
-        ));
-        if let Some(tool_calls) = &message.tool_calls {
-            lines.push(format!("assistant_tool_calls: {}", tool_calls.len()));
-        }
-        if let Some(tool_call_id) = &message.tool_call_id {
-            lines.push(format!(
-                "tool_call_id: {}",
-                sanitize_product_text_fragment(tool_call_id)
-            ));
-        }
+        rendered_messages.push(serde_json::json!({
+            "role": chat_role_label(&message.role),
+            "content": content_value_to_text(message.content.as_ref()),
+            "tool_call_id": message
+                .tool_call_id
+                .as_ref()
+                .map(|value| sanitize_product_text_fragment(value)),
+            "assistant_tool_call_count": message.tool_calls.as_ref().map(Vec::len),
+        }));
     }
-    Ok(lines.join("\n"))
+    serde_json::to_string(&serde_json::json!({
+        "format": "openai_compat.chat_messages.v1",
+        "messages": rendered_messages,
+    }))
+    .map_err(|_| OpenAiCompatHttpError::internal())
+}
+
+fn chat_role_label(role: &OpenAiChatMessageRole) -> &'static str {
+    match role {
+        OpenAiChatMessageRole::Developer => "developer",
+        OpenAiChatMessageRole::System => "system",
+        OpenAiChatMessageRole::User => "user",
+        OpenAiChatMessageRole::Assistant => "assistant",
+        OpenAiChatMessageRole::Tool => "tool",
+    }
 }
 
 fn chat_user_message_payload(
@@ -482,5 +491,5 @@ fn content_array_item_text(value: &serde_json::Value) -> Option<String> {
 }
 
 fn sanitize_product_text_fragment(value: &str) -> String {
-    value.replace(['\n', '\r'], " ")
+    value.replace(['\n', '\r', '\u{2028}', '\u{2029}'], " ")
 }
