@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
+
+use tokio::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -561,12 +563,8 @@ impl InMemoryOpenAiCompatRefStore {
         }
     }
 
-    fn lock_state(
-        &self,
-    ) -> Result<MutexGuard<'_, InMemoryOpenAiCompatRefState>, OpenAiCompatRefError> {
-        self.state
-            .lock()
-            .map_err(|_| OpenAiCompatRefError::StoreUnavailable)
+    async fn lock_state(&self) -> MutexGuard<'_, InMemoryOpenAiCompatRefState> {
+        self.state.lock().await
     }
 }
 
@@ -576,7 +574,7 @@ impl OpenAiCompatRefStore for InMemoryOpenAiCompatRefStore {
         &self,
         request: OpenAiCompatRefReservation,
     ) -> Result<OpenAiCompatRefReservationOutcome, OpenAiCompatRefError> {
-        let mut state = self.lock_state()?;
+        let mut state = self.lock_state().await;
         evict_oldest_if_needed(&mut state, self.max_mappings);
         if let Some(key) = request.idempotency_key.clone() {
             let index = IdempotencyIndexKey {
@@ -622,7 +620,7 @@ impl OpenAiCompatRefStore for InMemoryOpenAiCompatRefStore {
         &self,
         request: OpenAiCompatBindInternalRefs,
     ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        let mut state = self.lock_state()?;
+        let mut state = self.lock_state().await;
         let Some(mapping) = state.by_public_id.get_mut(&request.public_id) else {
             return Ok(None);
         };
@@ -640,7 +638,7 @@ impl OpenAiCompatRefStore for InMemoryOpenAiCompatRefStore {
         &self,
         request: OpenAiCompatRecordAcceptedAck,
     ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        let mut state = self.lock_state()?;
+        let mut state = self.lock_state().await;
         let Some(mapping) = state.by_public_id.get_mut(&request.public_id) else {
             return Ok(None);
         };
@@ -656,7 +654,7 @@ impl OpenAiCompatRefStore for InMemoryOpenAiCompatRefStore {
         &self,
         request: OpenAiCompatRefLookup,
     ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        let state = self.lock_state()?;
+        let state = self.lock_state().await;
         let Some(mapping) = state.by_public_id.get(&request.public_id) else {
             return Ok(None);
         };

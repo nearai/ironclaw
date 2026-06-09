@@ -491,5 +491,5 @@ fn content_array_item_text(value: &serde_json::Value) -> Option<String> {
 }
 
 fn sanitize_product_text_fragment(value: &str) -> String {
-    value.replace(['\n', '\r'], " ")
+    value.replace(['\n', '\r', '\u{2028}', '\u{2029}'], " ")
 }
