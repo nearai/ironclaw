@@ -313,3 +313,18 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
         assert len(finalized) == 1, (
             f"Expected one finalized assistant message, got {len(finalized)}: {finalized}"
         )
+
+
+async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server):
+    """Typing in the composer and pressing Enter renders the assistant reply in the SPA."""
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await composer.fill("hello there")
+    await composer.press("Enter")
+
+    # The user bubble and the streamed assistant reply both render in the shell.
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        "hello there", timeout=15000
+    )
+    await expect(reborn_v2_page.locator(SEL_V2["msg_assistant"]).first).to_contain_text(
+        "Hello", timeout=30000
+    )

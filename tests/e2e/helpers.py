@@ -227,6 +227,8 @@ SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
     "login_token":    "#v2-token",         # token input on the login/connect view
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
+    "msg_user":       "[data-testid='msg-user']",       # user message bubble
+    "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
 }
 
 
