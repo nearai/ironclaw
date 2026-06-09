@@ -12,7 +12,7 @@ use super::{
     DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput, ModelStep, PendingInputAck,
     PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep, StageContext, StopInput,
     StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
-    UserFacingInputDrainMode, pending_approval_resume_candidate,
+    UserFacingInputDrainMode,
 };
 
 impl DefaultExecutorPipeline {
@@ -103,125 +103,103 @@ impl DefaultExecutorPipeline {
                     state = prompt.state;
                     pending_input_ack = prompt.pending_input_ack;
 
-                    let completed = if let Some(resume) = state.pending_approval_resume.as_ref() {
-                        let call = pending_approval_resume_candidate(
-                            resume,
-                            prompt.surface.version.clone(),
-                        );
-                        pending_input_ack.ack(host).await?;
-                        self.capabilities
-                            .process(
+                    state = CheckpointStage
+                        .process(
+                            ctx,
+                            CheckpointInput {
+                                state,
+                                kind: CheckpointKind::BeforeModel,
+                            },
+                        )
+                        .await?
+                        .state;
+                    if prompt.rendered_repeated_call_warning {
+                        state.stop_state.mark_repeated_call_warning_rendered();
+                        CheckpointStage
+                            .emit_progress(
                                 ctx,
-                                CapabilityInput {
-                                    state,
-                                    surface: prompt.surface,
-                                    calls: vec![call],
-                                },
-                            )
-                            .await?
-                    } else {
-                        state = CheckpointStage
-                            .process(
-                                ctx,
-                                CheckpointInput {
-                                    state,
-                                    kind: CheckpointKind::BeforeModel,
-                                },
-                            )
-                            .await?
-                            .state;
-                        if prompt.rendered_repeated_call_warning {
-                            state.stop_state.mark_repeated_call_warning_rendered();
-                            CheckpointStage
-                                .emit_progress(
-                                    ctx,
-                                    LoopProgressEvent::driver_note(
-                                        LoopDriverNoteKind::Planning,
-                                        "repeated capability call warning rendered",
-                                    )
-                                    .map_err(|_| {
-                                        AgentLoopExecutorError::PlannerContract {
-                                            detail:
-                                                "repeated-call warning progress summary was invalid",
-                                        }
-                                    })?,
+                                LoopProgressEvent::driver_note(
+                                    LoopDriverNoteKind::Planning,
+                                    "repeated capability call warning rendered",
                                 )
-                                .await;
-                        }
-                        pending_input_ack.ack(host).await?;
-
-                        let model_response = match self
-                            .model
-                            .process(
-                                ctx,
-                                ModelInput {
-                                    state,
-                                    messages: prompt.messages,
-                                    surface_version: prompt.surface.version.clone(),
-                                    capability_view: prompt.capability_view,
-                                },
+                                .map_err(|_| AgentLoopExecutorError::PlannerContract {
+                                    detail: "repeated-call warning progress summary was invalid",
+                                })?,
                             )
-                            .await?
-                        {
-                            ModelStep::Response(next, response) => {
-                                state = *next;
-                                response
-                            }
-                            ModelStep::RetryIteration(next) => {
-                                state = *next;
-                                continue;
-                            }
-                            ModelStep::Exit(exit) => return Ok(exit),
-                        };
+                            .await;
+                    }
+                    pending_input_ack.ack(host).await?;
 
-                        // Capture provider-reported usage before the `match` consumes
-                        // `model_response`. Only assistant-reply turns feed the
-                        // diminishing-returns window (#3841 follow-up F1): a
-                        // capability-batch turn produces tool calls, not output
-                        // tokens, and would otherwise look like four "no progress"
-                        // turns in a row. `None` is "unknown" and must NOT count as
-                        // a zero-output turn against the detector.
-                        let response_usage = model_response.usage;
-                        match model_response.output {
-                            ParentLoopOutput::AssistantReply(reply) => {
-                                match self
-                                    .reply_admission
-                                    .process(ctx, ReplyAdmissionInput { state, reply })
-                                    .await?
-                                {
-                                    ReplyAdmissionStep::Accept { state, reply } => {
-                                        self.assistant_reply
-                                            .process(
-                                                ctx,
-                                                AssistantReplyInput {
-                                                    state: *state,
-                                                    reply,
-                                                    usage: response_usage,
-                                                },
-                                            )
-                                            .await?
-                                    }
-                                    ReplyAdmissionStep::Reject { state } => {
-                                        TurnCompletedStep::Continue {
-                                            state,
-                                            summary: crate::strategies::TurnSummary::reply_rejected(
-                                            ),
-                                        }
+                    let model_response = match self
+                        .model
+                        .process(
+                            ctx,
+                            ModelInput {
+                                state,
+                                messages: prompt.messages,
+                                surface_version: prompt.surface.version.clone(),
+                                capability_view: prompt.capability_view,
+                            },
+                        )
+                        .await?
+                    {
+                        ModelStep::Response(next, response) => {
+                            state = *next;
+                            response
+                        }
+                        ModelStep::RetryIteration(next) => {
+                            state = *next;
+                            continue;
+                        }
+                        ModelStep::Exit(exit) => return Ok(exit),
+                    };
+
+                    // Capture provider-reported usage before the `match` consumes
+                    // `model_response`. Only assistant-reply turns feed the
+                    // diminishing-returns window (#3841 follow-up F1): a
+                    // capability-batch turn produces tool calls, not output
+                    // tokens, and would otherwise look like four "no progress"
+                    // turns in a row. `None` is "unknown" and must NOT count as
+                    // a zero-output turn against the detector.
+                    let response_usage = model_response.usage;
+                    let completed = match model_response.output {
+                        ParentLoopOutput::AssistantReply(reply) => {
+                            match self
+                                .reply_admission
+                                .process(ctx, ReplyAdmissionInput { state, reply })
+                                .await?
+                            {
+                                ReplyAdmissionStep::Accept { state, reply } => {
+                                    self.assistant_reply
+                                        .process(
+                                            ctx,
+                                            AssistantReplyInput {
+                                                state: *state,
+                                                reply,
+                                                usage: response_usage,
+                                            },
+                                        )
+                                        .await?
+                                }
+                                ReplyAdmissionStep::Reject { state } => {
+                                    TurnCompletedStep::Continue {
+                                        state,
+                                        summary: crate::strategies::TurnSummary::reply_rejected(),
                                     }
                                 }
                             }
-                            ParentLoopOutput::CapabilityCalls(calls) => {
-                                self.capabilities
-                                    .process(
-                                        ctx,
-                                        CapabilityInput {
-                                            state,
-                                            surface: prompt.surface,
-                                            calls,
-                                        },
-                                    )
-                                    .await?
-                            }
+                        }
+                        ParentLoopOutput::CapabilityCalls(calls) => {
+                            self.capabilities
+                                .process(
+                                    ctx,
+                                    CapabilityInput {
+                                        state,
+                                        surface: prompt.surface,
+                                        calls,
+                                    },
+                                )
+                                .await?
                         }
                     };
 
@@ -285,6 +263,78 @@ impl DefaultExecutorPipeline {
                             InputStep::Exit(exit) => return Ok(exit),
                         }
                     }
+
+                    match self
+                        .stop
+                        .decide(
+                            ctx,
+                            StopInput {
+                                state: next_state,
+                                summary,
+                                pending_input_ack: std::mem::take(&mut pending_input_ack),
+                            },
+                        )
+                        .await?
+                    {
+                        StopStep::Stop {
+                            state,
+                            kind,
+                            pending_input_ack: mut ack,
+                        } => {
+                            let exit = self.exit.process(ctx, ExitInput { state, kind }).await?;
+                            ack.ack(host).await?;
+                            return Ok(exit);
+                        }
+                        StopStep::Continue {
+                            state: next,
+                            pending_input_ack: ack,
+                        } => {
+                            state = next;
+                            pending_input_ack = ack;
+                        }
+                        StopStep::Exit(exit) => return Ok(exit),
+                    }
+
+                    state.iteration = state.iteration.saturating_add(1);
+                }
+
+                PromptStep::ResumeApproval(resume) => {
+                    let resume = *resume;
+                    pending_input_ack = resume.pending_input_ack;
+                    pending_input_ack.ack(host).await?;
+                    let completed = self
+                        .capabilities
+                        .process(
+                            ctx,
+                            CapabilityInput {
+                                state: resume.state,
+                                surface: resume.surface,
+                                calls: vec![resume.call],
+                            },
+                        )
+                        .await?;
+
+                    let completed = self.post_capability.process(ctx, completed).await?;
+
+                    let (next_state, summary) = match completed {
+                        TurnCompletedStep::Continue { state, summary } => (*state, summary),
+                        TurnCompletedStep::Exit(exit) => return Ok(exit),
+                    };
+
+                    let (next_state, summary) = match self
+                        .stop
+                        .observe(
+                            ctx,
+                            StopObservationInput {
+                                state: next_state,
+                                summary,
+                            },
+                        )
+                        .await?
+                    {
+                        StopObservationStep::Continue { state, summary } => (*state, summary),
+                        StopObservationStep::Exit(exit) => return Ok(exit),
+                    };
 
                     match self
                         .stop

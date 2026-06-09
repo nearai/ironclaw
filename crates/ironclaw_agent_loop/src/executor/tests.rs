@@ -263,6 +263,7 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 2);
@@ -338,6 +339,7 @@ async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 1);
@@ -420,6 +422,7 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
@@ -505,6 +508,7 @@ async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
@@ -556,6 +560,7 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
             assert!(cancelled.checkpoint_id.is_some());
         }
         PromptStep::Prepared(_) => panic!("expected cancelled exit"),
+        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
         PromptStep::Exit(exit) => panic!("expected cancelled exit, got {exit:?}"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     }
@@ -658,6 +663,7 @@ async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
             assert!(failed.checkpoint_id.is_some());
         }
         PromptStep::Prepared(_) => panic!("security rejection should end the run"),
+        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
         PromptStep::Exit(exit) => panic!("expected failed exit, got {exit:?}"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     }
@@ -2792,6 +2798,7 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
     let returned_state = match step {
         PromptStep::SkipModel(state, _ack) => *state,
         PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
+        PromptStep::ResumeApproval(_) => panic!("expected SkipModel, got ResumeApproval"),
         PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
     };
 
@@ -2851,6 +2858,7 @@ async fn prompt_stage_skip_model_carries_pending_input_ack() {
     let mut carried_ack = match step {
         PromptStep::SkipModel(_state, ack) => ack,
         PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
+        PromptStep::ResumeApproval(_) => panic!("expected SkipModel, got ResumeApproval"),
         PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
     };
 
