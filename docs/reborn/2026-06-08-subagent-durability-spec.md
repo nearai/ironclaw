@@ -33,6 +33,12 @@ Plus: introduce the `CapabilityResultStore` trait (does not exist today). Introd
 | 11 | Idempotency ledger is **two-phase** (`delivered_at` NULL = pencil, NOT NULL = sealed). Pencil insert claims ownership; gate-store write completes delivery; seal UPDATE marks final. Pencil rows surviving a crash become `retryable` on next boot. | D1 fix. Resolves "crash between ledger insert and gate-store write silently strands the parent loop" bug surfaced by multi-agent review. Matches `IdempotencyLedger::begin_or_replay` precedent. |
 | 12 | Reconciler handles **orphan settlement log rows** (gate cleaned up before delivery) by writing a tombstone + sealing the ledger row in one pass. Counts as `skipped_orphan`, not `failed`. | D9 fix. Resolves "every boot counts cleaned-up gates as `failed` forever" bug. Preserves settlement log append-only invariant. |
 | 13 | `ReplayReport` has five operator-meaningful counters: `redelivered`, `skipped_idempotent`, `retryable`, `skipped_orphan`, `failed`. Only `failed > 0` is actionable. | D1+D9. Eliminates "what does `skipped` actually mean here" alert ambiguity. |
+| 14 | Reconciler replay algorithm is **batch-phased**: Phase 0 (bound input via LEFT JOIN), Phase 1 (preflight batch read), Phase 2 (multi-row ledger writes), Phase 3 (parallel capability loads via `join_all`), Phase 4 (per-row deliver+seal). Phases 0–3 issue O(1) DB calls regardless of pending-row count. | D4 fix. Resolves N+1 query problem surfaced by review. Phase 0 LEFT JOIN bounds replay input by outstanding work, not historical log size — addresses long-term concern (settlement log growth). |
+| 15 | Reconciler runs in a **background `tokio::spawn` task**, not synchronously at boot. Foreground traffic (incl. blocking subagent calls) is NEVER blocked by replay. Background-mode spawn admission is gated **per-scope** by `ReplayState[scope].completed_at` — rejected with `SubagentSpawnError::ReplayInProgress { try_again_after_ms }` until complete. | D5 fix. Preserves <100 ms foreground cold start regardless of replay backlog. Multi-tenant safe: tenant A's recovery does not gate tenant B's admissions. Background-mode default is OFF through WU-G so user impact is bounded. |
+| 16 | Reconciler uses a **dedicated `replay_pool`** (default 4 DB connections, configurable via `RebornEventStoreConfig.replay_pool_size`), separate from the main runtime connection pool. Prevents replay from starving foreground writes during a recovery storm. | D5 fix. Operationally observable as a distinct metric. Sizing controlled by operator. |
+| 17 | **Active-scope enumeration is eager at boot** via a runs-table query for non-terminal runs. Bounded by active-runs count, not historical user count. Lazy per-scope replay on first traffic is a deferred optimization (would add cold-foreground latency for first-touch tenants after restart). | D5 design choice. Eager wins for foreground SLA at typical scale. |
+| 18 | **Per-replay observability** is a contract, not optional. Required metrics (`replay_duration_seconds`, `replay_pending_rows`, `replay_outcomes_total{outcome=…}`, `pencil_age_seconds`, `replay_in_progress`), required alerts (`failed > 0`, `pencil_age_seconds > 60`, `replay_duration_seconds{P95} > 30`), tracing spans (one per scope + one per phase). Prerequisite for WU-G E2E + WU-F WebUI integration. | D5 long-term concern (operator clarity). See §5.7 for full contract. |
+| 19 | **HA replication is supported but redundant.** Each replica boot runs its own replay independently. Correctness holds (Phase 2b `INSERT OR IGNORE` arbitrates, seal UPDATE is single-winner). Cost is N× DB load at boot. Active-active leader election is a cross-cutting follow-up, NOT WU-C scope. | Long-term posture. Spec is HA-safe today, HA-redundant. Optimizations are additive. |
 
 The rest of this document fills in mechanics for each store.
 
@@ -881,93 +887,123 @@ pub enum ReconcilerError {
 
 ```
 fn replay(scope: &TurnScope) -> ReplayReport:
-  log_entries = settlement_event_log.read_all(scope)
-                  WHERE event_kind IN (Completed, Failed, Cancelled)
-                  AND   child_run_id IS NOT NULL
+  // ── Phase 0 — input bounding (one query) ──
+  // Read ONLY settlement-log rows whose ledger row is missing or pencil
+  // (NULL delivered_at). Bounded by outstanding work, not historical log size.
+  // PostgreSQL example:
+  //   SELECT s.* FROM subagent_gate_settlement_log s
+  //     LEFT JOIN subagent_idempotency_ledger l
+  //       ON  s.run_id        = l.run_id
+  //       AND s.child_run_id  = l.child_run_id
+  //       AND s.terminal_kind = l.terminal_kind
+  //   WHERE s.tenant_id = $1 AND s.user_id = $2
+  //     AND s.event_kind IN ('Completed', 'Failed', 'Cancelled')
+  //     AND s.child_run_id IS NOT NULL
+  //     AND (l.delivered_at IS NULL OR l.run_id IS NULL);
+  pending = settlement_event_log.read_pending_for_scope(scope)
+
+  if pending is empty:
+    return ReplayReport::zero()
 
   redelivered = 0; skipped_idempotent = 0
   retryable = 0; skipped_orphan = 0; failed = 0
 
-  for entry in log_entries:
-    key = (entry.run_id, entry.child_run_id, entry.terminal_kind)
+  // ── Phase 1 — preflight (two batched reads) ──
+  // Partition `pending` rows into live / orphan / explicit-tombstoned.
+  live_gate_refs = gate_store.gates_exist_batch(
+                     scope,
+                     pending.iter().map(|r| r.gate_ref).collect())
+  // Returns Set<GateRef> of refs that still exist.
 
-    // --- D9: detect orphan (parent cancelled, gate row deleted) ---
-    if !gate_store.gate_exists(scope, entry.gate_ref):
-      // Parent moved out. Tombstone child + seal ledger so no future boot
-      // re-attempts. This branch handles its own ledger writes.
-      tombstone_store.write_tombstone(
-        scope, SubagentResultTombstone {
-          child_run_id: entry.child_run_id,
-          terminal_status: entry.terminal_status,
-          disposition: SubagentResultDisposition::DiscardedParentGone,
-        })
-      ledger_inserted = idempotency_ledger.try_insert(key, delivery_node=self.node_id)
-      idempotency_ledger.seal(key)   // delivered_at = NOW()
-      skipped_orphan += 1
-      continue
+  tombstoned_child_ids = tombstone_store.read_tombstones_batch(
+                          scope,
+                          pending.iter().map(|r| r.child_run_id).collect())
+  // Returns Set<TurnRunId> of children with explicit tombstones.
 
-    // --- check tombstone BEFORE ledger claim (avoids race) ---
-    tombstone = tombstone_store.read_tombstone(scope, entry.child_run_id)
-    if tombstone is Some:
-      // Already explicitly discarded by parent cancel. Seal ledger to
-      // prevent future replay; counts as orphan-style cleanup.
-      idempotency_ledger.try_insert(key, delivery_node=self.node_id)
-      idempotency_ledger.seal(key)
-      skipped_orphan += 1
-      continue
+  (live_rows, orphan_rows) = pending.partition(|r| live_gate_refs.contains(&r.gate_ref))
+  (live_rows, tombstoned_rows) = live_rows.partition(
+                                   |r| !tombstoned_child_ids.contains(&r.child_run_id))
 
-    // --- pencil-receipt insert (claim ownership) ---
-    inserted = idempotency_ledger.try_insert(key, delivery_node=self.node_id)
-    // INSERT OR IGNORE (libsql) / ON CONFLICT DO NOTHING (postgres)
-    // leaves delivered_at NULL
+  // ── Phase 2a — orphan + tombstoned cleanup (one multi-row write each) ──
+  for row in orphan_rows:
+    tombstone_store.write_tombstone(
+      scope, SubagentResultTombstone {
+        child_run_id: row.child_run_id,
+        terminal_status: row.terminal_status,
+        disposition: SubagentResultDisposition::DiscardedParentGone,
+      })
+  // PostgreSQL multi-row upsert (single round-trip):
+  //   INSERT INTO subagent_idempotency_ledger
+  //     (tenant_id, user_id, agent_id, run_id, child_run_id, terminal_kind,
+  //      delivery_node, delivered_at)
+  //   VALUES (?,?,?,?,?,?,?,NOW()), …
+  //   ON CONFLICT (run_id, child_run_id, terminal_kind) DO UPDATE
+  //     SET delivered_at = COALESCE(subagent_idempotency_ledger.delivered_at, NOW());
+  idempotency_ledger.upsert_sealed_batch(
+    scope, orphan_rows ++ tombstoned_rows, delivery_node=self.node_id)
+  skipped_orphan = orphan_rows.len() + tombstoned_rows.len()
 
-    if not inserted:
-      // Row already exists. Is it sealed (delivered_at NOT NULL) or pencil?
-      existing = idempotency_ledger.read(key)
-      if existing.delivered_at is Some:
-        skipped_idempotent += 1   // already sealed; nothing to do
-      else:
-        // Pencil receipt from prior crash. Race: another node may be
-        // re-attempting concurrently. The seal UPDATE in step 2 is the
-        // single point of truth — only one node's UPDATE will set delivered_at
-        // (we do not UPDATE if delivered_at IS NOT NULL).
-        retryable += 1
-        // Fall through to attempt delivery + seal.
-        attempt_delivery = true
+  // ── Phase 2b — pencil claim (one multi-row write) ──
+  // INSERT OR IGNORE / ON CONFLICT DO NOTHING. Leaves delivered_at NULL.
+  inserted_keys = idempotency_ledger.insert_pencil_batch(
+                    scope, live_rows, delivery_node=self.node_id)
+  // Returns Set<LedgerKey> of rows actually inserted (not pre-existing).
+
+  // Partition: freshly-claimed vs pre-existing ledger row.
+  (freshly_claimed, pre_existing) = live_rows.partition(
+                                     |r| inserted_keys.contains(&r.key()))
+
+  // For pre-existing rows, read the ledger to see if sealed or pencil.
+  // One batched SELECT keyed on the pre_existing row keys.
+  pre_existing_states = idempotency_ledger.read_batch(
+                          scope, pre_existing.iter().map(|r| r.key()))
+
+  to_attempt = freshly_claimed
+  for (row, state) in pre_existing.zip(pre_existing_states):
+    if state.delivered_at is Some:
+      skipped_idempotent += 1   // already sealed
     else:
-      retryable += 0   // fresh pencil receipt; first attempt
-      attempt_delivery = true
+      retryable += 1            // pencil from prior crash
+      to_attempt.push(row)
 
-    if not attempt_delivery: continue
+  // ── Phase 3 — parallel capability loads ──
+  // join_all caps at the durable backend's connection pool. Capability
+  // payloads can be megabyte-scale; parallelize the reads.
+  load_results = join_all(to_attempt.iter().map(|r|
+    capability_result_store.load(scope, &r.result_ref)
+  ))
 
-    // --- load capability result ---
-    result = capability_result_store.load(scope, entry.result_ref)
-    if result is Err or None:
-      debug!("reconciler: capability result missing for child_run_id={}", entry.child_run_id)
-      failed += 1
-      // Do NOT seal the ledger — leaves pencil receipt for a future
-      // boot to retry (if result becomes available e.g. via backfill).
-      continue
-
-    // --- re-deliver to parent's gate store ---
-    outcome = gate_store.record_background_settlement(
-        scope, entry.parent_run_id, entry.child_run_id, result,
-    )
-    match outcome:
-      Ok(_) =>
-        // SEAL the ledger row (pen receipt) — only now is delivery final.
-        idempotency_ledger.seal(key)
-        redelivered += 1
-      Err(e) =>
-        warn!("reconciler: gate store re-delivery failed: {e}")
+  // ── Phase 4 — per-row deliver + seal (sequential per row, parallel-OK) ──
+  // Per-row because each row delivers to a different parent's mailbox.
+  // The seal UPDATE is the single point of truth for "is this final?"
+  for (row, load_result) in to_attempt.zip(load_results):
+    match load_result:
+      Err(_) | Ok(None) =>
+        debug!("reconciler: capability result missing for child_run_id={}",
+               row.child_run_id)
         failed += 1
-        // Do NOT seal. Future boot will see pencil receipt + retry.
+        // Leave pencil receipt; next boot will retry.
+        continue
+      Ok(Some(payload)) =>
+        match gate_store.record_background_settlement(
+                scope, row.parent_run_id, row.child_run_id, payload):
+          Ok(_) =>
+            // SEAL — single-row UPDATE keyed on the ledger PK.
+            // Sets delivered_at = NOW() WHERE delivered_at IS NULL.
+            idempotency_ledger.seal(scope, row.key())
+            redelivered += 1
+          Err(e) =>
+            warn!("reconciler: gate-store re-delivery failed: {e}")
+            failed += 1
+            // Leave pencil receipt; next boot will retry.
 
   return ReplayReport { redelivered, skipped_idempotent, retryable,
                         skipped_orphan, failed }
 ```
 
-Concurrency safety lives in two ledger writes. Two nodes racing on the same `(run_id, child_run_id, terminal_kind)` both attempt `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING`. Exactly one writer sees a row inserted (delivered_at NULL); the other sees zero rows affected. Either node may then attempt delivery — the gate store is idempotent in the same way (first-writer-wins on its own primary key, per §1). Whichever node completes its gate write first calls `seal(key)` which sets `delivered_at = NOW()` only if it is currently NULL. The seal UPDATE is the single point of truth: once a row is sealed, future passes count it as `skipped_idempotent` and never retry. Pencil receipts (delivered_at NULL) found on subsequent boots are evidence of a crash between insert and seal — the reconciler counts them as `retryable` and re-attempts delivery + seal. A duplicate delivery cannot occur because both gate store and seal are idempotent at the row level. A missed delivery cannot occur because pencil receipts survive crashes and trigger retry on the next boot. The compaction job mentioned in earlier drafts is no longer required for correctness — it remains a future optimization for GC of long-completed rows.
+**Performance shape (D4).** The replay algorithm is phase-batched: each phase issues O(1) DB calls regardless of `len(pending)`. Phase 0 bounds input to outstanding work via a LEFT JOIN against the ledger — historical settled log rows never enter the algorithm. Phase 1 batches both preflight reads. Phase 2 batches both ledger writes (orphan-seal + pencil-claim). Phase 3 parallelizes capability loads via `join_all`. Only Phase 4 (deliver + seal) is per-row, and only because each row's gate-store target differs — within Phase 4 the work can be further sharded across a `tokio::JoinSet` if profiling demands it. Net cost is dominated by Phase 4's per-row delivery (~5–30 ms per row depending on backend latency) rather than the historical N+1 round-trip cost. Implementations MUST cap Phase 3 concurrency at the durable backend's connection-pool size; running `join_all` over thousands of futures with a 4-connection pool will starve foreground writes. See §5.6 for the dedicated replay pool guidance.
+
+**Concurrency safety.** Two-phase ledger semantics from D1 hold under batching: Phase 2b's multi-row `INSERT OR IGNORE` is row-level idempotent — racing nodes either insert a pencil row or observe an existing one; only one node's seal UPDATE will succeed (the `delivered_at IS NULL` guard arbitrates). The gate-store write in Phase 4 is independently idempotent on its own primary key (per §1). Together: at most one delivery per `(run_id, child_run_id, terminal_kind)` tuple, regardless of replica count, crash count, or fan-out scale.
 
 ### 5.4 Idempotency ledger schema (libSQL)
 
@@ -1058,16 +1094,65 @@ Both dialects match the in-memory settlement semantics already established in `g
 
 ### 5.6 Composition wire-up
 
-Reconciler runs once per process boot in `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs` (local dev) and its production counterpart in `crates/ironclaw_reborn_composition/src/lib.rs`. Boot sequence:
+Reconciler runs once per process boot — **detached in a background task**, not blocking foreground traffic. Boot sequence in `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs` (local dev) and the production counterpart in `crates/ironclaw_reborn_composition/src/lib.rs`:
 
-1. `build_reborn_event_stores` (in `crates/ironclaw_reborn_event_store/src/lib.rs`) constructs the durable backends; it now also constructs the `SubagentIdempotencyLedger` instance and returns it alongside `RebornEventStores`.
-2. Composition layer creates concrete `DurableSubagentRestartReconciler` (implements `SubagentRestartReconciler`) holding references to: settlement event log (scoped reader over `DurableEventLog`), `CapabilityResultStore`, `SubagentResultTombstoneStore`, idempotency ledger, gate store.
-3. Before first run is accepted, composition boot path calls `reconciler.replay(&scope).await` for each active scope with non-terminal runs. Returned `ReplayReport` logged at `debug!`. Any `failed > 0` produces a `warn!`-level line.
-4. `RebornLoopComponentGraphReadiness.subagent_restart_reconciler` set to `RebornComponentReadiness::production_verified(RebornComponentRequirement::Required)` when durable implementation is wired; `non_durable(required)` for in-memory local-dev path. Production mode fails closed on any non-`ProductionVerified` safety class.
+1. `build_reborn_event_stores` constructs the durable backends and returns the `SubagentIdempotencyLedger` instance alongside `RebornEventStores`.
+2. Composition layer creates a concrete `DurableSubagentRestartReconciler` holding references to: settlement event log (scoped reader), `CapabilityResultStore`, `SubagentResultTombstoneStore`, idempotency ledger, gate store. The reconciler is given its own **dedicated DB connection pool** (`replay_pool`, default 4 connections) — separate from the main runtime pool so replay never starves foreground writes during a recovery storm.
+3. **Active-scope enumeration (eager, bounded).** Composition queries the runs table for scopes with non-terminal runs at boot time. This is bounded by active-runs count, not historical user count — typical: low thousands. The enumerated set is `active_scopes: Vec<TurnScope>`. Lazy per-scope replay on first incoming traffic is a future optimization (deferred — would add cold-foreground latency for first-touch tenants after a restart).
+4. **Background replay dispatch.** Composition stores an `Arc<ReplayState>` keyed by `TurnScope` (or `(tenant_id, agent_id)`), each tracking `{ in_progress: bool, completed_at: Option<Instant>, last_report: Option<ReplayReport> }`. Composition then `tokio::spawn`s one replay task per active scope (or one task that walks `active_scopes` sequentially with `replay_pool` capping concurrency — implementation choice).
+5. **Admission gate (background mode only).** The `SpawnSubagentPort` for the new background mode (WU-D) consults `ReplayState[scope].completed_at` before admitting a new background spawn:
+   - If `completed_at.is_some()` → admit immediately.
+   - If `completed_at.is_none()` → reject with a structured `SubagentSpawnError::ReplayInProgress { try_again_after_ms }` so the parent loop's retry logic can re-attempt cleanly.
+   - Foreground requests, blocking subagent calls, and all non-background-spawn paths are NEVER gated by replay completion.
+6. `RebornLoopComponentGraphReadiness.subagent_restart_reconciler` is set to `RebornComponentReadiness::production_verified(Required)` when durable; `non_durable(required)` for in-memory local-dev. Production fails closed on non-`ProductionVerified`.
 
-In-memory local-dev stub (`local_dev.rs`) wires a `NoopSubagentRestartReconciler` returning `ReplayReport { redelivered: 0, skipped_idempotent: 0, failed: 0 }` immediately — no-op, consistent with how other non-durable local-dev components behave (degraded warnings, not hard failures, in `LocalDevTest` mode).
+**Why background, not sync.** Foreground latency is the primary user-facing SLA. Synchronous boot-block (the previous spec version) made cold start scale with `O(scopes × pending_rows × per-row-cost)` — pathological in multi-tenant deployments. The background model preserves <100 ms foreground cold start regardless of replay backlog. Background-mode admission delay is acceptable because (a) background spawns are by definition not latency-critical, (b) the toggle defaults OFF through WU-G, (c) per-scope gating means tenant A's replay never blocks tenant B's background admissions.
 
-### 5.7 Crate placement
+**Why dedicated `replay_pool`.** A 10-second replay over 10k rows would otherwise compete with foreground writes for the main connection pool. The dedicated pool (default 4 connections) caps replay's DB footprint and makes its load operationally observable as a separate metric. Configurable via `RebornEventStoreConfig.replay_pool_size`.
+
+In-memory local-dev stub wires a `NoopSubagentRestartReconciler` returning `ReplayReport::zero()` immediately — no-op, consistent with other non-durable local-dev components (degraded warnings, not hard failures, in `LocalDevTest` mode). `NoopSubagentRestartReconciler` ignores the admission gate (`completed_at` always `Some(Instant::now())`).
+
+**HA replicas — design decision deferred to follow-up.** With multiple replicas serving the same tenant, each replica's reconciler runs `replay` independently. Correctness is preserved (Phase 2b's `INSERT OR IGNORE` arbitrates; the seal UPDATE is single-winner). Cost is N× DB load at boot for N replicas — wasted but bounded. Future HA work may introduce per-tenant leader election (Postgres advisory locks, K8s leases) or work-sharding by `hash(tenant_id) % replica_count`. Track as cross-cutting work; do not block WU-C on this. The current spec is HA-safe but HA-redundant.
+
+### 5.7 Observability contract
+
+Each per-scope replay emits a structured event at completion. Operator dashboards key on `(tenant_id, agent_id)`.
+
+**Per-replay event:**
+
+```
+RebornEventKind::SubagentReplayCompleted {
+    scope: TurnScope,
+    duration_ms: u64,
+    pool_size: u32,             // replay_pool capacity at run time
+    pending_count: u32,         // rows entering Phase 0
+    report: ReplayReport,       // 5-counter struct from §5.2
+}
+```
+
+**Required metrics** (Prometheus / equivalent):
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `reborn_subagent_replay_duration_seconds` | Histogram | `tenant_id`, `agent_id` | Wall-clock per-scope replay. P50/P95/P99 buckets. |
+| `reborn_subagent_replay_pending_rows`     | Gauge     | `tenant_id`, `agent_id` | Live count of pending rows (Phase 0 output). Sampled per replay. |
+| `reborn_subagent_replay_outcomes_total`   | Counter   | `tenant_id`, `agent_id`, `outcome ∈ {redelivered, skipped_idempotent, retryable, skipped_orphan, failed}` | Cumulative per-outcome counter. |
+| `reborn_subagent_pencil_age_seconds`      | Gauge     | `tenant_id`, `agent_id` | Max age of any pencil-receipt row in the ledger. Sampled per replay. |
+| `reborn_subagent_replay_in_progress`      | Gauge     | `tenant_id`, `agent_id` | 0 or 1. Tracks the background task. |
+
+**Required alerts:**
+
+- **`failed > 0` over any 5-minute window** → page on-call. Real-failure indicator; all phantom failures (orphans, idempotent-skips) are routed to dedicated counters under A+A.
+- **`pencil_age_seconds > 60`** → page on-call. A pencil receipt older than 60s indicates either a flaky reconciler impl or a stuck retry loop — neither is normal recovery behavior.
+- **`replay_duration_seconds{quantile="0.95"} > 30`** → ops review. Replay should complete in seconds, not tens. P95 above 30s suggests either a connection-pool starvation issue (raise `replay_pool_size`) or a real fan-out scale problem (raise the alarm to engineering).
+
+**Tracing.** Replay opens one span per scope (`reborn.subagent.replay`), with child spans per phase (`phase0.bound`, `phase1.preflight`, `phase2a.cleanup`, `phase2b.claim`, `phase3.load`, `phase4.deliver`). Span attributes include `pending_count`, `outcome counts`, `pool_size`. This is standard OpenTelemetry shape — no custom span format.
+
+**WebUI surfacing (WU-F).** The WebUI's replay-status indicator reads `replay_in_progress` per `(tenant_id, agent_id)` and surfaces "background subagent recovery in progress (N pending)" until the gauge drops to 0. Background-spawn rejection during this window MUST surface to the user as a "starting up, retrying in N seconds" affordance — not as a silent error.
+
+**Why this is required, not optional.** WU-D's background mode produces actions a user can see (subagent spawn + later result delivery). When replay is mid-flight, those actions become latency-uncertain. The observability contract turns that uncertainty into a deterministic operator signal — without it, ops blame the application layer for what is actually durable-state recovery delay. This contract is a prerequisite for the WU-G E2E + parity tests to be authored.
+
+### 5.8 Crate placement
 
 All new types — `SubagentRestartReconciler` trait, `ReplayReport`, `ReconcilerError`, `DurableSubagentRestartReconciler` (libSQL impl), `DurableSubagentRestartReconcilerPostgres` (PostgreSQL impl), `NoopSubagentRestartReconciler`, and the `subagent_idempotency_ledger` migration files — live in `crates/ironclaw_reborn_event_store/`. Canonical owner of Reborn durable backend selection (`events.md` §2). Existing `BoundaryRule` covers it. Already holds both libSQL and filesystem backends. Adding typed repositories for the idempotency ledger here follows the same pattern as the existing libSQL-backed durable event log.
 
@@ -1157,6 +1242,9 @@ All tests go in `crates/ironclaw_reborn_event_store/tests/` (contract-test tier,
 - **Stale-children GC.** Orphan cleanup (D9) handles the case where the parent run is gone by the time the reconciler runs — those entries are tombstoned and sealed in one pass. Stale tombstones from a deployment where `BoundedSubagentResultTombstoneStore` evicted entries before the durable migration are a separate concern; the durable `FilesystemSubagentTombstoneStore` (§3) eliminates eviction by construction. A time-based TTL GC for long-completed ledger rows is a future optimization, not a correctness requirement under A+A.
 - **Capability result tombstoned between settle and replay.** If result at `result_ref` was GC'd between child settled and replay (e.g., result store has TTL), `capability_result_store.load` returns `None` → entry counted `failed`. Ledger row remains, preventing future re-attempt. Correct behavior — a GC'd result cannot be re-delivered — but surfaces as non-zero `failed` in `ReplayReport`. Operators see `warn!`. Documentation for `ReplayReport.failed` must call this out. For WU-C the in-memory `CapabilityResultStore` has no TTL → cannot occur; only materializes if future durable store adds TTL eviction. The reconciler counts this as `failed` (not `skipped`) and the pencil receipt remains in the ledger, so the next boot will retry the capability load. If the result remains missing across N consecutive boots, an operator may manually tombstone the entry; automated stale-pencil GC is a follow-up, not WU-C scope.
 - **Feature toggle interaction.** While `subagent.background_enabled` is `false` (default until WU-G), no settlement log entries for background children are written → replay always returns zero `ReplayReport`. When toggle flips back `false` after `true` (rollback), durable rows from ON-period remain; replay on next boot returns `failed` entries for each settled child whose parent loop no longer expects results (gate store entry for blocking-mode parent does not accept background deliveries). Safe — `failed` count increments, ledger row blocks future re-attempt, parent loop unaffected.
+- **HA replication makes replay redundant but safe.** Each replica boot runs its own replay. Correctness holds because Phase 2b is row-level idempotent and the seal UPDATE is single-winner. Cost is N× DB load at boot for N replicas. Acceptable for current single-node + warm-standby topologies. If we ever run active-active replicas, introduce per-tenant leader election (advisory lock / K8s lease) — a cross-cutting follow-up, not WU-C scope. The current spec is HA-safe, HA-redundant.
+- **Settlement log growth.** Phase 0's LEFT JOIN bounds replay input by outstanding pencil-or-missing rows, so replay's scan size stays proportional to outstanding work — not historical log size. Long-term, sealed rows older than (e.g.) 90 days should be moved to a `subagent_gate_settlement_log_archive` table or summarized via materialized view. Track as ops follow-up; not WU-C scope.
+- **Replay pool sizing under load.** Default `replay_pool_size = 4` is fine for typical fan-outs. At sustained 1000+ pending rows per scope, tuning to 8 or 16 may be warranted. Operators surface this via the `replay_duration_seconds` P95 metric. Spec does not mandate auto-tuning; sizing knob is operator-controlled per `RebornEventStoreConfig`.
 
 ---
 
@@ -1420,6 +1508,13 @@ All DDL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` for i
 - [ ] WU-C lands the two-phase idempotency ledger (D1): `delivered_at NULL` column nullable; pencil-insert + pen-seal pattern; matches the existing `IdempotencyLedger::begin_or_replay` precedent in `crates/ironclaw_product_workflow/src/ledger.rs`.
 - [ ] WU-C lands orphan-gate handling (D9): reconciler tombstones + seals when `gate_store.gate_exists(gate_ref)` returns false; `gate_exists` becomes a required method on the gate store trait.
 - [ ] WU-C extends `ReplayReport` with `retryable: u32` and `skipped_orphan: u32` counters and updates operator dashboards (`warn!` on `failed > 0` only).
+- [ ] WU-C implements the §5.3 phase-batched replay algorithm: Phase 0 LEFT JOIN, Phase 1 batched preflight, Phase 2 multi-row ledger writes, Phase 3 `join_all` capability loads, Phase 4 per-row deliver+seal.
+- [ ] WU-C lands `replay_pool` config (`RebornEventStoreConfig.replay_pool_size: u32`, default 4). Reconciler MUST use this pool exclusively for replay queries.
+- [ ] WU-C dispatches replay via `tokio::spawn` from composition boot, NOT `.await` inline. Foreground traffic accepts immediately on cold start.
+- [ ] WU-C wires the per-scope admission gate: `SpawnSubagentPort` for background mode reads `ReplayState[scope].completed_at` before admitting; rejects with `SubagentSpawnError::ReplayInProgress` until complete. Foreground / blocking-subagent paths never consult this gate.
+- [ ] WU-C lands eager active-scope enumeration via runs-table query at boot. Lazy per-scope replay is a deferred follow-up.
+- [ ] WU-C lands the §5.7 observability contract: emit `RebornEventKind::SubagentReplayCompleted` per-scope; expose the five required metrics; wire the three required alerts.
+- [ ] WU-G E2E gates the background-mode toggle (`subagent.background_enabled = true` in production) on the observability dashboard being live AND the three alerts being silent over a 7-day soak.
 
 ## References
 
