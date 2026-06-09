@@ -9,11 +9,11 @@ use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     AuthRequirement, FakeProductWorkflow, ProductAdapterError, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
-    ProductWorkflow, ProtocolAuthEvidence,
+    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput, ProductRejection,
+    ProductRejectionKind, ProductWorkflow, ProjectionReadRequest, ProtocolAuthEvidence,
 };
 use ironclaw_reborn_openai_compat::{
     InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
@@ -24,7 +24,7 @@ use ironclaw_reborn_openai_compat::{
     OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
     OpenAiResponsesWorkflow, openai_compat_router_with_state,
 };
-use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tower::ServiceExt;
@@ -65,6 +65,7 @@ async fn responses_create_submits_product_workflow_and_returns_projection() {
     assert_eq!(submitted["input"][0]["role"], "user");
     assert_eq!(submitted["input"][0]["content"], "hello");
     assert!(submitted.get("model").is_none());
+    assert_eq!(workflow.read_inputs().len(), 1);
 }
 
 #[tokio::test]
@@ -427,6 +428,7 @@ async fn previous_response_id_must_be_authorized_before_product_workflow() {
 #[tokio::test]
 async fn responses_wait_timeout_detaches_without_resubmitting() {
     let workflow = Arc::new(FakeProductWorkflow::new());
+    workflow.program_projection_read_resolution(sample_projection_read_request());
     let service = OpenAiResponsesWorkflow::new(
         workflow.clone(),
         Arc::new(InMemoryOpenAiCompatRefStore::new()),
@@ -671,6 +673,7 @@ fn router_with_store(
     ref_store: Arc<InMemoryOpenAiCompatRefStore>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
 ) -> axum::Router {
+    workflow.program_projection_read_resolution(sample_projection_read_request());
     let service = OpenAiResponsesWorkflow::new(workflow, ref_store, reader);
     openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
         .layer(axum::Extension(caller()))
@@ -759,6 +762,21 @@ fn caller() -> OpenAiCompatAuthenticatedCaller {
     .expect("caller")
 }
 
+fn sample_projection_read_request() -> ProjectionReadRequest {
+    ProjectionReadRequest {
+        actor: TurnActor::new(UserId::new("user-a").expect("user")),
+        scope: TurnScope::new_with_owner(
+            TenantId::new("tenant-a").expect("tenant"),
+            Some(AgentId::new("agent-a").expect("agent")),
+            Some(ProjectId::new("project-a").expect("project")),
+            ThreadId::new("thread-openai-response").expect("thread"),
+            Some(UserId::new("user-a").expect("user")),
+        ),
+        after_cursor: None,
+        limit: None,
+    }
+}
+
 fn completed_response(id: OpenAiResponseId, text: &str) -> OpenAiResponseObject {
     OpenAiResponseObject {
         id,
@@ -785,6 +803,7 @@ fn completed_response(id: OpenAiResponseId, text: &str) -> OpenAiResponseObject 
 struct FixedAckWorkflow {
     ack: ProductInboundAck,
     seen_envelopes: Mutex<Vec<ProductInboundEnvelope>>,
+    read_inputs: Mutex<Vec<ProductProjectionReadInput>>,
 }
 
 impl FixedAckWorkflow {
@@ -792,6 +811,7 @@ impl FixedAckWorkflow {
         Self {
             ack,
             seen_envelopes: Mutex::new(Vec::new()),
+            read_inputs: Mutex::new(Vec::new()),
         }
     }
 
@@ -814,6 +834,17 @@ impl ProductWorkflow for FixedAckWorkflow {
             .expect("workflow seen lock")
             .push(envelope);
         Ok(self.ack.clone())
+    }
+
+    async fn read_projection(
+        &self,
+        request: ProductProjectionReadInput,
+    ) -> Result<ProjectionReadRequest, ProductAdapterError> {
+        self.read_inputs
+            .lock()
+            .expect("workflow read lock")
+            .push(request);
+        Ok(sample_projection_read_request())
     }
 }
 

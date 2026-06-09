@@ -13,7 +13,10 @@ use ironclaw_host_api::{
     AgentId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
     ResourceScope, TenantId, UserId, VirtualPath,
 };
-use ironclaw_product_adapters::{AdapterInstallationId, ProductAdapterId, ProductInboundAck};
+use ironclaw_product_adapters::{
+    AdapterInstallationId, ProductAdapterId, ProductInboundAck, ProductWorkflow,
+    ProjectionReadRequest,
+};
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
     ProductActorUserResolver, ProductConversationBindingService, ProductInstallationKey,
@@ -24,7 +27,11 @@ use ironclaw_reborn_openai_compat::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
     OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow, OpenAiCompatErrorKind,
-    OpenAiCompatHttpError, OpenAiCompatRouterState, openai_compat_router_with_state,
+    OpenAiCompatHttpError, OpenAiCompatRefStore, OpenAiCompatResourceBinding,
+    OpenAiCompatRouterState, OpenAiResponseObject, OpenAiResponseOutputItem,
+    OpenAiResponseOutputItemStatus, OpenAiResponseProjection, OpenAiResponseReadRequest,
+    OpenAiResponseStatus, OpenAiResponseWaitRequest, OpenAiResponsesMessageRole,
+    OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
     openai_compat_routes,
 };
 use ironclaw_reborn_openai_compat_storage::FilesystemOpenAiCompatRefStore;
@@ -84,7 +91,7 @@ pub async fn build_openai_compat_route_mount(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
     ));
-    let product_workflow = Arc::new(
+    let product_workflow: Arc<dyn ProductWorkflow> = Arc::new(
         DefaultProductWorkflow::new(
             inbound,
             Arc::new(RebornFilesystemIdempotencyLedger::new(
@@ -105,20 +112,32 @@ pub async fn build_openai_compat_route_mount(
     );
 
     let ref_filesystem: Arc<dyn RootFilesystem> = local_runtime.extension_filesystem.clone();
-    let ref_store = Arc::new(FilesystemOpenAiCompatRefStore::with_root(
-        ref_filesystem,
-        openai_compat_ref_root(&tenant_id)?,
-    ));
-    let projection_reader = Arc::new(OpenAiChatCompletionThreadProjectionReader::new(
+    let ref_store: Arc<dyn OpenAiCompatRefStore> =
+        Arc::new(FilesystemOpenAiCompatRefStore::with_root(
+            ref_filesystem,
+            openai_compat_ref_root(&tenant_id)?,
+        ));
+    let chat_projection_reader = Arc::new(OpenAiChatCompletionThreadProjectionReader::new(
         runtime.webui_thread_service(),
     ));
-    let workflow = Arc::new(OpenAiChatCompletionsWorkflow::new(
+    let responses_projection_reader = Arc::new(OpenAiResponsesThreadProjectionReader::new(
+        runtime.webui_thread_service(),
+    ));
+    let chat_workflow = Arc::new(OpenAiChatCompletionsWorkflow::new(
+        product_workflow.clone(),
+        ref_store.clone(),
+        chat_projection_reader,
+    ));
+    let responses_workflow = Arc::new(OpenAiResponsesWorkflow::new(
         product_workflow,
         ref_store,
-        projection_reader,
+        responses_projection_reader,
     ));
     Ok(ProtectedRouteMount::new(
-        openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(workflow)),
+        openai_compat_router_with_state(
+            OpenAiCompatRouterState::with_chat_completions(chat_workflow)
+                .with_responses_workflow(responses_workflow),
+        ),
         openai_compat_routes(),
     ))
 }
@@ -172,7 +191,7 @@ impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjecti
             } => submitted_run_id.to_string(),
             _ => return Err(OpenAiCompatHttpError::internal()),
         };
-        let thread_scope = thread_scope_from_projection_request(&request)?;
+        let thread_scope = thread_scope_from_projection_read(&request.projection_read)?;
         loop {
             match self
                 .thread_service
@@ -215,17 +234,173 @@ impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjecti
     }
 }
 
-fn thread_scope_from_projection_request(
-    request: &OpenAiChatCompletionProjectionRequest,
+struct OpenAiResponsesThreadProjectionReader {
+    thread_service: Arc<dyn SessionThreadService>,
+    poll_interval: Duration,
+}
+
+impl OpenAiResponsesThreadProjectionReader {
+    fn new(thread_service: Arc<dyn SessionThreadService>) -> Self {
+        Self {
+            thread_service,
+            poll_interval: OPENAI_COMPAT_PROJECTION_POLL_INTERVAL,
+        }
+    }
+
+    async fn read_finalized_response_message(
+        &self,
+        request: &ProjectionReadRequest,
+        turn_run_id: String,
+    ) -> Result<Option<String>, OpenAiCompatHttpError> {
+        let thread_scope = thread_scope_from_projection_read(request)?;
+        match self
+            .thread_service
+            .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+                scope: thread_scope,
+                thread_id: request.scope.thread_id.clone(),
+                turn_run_id,
+            })
+            .await
+        {
+            Ok(message) => Ok(message.map(|message| message.content.unwrap_or_default())),
+            Err(
+                SessionThreadError::UnknownThread { .. }
+                | SessionThreadError::ThreadScopeMismatch { .. },
+            ) => Err(OpenAiCompatHttpError::not_found(Some(
+                "response_id".to_string(),
+            ))),
+            Err(error) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::openai_compat",
+                    error = %error,
+                    "failed to read finalized assistant message for OpenAI-compatible response"
+                );
+                Err(OpenAiCompatHttpError::from_kind(
+                    503,
+                    true,
+                    OpenAiCompatErrorKind::ServiceUnavailable,
+                    None,
+                ))
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
+    async fn wait_for_response_completion(
+        &self,
+        request: OpenAiResponseWaitRequest,
+    ) -> Result<OpenAiResponseProjection, OpenAiCompatHttpError> {
+        let submitted_run_id = match &request.accepted_ack {
+            ProductInboundAck::Accepted {
+                submitted_run_id, ..
+            } => submitted_run_id.to_string(),
+            _ => return Err(OpenAiCompatHttpError::internal()),
+        };
+        loop {
+            if let Some(content) = self
+                .read_finalized_response_message(&request.projection_read, submitted_run_id.clone())
+                .await?
+            {
+                return Ok(OpenAiResponseProjection::new(response_object(
+                    request.public_id,
+                    request.mapping.created_at,
+                    request.requested_model,
+                    OpenAiResponseStatus::Completed,
+                    Some(content),
+                )));
+            }
+            tokio::time::sleep(self.poll_interval).await;
+        }
+    }
+
+    async fn read_response(
+        &self,
+        request: OpenAiResponseReadRequest,
+    ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError> {
+        let submitted_run_id = response_turn_run_ref_from_mapping(&request)?;
+        let content = self
+            .read_finalized_response_message(&request.projection_read, submitted_run_id)
+            .await?;
+        let status = if content.is_some() {
+            OpenAiResponseStatus::Completed
+        } else {
+            OpenAiResponseStatus::InProgress
+        };
+        Ok(response_object(
+            request.public_id,
+            request.mapping.created_at,
+            request
+                .requested_model
+                .unwrap_or_else(|| "reborn".to_string()),
+            status,
+            content,
+        ))
+    }
+}
+
+fn response_turn_run_ref_from_mapping(
+    request: &OpenAiResponseReadRequest,
+) -> Result<String, OpenAiCompatHttpError> {
+    let OpenAiCompatResourceBinding::Bound { internal_refs } = &request.mapping.binding else {
+        return Err(OpenAiCompatHttpError::conflict(Some(
+            "response_id".to_string(),
+        )));
+    };
+    let Some(turn_run_ref) = internal_refs.turn_run_ref.as_ref() else {
+        return Err(OpenAiCompatHttpError::not_found(Some(
+            "response_id".to_string(),
+        )));
+    };
+    Ok(turn_run_ref.as_str().to_string())
+}
+
+fn response_object(
+    id: ironclaw_reborn_openai_compat::OpenAiResponseId,
+    created_at: u64,
+    model: String,
+    status: OpenAiResponseStatus,
+    content: Option<String>,
+) -> OpenAiResponseObject {
+    let output = content
+        .map(|text| {
+            vec![OpenAiResponseOutputItem::Message {
+                id: format!("msg_{}", id.as_str()),
+                status: Some(OpenAiResponseOutputItemStatus::Completed),
+                role: OpenAiResponsesMessageRole::Assistant,
+                content: serde_json::json!([{"type": "output_text", "text": text}]),
+            }]
+        })
+        .unwrap_or_default();
+    OpenAiResponseObject {
+        id,
+        object: "response".to_string(),
+        created_at,
+        status,
+        model,
+        output,
+        error: None,
+        incomplete_details: None,
+        usage: None,
+    }
+}
+
+fn thread_scope_from_projection_read(
+    projection_read: &ProjectionReadRequest,
 ) -> Result<ThreadScope, OpenAiCompatHttpError> {
-    let Some(agent_id) = request.projection_read.scope.agent_id.clone() else {
+    let Some(agent_id) = projection_read.scope.agent_id.clone() else {
         return Err(OpenAiCompatHttpError::internal());
     };
     Ok(ThreadScope {
-        tenant_id: request.projection_read.scope.tenant_id.clone(),
+        tenant_id: projection_read.scope.tenant_id.clone(),
         agent_id,
-        project_id: request.projection_read.scope.project_id.clone(),
-        owner_user_id: Some(request.projection_read.actor.user_id.clone()),
+        project_id: projection_read.scope.project_id.clone(),
+        owner_user_id: projection_read
+            .scope
+            .explicit_owner_user_id()
+            .cloned()
+            .or_else(|| Some(projection_read.actor.user_id.clone())),
         mission_id: None,
     })
 }
