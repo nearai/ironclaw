@@ -38,6 +38,7 @@ ENV CARGO_PROFILE_DIST_PANIC=abort \
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook \
     --profile dist \
+    --package ironclaw_reborn_cli \
     --features webui-v2-beta,slack-v2-host-beta \
     --recipe-path recipe.json
 

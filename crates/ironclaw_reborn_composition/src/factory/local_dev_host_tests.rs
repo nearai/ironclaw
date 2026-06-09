@@ -2,6 +2,8 @@ use ironclaw_host_api::MountPermissions;
 
 use super::*;
 
+mod approval_gates;
+
 #[tokio::test]
 async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
     let dir = tempfile::tempdir().expect("tempdir");
