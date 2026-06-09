@@ -95,7 +95,7 @@ The LLM configuration and operator command-plane routes are operator-wide. Host
 composition must only mount them for authenticators that represent a single
 trusted operator; multi-user session/OIDC authenticators should leave those
 routes unmounted until an admin role boundary exists in
-`WebUiAuthenticatedCaller`. Unwired operator command-plane write, setup, log, and service-control methods fail closed with sanitized `503 service_unavailable` responses. Config validation plus read-only config, status, and diagnostics surfaces may instead return unavailable command-plane payloads with redacted diagnostics so operators can see why a setting is ignored. Stable unsupported-config reason codes currently include `operator_config_service_not_wired`, `operator_config_secret_not_wired`, `operator_config_deprecated`, `operator_config_immutable`, `operator_config_not_wired`, and `operator_config_unknown_key`.
+`WebUiAuthenticatedCaller`. Unwired operator command-plane write, setup, log, and service-control methods fail closed with sanitized `503 service_unavailable` responses. Config validation plus read-only config, status, and diagnostics surfaces may instead return unavailable command-plane payloads with redacted diagnostics so operators can see why a setting is ignored. Stable unsupported-config reason codes currently include `operator_config_service_not_wired`, `operator_config_secret_not_wired`, `operator_config_deprecated`, `operator_config_immutable`, `operator_config_not_wired`, and `operator_config_unknown_key`. `POST /api/webchat/v2/operator/setup` uses the typed LLM config service for provider/model setup; profile and WebUI access setup return redacted not-yet-wired diagnostics until those owning services are exposed.
 
 ### List-threads
 

@@ -83,15 +83,16 @@ pub use types::{
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
-    RebornOperatorSetupRequest, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornOperatorSetupRequest, RebornOperatorSetupResponse, RebornOperatorSetupStatus,
+    RebornOperatorSetupStep, RebornOperatorSetupStepStatus, RebornOperatorSurfaceStatus,
+    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetChannel, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetDisplayName, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -345,6 +346,103 @@ impl GateResolutionRoute {
 }
 
 /// Stable WebUI-facing facade surface for beta Reborn routes.
+fn operator_setup_diagnostic(
+    key: &str,
+    reason_code: &str,
+    message: &str,
+    remediation: &str,
+) -> RebornOperatorConfigDiagnostic {
+    RebornOperatorConfigDiagnostic {
+        key: key.to_string(),
+        severity: RebornOperatorConfigDiagnosticSeverity::Error,
+        reason_code: reason_code.to_string(),
+        message: message.to_string(),
+        owning_area: RebornOperatorArea::Setup,
+        remediation: remediation.to_string(),
+    }
+}
+
+fn setup_response_from_llm_snapshot(
+    snapshot: LlmConfigSnapshot,
+    mut diagnostics: Vec<RebornOperatorConfigDiagnostic>,
+) -> RebornOperatorSetupResponse {
+    diagnostics.push(operator_setup_diagnostic(
+        "profile_id",
+        "operator_setup_profile_not_wired",
+        "Profile setup is not wired into the operator setup API yet.",
+        "Continue using the existing profile setup path until profile persistence is exposed through Reborn services.",
+    ));
+    diagnostics.push(operator_setup_diagnostic(
+        "webui_access",
+        "operator_setup_webui_access_not_wired",
+        "WebUI access setup is not wired into the operator setup API yet.",
+        "Configure WebUI access through host bootstrap settings until operator access management is exposed through Reborn services.",
+    ));
+
+    let active_provider_id = snapshot
+        .active
+        .as_ref()
+        .map(|active| active.provider_id.clone());
+    let active_model = snapshot
+        .active
+        .as_ref()
+        .and_then(|active| active.model.clone());
+    let provider_complete = active_provider_id.is_some();
+    let model_complete = active_model.is_some();
+    let status = RebornOperatorSetupStatus::Incomplete;
+
+    RebornOperatorSetupResponse {
+        area: RebornOperatorArea::Setup,
+        status,
+        message: if provider_complete {
+            "Provider setup is available through the operator setup API.".to_string()
+        } else {
+            "Provider setup is incomplete.".to_string()
+        },
+        active_provider_id,
+        active_model,
+        steps: vec![
+            RebornOperatorSetupStep {
+                name: "provider".to_string(),
+                status: if provider_complete {
+                    RebornOperatorSetupStepStatus::Complete
+                } else {
+                    RebornOperatorSetupStepStatus::Required
+                },
+                message: if provider_complete {
+                    "An active provider is configured.".to_string()
+                } else {
+                    "Select a provider before first use.".to_string()
+                },
+            },
+            RebornOperatorSetupStep {
+                name: "model".to_string(),
+                status: if model_complete {
+                    RebornOperatorSetupStepStatus::Complete
+                } else {
+                    RebornOperatorSetupStepStatus::Required
+                },
+                message: if model_complete {
+                    "An active model is configured.".to_string()
+                } else {
+                    "Select a model for the active provider.".to_string()
+                },
+            },
+            RebornOperatorSetupStep {
+                name: "profile".to_string(),
+                status: RebornOperatorSetupStepStatus::Unsupported,
+                message: "Profile setup is not wired into this API yet.".to_string(),
+            },
+            RebornOperatorSetupStep {
+                name: "webui_access".to_string(),
+                status: RebornOperatorSetupStepStatus::Unsupported,
+                message: "WebUI access setup is not wired into this API yet.".to_string(),
+            },
+        ],
+        diagnostics,
+    }
+}
+
 fn operator_config_surface_not_wired_diagnostic() -> RebornOperatorConfigDiagnostic {
     RebornOperatorConfigDiagnostic {
         key: "*".to_string(),
@@ -688,7 +786,7 @@ pub trait RebornServicesApi: Send + Sync {
     async fn get_operator_setup(
         &self,
         caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
         let _ = caller;
         Err(RebornServicesError::service_unavailable(false))
     }
@@ -697,7 +795,7 @@ pub trait RebornServicesApi: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornOperatorSetupRequest,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
         let _ = (caller, request);
         Err(RebornServicesError::service_unavailable(false))
     }
@@ -950,6 +1048,91 @@ impl RebornServices {
 
 #[async_trait]
 impl RebornServicesApi for RebornServices {
+    async fn get_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        let Some(llm_config) = &self.llm_config else {
+            return Err(llm_config::llm_config_unavailable());
+        };
+        let snapshot = llm_config
+            .snapshot(caller)
+            .await
+            .map_err(llm_config::map_llm_config_error)?;
+        Ok(setup_response_from_llm_snapshot(snapshot, Vec::new()))
+    }
+
+    async fn run_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorSetupRequest,
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        let Some(llm_config) = &self.llm_config else {
+            return Err(llm_config::llm_config_unavailable());
+        };
+
+        let mut diagnostics = Vec::new();
+        if request.model.is_some() && request.provider_id.is_none() {
+            diagnostics.push(operator_setup_diagnostic(
+                "model",
+                "operator_setup_model_requires_provider",
+                "A model cannot be selected until a provider is selected.",
+                "Include provider_id with the requested model.",
+            ));
+        }
+        if request.api_key.is_some() && request.adapter.is_none() {
+            diagnostics.push(operator_setup_diagnostic(
+                "api_key",
+                "operator_setup_api_key_requires_adapter",
+                "An API key cannot be stored without provider adapter metadata.",
+                "Include adapter when creating or repairing a provider with an API key.",
+            ));
+        }
+
+        if !diagnostics.is_empty() {
+            let snapshot = llm_config
+                .snapshot(caller)
+                .await
+                .map_err(llm_config::map_llm_config_error)?;
+            return Ok(setup_response_from_llm_snapshot(snapshot, diagnostics));
+        }
+
+        let snapshot = match (request.provider_id, request.adapter) {
+            (Some(provider_id), Some(adapter)) => llm_config
+                .upsert_provider(
+                    caller,
+                    UpsertLlmProviderRequest {
+                        id: provider_id,
+                        name: None,
+                        adapter,
+                        base_url: request.base_url,
+                        default_model: request.model.clone(),
+                        api_key: request.api_key,
+                        set_active: true,
+                        model: request.model,
+                    },
+                )
+                .await
+                .map_err(llm_config::map_llm_config_error)?,
+            (Some(provider_id), None) => llm_config
+                .set_active(
+                    caller,
+                    SetActiveLlmRequest {
+                        provider_id,
+                        model: request.model,
+                    },
+                )
+                .await
+                .map_err(llm_config::map_llm_config_error)?,
+            (None, _) => llm_config
+                .snapshot(caller)
+                .await
+                .map_err(llm_config::map_llm_config_error)?,
+        };
+
+        Ok(setup_response_from_llm_snapshot(snapshot, Vec::new()))
+    }
+
     /// `requested_thread_id` makes the caller's choice authoritative.
     /// Without it, `client_action_id` deterministically derives the thread id
     /// so a retry of the same create maps back to the same thread.

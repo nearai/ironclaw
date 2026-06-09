@@ -32,13 +32,14 @@ use ironclaw_product_workflow::{
     RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornOperatorSetupResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -577,7 +578,7 @@ pub async fn setup_extension(
 pub async fn get_operator_setup(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+) -> Result<Json<RebornOperatorSetupResponse>, WebUiV2HttpError> {
     let response = state.services().get_operator_setup(caller).await?;
     Ok(Json(response))
 }
@@ -587,7 +588,7 @@ pub async fn run_operator_setup(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<RebornOperatorSetupRequest>,
-) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+) -> Result<Json<RebornOperatorSetupResponse>, WebUiV2HttpError> {
     let response = state.services().run_operator_setup(caller, body).await?;
     Ok(Json(response))
 }
