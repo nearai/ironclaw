@@ -56,6 +56,9 @@ bind sockets or call `axum::serve`.
   contract crate defines the port and the storage crate provides
   filesystem-backed adapters under `/engine/openai_compat/refs/` with
   per-public-id mapping records plus per-scope idempotency index records.
+- The in-memory ref store is bounded and evicts the oldest mappings when full.
+  Durable filesystem retention and pruning are owned by host composition or the
+  storage adapter lifecycle, not by route handlers.
 - Client idempotency keys are scoped by authenticated actor scope, route
   surface, and request-body fingerprint. Same key + same fingerprint replays the
   same public ref; same key + different fingerprint is a sanitized conflict.
@@ -64,6 +67,10 @@ bind sockets or call `axum::serve`.
 - Ref lookup for retrieve, stream resume, and cancel is actor/scope checked.
   Unauthorized and nonexistent refs must produce the same sanitized not-found
   response at the API boundary.
+- Chat Completions projection reads must resolve through
+  `ProductWorkflow::read_projection(...)` and the returned canonical
+  actor/scope must match the authenticated caller before any projection reader
+  is called.
 - Ref mappings are two-stage: route code may reserve a pending public ref before
   ProductWorkflow side effects, then bind it to internal product-action,
   turn-run, and projection refs after those refs exist.
@@ -87,11 +94,13 @@ The route:
   before submission.
 - Converts OpenAI-compatible messages into a `UserMessagePayload` and submits it
   through `ProductWorkflow`.
-- Waits through a composition-supplied projection waiter and returns a sanitized
-  Chat Completions response.
+- Resolves the canonical projection read request through
+  `ProductWorkflow::read_projection(...)`, then waits through a
+  composition-supplied projection reader and returns a sanitized Chat
+  Completions response.
 - Carries the requested public model string as a composition/policy hint for
-  the waiter; the route must not inject the model name into user transcript
-  text.
+  the projection reader; the route must not inject the model name into user
+  transcript text.
 - Preserves model-produced tool-call output shape in the response, while
   treating client-supplied tools as model-only hints rather than executable
   Reborn capabilities.

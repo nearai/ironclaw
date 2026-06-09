@@ -16,6 +16,8 @@ mod descriptors;
 mod error;
 #[cfg(feature = "openai-compat-beta")]
 mod handlers;
+#[cfg(feature = "openai-compat-beta")]
+mod identity;
 mod refs;
 mod responses;
 #[cfg(feature = "openai-compat-beta")]
@@ -34,8 +36,9 @@ pub use chat::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use chat_workflow::{
-    OpenAiChatCompletionProjection, OpenAiChatCompletionWaitRequest, OpenAiChatCompletionWaiter,
-    OpenAiChatCompletionsWorkflow, OpenAiChatModelOnlyTools, OpenAiCompatAuthenticatedCaller,
+    OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
+    OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow, OpenAiChatModelOnlyTools,
+    OpenAiCompatAuthenticatedCaller,
 };
 pub use descriptors::{
     OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS, OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,
@@ -64,7 +67,7 @@ pub use refs::{
     OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
     OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
     OpenAiCompatResourceBinding, OpenAiCompatResourceKind, OpenAiCompatResourceMapping,
-    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId,
+    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId, unix_timestamp_now,
 };
 pub use responses::{
     OpenAiResponseErrorObject, OpenAiResponseObject, OpenAiResponseOutputItem,

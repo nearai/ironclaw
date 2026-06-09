@@ -19,6 +19,10 @@ pub struct OpenAiCompatRouterState {
     /// arch-exempt: optional Arc, genuinely optional by design; default
     /// fail-closed behavior is intentional until host composition wires #4444.
     chat_completions: Option<Arc<OpenAiChatCompletionsWorkflow>>,
+    /// Wired by host composition when `openai-compat-beta` is active.
+    /// When `None`, Responses requests return 501 fail-closed.
+    /// arch-exempt: optional Arc, genuinely optional by design; default
+    /// fail-closed behavior is intentional until host composition wires #4445.
     responses: Option<Arc<OpenAiResponsesWorkflow>>,
 }
 
