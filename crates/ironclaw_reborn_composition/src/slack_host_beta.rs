@@ -992,8 +992,8 @@ mod tests {
     };
     use crate::{
         RebornBuildError, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput,
-        SLACK_EVENTS_PATH, WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime,
-        local_dev_runtime_policy, webui_v2_app,
+        SLACK_EVENTS_PATH, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
+        build_reborn_runtime, local_dev_runtime_policy, webui_v2_app,
     };
 
     const TENANT: &str = "tenant:slack-host";
@@ -1013,15 +1013,17 @@ mod tests {
 
     #[async_trait]
     impl WebuiAuthenticator for OperatorTokenAuthenticator {
-        async fn authenticate(&self, token: &str) -> Option<UserId> {
+        async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             if token == "operator-token" {
-                Some(UserId::new(USER).expect("user"))
+                Some(WebuiAuthentication::operator(
+                    UserId::new(USER).expect("user"),
+                ))
             } else {
                 None
             }
         }
 
-        fn allows_operator_webui_config(&self) -> bool {
+        fn mounts_operator_webui_config_routes(&self) -> bool {
             true
         }
     }
@@ -1030,9 +1032,9 @@ mod tests {
 
     #[async_trait]
     impl WebuiAuthenticator for MultiUserTokenAuthenticator {
-        async fn authenticate(&self, token: &str) -> Option<UserId> {
+        async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             if token == "operator-token" {
-                Some(UserId::new(USER).expect("user"))
+                Some(WebuiAuthentication::user(UserId::new(USER).expect("user")))
             } else {
                 None
             }

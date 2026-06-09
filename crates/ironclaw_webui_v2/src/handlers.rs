@@ -56,13 +56,13 @@ pub struct WebUiV2SessionResponse {
 
 /// `GET /api/webchat/v2/session`
 pub async fn get_session(
-    State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Json<WebUiV2SessionResponse> {
     Json(WebUiV2SessionResponse {
         tenant_id: caller.tenant_id.to_string(),
         user_id: caller.user_id.to_string(),
-        capabilities: state.capabilities(),
+        capabilities,
     })
 }
 

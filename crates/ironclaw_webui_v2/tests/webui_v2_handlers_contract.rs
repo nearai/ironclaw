@@ -79,13 +79,13 @@ fn router_with_capabilities(
 ) -> Router {
     webui_v2_router(WebUiV2State::new(
         services,
-        capabilities,
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     // Production composition runs the bearer-token middleware that
     // constructs this `Extension`; tests bypass auth and inject the
     // caller directly so the regression target is the handler itself.
     .layer(axum::Extension(caller()))
+    .layer(axum::Extension(capabilities))
 }
 
 fn service_unavailable_error(retryable: bool) -> RebornServicesError {
@@ -1901,12 +1901,7 @@ async fn stream_events_ws_shares_capacity_with_sse_streams() {
     let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
     // Pool size 1: any one open stream (SSE or WS) must exhaust the
     // budget for the caller.
-    let router = webui_v2_router(WebUiV2State::new(
-        services,
-        WebUiV2Capabilities::default(),
-        1,
-    ))
-    .layer(axum::Extension(caller()));
+    let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -2014,12 +2009,7 @@ async fn stream_events_ws_shares_capacity_with_sse_streams() {
 async fn stream_events_caps_concurrent_streams_per_caller() {
     let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
     // Use a low custom cap so the test runs without burning resources.
-    let router = webui_v2_router(WebUiV2State::new(
-        services,
-        WebUiV2Capabilities::default(),
-        2,
-    ))
-    .layer(axum::Extension(caller()));
+    let router = webui_v2_router(WebUiV2State::new(services, 2)).layer(axum::Extension(caller()));
 
     let open_stream = || {
         router.clone().oneshot(
@@ -2264,12 +2254,7 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
     // Cap of 1 so we can observe slot release directly: a second open
     // returns 429 while the first is held, and 200 once it's released.
     let services: Arc<dyn RebornServicesApi> = Arc::new(StallingServices);
-    let router = webui_v2_router(WebUiV2State::new(
-        services,
-        WebUiV2Capabilities::default(),
-        1,
-    ))
-    .layer(axum::Extension(caller()));
+    let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
 
     let open_stream = || {
         router.clone().oneshot(
@@ -2738,7 +2723,6 @@ async fn missing_caller_extension_returns_500() {
     let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
     let router = webui_v2_router(WebUiV2State::new(
         services,
-        WebUiV2Capabilities::default(),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ));
 
@@ -2973,12 +2957,7 @@ async fn stream_events_ws_releases_slot_on_peer_close() {
     use futures::SinkExt;
 
     let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
-    let router = webui_v2_router(WebUiV2State::new(
-        services,
-        WebUiV2Capabilities::default(),
-        1,
-    ))
-    .layer(axum::Extension(caller()));
+    let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

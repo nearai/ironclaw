@@ -148,7 +148,7 @@ mod tests {
     use super::*;
 
     use async_trait::async_trait;
-    use ironclaw_reborn_composition::host_api::UserId;
+    use ironclaw_reborn_composition::WebuiAuthentication;
     use ironclaw_reborn_webui_ingress::{
         OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile,
     };
@@ -159,7 +159,7 @@ mod tests {
 
     #[async_trait]
     impl WebuiAuthenticator for RejectingAuth {
-        async fn authenticate(&self, _token: &str) -> Option<UserId> {
+        async fn authenticate(&self, _token: &str) -> Option<WebuiAuthentication> {
             None
         }
     }

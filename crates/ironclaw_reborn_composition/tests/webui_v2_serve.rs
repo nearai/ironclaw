@@ -35,8 +35,8 @@ use ironclaw_product_workflow::{
     WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
-    PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
-    webui_v2_app,
+    PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator,
+    WebuiServeConfig, webui_v2_app,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
@@ -65,15 +65,17 @@ struct OnlyValidToken;
 
 #[async_trait]
 impl WebuiAuthenticator for OnlyValidToken {
-    async fn authenticate(&self, token: &str) -> Option<UserId> {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         if token == VALID_TOKEN {
-            Some(UserId::new(USER).expect("user id"))
+            Some(WebuiAuthentication::operator(
+                UserId::new(USER).expect("user id"),
+            ))
         } else {
             None
         }
     }
 
-    fn allows_operator_webui_config(&self) -> bool {
+    fn mounts_operator_webui_config_routes(&self) -> bool {
         true
     }
 }
@@ -82,9 +84,11 @@ struct MultiUserToken;
 
 #[async_trait]
 impl WebuiAuthenticator for MultiUserToken {
-    async fn authenticate(&self, token: &str) -> Option<UserId> {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         if token == VALID_TOKEN {
-            Some(UserId::new(USER).expect("user id"))
+            Some(WebuiAuthentication::user(
+                UserId::new(USER).expect("user id"),
+            ))
         } else {
             None
         }
@@ -1288,7 +1292,7 @@ async fn malformed_user_id_from_authenticator_rejects_with_401() {
     struct AlwaysReject;
     #[async_trait]
     impl WebuiAuthenticator for AlwaysReject {
-        async fn authenticate(&self, _token: &str) -> Option<UserId> {
+        async fn authenticate(&self, _token: &str) -> Option<WebuiAuthentication> {
             None
         }
     }
@@ -1753,10 +1757,12 @@ async fn rate_limit_is_independent_per_caller() {
     struct UserSwitch;
     #[async_trait]
     impl WebuiAuthenticator for UserSwitch {
-        async fn authenticate(&self, token: &str) -> Option<UserId> {
+        async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             match token {
-                "tok-alice" => Some(UserId::new("alice").expect("user")),
-                "tok-bob" => Some(UserId::new("bob").expect("user")),
+                "tok-alice" => Some(WebuiAuthentication::user(
+                    UserId::new("alice").expect("user"),
+                )),
+                "tok-bob" => Some(WebuiAuthentication::user(UserId::new("bob").expect("user"))),
                 _ => None,
             }
         }
