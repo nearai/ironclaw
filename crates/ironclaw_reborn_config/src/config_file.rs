@@ -256,7 +256,7 @@ pub struct SlackSection {
     /// Optional channel-specific shared subjects for Slack app mentions and
     /// thread replies. Each route maps one Slack channel id to a Reborn user
     /// scope that owns tools, skills, memory, and conversation context.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channel_routes: Vec<SlackChannelRouteSection>,
     /// Environment variable name containing the Slack signing secret.
     pub signing_secret_env: Option<String>,
