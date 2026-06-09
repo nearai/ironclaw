@@ -54,6 +54,8 @@ mod schema;
 #[cfg(feature = "webui-v2-beta")]
 mod sse_capacity;
 
+#[allow(deprecated)]
+pub use descriptors::is_webui_v2_llm_config_route_id;
 #[cfg(feature = "webui-v2-beta")]
 pub use descriptors::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_CANCEL_RUN,
@@ -64,23 +66,30 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_INSTALL_SKILL, WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
     WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS, WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY,
     WEBUI_V2_ROUTE_LIST_EXTENSIONS, WEBUI_V2_ROUTE_LIST_LLM_MODELS, WEBUI_V2_ROUTE_LIST_SKILLS,
-    WEBUI_V2_ROUTE_LIST_THREADS, WEBUI_V2_ROUTE_REMOVE_EXTENSION, WEBUI_V2_ROUTE_REMOVE_SKILL,
-    WEBUI_V2_ROUTE_RESOLVE_GATE, WEBUI_V2_ROUTE_SEARCH_SKILLS, WEBUI_V2_ROUTE_SEND_MESSAGE,
-    WEBUI_V2_ROUTE_SET_ACTIVE_LLM, WEBUI_V2_ROUTE_SETUP_EXTENSION,
+    WEBUI_V2_ROUTE_LIST_THREADS, WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS,
+    WEBUI_V2_ROUTE_OPERATOR_GET_SETUP, WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG,
+    WEBUI_V2_ROUTE_OPERATOR_LOGS, WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP,
+    WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE, WEBUI_V2_ROUTE_OPERATOR_STATUS,
+    WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG, WEBUI_V2_ROUTE_REMOVE_EXTENSION,
+    WEBUI_V2_ROUTE_REMOVE_SKILL, WEBUI_V2_ROUTE_RESOLVE_GATE, WEBUI_V2_ROUTE_SEARCH_SKILLS,
+    WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SET_ACTIVE_LLM, WEBUI_V2_ROUTE_SETUP_EXTENSION,
     WEBUI_V2_ROUTE_START_CODEX_LOGIN, WEBUI_V2_ROUTE_START_NEARAI_LOGIN,
     WEBUI_V2_ROUTE_STREAM_EVENTS, WEBUI_V2_ROUTE_STREAM_EVENTS_WS,
     WEBUI_V2_ROUTE_TEST_LLM_CONNECTION, WEBUI_V2_ROUTE_UPDATE_SKILL,
-    WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, is_webui_v2_llm_config_route_id, webui_v2_routes,
+    WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, is_webui_v2_operator_webui_config_route_id,
+    webui_v2_routes,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 #[cfg(feature = "webui-v2-beta")]
 pub use handlers::{
     activate_extension, cancel_run, complete_nearai_wallet_login, create_thread,
-    delete_llm_provider, delete_thread, get_extension_setup, get_llm_config, get_session,
+    delete_llm_provider, delete_thread, get_extension_setup, get_llm_config,
+    get_operator_diagnostics, get_operator_setup, get_operator_status, get_session,
     get_skill_content, get_timeline, install_extension, install_skill, list_automations,
     list_connectable_channels, list_extension_registry, list_extensions, list_llm_models,
-    list_skills, list_threads, remove_extension, remove_skill, resolve_gate, search_skills,
+    list_operator_config, list_skills, list_threads, query_operator_logs, remove_extension,
+    remove_skill, resolve_gate, run_operator_service_lifecycle, run_operator_setup, search_skills,
     send_message, set_active_llm, setup_extension, start_codex_login, start_nearai_login,
     stream_events, stream_events_ws, test_llm_connection, update_skill, upsert_llm_provider,
 };

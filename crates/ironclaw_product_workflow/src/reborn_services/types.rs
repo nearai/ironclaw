@@ -1020,3 +1020,79 @@ pub struct RebornExtensionSetupField {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornOperatorArea {
+    Setup,
+    Config,
+    Diagnostics,
+    Logs,
+    Status,
+    ServiceLifecycle,
+}
+
+impl RebornOperatorArea {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Setup => "setup",
+            Self::Config => "config",
+            Self::Diagnostics => "diagnostics",
+            Self::Logs => "logs",
+            Self::Status => "status",
+            Self::ServiceLifecycle => "service_lifecycle",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOperatorCommandPlaneResponse {
+    pub area: RebornOperatorArea,
+    pub status: RebornOperatorSurfaceStatus,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornOperatorSurfaceStatus {
+    Available,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOperatorSetupRequest {
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOperatorConfigValidateRequest {
+    #[serde(default)]
+    pub keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOperatorLogsQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOperatorServiceLifecycleRequest {
+    pub action: RebornOperatorServiceLifecycleAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornOperatorServiceLifecycleAction {
+    Install,
+    Start,
+    Stop,
+    Status,
+}

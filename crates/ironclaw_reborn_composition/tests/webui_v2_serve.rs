@@ -1869,7 +1869,7 @@ async fn every_webui_v2_descriptor_is_mounted_on_composed_app() {
 }
 
 #[tokio::test]
-async fn llm_config_routes_are_not_mounted_for_multi_user_authenticator() {
+async fn operator_routes_are_not_mounted_for_multi_user_authenticator() {
     let (app, _services) = build_app_with_authenticator(Arc::new(MultiUserToken));
 
     for (method, uri) in [
@@ -1882,6 +1882,14 @@ async fn llm_config_routes_are_not_mounted_for_multi_user_authenticator() {
         (Method::POST, "/api/webchat/v2/llm/nearai/login"),
         (Method::POST, "/api/webchat/v2/llm/nearai/wallet"),
         (Method::POST, "/api/webchat/v2/llm/codex/login"),
+        (Method::GET, "/api/webchat/v2/operator/setup"),
+        (Method::POST, "/api/webchat/v2/operator/setup"),
+        (Method::GET, "/api/webchat/v2/operator/config"),
+        (Method::POST, "/api/webchat/v2/operator/config/validate"),
+        (Method::GET, "/api/webchat/v2/operator/diagnostics"),
+        (Method::GET, "/api/webchat/v2/operator/status"),
+        (Method::GET, "/api/webchat/v2/operator/logs"),
+        (Method::POST, "/api/webchat/v2/operator/service"),
     ] {
         let mut builder = Request::builder()
             .method(method.clone())
