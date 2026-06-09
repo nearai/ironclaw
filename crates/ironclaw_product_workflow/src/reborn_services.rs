@@ -1968,13 +1968,11 @@ impl RebornServices {
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
         let decision = match resolution {
             WebUiGateResolution::Approved { always } => {
-                // `always: true` requests a *persistent* approval but this
-                // facade has only one-shot approval interaction routing and no
-                // approval-policy port. Fail loud rather than silently downgrade.
                 if always {
-                    return Err(persistent_approval_unavailable());
+                    ApprovalInteractionDecision::AlwaysAllow
+                } else {
+                    ApprovalInteractionDecision::ApproveOnce
                 }
-                ApprovalInteractionDecision::ApproveOnce
             }
             WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
                 ApprovalInteractionDecision::Deny
@@ -2100,9 +2098,8 @@ impl RebornServices {
             WebUiGateResolution::Approved { always } => {
                 reject_generic_auth_gate_resolution(self.turn_coordinator.as_ref(), &scope, run_id)
                     .await?;
-                // `always: true` requests a *persistent* approval but this
-                // facade has only one-shot `resume_turn` and no approval-policy
-                // port. Fail loud rather than silently downgrade.
+                // Generic fallback has only one-shot `resume_turn`; persistent
+                // approval must go through the typed approval interaction path.
                 if always {
                     return Err(persistent_approval_unavailable());
                 }

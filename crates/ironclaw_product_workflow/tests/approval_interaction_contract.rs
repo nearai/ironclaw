@@ -2,7 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_approvals::{DenyApproval, LeaseApproval};
+use ironclaw_approvals::{
+    DenyApproval, InMemoryPersistentApprovalPolicyStore, LeaseApproval, PersistentApprovalAction,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+};
 use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStore, InMemoryCapabilityLeaseStore,
 };
@@ -543,6 +546,59 @@ async fn approve_resolves_pending_gate_then_resumes_blocked_approval() {
         coordinator.last_resumption_precondition(),
         Some(ResumeTurnPrecondition::BlockedApprovalGate)
     );
+}
+
+#[tokio::test]
+async fn always_allow_resolves_gate_and_persists_reusable_policy() {
+    let request = approval_request("send the email");
+    let request_id = request.id;
+    let capability = match request.action.as_ref() {
+        Action::Dispatch { capability, .. } => capability.clone(),
+        _ => panic!("test request should be dispatch"),
+    };
+    let policy_scope = resource_scope(&actor("user-alpha"));
+    let key = PersistentApprovalPolicyKey::new(
+        &policy_scope,
+        PersistentApprovalAction::Dispatch,
+        capability,
+        Principal::User(UserId::new("user-alpha").expect("user")),
+    )
+    .expect("persistent policy key");
+    let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request(request);
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let service = service.with_persistent_policy_store(policy_store);
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new("approve-always").expect("idempotency"),
+        })
+        .await
+        .expect("always allow");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Approved(_)
+    ));
+    assert_eq!(resolver.approval_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
+    let policy = policies
+        .lookup(&key)
+        .await
+        .expect("persistent policy lookup")
+        .expect("persistent policy");
+    assert_eq!(policy.source_approval_request_id, Some(request_id));
+    assert_eq!(policy.constraints.max_invocations, None);
+    assert_eq!(
+        policy.constraints.allowed_effects,
+        vec![EffectKind::DispatchCapability]
+    );
+    assert!(policy.active_grant().is_some());
 }
 
 #[tokio::test]

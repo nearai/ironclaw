@@ -403,6 +403,14 @@ where
         self
     }
 
+    pub fn with_persistent_approval_policies<T>(mut self, policies: Arc<T>) -> Self
+    where
+        T: ironclaw_approvals::PersistentApprovalPolicyStore + 'static,
+    {
+        self.persistent_approval_policies = Some(policies);
+        self
+    }
+
     pub fn with_turn_state<T>(mut self, turn_state: Arc<T>) -> Self
     where
         T: TurnStateStore + 'static,

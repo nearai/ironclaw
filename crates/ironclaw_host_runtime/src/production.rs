@@ -16,6 +16,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_approvals::{
+    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+};
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
     CapabilityHost, CapabilityInvocationError, CapabilityInvocationRequest,
@@ -26,8 +29,9 @@ use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRe
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
-    PackageSource, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind,
-    RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
+    PackageSource, PermissionMode, Principal, ResourceScope, RuntimeCredentialAuthRequirement,
+    RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy,
+    sha256_digest_token,
 };
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
@@ -63,6 +67,7 @@ pub struct DefaultHostRuntime {
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
+    persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
     process_manager: Option<Arc<dyn ProcessManager>>,
     process_store: Option<Arc<dyn ProcessStore>>,
     process_result_store: Option<Arc<dyn ProcessResultStore>>,
@@ -127,6 +132,7 @@ impl DefaultHostRuntime {
             approval_requests: None,
             run_state_approval_store: None,
             capability_leases: None,
+            persistent_approval_policies: None,
             process_manager: None,
             process_store: None,
             process_result_store: None,
@@ -199,6 +205,16 @@ impl DefaultHostRuntime {
         capability_leases: Arc<dyn CapabilityLeaseStore>,
     ) -> Self {
         self.capability_leases = Some(capability_leases);
+        self
+    }
+
+    /// Attaches reusable approval policy overrides used to inject scoped,
+    /// manifest-bounded grants before ordinary authorization.
+    pub fn with_persistent_approval_policies(
+        mut self,
+        policies: Arc<dyn PersistentApprovalPolicyStore>,
+    ) -> Self {
+        self.persistent_approval_policies = Some(policies);
         self
     }
 
@@ -351,6 +367,13 @@ impl HostRuntime for DefaultHostRuntime {
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+        self.apply_persistent_approval_policy(
+            &mut context,
+            &registry,
+            PersistentApprovalAction::Dispatch,
+            &capability_id,
+        )
+        .await;
         let host = self.capability_host(&registry);
 
         let invocation = CapabilityInvocationRequest {
@@ -425,6 +448,13 @@ impl HostRuntime for DefaultHostRuntime {
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+        self.apply_persistent_approval_policy(
+            &mut context,
+            &registry,
+            PersistentApprovalAction::SpawnCapability,
+            &capability_id,
+        )
+        .await;
         let host = self.capability_host(&registry);
         let spawn = CapabilitySpawnRequest {
             context,
@@ -924,6 +954,68 @@ impl DefaultHostRuntime {
         Ok(())
     }
 
+    async fn apply_persistent_approval_policy(
+        &self,
+        context: &mut ironclaw_host_api::ExecutionContext,
+        registry: &ExtensionRegistry,
+        action: PersistentApprovalAction,
+        capability_id: &CapabilityId,
+    ) {
+        let Some(policies) = self.persistent_approval_policies.as_ref() else {
+            return;
+        };
+        let Some(descriptor) = registry.get_capability(capability_id) else {
+            return;
+        };
+        if descriptor.default_permission == PermissionMode::Deny {
+            tracing::debug!(
+                capability_id = %capability_id,
+                "persistent approval skipped for manifest-denied capability"
+            );
+            return;
+        }
+        for grantee in persistent_approval_grantees(context) {
+            let key = match PersistentApprovalPolicyKey::new(
+                &context.resource_scope,
+                action,
+                capability_id.clone(),
+                grantee,
+            ) {
+                Ok(key) => key,
+                Err(error) => {
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        error = %error,
+                        "persistent approval lookup skipped for unsupported scope"
+                    );
+                    continue;
+                }
+            };
+            let policy = match policies.lookup(&key).await {
+                Ok(policy) => policy,
+                Err(error) => {
+                    tracing::warn!(
+                        capability_id = %capability_id,
+                        error = %error,
+                        "persistent approval policy lookup failed; falling back to normal authorization"
+                    );
+                    continue;
+                }
+            };
+            let Some(policy) = policy else {
+                continue;
+            };
+            let Some(grant) = policy.active_grant() else {
+                continue;
+            };
+            tracing::debug!(
+                capability_id = %capability_id,
+                "persistent approval policy matched; injecting scoped grant"
+            );
+            context.grants.grants.push(grant);
+        }
+    }
+
     async fn fail_matching_blocked_resume_on_preflight_error(
         &self,
         context: &ironclaw_host_api::ExecutionContext,
@@ -1385,6 +1477,27 @@ fn spawned_process_outcome_from(
         process_id: result.process.process_id,
         capability_id,
     }
+}
+
+fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -> Vec<Principal> {
+    let mut grantees = vec![
+        Principal::Extension(context.extension_id.clone()),
+        Principal::User(context.user_id.clone()),
+        Principal::Tenant(context.tenant_id.clone()),
+    ];
+    if let Some(agent_id) = &context.agent_id {
+        grantees.push(Principal::Agent(agent_id.clone()));
+    }
+    if let Some(project_id) = &context.project_id {
+        grantees.push(Principal::Project(project_id.clone()));
+    }
+    if let Some(mission_id) = &context.mission_id {
+        grantees.push(Principal::Mission(mission_id.clone()));
+    }
+    if let Some(thread_id) = &context.thread_id {
+        grantees.push(Principal::Thread(thread_id.clone()));
+    }
+    grantees
 }
 
 fn host_runtime_spawn_input_for_capability(

@@ -1961,8 +1961,8 @@ pub async fn build_reborn_runtime(
         )
         .with_audit_sink(approval_audit_sink.clone()),
     );
-    let approval_interaction_service: Arc<dyn ApprovalInteractionService> =
-        Arc::new(DefaultApprovalInteractionService::new(
+    let approval_interaction_service: Arc<dyn ApprovalInteractionService> = Arc::new(
+        DefaultApprovalInteractionService::new(
             approval_read_model,
             Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
                 local_dev_capability_policy,
@@ -1975,7 +1975,9 @@ pub async fn build_reborn_runtime(
             )),
             approval_resolver,
             Arc::clone(&planned_turn_coordinator),
-        ));
+        )
+        .with_persistent_policy_store(local_runtime.persistent_approval_policies.clone()),
+    );
     let auth_interaction_service = build_webui_auth_interaction_service(
         services.product_auth.as_deref(),
         Arc::clone(&turn_state_store),
