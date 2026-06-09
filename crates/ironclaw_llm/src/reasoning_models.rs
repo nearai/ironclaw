@@ -97,9 +97,12 @@ pub fn supports_openai_reasoning(model: &str) -> bool {
 /// `vendor/sora4` does not; the longer names are specific enough to match
 /// anywhere in the segment.
 pub fn model_rejects_temperature(model: &str) -> bool {
+    // Take the last *non-empty* path segment so a gateway prefix
+    // (`openai/o3-mini`) matches and a trailing slash (`openai/o1/`) doesn't
+    // collapse to an empty name that slips past the classifier.
     let name = model
-        .rsplit('/')
-        .next()
+        .split('/')
+        .rfind(|s| !s.is_empty())
         .unwrap_or(model)
         .to_ascii_lowercase();
     const O_SERIES: &[&str] = &["o1", "o3", "o4"];
@@ -288,6 +291,9 @@ mod tests {
             "claude-opus-4-7",
             "claude-opus-4-8",
             "anthropic.claude-opus-4-8-v1:0",
+            // A trailing slash must not collapse the final segment to empty.
+            "openai/o1/",
+            "claude-opus-4-8/",
         ] {
             assert!(
                 model_rejects_temperature(m),
