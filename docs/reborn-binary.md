@@ -75,17 +75,21 @@ runner → LLM provider → timeline) end to end.
 ### Quick start
 
 ```bash
-# 1. Reborn home MUST live outside your current working directory (see gotchas).
+# 1. For serve/run/repl the Reborn home must live OUTSIDE your current working
+#    directory: these commands use the cwd as the local-dev workspace root and
+#    reject overlap with it (see gotchas). Other commands have no such rule.
 export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
 
-# 2. Configure a model route for your preferred provider (see the table below).
-#    set-provider records the provider's credential env-var NAME in config.toml;
-#    the secret VALUE always stays in the environment, never in a file.
+# 2. Configure a model route. NEAR AI shown here; swap the provider id and key
+#    env var for any row in the table below. set-provider records the credential
+#    env-var NAME in config.toml; the secret VALUE stays in the environment.
 cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- \
-  models set-provider <provider>            # e.g. nearai, openai, anthropic
-export <PROVIDER_API_KEY>="<your-key>"      # e.g. NEARAI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY
+  models set-provider nearai
+export NEARAI_API_KEY="your-key-here"
 
-# 3. WebUI auth env vars. serve REQUIRES both or it refuses to start.
+# 3. WebUI auth. serve REQUIRES both values or it refuses to start. The variable
+#    NAMES below are the defaults; override them via [webui].env_token_var and
+#    [webui].env_user_id_var in config.toml if you prefer different names.
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"   # bearer token you log in with
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"             # must match [identity].default_owner
 
@@ -103,9 +107,10 @@ the kernel pick a free port. For the Slack host-beta ingress, build with
 
 ### Choose your model provider
 
-`models set-provider <id>` works for any provider in the built-in catalog and
-writes that provider's credential env-var name into `config.toml` for you. The
-common single-API-key providers:
+`models set-provider <id>` works for any provider in the built-in catalog. For
+API-key providers it records that provider's credential env-var name in
+`config.toml` for you; for keyless providers (e.g. `ollama`) it writes no
+`api_key_env`. The common single-API-key providers:
 
 | Provider | `set-provider` id | Key env var | Default model |
 | --- | --- | --- | --- |
@@ -119,17 +124,24 @@ So to use Anthropic instead of the quick-start example, swap step 2 for:
 ```bash
 cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- \
   models set-provider anthropic
-export ANTHROPIC_API_KEY="<your-key>"
+export ANTHROPIC_API_KEY="your-key-here"
 ```
 
 Not sure which env var your chosen provider needs? After `set-provider`, run
 `models status` — it prints `default.api_key_env` (the exact variable to
 export) alongside the active provider and model. `models list --verbose` shows
-the same for every provider in the catalog; pass `--model <id>` to
-`set-provider` to override the default model. Providers that use OAuth or
-multi-field credentials (`bedrock`, `gemini_oauth`, `openai_codex`) need extra
-setup beyond a single key. The runtime still boots without a key set, but turns
-fail cleanly until the provider's env var is present.
+the same for every provider in the catalog, including whether its key is
+`required` or `optional`; pass `--model <id>` to `set-provider` to override the
+default model. Providers that use OAuth or multi-field credentials (`bedrock`,
+`gemini_oauth`, `openai_codex`) need extra setup beyond a single key.
+
+**Missing keys are fatal for required-key providers.** For `api_key_required`
+providers (`openai`, `anthropic`, and most others), `run`/`serve`/`repl` exit at
+startup during LLM resolution with `llm provider '<id>' requires API key env var
+'<VAR>' to be set` if the env var is missing. For no-key providers (`ollama`)
+and NEAR AI's session flow (`api_key_required: false`), the runtime boots
+without that env var and authenticates separately — so export your provider's
+key before launching `serve`.
 
 ### Common startup errors (and fixes)
 
@@ -352,13 +364,19 @@ var to export for it — handy for confirming setup before `serve`/`run`:
 - `default.api_key_env` (the env var that must hold your key, e.g. `NEARAI_API_KEY`)
 - `v1_state: not-used`
 
+Those are the **text** field names. `models status --json` serializes the
+selection struct instead, nesting the route under `default` with the raw field
+names: `provider_id` (not `provider`), `provider_known`, `model`, `api_key_env`,
+and `base_url`.
+
 `models list` prints the full provider catalog, marks the active provider with
 `*`, and (with `--verbose`) shows each provider's `api_key_env`, default model,
 and credential kind.
 
 `models set-provider <provider> [--model <model>]` writes `[llm.default]` into
-`$IRONCLAW_REBORN_HOME/config.toml` with the provider id and its catalog
-credential env-var name. `<provider>` is a provider id or alias (`openai`,
+`$IRONCLAW_REBORN_HOME/config.toml` with the provider id and, for API-key
+providers, its catalog credential env-var name (keyless providers like `ollama`
+get no `api_key_env`). `<provider>` is a provider id or alias (`openai`,
 `anthropic`, `nearai`, `ollama`, …); `--model` is optional and defaults to the
 provider's catalog default.
 
