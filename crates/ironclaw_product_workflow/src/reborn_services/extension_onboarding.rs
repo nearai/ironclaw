@@ -4,6 +4,7 @@ use crate::{
     LifecycleProductResponse,
 };
 
+use super::extension_credentials::ExtensionCredentialReadiness;
 use super::types::{RebornExtensionOnboardingPayload, RebornExtensionOnboardingState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +28,24 @@ impl ExtensionOnboarding {
 
 pub(super) fn for_installed(extension: &LifecycleInstalledExtensionSummary) -> ExtensionOnboarding {
     for_summary(&extension.summary, extension.phase)
+}
+
+pub(super) fn for_installed_with_credential_status(
+    extension: &LifecycleInstalledExtensionSummary,
+    readiness: ExtensionCredentialReadiness,
+) -> ExtensionOnboarding {
+    if readiness == ExtensionCredentialReadiness::MissingRequired {
+        return credential_onboarding(&extension.summary);
+    }
+    if readiness == ExtensionCredentialReadiness::Configured
+        && matches!(
+            extension.phase,
+            LifecyclePhase::Installed | LifecyclePhase::Configured
+        )
+    {
+        return no_credential_onboarding(&extension.summary, LifecyclePhase::Configured);
+    }
+    for_installed(extension)
 }
 
 pub(super) fn from_lifecycle(lifecycle: &LifecycleProductResponse) -> ExtensionOnboarding {
@@ -323,6 +342,44 @@ mod tests {
         assert_eq!(
             onboarding.instructions.as_deref(),
             Some("GitHub is installed. Activate it to make its tools available.")
+        );
+    }
+
+    #[test]
+    fn credential_ready_installed_extension_projects_activation_message() {
+        let extension = installed_extension(
+            "gmail",
+            "Gmail",
+            LifecyclePhase::Installed,
+            vec![oauth_requirement("gmail_account", "google")],
+            LifecycleExtensionRuntimeKind::FirstParty,
+            Some(LifecycleExtensionOnboarding {
+                instructions: "Gmail needs Google OAuth authorization before mail tools can run."
+                    .to_string(),
+                credential_instructions: Some(
+                    "Authorize the Google account that IronClaw should use for Gmail.".to_string(),
+                ),
+                setup_url: None,
+                credential_next_step: Some(
+                    "After authorization completes, activate Gmail to publish its tools."
+                        .to_string(),
+                ),
+            }),
+        );
+
+        let onboarding = for_installed_with_credential_status(
+            &extension,
+            ExtensionCredentialReadiness::Configured,
+        );
+
+        assert_eq!(
+            onboarding.state,
+            Some(RebornExtensionOnboardingState::Installed)
+        );
+        assert_eq!(onboarding.awaiting_token, None);
+        assert_eq!(
+            onboarding.instructions.as_deref(),
+            Some("Gmail is installed. Activate it to make its tools available.")
         );
     }
 
