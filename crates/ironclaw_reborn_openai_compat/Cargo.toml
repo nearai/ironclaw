@@ -14,7 +14,7 @@ publish = false
 default = []
 # Compile the fail-closed axum route fragment. Host composition still owns
 # listener binding, auth middleware, CORS, body/rate limits, and mounting.
-openai-compat-beta = ["dep:axum"]
+openai-compat-beta = ["dep:async-stream", "dep:axum", "dep:futures-core"]
 
 [dependencies]
 async-trait = "0.1"
@@ -29,7 +29,9 @@ thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
+async-stream = { version = "0.3", optional = true }
 axum = { version = "0.8", optional = true }
+futures-core = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["sync", "time"] }
 
 [dev-dependencies]

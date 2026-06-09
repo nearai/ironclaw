@@ -75,16 +75,26 @@ browser-reachable.
 | `webui.v2.set_active_llm` | POST | `/api/webchat/v2/llm/active` | None | `ProductWorkflow` |
 | `webui.v2.test_llm_connection` | POST | `/api/webchat/v2/llm/test-connection` | None | `ProductWorkflow` |
 | `webui.v2.list_llm_models` | POST | `/api/webchat/v2/llm/list-models` | None | `ProductWorkflow` |
+| `webui.v2.operator.get_setup` | GET | `/api/webchat/v2/operator/setup` | None | `ProjectionOnly` |
+| `webui.v2.operator.run_setup` | POST | `/api/webchat/v2/operator/setup` | None | `ProductWorkflow` |
+| `webui.v2.operator.list_config` | GET | `/api/webchat/v2/operator/config` | None | `ProjectionOnly` |
+| `webui.v2.operator.validate_config` | POST | `/api/webchat/v2/operator/config/validate` | None | `ProductWorkflow` |
+| `webui.v2.operator.diagnostics` | GET | `/api/webchat/v2/operator/diagnostics` | None | `ProjectionOnly` |
+| `webui.v2.operator.status` | GET | `/api/webchat/v2/operator/status` | None | `ProjectionOnly` |
+| `webui.v2.operator.logs` | GET | `/api/webchat/v2/operator/logs` | None | `ProjectionOnly` |
+| `webui.v2.operator.service_lifecycle` | POST | `/api/webchat/v2/operator/service` | None | `ProductWorkflow` |
 
 All routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
 constructing the `WebUiAuthenticatedCaller` and injecting it as an
 axum `Extension` before the handler runs.
 
-The LLM configuration routes are operator-wide. Host composition must only
-mount them for authenticators that represent a single trusted operator; multi-
-user session/OIDC authenticators should leave those routes unmounted until an
-admin role boundary exists in `WebUiAuthenticatedCaller`.
+The LLM configuration and operator command-plane routes are operator-wide. Host
+composition must only mount them for authenticators that represent a single
+trusted operator; multi-user session/OIDC authenticators should leave those
+routes unmounted until an admin role boundary exists in
+`WebUiAuthenticatedCaller`. Unwired operator command-plane facade methods fail
+closed with sanitized `503 service_unavailable` responses.
 
 ### List-threads
 

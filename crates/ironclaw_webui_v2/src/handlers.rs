@@ -28,15 +28,17 @@ use ironclaw_product_workflow::{
     RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigValidateRequest, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornResolveGateResponse,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
+    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -640,6 +642,88 @@ pub async fn setup_extension(
     let response = state
         .services()
         .setup_extension(caller, package_ref, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/operator/setup`
+pub async fn get_operator_setup(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    let response = state.services().get_operator_setup(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/operator/setup`
+pub async fn run_operator_setup(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornOperatorSetupRequest>,
+) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    let response = state.services().run_operator_setup(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/operator/config`
+pub async fn list_operator_config(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    let response = state.services().list_operator_config(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/operator/config/validate`
+pub async fn validate_operator_config(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornOperatorConfigValidateRequest>,
+) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .validate_operator_config(caller, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/operator/diagnostics`
+pub async fn get_operator_diagnostics(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    let response = state.services().get_operator_diagnostics(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/operator/status`
+pub async fn get_operator_status(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    let response = state.services().get_operator_status(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/operator/logs`
+pub async fn query_operator_logs(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<RebornOperatorLogsQuery>,
+) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    let response = state.services().query_operator_logs(caller, query).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/operator/service`
+pub async fn run_operator_service_lifecycle(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornOperatorServiceLifecycleRequest>,
+) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .run_operator_service_lifecycle(caller, body)
         .await?;
     Ok(Json(response))
 }

@@ -413,3 +413,111 @@ async fn oidc_unknown_kid_storm_does_not_force_unbounded_jwks_refresh() {
 
     server.abort();
 }
+
+/// Sign an HS256 (symmetric) token with an attacker-chosen secret. The
+/// `kid` matches the JWKS RSA key so a naive verifier could be tricked
+/// into the classic alg-confusion attack (verify an HS256 MAC using the
+/// RSA public key as the secret) — the RS/ES-only allowlist must reject
+/// it before that can happen.
+fn sign_hs256_token(kid: &str, issuer: &str, audience: &str) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let claims = json!({
+        "iss": issuer,
+        "sub": "alice",
+        "aud": audience,
+        "exp": now + 600,
+        "iat": now,
+    });
+    let mut header = Header::new(Algorithm::HS256);
+    header.kid = Some(kid.to_string());
+    encode(
+        &header,
+        &claims,
+        &EncodingKey::from_secret(b"attacker-chosen-secret"),
+    )
+    .expect("sign hs256")
+}
+
+/// Sign an RS256 token with a `nbf` (not-before) claim `nbf_offset_secs`
+/// from now (negative = in the past). All other claims are valid.
+fn sign_token_with_nbf(
+    private_pem: &str,
+    kid: &str,
+    issuer: &str,
+    audience: &str,
+    nbf_offset_secs: i64,
+) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let claims = json!({
+        "iss": issuer,
+        "sub": "alice",
+        "aud": audience,
+        "exp": now + 600,
+        "iat": now,
+        "nbf": now + nbf_offset_secs,
+    });
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(kid.to_string());
+    encode(
+        &header,
+        &claims,
+        &EncodingKey::from_rsa_pem(private_pem.as_bytes()).expect("encoding key"),
+    )
+    .expect("sign jwt")
+}
+
+#[tokio::test]
+async fn oidc_authenticator_rejects_hs256_tokens() {
+    // The parity doc (01-auth.md row 5) claims an RS/ES-only algorithm
+    // allowlist that rejects HS256. `oidc_e2e.rs` otherwise only signs
+    // RS256, so lock the symmetric-algorithm rejection end-to-end: an
+    // HS256 token (valid iss/aud/exp, kid matching the JWKS key) must
+    // not authenticate.
+    let key = generate_test_key();
+    let state = JwksState::new(vec![jwk_for(&key.public, TEST_KID)]);
+    let (jwks_url, server) = spawn_jwks_server(state).await;
+    let auth = build_authenticator(jwks_url);
+
+    let hs256 = sign_hs256_token(TEST_KID, TEST_ISSUER, TEST_AUDIENCE);
+    assert!(
+        auth.authenticate(&hs256).await.is_none(),
+        "HS256 token must be rejected by the RS/ES-only allowlist (alg-confusion defense)",
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn oidc_authenticator_rejects_future_nbf() {
+    // The parity doc (row 5) lists `nbf` among the validated claims, but
+    // `oidc.rs` only has a helper-level `in_future` unit test. Lock the
+    // claim end-to-end through `authenticate()`: a token whose `nbf` is
+    // in the future is rejected, while an otherwise-identical token with
+    // a past `nbf` authenticates — isolating `nbf` as the cause.
+    let key = generate_test_key();
+    let state = JwksState::new(vec![jwk_for(&key.public, TEST_KID)]);
+    let (jwks_url, server) = spawn_jwks_server(state).await;
+    let auth = build_authenticator(jwks_url);
+
+    let future_nbf =
+        sign_token_with_nbf(&key.private_pem, TEST_KID, TEST_ISSUER, TEST_AUDIENCE, 3600);
+    assert!(
+        auth.authenticate(&future_nbf).await.is_none(),
+        "a token whose nbf is in the future must be rejected",
+    );
+
+    let past_nbf = sign_token_with_nbf(
+        &key.private_pem,
+        TEST_KID,
+        TEST_ISSUER,
+        TEST_AUDIENCE,
+        -3600,
+    );
+    let user = auth
+        .authenticate(&past_nbf)
+        .await
+        .expect("a token with a past nbf must authenticate (isolates nbf as the cause)");
+    assert_eq!(user.as_str(), "alice");
+
+    server.abort();
+}

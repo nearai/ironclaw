@@ -18,6 +18,9 @@ use ironclaw_trust::HostTrustPolicy;
 use ironclaw_turns::TurnRunWakeNotifier;
 use secrecy::SecretString;
 
+#[cfg(feature = "postgres")]
+use ironclaw_reborn_config::StorageBackend;
+
 use crate::google_oauth::google_provider_spec;
 use crate::notion_oauth::notion_provider_spec;
 use crate::oauth_dcr::OAuthDcrProviderConfig;
@@ -28,28 +31,6 @@ use crate::{RebornBuildError, RebornCompositionProfile, RebornProductAuthService
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
 #[cfg(feature = "postgres")]
 const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
-
-#[cfg(feature = "postgres")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProductionStorageBackend {
-    Postgres,
-}
-
-#[cfg(feature = "postgres")]
-impl TryFrom<&str> for ProductionStorageBackend {
-    type Error = RebornBuildError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "postgres" => Ok(Self::Postgres),
-            other => Err(RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "production storage supports only [storage].backend = \"postgres\" in this slice; got `{other}`"
-                ),
-            }),
-        }
-    }
-}
 
 /// Composition-time OAuth client metadata.
 ///
@@ -399,14 +380,21 @@ impl RebornBuildInput {
                      an environment variable such as {DEFAULT_REBORN_POSTGRES_URL_ENV}"
                 ),
             })?;
-        let backend =
-            storage
-                .backend
-                .as_deref()
-                .ok_or_else(|| RebornBuildError::InvalidConfig {
+        match storage.backend.as_ref() {
+            Some(StorageBackend::Postgres) => {}
+            Some(StorageBackend::Unknown(backend)) => {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "production storage supports only [storage].backend = \"postgres\" in this slice; got `{backend}`"
+                    ),
+                });
+            }
+            None => {
+                return Err(RebornBuildError::InvalidConfig {
                     reason: format!("profile={profile} requires [storage].backend = \"postgres\""),
-                })?;
-        let _backend = ProductionStorageBackend::try_from(backend)?;
+                });
+            }
+        }
         let url_env = storage
             .url_env
             .as_deref()

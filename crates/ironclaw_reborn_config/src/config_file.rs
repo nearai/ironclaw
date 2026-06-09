@@ -37,7 +37,8 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
 use crate::secrets_guard::{InlineSecretError, reject_inline_secret};
@@ -163,6 +164,43 @@ pub struct SkillsSection {
     pub regex_activation_enabled: Option<bool>,
 }
 
+/// Durable storage backend names accepted by the Reborn production boot config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageBackend {
+    Postgres,
+    #[doc(hidden)]
+    Unknown(String),
+}
+
+impl<'de> Deserialize<'de> for StorageBackend {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StorageBackendVisitor;
+
+        impl Visitor<'_> for StorageBackendVisitor {
+            type Value = StorageBackend;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a storage backend name such as `postgres`")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    "postgres" => Ok(StorageBackend::Postgres),
+                    candidate => Ok(StorageBackend::Unknown(candidate.to_string())),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(StorageBackendVisitor)
+    }
+}
+
 /// Durable storage selection for production Reborn boot.
 ///
 /// `url_env` and `secret_master_key_env` are environment variable NAMES, not
@@ -172,7 +210,7 @@ pub struct SkillsSection {
 #[serde(deny_unknown_fields)]
 pub struct StorageSection {
     /// Storage backend name. First production slice supports `"postgres"`.
-    pub backend: Option<String>,
+    pub backend: Option<StorageBackend>,
     /// Environment variable name containing the PostgreSQL connection URL.
     pub url_env: Option<String>,
     /// Environment variable name containing the Reborn secret master key.
@@ -666,16 +704,18 @@ impl RebornConfigFile {
             }
         }
         if let Some(storage) = &self.storage {
-            if let Some(backend) = &storage.backend {
+            if let Some(StorageBackend::Unknown(backend)) = &storage.backend {
                 check_non_empty_trimmed(Cow::Borrowed("storage.backend"), backend)?;
-                if backend.contains("://") {
-                    return Err(RebornConfigFileError::InvalidField {
-                        path: attributed_path.display().to_string(),
-                        field: "storage.backend".to_string(),
-                        reason: "must be a backend name, not a URL or inline secret value"
-                            .to_string(),
-                    });
-                }
+                let reason = if backend.contains("://") {
+                    "must be a backend name, not a URL or inline secret value".to_string()
+                } else {
+                    format!("supports only \"postgres\" in this slice; got `{backend}`")
+                };
+                return Err(RebornConfigFileError::InvalidField {
+                    path: attributed_path.display().to_string(),
+                    field: "storage.backend".to_string(),
+                    reason,
+                });
             }
             if let Some(url_env) = &storage.url_env {
                 check_non_empty_trimmed(Cow::Borrowed("storage.url_env"), url_env)?;
@@ -1173,7 +1213,7 @@ subject_user_id = "eng-team-agent"
             Some(false)
         );
         let storage = cfg.storage.as_ref().expect("storage section present");
-        assert_eq!(storage.backend.as_deref(), Some("postgres"));
+        assert_eq!(storage.backend, Some(StorageBackend::Postgres));
         assert_eq!(
             storage.url_env.as_deref(),
             Some("IRONCLAW_REBORN_POSTGRES_URL")
@@ -1369,7 +1409,7 @@ pool_max_size = 24
         let cfg = RebornConfigFile::parse_text(toml, &attributed())
             .expect("storage env reference must parse");
         let storage = cfg.storage.expect("storage section");
-        assert_eq!(storage.backend.as_deref(), Some("postgres"));
+        assert_eq!(storage.backend, Some(StorageBackend::Postgres));
         assert_eq!(
             storage.url_env.as_deref(),
             Some("IRONCLAW_REBORN_POSTGRES_URL")
@@ -1427,6 +1467,23 @@ backend = "postgres://user:password@db.example.com/ironclaw"
         assert!(
             !err.to_string().contains("password"),
             "error must not echo credential-bearing backend value: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_storage_secret_master_key_env() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "   "
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("whitespace-only secret_master_key_env must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.secret_master_key_env"),
+            "error should identify storage.secret_master_key_env: {err}"
         );
     }
 

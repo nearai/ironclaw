@@ -134,8 +134,11 @@ mod openai_compat_mount_tests {
     use ironclaw_reborn_openai_compat::{
         InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection,
         OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
-        OpenAiChatCompletionsWorkflow, OpenAiCompatRouterState, openai_compat_router_with_state,
-        openai_compat_routes,
+        OpenAiChatCompletionsWorkflow, OpenAiCompatRouterState, OpenAiResponseId,
+        OpenAiResponseObject, OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus,
+        OpenAiResponseProjection, OpenAiResponseReadRequest, OpenAiResponseStatus,
+        OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
+        OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
     };
     use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
 
@@ -196,6 +199,60 @@ mod openai_compat_mount_tests {
         assert_eq!(workflow.submit_count(), 1);
     }
 
+    #[tokio::test]
+    async fn openai_responses_mount_uses_webui_auth_and_product_workflow() {
+        let workflow = Arc::new(GatewayOpenAiWorkflow::default());
+        let responses = Arc::new(OpenAiResponsesWorkflow::new(
+            workflow.clone(),
+            Arc::new(InMemoryOpenAiCompatRefStore::new()),
+            Arc::new(StaticResponsesProjectionReader::text(
+                "hello through responses",
+            )),
+        ));
+        let mount = ProtectedRouteMount::new(
+            openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(responses)),
+            openai_compat_routes(),
+        );
+        let bundle = RebornWebuiBundle {
+            api: Arc::new(StubServices::default()),
+            product_auth: None,
+            readiness: RebornReadiness::disabled(),
+        };
+        let config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            Arc::new(OnlyValidToken),
+            vec![HeaderValue::from_static("http://localhost:3000")],
+        )
+        .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+        .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+        .with_protected_route_mount(mount);
+        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+        let unauthenticated = app
+            .clone()
+            .oneshot(response_request(None))
+            .await
+            .expect("oneshot");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(workflow.submit_count(), 0);
+
+        let authenticated = app
+            .oneshot(response_request(Some(VALID_TOKEN)))
+            .await
+            .expect("oneshot");
+        assert_eq!(authenticated.status(), StatusCode::OK);
+        let body = to_bytes(authenticated.into_body(), 4096)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(
+            body["output"][0]["content"][0]["text"],
+            "hello through responses"
+        );
+        assert_eq!(workflow.submit_count(), 1);
+        assert_eq!(workflow.read_count(), 1);
+    }
+
     fn chat_request(token: Option<&str>) -> Request<Body> {
         let mut builder = Request::builder()
             .method(Method::POST)
@@ -215,9 +272,29 @@ mod openai_compat_mount_tests {
             .expect("request")
     }
 
+    fn response_request(token: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/responses")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        builder
+            .body(Body::from(
+                json!({
+                    "model": "reborn-test",
+                    "input": "hello"
+                })
+                .to_string(),
+            ))
+            .expect("request")
+    }
+
     #[derive(Default)]
     struct GatewayOpenAiWorkflow {
         submit_count: Mutex<usize>,
+        read_count: Mutex<usize>,
     }
 
     impl GatewayOpenAiWorkflow {
@@ -226,6 +303,13 @@ mod openai_compat_mount_tests {
                 .submit_count
                 .lock()
                 .expect("submit count lock should not be poisoned")
+        }
+
+        fn read_count(&self) -> usize {
+            *self
+                .read_count
+                .lock()
+                .expect("read count lock should not be poisoned")
         }
     }
 
@@ -250,6 +334,10 @@ mod openai_compat_mount_tests {
             &self,
             request: ProductProjectionReadInput,
         ) -> Result<ProjectionReadRequest, ProductAdapterError> {
+            *self
+                .read_count
+                .lock()
+                .expect("read count lock should not be poisoned") += 1;
             let ProductProjectionSubject::AdapterExternalRefs { auth_claim, .. } = request.subject
             else {
                 return Err(ProductAdapterError::Internal {
@@ -298,6 +386,59 @@ mod openai_compat_mount_tests {
             ironclaw_reborn_openai_compat::OpenAiCompatHttpError,
         > {
             Ok(self.projection.clone())
+        }
+    }
+
+    struct StaticResponsesProjectionReader {
+        content: String,
+    }
+
+    impl StaticResponsesProjectionReader {
+        fn text(content: &str) -> Self {
+            Self {
+                content: content.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OpenAiResponsesProjectionReader for StaticResponsesProjectionReader {
+        async fn wait_for_response_completion(
+            &self,
+            request: OpenAiResponseWaitRequest,
+        ) -> Result<OpenAiResponseProjection, ironclaw_reborn_openai_compat::OpenAiCompatHttpError>
+        {
+            Ok(OpenAiResponseProjection::new(response_object(
+                request.public_id,
+                &self.content,
+            )))
+        }
+
+        async fn read_response(
+            &self,
+            request: OpenAiResponseReadRequest,
+        ) -> Result<OpenAiResponseObject, ironclaw_reborn_openai_compat::OpenAiCompatHttpError>
+        {
+            Ok(response_object(request.public_id, &self.content))
+        }
+    }
+
+    fn response_object(id: OpenAiResponseId, content: &str) -> OpenAiResponseObject {
+        OpenAiResponseObject {
+            id,
+            object: "response".to_string(),
+            created_at: 1_777_777_777,
+            status: OpenAiResponseStatus::Completed,
+            model: "reborn-test".to_string(),
+            output: vec![OpenAiResponseOutputItem::Message {
+                id: "msg_1".to_string(),
+                status: Some(OpenAiResponseOutputItemStatus::Completed),
+                role: OpenAiResponsesMessageRole::Assistant,
+                content: json!([{"type": "output_text", "text": content}]),
+            }],
+            error: None,
+            incomplete_details: None,
+            usage: None,
         }
     }
 }
@@ -1728,7 +1869,7 @@ async fn every_webui_v2_descriptor_is_mounted_on_composed_app() {
 }
 
 #[tokio::test]
-async fn llm_config_routes_are_not_mounted_for_multi_user_authenticator() {
+async fn operator_routes_are_not_mounted_for_multi_user_authenticator() {
     let (app, _services) = build_app_with_authenticator(Arc::new(MultiUserToken));
 
     for (method, uri) in [
@@ -1741,6 +1882,14 @@ async fn llm_config_routes_are_not_mounted_for_multi_user_authenticator() {
         (Method::POST, "/api/webchat/v2/llm/nearai/login"),
         (Method::POST, "/api/webchat/v2/llm/nearai/wallet"),
         (Method::POST, "/api/webchat/v2/llm/codex/login"),
+        (Method::GET, "/api/webchat/v2/operator/setup"),
+        (Method::POST, "/api/webchat/v2/operator/setup"),
+        (Method::GET, "/api/webchat/v2/operator/config"),
+        (Method::POST, "/api/webchat/v2/operator/config/validate"),
+        (Method::GET, "/api/webchat/v2/operator/diagnostics"),
+        (Method::GET, "/api/webchat/v2/operator/status"),
+        (Method::GET, "/api/webchat/v2/operator/logs"),
+        (Method::POST, "/api/webchat/v2/operator/service"),
     ] {
         let mut builder = Request::builder()
             .method(method.clone())

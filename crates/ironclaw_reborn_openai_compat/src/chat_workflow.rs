@@ -1,42 +1,47 @@
 //! ProductWorkflow-backed Chat Completions route service.
 //!
-//! This module is the first non-streaming OpenAI-compatible Chat slice. It
-//! translates the HTTP DTO into a product inbound user-message envelope, routes
-//! the mutating action through `ProductWorkflow`, resolves canonical projection
-//! read metadata through the ProductWorkflow read door, and waits on a
-//! projection reader port supplied by host composition. It deliberately does not
-//! call v1 gateway handlers, LLM providers, `TurnCoordinator`, or projection
-//! internals.
+//! This module translates OpenAI-compatible Chat requests into product inbound
+//! user-message envelopes. Non-streaming requests wait on a projection waiter;
+//! streaming requests consume a composition-supplied projection stream and emit
+//! OpenAI-compatible SSE through the route-owned streaming translator.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ack_helpers::internal_refs_from_ack;
+use crate::identity::{
+    OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
+};
+use crate::projection_helpers::{
+    ensure_projection_read_matches_caller, ensure_projection_subscription_matches_caller,
+};
 use crate::{
     OpenAiChatChoice, OpenAiChatCompletionId, OpenAiChatCompletionRequest,
     OpenAiChatCompletionResponse, OpenAiChatFinishReason, OpenAiChatMessage, OpenAiChatMessageRole,
-    OpenAiChatTool, OpenAiChatToolCall, OpenAiCompatActorScope, OpenAiCompatBindInternalRefs,
-    OpenAiCompatHttpError, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,
-    OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck, OpenAiCompatRefReservation,
-    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
+    OpenAiChatProjectionStreamRequest, OpenAiChatTool, OpenAiChatToolCall, OpenAiCompatActorScope,
+    OpenAiCompatBindInternalRefs, OpenAiCompatHttpError, OpenAiCompatIdempotencyKey,
+    OpenAiCompatInternalRefs, OpenAiCompatProjectionStreamer, OpenAiCompatPublicId,
+    OpenAiCompatRecordAcceptedAck, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
+    OpenAiCompatRefStore, OpenAiCompatRequestFingerprint, OpenAiCompatResourceMapping,
     OpenAiCompatRouteSurface, OpenAiUsage,
 };
 use async_trait::async_trait;
+use axum::Json;
+use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     ParsedProductInbound, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductProjectionReadInput, ProductProjectionSubject, ProductRejection,
-    ProductRejectionKind, ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind,
-    ProjectionReadRequest, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    ProductInboundPayload, ProductProjectionReadInput, ProductProjectionSubject,
+    ProductProjectionSubscribeInput, ProductRejection, ProductRejectionKind, ProductTriggerReason,
+    ProductWorkflow, ProductWorkflowRejectionKind, ProjectionReadRequest, ProtocolAuthEvidence,
+    TrustedInboundContext, UserMessagePayload,
 };
 
 const DEFAULT_CHAT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CHAT_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CHAT_COMPLETION_MESSAGES: usize = 1_000;
-pub const OPENAI_COMPAT_ADAPTER_ID: &str = "openai_compat";
-pub const OPENAI_COMPAT_INSTALLATION_ID: &str = "openai_compat_default";
-pub const OPENAI_COMPAT_ACTOR_KIND: &str = "openai_compat_user";
 pub const OPENAI_COMPAT_CONVERSATION_PREFIX: &str = "chat_completion";
 
 #[derive(Debug, Clone)]
@@ -86,6 +91,11 @@ pub struct OpenAiChatCompletionsWorkflow {
     product_workflow: Arc<dyn ProductWorkflow>,
     ref_store: Arc<dyn OpenAiCompatRefStore>,
     projection_reader: Arc<dyn OpenAiChatCompletionProjectionReader>,
+    /// Wired by host composition when OpenAI-compatible streaming is enabled.
+    /// When `None`, `stream: true` requests fail closed.
+    /// arch-exempt: optional Arc, streaming is a staged #4446 capability layered
+    /// onto the non-streaming #4444 workflow.
+    projection_streamer: Option<Arc<dyn OpenAiCompatProjectionStreamer>>,
     wait_timeout: Duration,
     adapter_id: ProductAdapterId,
     installation_id: AdapterInstallationId,
@@ -101,6 +111,7 @@ impl OpenAiChatCompletionsWorkflow {
             product_workflow,
             ref_store,
             projection_reader,
+            projection_streamer: None,
             wait_timeout: DEFAULT_CHAT_WAIT_TIMEOUT,
             adapter_id: ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID)
                 .expect("OPENAI_COMPAT_ADAPTER_ID is valid"), // safety: hard-coded non-empty product adapter id literal.
@@ -114,6 +125,14 @@ impl OpenAiChatCompletionsWorkflow {
         self
     }
 
+    pub fn with_projection_streamer(
+        mut self,
+        projection_streamer: Arc<dyn OpenAiCompatProjectionStreamer>,
+    ) -> Self {
+        self.projection_streamer = Some(projection_streamer);
+        self
+    }
+
     pub async fn complete_chat(
         &self,
         caller: OpenAiCompatAuthenticatedCaller,
@@ -121,6 +140,34 @@ impl OpenAiChatCompletionsWorkflow {
         idempotency_key: Option<OpenAiCompatIdempotencyKey>,
     ) -> Result<OpenAiChatCompletionResponse, OpenAiCompatHttpError> {
         let request = parse_chat_request(raw_body)?;
+        self.complete_chat_request(caller, request, raw_body, idempotency_key)
+            .await
+    }
+
+    pub(crate) async fn handle_chat_request(
+        &self,
+        caller: OpenAiCompatAuthenticatedCaller,
+        request: OpenAiChatCompletionRequest,
+        raw_body: &[u8],
+        idempotency_key: Option<OpenAiCompatIdempotencyKey>,
+    ) -> Result<Response, OpenAiCompatHttpError> {
+        if request.stream.unwrap_or(false) {
+            return self
+                .stream_chat_request(caller, request, raw_body, idempotency_key)
+                .await;
+        }
+        self.complete_chat_request(caller, request, raw_body, idempotency_key)
+            .await
+            .map(|response| Json(response).into_response())
+    }
+
+    async fn complete_chat_request(
+        &self,
+        caller: OpenAiCompatAuthenticatedCaller,
+        request: OpenAiChatCompletionRequest,
+        raw_body: &[u8],
+        idempotency_key: Option<OpenAiCompatIdempotencyKey>,
+    ) -> Result<OpenAiChatCompletionResponse, OpenAiCompatHttpError> {
         if request.stream.unwrap_or(false) {
             return Err(OpenAiCompatHttpError::invalid_request(Some(
                 "stream".to_string(),
@@ -242,6 +289,104 @@ impl OpenAiChatCompletionsWorkflow {
         })
     }
 
+    pub async fn stream_chat(
+        &self,
+        caller: OpenAiCompatAuthenticatedCaller,
+        raw_body: &[u8],
+        idempotency_key: Option<OpenAiCompatIdempotencyKey>,
+    ) -> Result<Response, OpenAiCompatHttpError> {
+        let request = parse_chat_request(raw_body)?;
+        self.stream_chat_request(caller, request, raw_body, idempotency_key)
+            .await
+    }
+
+    async fn stream_chat_request(
+        &self,
+        caller: OpenAiCompatAuthenticatedCaller,
+        request: OpenAiChatCompletionRequest,
+        raw_body: &[u8],
+        idempotency_key: Option<OpenAiCompatIdempotencyKey>,
+    ) -> Result<Response, OpenAiCompatHttpError> {
+        let projection_streamer = self
+            .projection_streamer
+            .clone()
+            .ok_or_else(OpenAiCompatHttpError::not_wired)?;
+        if !request.stream.unwrap_or(false) {
+            return Err(OpenAiCompatHttpError::invalid_request(Some(
+                "stream".to_string(),
+            )));
+        }
+
+        let user_message_payload = chat_user_message_payload(&request)?;
+        let model_only_tools = OpenAiChatModelOnlyTools::from_request(&request);
+        let request_fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(raw_body);
+        let reservation = self
+            .ref_store
+            .reserve(OpenAiCompatRefReservation::new(
+                caller.scope().clone(),
+                OpenAiCompatRouteSurface::ChatCompletions,
+                request_fingerprint,
+                idempotency_key,
+            ))
+            .await?;
+        let (mapping, accepted_ack) = match reservation {
+            OpenAiCompatRefReservationOutcome::Created(mapping) => {
+                let OpenAiCompatPublicId::ChatCompletion(public_id) = &mapping.public_id else {
+                    return Err(OpenAiCompatHttpError::internal());
+                };
+                let accepted_ack = self
+                    .submit_chat_and_record_ack(&caller, public_id, user_message_payload)
+                    .await?;
+                (mapping, accepted_ack)
+            }
+            OpenAiCompatRefReservationOutcome::Replayed(mapping) => {
+                let OpenAiCompatPublicId::ChatCompletion(public_id) = &mapping.public_id else {
+                    return Err(OpenAiCompatHttpError::internal());
+                };
+                let accepted_ack = match mapping.accepted_ack.clone() {
+                    Some(accepted_ack) => accepted_ack,
+                    None => {
+                        self.submit_chat_and_record_ack(&caller, public_id, user_message_payload)
+                            .await?
+                    }
+                };
+                (mapping, accepted_ack)
+            }
+            OpenAiCompatRefReservationOutcome::Conflict(_) => {
+                return Err(OpenAiCompatHttpError::conflict(Some(
+                    "idempotency_key".to_string(),
+                )));
+            }
+        };
+        let OpenAiCompatPublicId::ChatCompletion(public_id) = mapping.public_id.clone() else {
+            return Err(OpenAiCompatHttpError::internal());
+        };
+        let mapping = self
+            .bind_internal_refs_from_ack(caller.scope().clone(), public_id.clone(), &accepted_ack)
+            .await?
+            .unwrap_or(mapping);
+        let projection_subscription = self
+            .product_workflow
+            .subscribe_projection(self.chat_projection_subscribe_input(&caller, &public_id)?)
+            .await?;
+        ensure_projection_subscription_matches_caller(&caller, &projection_subscription)?;
+
+        Ok(crate::streaming::chat_sse_response(
+            projection_streamer,
+            OpenAiChatProjectionStreamRequest {
+                public_id,
+                actor_scope: caller.scope().clone(),
+                accepted_ack,
+                requested_model: request.model,
+                model_only_tools,
+                projection_subscription,
+                mapping,
+                wait_timeout: self.wait_timeout,
+                after_cursor: None,
+            },
+        ))
+    }
+
     async fn submit_chat_and_record_ack(
         &self,
         caller: &OpenAiCompatAuthenticatedCaller,
@@ -260,6 +405,35 @@ impl OpenAiChatCompletionsWorkflow {
             .await?
             .ok_or_else(|| OpenAiCompatHttpError::not_found(None))?;
         Ok(accepted_ack)
+    }
+
+    async fn bind_internal_refs_from_ack(
+        &self,
+        owner: OpenAiCompatActorScope,
+        public_id: OpenAiChatCompletionId,
+        accepted_ack: &ProductInboundAck,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatHttpError> {
+        let internal_refs = internal_refs_from_ack(accepted_ack)?;
+        match tokio::time::timeout(
+            DEFAULT_BIND_INTERNAL_REFS_TIMEOUT,
+            self.ref_store
+                .bind_internal_refs(OpenAiCompatBindInternalRefs::new(
+                    owner,
+                    OpenAiCompatPublicId::ChatCompletion(public_id.clone()),
+                    internal_refs,
+                )),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(Into::into),
+            Err(_) => {
+                tracing::warn!(
+                    public_id = public_id.as_str(),
+                    "bind_internal_refs timed out; continuing without binding"
+                );
+                Ok(None)
+            }
+        }
     }
 
     fn chat_product_envelope(
@@ -297,31 +471,51 @@ impl OpenAiChatCompletionsWorkflow {
         caller: &OpenAiCompatAuthenticatedCaller,
         public_id: &OpenAiChatCompletionId,
     ) -> Result<ProductProjectionReadInput, OpenAiCompatHttpError> {
-        let Some(auth_claim) = caller.auth_evidence().claim().cloned() else {
-            return Err(OpenAiCompatHttpError::internal());
-        };
         Ok(ProductProjectionReadInput::new(
-            ProductProjectionSubject::AdapterExternalRefs {
-                adapter_id: self.adapter_id.clone(),
-                installation_id: self.installation_id.clone(),
-                external_event_id: ExternalEventId::new(public_id.as_str())?,
-                external_actor_ref: ExternalActorRef::new(
-                    OPENAI_COMPAT_ACTOR_KIND,
-                    caller.scope().user_id().as_str(),
-                    Option::<String>::None,
-                )?,
-                external_conversation_ref: ExternalConversationRef::new(
-                    None,
-                    format!("{OPENAI_COMPAT_CONVERSATION_PREFIX}:{}", public_id.as_str()),
-                    None,
-                    None,
-                )?,
-                auth_claim,
-            },
+            self.chat_projection_subject(caller, public_id)?,
             None,
             None,
             None,
         ))
+    }
+
+    fn chat_projection_subscribe_input(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        public_id: &OpenAiChatCompletionId,
+    ) -> Result<ProductProjectionSubscribeInput, OpenAiCompatHttpError> {
+        Ok(ProductProjectionSubscribeInput::new(
+            self.chat_projection_subject(caller, public_id)?,
+            None,
+            None,
+        ))
+    }
+
+    fn chat_projection_subject(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        public_id: &OpenAiChatCompletionId,
+    ) -> Result<ProductProjectionSubject, OpenAiCompatHttpError> {
+        let Some(auth_claim) = caller.auth_evidence().claim().cloned() else {
+            return Err(OpenAiCompatHttpError::internal());
+        };
+        Ok(ProductProjectionSubject::AdapterExternalRefs {
+            adapter_id: self.adapter_id.clone(),
+            installation_id: self.installation_id.clone(),
+            external_event_id: ExternalEventId::new(public_id.as_str())?,
+            external_actor_ref: ExternalActorRef::new(
+                OPENAI_COMPAT_ACTOR_KIND,
+                caller.scope().user_id().as_str(),
+                Option::<String>::None,
+            )?,
+            external_conversation_ref: ExternalConversationRef::new(
+                None,
+                format!("{OPENAI_COMPAT_CONVERSATION_PREFIX}:{}", public_id.as_str()),
+                None,
+                None,
+            )?,
+            auth_claim,
+        })
     }
 }
 
@@ -391,31 +585,6 @@ pub trait OpenAiChatCompletionProjectionReader: Send + Sync {
     ) -> Result<OpenAiChatCompletionProjection, OpenAiCompatHttpError>;
 }
 
-fn ensure_projection_read_matches_caller(
-    caller: &OpenAiCompatAuthenticatedCaller,
-    projection_read: &ProjectionReadRequest,
-) -> Result<(), OpenAiCompatHttpError> {
-    let scope = caller.scope();
-    let matches_caller = &projection_read.actor.user_id == scope.user_id()
-        && &projection_read.scope.tenant_id == scope.tenant_id()
-        && projection_read.scope.agent_id.as_ref() == scope.agent_id()
-        && projection_read.scope.project_id.as_ref() == scope.project_id()
-        && projection_read
-            .scope
-            .explicit_owner_user_id()
-            .is_none_or(|owner| owner == scope.user_id());
-    if matches_caller {
-        Ok(())
-    } else {
-        Err(OpenAiCompatHttpError::from_kind(
-            403,
-            false,
-            crate::OpenAiCompatErrorKind::PermissionDenied,
-            None,
-        ))
-    }
-}
-
 fn accepted_ack_from_ack(
     mut ack: ProductInboundAck,
 ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
@@ -468,7 +637,7 @@ fn error_from_rejection(rejection: ProductRejection) -> OpenAiCompatHttpError {
     }
 }
 
-fn parse_chat_request(
+pub(crate) fn parse_chat_request(
     raw_body: &[u8],
 ) -> Result<OpenAiChatCompletionRequest, OpenAiCompatHttpError> {
     if raw_body.len() > MAX_CHAT_BODY_BYTES {

@@ -40,9 +40,9 @@ use ironclaw_first_party_extension_ports::{
     SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
 use ironclaw_host_api::{
-    ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId, ResourceScope,
-    TenantId, ThreadId, UserId,
+    ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
+    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId,
+    ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -57,7 +57,9 @@ use ironclaw_product_workflow::{
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
     RunStateApprovalInteractionReadModel,
 };
-use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
+use ironclaw_reborn::loop_exit_applier::{
+    ApprovalGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
+};
 use ironclaw_reborn::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
 };
@@ -82,8 +84,8 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
     TurnScope, TurnSpawnTreeStateStore, TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
@@ -531,6 +533,40 @@ impl LocalDevApprovalTurnRunLocator {
             Ok(self.turn_state.persistence_snapshot())
         }
     }
+}
+
+struct LocalDevApprovalGateEvidence {
+    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+}
+
+#[async_trait::async_trait]
+impl ApprovalGateEvidenceStore for LocalDevApprovalGateEvidence {
+    async fn pending_approval_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        let Some(request_id) = approval_request_id_from_gate_ref(gate_ref) else {
+            return Ok(false);
+        };
+        let record = self
+            .approval_requests
+            .get(&scope.to_resource_scope(), request_id)
+            .await
+            .map_err(|error| TurnError::Unavailable {
+                reason: format!("approval request evidence lookup failed: {error}"),
+            })?;
+        Ok(record
+            .map(|record| record.status == ironclaw_run_state::ApprovalStatus::Pending)
+            .unwrap_or(false))
+    }
+}
+
+fn approval_request_id_from_gate_ref(gate_ref: &LoopGateRef) -> Option<ApprovalRequestId> {
+    gate_ref
+        .as_str()
+        .strip_prefix("gate:approval-")
+        .and_then(|value| ApprovalRequestId::parse(value).ok())
 }
 
 #[async_trait::async_trait]
@@ -1856,12 +1892,21 @@ pub async fn build_reborn_runtime(
         (_, None) => None,
     };
 
-    let loop_exit_evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
+    let mut loop_exit_evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
         Arc::clone(&thread_service),
         Arc::clone(&turn_state_store) as Arc<dyn ironclaw_turns::TurnStateStore>,
         Arc::clone(&loop_checkpoint_store) as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
         thread_scope.clone(),
-    ));
+    );
+    if let Some(local_runtime) = local_runtime {
+        loop_exit_evidence = loop_exit_evidence.with_approval_gate_evidence(Arc::new(
+            LocalDevApprovalGateEvidence {
+                approval_requests: Arc::clone(&local_runtime.approval_requests)
+                    as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+            },
+        ));
+    }
+    let loop_exit_evidence = Arc::new(loop_exit_evidence);
     let milestone_thread_scope = ThreadScope {
         owner_user_id: Some(actor_user_id.clone()),
         ..thread_scope.clone()
@@ -2109,6 +2154,9 @@ pub async fn build_reborn_runtime(
                     local_runtime.workspace_mounts.clone(),
                     local_runtime.skill_mounts.clone(),
                     local_runtime.memory_mounts.clone(),
+                    local_dev::extension_surface::LocalDevExtensionSurfaceSource::new(
+                        local_runtime.extension_management.clone(),
+                    ),
                 )),
                 approval_resolver,
                 Arc::clone(&planned_turn_coordinator),
@@ -3951,6 +3999,17 @@ mod tests {
             run_id: child_run_id,
             ..
         } = child;
+
+        runtime
+            .cancel_run(
+                &parent_scope,
+                parent_run_id,
+                SanitizedCancelReason::UserRequested,
+                "test-parent-cancel",
+            )
+            .await
+            .expect("parent cancellation succeeds");
+
         let result_ref = LoopResultRef::new("result:runtime-cancel-child").unwrap();
         runtime
             .thread_service
@@ -3996,16 +4055,6 @@ mod tests {
             })
             .await
             .expect("child thread metadata seeded");
-
-        runtime
-            .cancel_run(
-                &parent_scope,
-                parent_run_id,
-                SanitizedCancelReason::UserRequested,
-                "test-parent-cancel",
-            )
-            .await
-            .expect("parent cancellation succeeds");
 
         let child_state = runtime
             .turn_coordinator
@@ -5943,6 +5992,29 @@ mod tests {
             .save_pending(resource_scope.clone(), approval)
             .await
             .expect("save approval");
+        let streamed = bundle
+            .api
+            .stream_events(
+                caller.clone(),
+                RebornStreamEventsRequest {
+                    thread_id: scope.thread_id.to_string(),
+                    after_cursor: None,
+                },
+            )
+            .await
+            .expect("approval gate event stream");
+        assert!(
+            streamed.events.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    ProductOutboundPayload::GatePrompt(prompt)
+                        if prompt.turn_run_id == run_id
+                            && prompt.gate_ref == gate_ref.as_str()
+                            && prompt.headline == "Approval required"
+                )
+            }),
+            "blocked approval run should be visible as a gate prompt on the product event stream"
+        );
 
         bundle
             .api
@@ -5975,6 +6047,11 @@ mod tests {
             .leases_for_scope(&resource_scope)
             .await;
         assert_eq!(leases.len(), 1);
+        assert_eq!(
+            leases[0].grant.issued_by,
+            Principal::User(actor.user_id.clone()),
+            "product approval service should stamp the approving user on the resume lease"
+        );
         assert!(
             leases[0]
                 .grant
