@@ -128,7 +128,7 @@ impl RebornReadinessDiagnostic {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornReadiness {
     pub profile: RebornCompositionProfile,
     pub state: RebornReadinessState,
@@ -137,6 +137,12 @@ pub struct RebornReadiness {
     pub workers: RebornWorkerReadiness,
     #[serde(default)]
     pub diagnostics: Vec<RebornReadinessDiagnostic>,
+}
+
+impl Default for RebornReadiness {
+    fn default() -> Self {
+        Self::disabled()
+    }
 }
 
 impl RebornReadiness {
@@ -161,6 +167,11 @@ impl RebornReadiness {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_default_matches_disabled_snapshot() {
+        assert_eq!(RebornReadiness::default(), RebornReadiness::disabled());
+    }
 
     #[test]
     fn readiness_deserializes_without_workers_for_older_payloads() {
