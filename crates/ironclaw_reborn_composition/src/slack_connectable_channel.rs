@@ -42,39 +42,40 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
     let outbound_delivery_target_providers = slack_mounts
         .map(|mounts| vec![Arc::clone(&mounts.outbound_delivery_target_provider)])
         .unwrap_or_default();
-    build_webui_services_with_slack_connectable_channel(
+    build_webui_services_with_connectable_channels(
         runtime,
         event_stream,
-        visibility,
+        slack_connectable_channels(visibility),
         outbound_delivery_target_providers,
     )
 }
 
+#[cfg(test)]
 fn build_webui_services_with_slack_connectable_channel(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     visibility: SlackConnectableChannelVisibility,
-    outbound_delivery_target_providers: Vec<
-        Arc<dyn crate::outbound_preferences::OutboundDeliveryTargetProvider>,
-    >,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    let connectable_channels =
-        (visibility != SlackConnectableChannelVisibility::Hidden).then(|| {
-            let mut channels = vec![slack_inbound_proof_code_connectable_channel()];
-            if visibility
-                == SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement
-            {
-                channels.push(slack_admin_managed_channel_connectable_channel());
-            }
-            Arc::new(StaticConnectableChannelsProductFacade::new(channels))
-                as Arc<dyn ConnectableChannelsProductFacade>
-        });
     build_webui_services_with_connectable_channels(
         runtime,
         event_stream,
-        connectable_channels,
-        outbound_delivery_target_providers,
+        slack_connectable_channels(visibility),
+        Vec::new(),
     )
+}
+
+fn slack_connectable_channels(
+    visibility: SlackConnectableChannelVisibility,
+) -> Option<Arc<dyn ConnectableChannelsProductFacade>> {
+    (visibility != SlackConnectableChannelVisibility::Hidden).then(|| {
+        let mut channels = vec![slack_inbound_proof_code_connectable_channel()];
+        if visibility == SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement
+        {
+            channels.push(slack_admin_managed_channel_connectable_channel());
+        }
+        Arc::new(StaticConnectableChannelsProductFacade::new(channels))
+            as Arc<dyn ConnectableChannelsProductFacade>
+    })
 }
 
 fn slack_inbound_proof_code_connectable_channel() -> RebornConnectableChannelInfo {
@@ -193,7 +194,6 @@ mod tests {
             &runtime,
             None,
             SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement,
-            Vec::new(),
         )
         .expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
@@ -248,7 +248,6 @@ mod tests {
             &runtime,
             None,
             SlackConnectableChannelVisibility::PersonalPairing,
-            Vec::new(),
         )
         .expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(

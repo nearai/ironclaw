@@ -516,9 +516,10 @@ Current implementation status:
   module to avoid refactor churn. Follow up by moving the provider into
   `slack_channel_routes` or a dedicated Slack route-authority module if the
   target-provider implementation grows beyond this first shared-channel slice.
-- PR C1 uses a bounded first-page route listing for target inventory. Follow up
-  with a subject-scoped or paginated route-store query if tenants can manage
-  enough Slack channel routes for the cap to hide valid targets.
+- PR C1 pages through the existing route-store API for shared-channel target
+  inventory so stored routes past the first page still override static fallback.
+  Follow up with a subject-scoped route-store query if route inventory scans
+  become too expensive for tenants with many Slack channel routes.
 - PR C1 keeps the Slack reply-target binding formatter local. Follow up with a
   shared bounded binding-ref helper only if another provider needs the same
   formatter shape; do not move crate APIs just for this first Slack target.
