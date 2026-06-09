@@ -264,7 +264,7 @@ pub struct SlackSection {
     pub bot_token_env: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlackChannelRouteSection {
     pub channel_id: Option<String>,
