@@ -11,9 +11,9 @@ use http_body_util::BodyExt;
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalConversationRef, FakeProductWorkflow,
-    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
-    ProductWorkflow, ProjectionCursor, ProtocolAuthEvidence,
+    FinalReplyView, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
+    ProductProjectionState, ProductWorkflow, ProjectionCursor, ProtocolAuthEvidence,
 };
 use ironclaw_reborn_openai_compat::{
     InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection,
@@ -113,6 +113,37 @@ async fn keepalive_is_suppressed_and_non_monotonic_rebase_fails_safely() {
 }
 
 #[tokio::test]
+async fn chat_stream_non_monotonic_rebase_fails_safely() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_chat(vec![projection_text_envelope("first", "hello")]);
+    streamer.push_chat(vec![projection_text_envelope("rebase", "jello")]);
+    let router = router(streamer);
+
+    let response = router
+        .oneshot(post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-reborn",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = read_until(response, "event: error").await;
+    assert!(raw.contains("\"content\":\"hello\""), "raw SSE: {raw}");
+    assert!(raw.contains("event: error"), "raw SSE: {raw}");
+    assert!(
+        raw.contains("\"code\":\"internal_error\""),
+        "raw SSE: {raw}"
+    );
+    assert!(!raw.contains("cursor:rebase"), "raw SSE: {raw}");
+    assert!(!raw.contains("RebaseRequired"), "raw SSE: {raw}");
+}
+
+#[tokio::test]
 async fn chat_stream_completes_on_terminal_run_status_projection() {
     let streamer = Arc::new(QueuedStreamer::new());
     streamer.push_chat(vec![
@@ -141,6 +172,113 @@ async fn chat_stream_completes_on_terminal_run_status_projection() {
 }
 
 #[tokio::test]
+async fn chat_stream_completes_on_final_reply_payload() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_chat(vec![final_reply_envelope("chat-final", "hello final")]);
+    let router = router(streamer);
+
+    let response = router
+        .oneshot(post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-reborn",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = read_until(response, "[DONE]").await;
+    assert!(
+        raw.contains("\"content\":\"hello final\""),
+        "raw SSE: {raw}"
+    );
+    assert!(raw.contains("\"finish_reason\":\"stop\""), "raw SSE: {raw}");
+    assert!(raw.contains("[DONE]"), "raw SSE: {raw}");
+}
+
+#[tokio::test]
+async fn chat_stream_errors_on_failed_run_status() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_chat(vec![run_status_envelope("chat-failed", "failed")]);
+    let router = router(streamer);
+
+    let response = router
+        .oneshot(post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-reborn",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = read_until(response, "event: error").await;
+    assert!(
+        raw.contains("\"code\":\"internal_error\""),
+        "raw SSE: {raw}"
+    );
+    assert!(!raw.contains("failure_summary"), "raw SSE: {raw}");
+}
+
+#[tokio::test]
+async fn chat_stream_drain_error_emits_sanitized_in_stream_error() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_chat_error(OpenAiCompatHttpError::internal());
+    let router = router(streamer);
+
+    let response = router
+        .oneshot(post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-reborn",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = read_until(response, "event: error").await;
+    assert!(
+        raw.contains("\"code\":\"internal_error\""),
+        "raw SSE: {raw}"
+    );
+    assert!(!raw.contains("SECRET_TOKEN"), "raw SSE: {raw}");
+}
+
+#[tokio::test]
+async fn chat_stream_times_out_when_projection_stalls() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    let router = router_with_wait_timeout(streamer, Duration::from_millis(5));
+
+    let response = router
+        .oneshot(post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-reborn",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = read_until(response, "event: error").await;
+    assert!(
+        raw.contains("\"code\":\"service_unavailable\""),
+        "raw SSE: {raw}"
+    );
+}
+
+#[tokio::test]
 async fn responses_stream_completes_on_terminal_run_status_projection() {
     let streamer = Arc::new(QueuedStreamer::new());
     streamer.push_response(vec![
@@ -165,6 +303,156 @@ async fn responses_stream_completes_on_terminal_run_status_projection() {
     );
     assert!(raw.contains("event: response.completed"), "raw SSE: {raw}");
     assert!(raw.contains("\"status\":\"completed\""), "raw SSE: {raw}");
+}
+
+#[tokio::test]
+async fn responses_stream_completes_on_final_reply_payload() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_response(vec![final_reply_envelope("resp-final", "hello final")]);
+    let router = router(streamer);
+
+    let response = router
+        .oneshot(post_json(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "stream": true, "input": "hello"}),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = read_until(response, "event: response.completed").await;
+    assert!(
+        raw.contains("event: response.output_text.done"),
+        "raw SSE: {raw}"
+    );
+    assert!(raw.contains("event: response.completed"), "raw SSE: {raw}");
+    assert!(raw.contains("\"text\":\"hello final\""), "raw SSE: {raw}");
+    assert!(raw.contains("\"status\":\"completed\""), "raw SSE: {raw}");
+}
+
+#[tokio::test]
+async fn responses_stream_emits_failed_event_on_failed_run_status() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_response(vec![run_status_envelope("resp-failed", "failed")]);
+    let router = router(streamer);
+
+    let response = router
+        .oneshot(post_json(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "stream": true, "input": "hello"}),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = read_until(response, "event: response.failed").await;
+    assert!(raw.contains("event: response.failed"), "raw SSE: {raw}");
+    assert!(raw.contains("\"status\":\"failed\""), "raw SSE: {raw}");
+    assert!(
+        raw.contains("\"code\":\"internal_error\""),
+        "raw SSE: {raw}"
+    );
+    assert!(!raw.contains("failure_summary"), "raw SSE: {raw}");
+}
+
+#[tokio::test]
+async fn responses_stream_emits_cancelled_event_on_cancelled_run_status() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_response(vec![run_status_envelope("resp-cancelled", "cancelled")]);
+    let router = router(streamer);
+
+    let response = router
+        .oneshot(post_json(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "stream": true, "input": "hello"}),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = read_until(response, "event: response.cancelled").await;
+    assert!(raw.contains("event: response.cancelled"), "raw SSE: {raw}");
+    assert!(raw.contains("\"status\":\"cancelled\""), "raw SSE: {raw}");
+    assert!(!raw.contains("failure_summary"), "raw SSE: {raw}");
+}
+
+#[tokio::test]
+async fn responses_stream_omits_text_done_when_completed_without_text() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_response(vec![run_status_envelope("resp-empty-done", "completed")]);
+    let router = router(streamer);
+
+    let response = router
+        .oneshot(post_json(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "stream": true, "input": "hello"}),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = read_until(response, "event: response.completed").await;
+    assert!(!raw.contains("response.output_text.done"), "raw SSE: {raw}");
+    assert!(raw.contains("\"status\":\"completed\""), "raw SSE: {raw}");
+}
+
+#[tokio::test]
+async fn responses_stream_times_out_when_projection_stalls() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    let router = router_with_wait_timeout(streamer, Duration::from_millis(5));
+
+    let response = router
+        .oneshot(post_json(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "stream": true, "input": "hello"}),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = read_until(response, "event: error").await;
+    assert!(
+        raw.contains("\"code\":\"service_unavailable\""),
+        "raw SSE: {raw}"
+    );
+}
+
+#[tokio::test]
+async fn stream_true_without_wired_streamer_returns_not_wired() {
+    let router = router_without_streamer();
+
+    let chat = router
+        .clone()
+        .oneshot(post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-reborn",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+        ))
+        .await
+        .expect("chat response");
+    assert_eq!(chat.status(), http::StatusCode::NOT_IMPLEMENTED);
+    let chat_body = response_body(chat).await;
+    assert!(
+        chat_body.contains("\"code\":\"unsupported\""),
+        "{chat_body}"
+    );
+
+    let responses = router
+        .oneshot(post_json(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "stream": true, "input": "hello"}),
+        ))
+        .await
+        .expect("responses response");
+    assert_eq!(responses.status(), http::StatusCode::NOT_IMPLEMENTED);
+    let responses_body = response_body(responses).await;
+    assert!(
+        responses_body.contains("\"code\":\"unsupported\""),
+        "{responses_body}"
+    );
 }
 
 #[tokio::test]
@@ -256,6 +544,10 @@ impl QueuedStreamer {
 
     fn push_chat(&self, envelopes: Vec<ProductOutboundEnvelope>) {
         self.chat.lock().expect("lock").push_back(Ok(envelopes));
+    }
+
+    fn push_chat_error(&self, error: OpenAiCompatHttpError) {
+        self.chat.lock().expect("lock").push_back(Err(error));
     }
 
     fn push_response(&self, envelopes: Vec<ProductOutboundEnvelope>) {
@@ -386,27 +678,52 @@ fn router(streamer: Arc<QueuedStreamer>) -> axum::Router {
     router_with_workflow(streamer, Arc::new(FakeProductWorkflow::new()))
 }
 
+fn router_with_wait_timeout(streamer: Arc<QueuedStreamer>, wait_timeout: Duration) -> axum::Router {
+    router_with_options(
+        Some(streamer),
+        Arc::new(FakeProductWorkflow::new()),
+        wait_timeout,
+    )
+}
+
 fn router_with_workflow(
     streamer: Arc<QueuedStreamer>,
     workflow: Arc<dyn ProductWorkflow>,
 ) -> axum::Router {
+    router_with_options(Some(streamer), workflow, Duration::from_secs(30))
+}
+
+fn router_without_streamer() -> axum::Router {
+    router_with_options(
+        None,
+        Arc::new(FakeProductWorkflow::new()),
+        Duration::from_secs(30),
+    )
+}
+
+fn router_with_options(
+    streamer: Option<Arc<QueuedStreamer>>,
+    workflow: Arc<dyn ProductWorkflow>,
+    wait_timeout: Duration,
+) -> axum::Router {
     let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
-    let chat = Arc::new(
-        OpenAiChatCompletionsWorkflow::new(
-            workflow.clone(),
-            ref_store.clone(),
-            Arc::new(StaticChatReader),
-        )
-        .with_projection_streamer(streamer.clone()),
-    );
-    let responses = Arc::new(
+    let mut chat = OpenAiChatCompletionsWorkflow::new(
+        workflow.clone(),
+        ref_store.clone(),
+        Arc::new(StaticChatReader),
+    )
+    .with_wait_timeout(wait_timeout);
+    let mut responses =
         OpenAiResponsesWorkflow::new(workflow, ref_store, Arc::new(StaticResponsesReader))
-            .with_projection_streamer(streamer),
-    );
+            .with_wait_timeout(wait_timeout);
+    if let Some(streamer) = streamer {
+        chat = chat.with_projection_streamer(streamer.clone());
+        responses = responses.with_projection_streamer(streamer);
+    }
     openai_compat_router_with_state(
         OpenAiCompatRouterState::default()
-            .with_chat_completions_workflow(chat)
-            .with_responses_workflow(responses),
+            .with_chat_completions_workflow(Arc::new(chat))
+            .with_responses_workflow(Arc::new(responses)),
     )
 }
 
@@ -465,6 +782,16 @@ async fn read_until(response: axum::response::Response, needle: &str) -> String 
     }
 }
 
+async fn response_body(response: axum::response::Response) -> String {
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    String::from_utf8(bytes.to_vec()).expect("utf8 body")
+}
+
 fn projection_text_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope {
     envelope(
         cursor,
@@ -478,6 +805,17 @@ fn projection_text_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope
             )
             .expect("projection state"),
         },
+    )
+}
+
+fn final_reply_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope {
+    envelope(
+        cursor,
+        ProductOutboundPayload::FinalReply(FinalReplyView {
+            turn_run_id: TurnRunId::new(),
+            text: text.to_string(),
+            generated_at: chrono::Utc::now(),
+        }),
     )
 }
 

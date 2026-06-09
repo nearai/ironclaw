@@ -9,22 +9,24 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ack_helpers::internal_refs_from_ack;
 use crate::identity::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
 };
 use crate::{
     OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatBindInternalRefs,
     OpenAiCompatHttpError, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,
-    OpenAiCompatProductActionRef, OpenAiCompatProjectionStreamer, OpenAiCompatPublicId,
-    OpenAiCompatRecordAcceptedAck, OpenAiCompatRefLookup, OpenAiCompatRefOperation,
-    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore,
-    OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding, OpenAiCompatResourceMapping,
-    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiCompatProjectionStreamer, OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck,
+    OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
+    OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
+    OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
     OpenAiResponseProjectionStreamRequest, OpenAiResponsesCreateRequest, OpenAiResponsesInput,
     OpenAiResponsesInputItem, OpenAiResponsesMessageRole,
 };
 use async_trait::async_trait;
-use axum::response::Response;
+use axum::Json;
+use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -87,10 +89,6 @@ impl OpenAiResponsesWorkflow {
         self
     }
 
-    pub(crate) fn can_stream(&self) -> bool {
-        self.projection_streamer.is_some()
-    }
-
     pub async fn create_response(
         &self,
         caller: OpenAiCompatAuthenticatedCaller,
@@ -106,6 +104,24 @@ impl OpenAiResponsesWorkflow {
         let request = parse_response_create_request(raw_body)?;
         self.create_response_request(caller, request, raw_body, idempotency_key, surface)
             .await
+    }
+
+    pub(crate) async fn handle_response_create_request(
+        &self,
+        caller: OpenAiCompatAuthenticatedCaller,
+        request: OpenAiResponsesCreateRequest,
+        raw_body: &[u8],
+        idempotency_key: Option<OpenAiCompatIdempotencyKey>,
+        surface: OpenAiCompatRouteSurface,
+    ) -> Result<Response, OpenAiCompatHttpError> {
+        if request.stream.unwrap_or(false) {
+            return self
+                .stream_response_request(caller, request, raw_body, idempotency_key, surface)
+                .await;
+        }
+        self.create_response_request(caller, request, raw_body, idempotency_key, surface)
+            .await
+            .map(|response| Json(response).into_response())
     }
 
     pub(crate) async fn create_response_request(
@@ -357,6 +373,7 @@ impl OpenAiResponsesWorkflow {
                 accepted_ack,
                 requested_model: request.model,
                 mapping,
+                wait_timeout: self.wait_timeout,
                 after_cursor: None,
             },
         ))
@@ -733,33 +750,6 @@ fn bind_internal_refs_unavailable() -> OpenAiCompatHttpError {
         crate::OpenAiCompatErrorKind::ServiceUnavailable,
         None,
     )
-}
-
-fn internal_refs_from_ack(
-    ack: &ProductInboundAck,
-) -> Result<OpenAiCompatInternalRefs, OpenAiCompatHttpError> {
-    let mut ack = ack;
-    loop {
-        match ack {
-            ProductInboundAck::Accepted {
-                accepted_message_ref,
-                submitted_run_id,
-            } => {
-                return Ok(
-                    OpenAiCompatInternalRefs::new(OpenAiCompatProductActionRef::new(format!(
-                        "accepted:{}",
-                        accepted_message_ref.as_str()
-                    ))?)
-                    .with_turn_run_ref(OpenAiCompatTurnRunRef::new(submitted_run_id.to_string())?),
-                );
-            }
-            ProductInboundAck::Duplicate { prior } => ack = prior,
-            ProductInboundAck::DeferredBusy { .. }
-            | ProductInboundAck::Rejected(_)
-            | ProductInboundAck::CommandResult { .. }
-            | ProductInboundAck::NoOp => return Err(OpenAiCompatHttpError::internal()),
-        }
-    }
 }
 
 fn response_turn_run_ref(

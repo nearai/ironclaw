@@ -311,7 +311,7 @@ async fn responses_cancel_uses_product_workflow_control_action() {
 }
 
 #[tokio::test]
-async fn unsupported_responses_tools_and_stream_reject_before_product_workflow() {
+async fn unsupported_responses_tools_and_unwired_stream_reject_before_product_workflow() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(
         workflow.clone(),
@@ -327,7 +327,7 @@ async fn unsupported_responses_tools_and_stream_reject_before_product_workflow()
         ))
         .await
         .expect("stream");
-    assert_eq!(stream.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(stream.status(), http::StatusCode::NOT_IMPLEMENTED);
 
     let tools = router
         .oneshot(response_create_request(

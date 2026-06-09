@@ -9,6 +9,8 @@
 //! fail-closed; host composition can inject ProductWorkflow-backed Chat,
 //! Responses, and projection-streaming services for the wired Reborn slices.
 
+#[cfg(feature = "openai-compat-beta")]
+mod ack_helpers;
 mod chat;
 #[cfg(feature = "openai-compat-beta")]
 mod chat_workflow;

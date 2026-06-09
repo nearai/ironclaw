@@ -1,7 +1,7 @@
 # ironclaw_reborn_openai_compat
 
 Reborn-native OpenAI-compatible API contract surface for #3283 / #4442 /
-#4443 / #4444 / #4445.
+#4443 / #4444 / #4445 / #4446.
 
 ## Boundary
 
@@ -41,8 +41,7 @@ routes are wired to ProductWorkflow:
 
 With `openai-compat-beta`, the default router remains fail-closed unless host
 composition injects `OpenAiCompatRouterState::with_chat_completions(...)`.
-The injected `OpenAiChatCompletionsWorkflow` is the non-streaming Chat
-Completions slice:
+The injected `OpenAiChatCompletionsWorkflow` is the Chat Completions slice:
 
 - `POST /v1/chat/completions` parses the OpenAI-compatible DTO, reserves an
   opaque `chatcmpl-*` ref with actor-scoped idempotency, and submits the user
@@ -59,6 +58,10 @@ Completions slice:
 - Client-supplied `tools` and `tool_choice` are model hints only. They are
   forwarded on the projection reader request as model-only metadata and must not
   execute as Reborn capabilities from this crate.
+- `stream: true` is enabled only when host composition injects an
+  `OpenAiCompatProjectionStreamer`. The route translates projection-safe
+  outbound envelopes into OpenAI-compatible SSE without exposing projection
+  cursors, product refs, or backend details.
 - The route requires a verified `OpenAiCompatAuthenticatedCaller` extension
   minted by host auth middleware. Do not mint auth evidence in this crate's
   production feature set.
@@ -89,6 +92,10 @@ slice:
   `openai_compat.responses_input.v1` JSON payload inside `UserMessagePayload`
   text so CR/LF-delimited role spoofing cannot create synthetic transcript
   lines while `function_call` `call_id` and `arguments` remain available.
+- `stream: true` uses the same ProductWorkflow submission and opaque ref
+  reservation path, then drains a composition-supplied projection streamer into
+  OpenAI-compatible Responses SSE events. Stalled streams are bounded by the
+  workflow wait timeout and fail with a sanitized retryable service error.
 
 ## DTO Policy
 

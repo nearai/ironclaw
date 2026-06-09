@@ -734,7 +734,7 @@ fn authenticated_caller_rejects_auth_subject_scope_mismatch() {
 }
 
 #[tokio::test]
-async fn streaming_chat_completion_is_rejected_before_product_workflow() {
+async fn streaming_chat_completion_requires_streamer_before_product_workflow() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(
         workflow.clone(),
@@ -753,7 +753,7 @@ async fn streaming_chat_completion_is_rejected_before_product_workflow() {
         .await
         .expect("response");
 
-    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), http::StatusCode::NOT_IMPLEMENTED);
     assert_eq!(workflow.accepted_count(), 0);
 }
 
