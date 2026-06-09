@@ -34,6 +34,10 @@ ironclaw-reborn models list
 ironclaw-reborn models list --json
 ironclaw-reborn models status
 ironclaw-reborn models status --json
+ironclaw-reborn models set-provider openai --model gpt-5-mini
+ironclaw-reborn onboard
+ironclaw-reborn onboard --dry-run
+ironclaw-reborn onboard --force
 ironclaw-reborn profile list
 ironclaw-reborn profile list --json
 ironclaw-reborn repl
@@ -46,14 +50,134 @@ ironclaw-reborn skills list --json
 ironclaw-reborn skills list --verbose
 ```
 
+The `traces` command tree is a contributor-only trace client; see
+`crates/ironclaw_reborn_cli/src/commands/traces/` for its subcommands.
+
 It intentionally does not yet support:
 
 - replacing `ironclaw` behavior;
 - daemon/service installation;
-- web gateway/UI startup;
 - v1 config, DB, settings, or secrets migration;
 - production extension/tool execution;
 - long-lived Reborn runtime services.
+
+The WebChat v2 web UI **is** supported through `serve`, but only when the
+binary is built with `--features webui-v2-beta`. It is an early beta operator
+surface, not a production gateway. See
+[Running with the WebUI (`serve`)](#running-with-the-webui-serve).
+
+## Running with the WebUI (`serve`)
+
+`serve` starts the WebChat v2 HTTP listener so you can drive Reborn from a
+browser. This is the fastest way to exercise the full loop (ingress → turn
+runner → LLM provider → timeline) end to end.
+
+### Quick start
+
+```bash
+# 1. Reborn home MUST live outside your current working directory (see gotchas).
+export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
+
+# 2. Configure a model route for your preferred provider (see the table below).
+#    set-provider records the provider's credential env-var NAME in config.toml;
+#    the secret VALUE always stays in the environment, never in a file.
+cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- \
+  models set-provider <provider>            # e.g. nearai, openai, anthropic
+export <PROVIDER_API_KEY>="<your-key>"      # e.g. NEARAI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY
+
+# 3. WebUI auth env vars. serve REQUIRES both or it refuses to start.
+export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"   # bearer token you log in with
+export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"             # must match [identity].default_owner
+
+# 4. Launch (feature flag is mandatory — the UI is not compiled in without it).
+cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
+```
+
+Then open **`http://127.0.0.1:3000/v2`** and log in with the
+`IRONCLAW_REBORN_WEBUI_TOKEN` value.
+
+`--host` / `--port` override the defaults (`127.0.0.1` / `3000`), or set
+`[webui].listen_host` / `[webui].listen_port` in `config.toml`. `--port 0` lets
+the kernel pick a free port. For the Slack host-beta ingress, build with
+`--features slack-v2-host-beta` (it includes `webui-v2-beta`).
+
+### Choose your model provider
+
+`models set-provider <id>` works for any provider in the built-in catalog and
+writes that provider's credential env-var name into `config.toml` for you. The
+common single-API-key providers:
+
+| Provider | `set-provider` id | Key env var | Default model |
+| --- | --- | --- | --- |
+| NEAR AI | `nearai` | `NEARAI_API_KEY` | `deepseek-ai/DeepSeek-V4-Flash` |
+| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-5-mini` |
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-20250514` |
+| Ollama (local) | `ollama` | _(none — runs locally)_ | `llama3` |
+
+So to use Anthropic instead of the quick-start example, swap step 2 for:
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- \
+  models set-provider anthropic
+export ANTHROPIC_API_KEY="<your-key>"
+```
+
+Not sure which env var your chosen provider needs? After `set-provider`, run
+`models status` — it prints `default.api_key_env` (the exact variable to
+export) alongside the active provider and model. `models list --verbose` shows
+the same for every provider in the catalog; pass `--model <id>` to
+`set-provider` to override the default model. Providers that use OAuth or
+multi-field credentials (`bedrock`, `gemini_oauth`, `openai_codex`) need extra
+setup beyond a single key. The runtime still boots without a key set, but turns
+fail cleanly until the provider's env var is present.
+
+### Common startup errors (and fixes)
+
+These are validation failures that abort `serve` before it binds; each prints a
+single-line `Error:` and exits.
+
+| Error message contains | Cause | Fix |
+| --- | --- | --- |
+| `must be set to the WebChat v2 bearer token` | `IRONCLAW_REBORN_WEBUI_TOKEN` unset | Export the token env var (step 3). |
+| `must be set to the UserId an env-bearer-authenticated caller maps to` | `IRONCLAW_REBORN_WEBUI_USER_ID` unset | Export the user-id env var (step 3). |
+| `default_owner ... must match the WebChat v2 authenticated user` | `[identity].default_owner` ≠ `IRONCLAW_REBORN_WEBUI_USER_ID` | Set the env user to the config owner (default `reborn-cli`), or remove/align `[identity].default_owner`. |
+| `workspace root must not overlap default skill root /skills` | Reborn home is **inside** the current working directory | Point `IRONCLAW_REBORN_HOME` at a path outside your repo/cwd. |
+
+The workspace-overlap one is the easiest to trip: `serve`/`run`/`repl` use the
+**current working directory** as the local-dev workspace root, and the skill
+root lives under `<reborn-home>/local-dev/skills`. If the home is nested inside
+the cwd (e.g. `IRONCLAW_REBORN_HOME="$PWD/.reborn-home"`), the two paths overlap
+and boot is rejected. Keep the home outside the directory you launch from — the
+default `~/.ironclaw/reborn` already satisfies this.
+
+### Smoke-test a turn over the API
+
+The browser UI talks to the `/api/webchat/v2` routes. You can drive the same
+loop with `curl` to confirm the model route works without opening a browser:
+
+```bash
+TOKEN="$IRONCLAW_REBORN_WEBUI_TOKEN"
+BASE=http://127.0.0.1:3000/api/webchat/v2
+AUTH="Authorization: Bearer $TOKEN"
+
+# create a thread -> returns .thread.thread_id
+TID=$(curl -s -X POST "$BASE/threads" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"client_action_id":"smoke-1"}' \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['thread']['thread_id'])")
+
+# send a message -> queues a turn
+curl -s -X POST "$BASE/threads/$TID/messages" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"client_action_id":"smoke-msg-1","content":"Reply with exactly: NEARAI_OK"}'
+
+# poll the timeline for the finalized assistant message
+curl -s "$BASE/threads/$TID/timeline" -H "$AUTH" | python3 -m json.tool
+```
+
+A healthy run shows a `kind: "assistant"`, `status: "finalized"` message in
+`messages[]` with the model's reply. `GET /api/health` returns
+`{"status":"healthy","channel":"reborn"}` and `/v2` serves the UI; `/` is
+intentionally a 404. CORS is fail-closed with no allowed origins, so drive it
+from a browser on the same host against `127.0.0.1`.
 
 ## Commands
 
@@ -178,11 +302,31 @@ Expected fields include:
 - `status: not-wired`
 - `v1_state: not-used`
 
-### `models list` / `models status`
+### `onboard`
 
-Shows Reborn model purpose slots and route status without resolving Reborn home, reading v1 provider settings, or creating directories.
+First-run bootstrap for the standalone Reborn home. It resolves
+`IRONCLAW_REBORN_HOME` (or the default `~/.ironclaw/reborn`), creates the home
+directory, writes missing `config.toml` and `providers.json` using the same
+atomic writer as `config init`, preserves operator-edited files unless
+`--force` is passed, writes a `.onboard-completed.json` marker, and prints the
+remaining setup work. It does not call into v1 `src/setup`, v1 database
+config, v1 channels, or v1 import state.
 
-Routes are not configurable through Reborn CLI yet, so the command currently reports `not-configured` routes for built-in slots:
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- onboard
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- onboard --dry-run
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- onboard --force
+```
+
+`--dry-run` reports what would be initialized without writing files.
+`--import-history` reserves the history-import step in the summary (not wired
+yet). See `docs/reborn/onboarding.md` for the full slice description and the
+completion-marker schema.
+
+### `models list` / `models status` / `models set-provider`
+
+Shows Reborn model purpose slots and route status, and configures the default
+LLM route.
 
 ```bash
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models list
@@ -191,12 +335,35 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status --json
 ```
 
-Expected fields include:
+`models status` reports the configured default route, including the exact env
+var to export for it — handy for confirming setup before `serve`/`run`:
 
-- `default`
-- `mission`
-- `routes: not-configured`
+- `default.provider`
+- `default.provider_known` (`yes` once the provider id resolves in the catalog)
+- `default.model`
+- `default.api_key_env` (the env var that must hold your key, e.g. `NEARAI_API_KEY`)
 - `v1_state: not-used`
+
+`models list` prints the full provider catalog, marks the active provider with
+`*`, and (with `--verbose`) shows each provider's `api_key_env`, default model,
+and credential kind.
+
+`models set-provider <provider> [--model <model>]` writes `[llm.default]` into
+`$IRONCLAW_REBORN_HOME/config.toml` with the provider id and its catalog
+credential env-var name. `<provider>` is a provider id or alias (`openai`,
+`anthropic`, `nearai`, `ollama`, …); `--model` is optional and defaults to the
+provider's catalog default.
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models set-provider openai --model gpt-5-mini
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models set-provider nearai --model deepseek-ai/DeepSeek-V4-Flash
+```
+
+The secret value still lives in the environment under the catalog's
+`api_key_env` (e.g. `OPENAI_API_KEY`, `NEARAI_API_KEY`); `set-provider` only
+records the variable *name*, never the value. Once `[llm.default]` exists it
+selects the provider; `LLM_BACKEND` is only an env fallback when no default slot
+is configured.
 
 ### `profile list`
 
@@ -256,6 +423,28 @@ Expected fields include:
 For `IRONCLAW_REBORN_PROFILE=local-dev-yolo`, `run`, `repl`, and `serve` require `--confirm-host-access` before the runtime receives trusted-laptop host access. Confirmed access mounts the host home through `/host`; Unix-style raw home aliases are also accepted when they can be represented as scoped mount aliases.
 
 When `serve --confirm-host-access` grants trusted-laptop access, `serve` refuses non-loopback listeners such as `0.0.0.0`. Bind to `127.0.0.1` or `::1`, or use a less privileged profile for non-loopback test listeners.
+
+### `repl`
+
+Starts an interactive Reborn session backed by the composed runtime, reading
+turns from stdin. Same runtime as `run`, without the WebUI listener. Accepts
+`--confirm-host-access` for `local-dev-yolo`.
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl
+```
+
+### `serve`
+
+Starts the WebChat v2 HTTP listener (browser UI). Requires a binary built with
+`--features webui-v2-beta` and the two `IRONCLAW_REBORN_WEBUI_*` auth env vars.
+See [Running with the WebUI (`serve`)](#running-with-the-webui-serve) for the
+full walkthrough, auth setup, common startup errors, and an API smoke test.
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
+cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve --host 127.0.0.1 --port 3000
+```
 
 ### `skills list`
 
