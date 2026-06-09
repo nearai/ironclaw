@@ -472,3 +472,38 @@ async def test_reborn_v2_sse_streams_run_lifecycle(reborn_v2_server):
                     line = raw.decode("utf-8", errors="replace")
                     if '"status":"completed"' in line:
                         return
+
+
+async def test_reborn_v2_bearer_auth_and_token_shim_scope(reborn_v2_server):
+    """v2 routes require a bearer; the `?token=` shim authenticates only the events route."""
+    bearer = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=bearer) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+
+    async with httpx.AsyncClient() as anon:
+        # No credentials at all -> 401 on session, list, and timeline.
+        for path in (
+            "/api/webchat/v2/session",
+            "/api/webchat/v2/threads",
+            f"/api/webchat/v2/threads/{thread_id}/timeline",
+        ):
+            response = await anon.get(f"{reborn_v2_server}{path}", timeout=15)
+            assert response.status_code == 401, f"{path} without bearer: {response.status_code}"
+
+        # A malformed bearer is rejected.
+        bad = await anon.get(
+            f"{reborn_v2_server}/api/webchat/v2/session",
+            headers={"Authorization": "Bearer not-a-valid-token"},
+            timeout=15,
+        )
+        assert bad.status_code == 401, bad.text
+
+        # The `?token=` shim must NOT authenticate a non-events route (timeline).
+        shimmed = await anon.get(
+            f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/timeline"
+            f"?token={REBORN_V2_AUTH_TOKEN}",
+            timeout=15,
+        )
+        assert shimmed.status_code == 401, (
+            f"?token= must not authenticate timeline, got {shimmed.status_code}"
+        )
