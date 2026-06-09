@@ -154,13 +154,20 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["command"],
             "additionalProperties": false
         }),
+        // NOTE: this schema is published by the host_runtime first-party
+        // capability registry (consumed by `surface.rs::resolve_builtin_input_schema_ref`).
+        // The decorator path (`ironclaw_loop_support::build_spawn_subagent_parameters_schema`)
+        // builds an equivalent schema dynamically from the registered flavor
+        // catalog and overrides the model-facing tool definition at runtime.
+        // The two shapes MUST stay in sync. Long-term, route this entry
+        // through the canonical builder to eliminate the dual source of truth.
         "schemas/builtin/spawn_subagent.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "flavor_id": {
+                "subagent_type": {
                     "type": "string",
-                    "enum": ["general", "researcher", "coder", "explorer"],
-                    "description": "Subagent flavor. general: read/search only, bounded task. researcher: + web search, prefer evidence over mutation. coder: read/write/shell, file-focused execution. explorer: read/search, deep analysis, no writes."
+                    "enum": ["general", "explorer", "coder", "planner"],
+                    "description": "Which subagent profile to spawn. Options:\n- general: read-only file exploration (read_file, list_dir, grep)\n- explorer: read + glob over filesystem (read_file, list_dir, grep, glob)\n- coder: read + write + shell (read_file, write_file, apply_patch, shell, list_dir, grep, glob)\n- planner: read codebase + web research, returns a structured implementation plan (read_file, list_dir, grep, glob, http)"
                 },
                 "task": {
                     "type": "string",
@@ -171,7 +178,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "description": "Optional context to pass to the child subagent"
                 }
             },
-            "required": ["flavor_id", "task"],
+            "required": ["subagent_type", "task"],
             "additionalProperties": false
         }),
         "schemas/builtin/read_file.input.v1.json" => json!({
@@ -322,6 +329,12 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "minimum": 0,
                     "maximum": 100,
                     "description": "Maximum triggers to return. Defaults to 100."
+                },
+                "run_limit": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Maximum recent runs to embed per trigger. Defaults to 25."
                 }
             },
             "additionalProperties": false

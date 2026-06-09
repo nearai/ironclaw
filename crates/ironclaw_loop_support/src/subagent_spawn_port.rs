@@ -43,18 +43,51 @@ pub const DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS: u32 = 16;
 pub const DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID: &str = "builtin.spawn_subagent";
 const SPAWN_SUBAGENT_PROVIDER_TOOL_NAME: &str = "builtin__spawn_subagent";
 pub(crate) const SPAWN_SUBAGENT_DESCRIPTION: &str =
-    "Spawn a scoped child subagent to handle a focused task and return its result.";
+    include_str!("../prompts/spawn_subagent_description.md");
 
-fn spawn_subagent_parameters_schema() -> serde_json::Value {
+/// A flavor descriptor passed into [`SubagentSpawnCapabilityPort`] at
+/// construction time so the port can build a dynamic `subagent_type` enum
+/// schema. Carries a validated [`SubagentKindId`] and a human-readable
+/// description bullet used in the schema's `description` field.
+#[derive(Clone, Debug)]
+pub struct SpawnSubagentFlavorDescriptor {
+    pub id: SubagentKindId,
+    pub summary: String,
+}
+
+pub fn build_spawn_subagent_parameters_schema(
+    catalog: &[SpawnSubagentFlavorDescriptor],
+) -> serde_json::Value {
+    let enum_values: Vec<serde_json::Value> =
+        catalog.iter().map(|f| serde_json::json!(f.id)).collect();
+
+    let description = if catalog.is_empty() {
+        "Which subagent profile to spawn.".to_string()
+    } else {
+        let lines: Vec<String> = catalog
+            .iter()
+            .map(|f| format!("- {}: {}", f.id, f.summary))
+            .collect();
+        format!(
+            "Which subagent profile to spawn. Options:\n{}",
+            lines.join("\n")
+        )
+    };
+
+    let mut subagent_type_props = serde_json::json!({
+        "type": "string",
+        "description": description,
+    });
+    if !enum_values.is_empty() {
+        subagent_type_props["enum"] = serde_json::Value::Array(enum_values);
+    }
+
     serde_json::json!({
         "type": "object",
-        "required": ["flavor_id", "task"],
+        "required": ["subagent_type", "task"],
         "additionalProperties": false,
         "properties": {
-            "flavor_id": {
-                "type": "string",
-                "description": "Subagent flavor id for the child run."
-            },
+            "subagent_type": subagent_type_props,
             "task": {
                 "type": "string",
                 "maxLength": DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
@@ -150,7 +183,7 @@ pub enum SpawnSubagentMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnSubagentArgs {
-    #[serde(rename = "flavor_id")]
+    #[serde(rename = "subagent_type", alias = "flavor_id")]
     pub subagent_kind: SubagentKindId,
     pub task: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,8 +191,9 @@ pub struct SpawnSubagentArgs {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpawnSubagentWireArgs {
-    #[serde(rename = "flavor_id")]
+    #[serde(rename = "subagent_type", alias = "flavor_id")]
     subagent_kind: SubagentKindId,
     task: String,
     #[serde(default)]
@@ -353,6 +387,7 @@ pub struct SubagentSpawnCapabilityPort {
     spawn_id: CapabilityId,
     limits: SubagentSpawnLimits,
     deps: Arc<SubagentSpawnDeps>,
+    parameters_schema: Arc<serde_json::Value>,
     auth_input_refs: Mutex<HashSet<CapabilityInputRef>>,
     spawned_this_turn: AtomicU32,
 }
@@ -455,6 +490,34 @@ impl SubagentSpawnCapabilityPort {
         spawn_id: CapabilityId,
         limits: SubagentSpawnLimits,
         deps: Arc<SubagentSpawnDeps>,
+        flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
+    ) -> Self {
+        let parameters_schema = Arc::new(build_spawn_subagent_parameters_schema(&flavor_catalog));
+        Self {
+            inner,
+            run_context,
+            spawn_id,
+            limits,
+            deps,
+            parameters_schema,
+            auth_input_refs: Mutex::new(HashSet::new()),
+            spawned_this_turn: AtomicU32::new(0),
+        }
+    }
+
+    /// Creates a port with a precomputed parameters schema, avoiding the
+    /// schema-build cost when the caller already computed it (e.g. the
+    /// decorator precomputes once at startup and reuses across `decorate()`
+    /// calls). Takes `Arc<serde_json::Value>` so `decorate()` can pass
+    /// `Arc::clone(&self.parameters_schema)` — a cheap ref-count bump — rather
+    /// than deep-cloning the JSON tree on every loop run.
+    pub fn new_with_schema(
+        inner: Arc<dyn LoopCapabilityPort>,
+        run_context: LoopRunContext,
+        spawn_id: CapabilityId,
+        limits: SubagentSpawnLimits,
+        deps: Arc<SubagentSpawnDeps>,
+        parameters_schema: Arc<serde_json::Value>,
     ) -> Self {
         Self {
             inner,
@@ -462,6 +525,7 @@ impl SubagentSpawnCapabilityPort {
             spawn_id,
             limits,
             deps,
+            parameters_schema,
             auth_input_refs: Mutex::new(HashSet::new()),
             spawned_this_turn: AtomicU32::new(0),
         }
@@ -480,7 +544,7 @@ impl SubagentSpawnCapabilityPort {
             capability_id: self.spawn_id.clone(),
             name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
             description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
-            parameters: spawn_subagent_parameters_schema(),
+            parameters: (*self.parameters_schema).clone(),
         }
     }
 
@@ -492,7 +556,7 @@ impl SubagentSpawnCapabilityPort {
             safe_name: self.spawn_id.as_str().to_string(),
             safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
             concurrency_hint: ConcurrencyHint::Exclusive,
-            parameters_schema: spawn_subagent_parameters_schema(),
+            parameters_schema: (*self.parameters_schema).clone(),
         }
     }
 
@@ -722,7 +786,7 @@ impl SubagentSpawnCapabilityPort {
             "spawned",
             false,
         );
-        let result_ref = self
+        let (result_ref, byte_len) = self
             .deps
             .result_writer
             .write_capability_result(CapabilityResultWrite {
@@ -864,6 +928,7 @@ impl SubagentSpawnCapabilityPort {
             gate_ref: loop_gate_ref,
             result_ref,
             safe_summary: safe_summary("subagent spawned; waiting for completion"),
+            byte_len,
         })
     }
 

@@ -10,7 +10,7 @@
     "api_key_required": false,
     "base_url_env": "NEARAI_BASE_URL",
     "model_env": "NEARAI_MODEL",
-    "default_model": "auto",
+    "default_model": "deepseek-ai/DeepSeek-V4-Flash",
     "description": "multi-model access via NEAR account",
     "setup": {
       "kind": "session_token",

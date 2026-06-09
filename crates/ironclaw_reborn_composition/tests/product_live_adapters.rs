@@ -65,15 +65,17 @@ async fn write_capability_result_for_test(
     output: serde_json::Value,
 ) -> Result<LoopResultRef, AgentLoopHostError> {
     let capability_id = capability_id(capability);
-    io.write_capability_result(CapabilityResultWrite {
-        run_context,
-        input_ref,
-        invocation_id: InvocationId::new(),
-        capability_id: &capability_id,
-        output,
-        display_preview: None,
-    })
-    .await
+    let (result_ref, _byte_len) = io
+        .write_capability_result(CapabilityResultWrite {
+            run_context,
+            input_ref,
+            invocation_id: InvocationId::new(),
+            capability_id: &capability_id,
+            output,
+            display_preview: None,
+        })
+        .await?;
+    Ok(result_ref)
 }
 
 #[tokio::test]
@@ -128,6 +130,41 @@ async fn capability_io_resolves_staged_inputs_and_materializes_run_scoped_result
     assert_eq!(
         io.result_for_ref(&run_context, &result_ref).unwrap(),
         serde_json::json!({ "reply": "terminal" })
+    );
+}
+
+/// F6: ProductLiveCapabilityIo::write_capability_result must return a byte_len
+/// equal to the serialized payload size. Verifies that the writer's returned
+/// byte_len value can be relied upon by callers (e.g. ByteCapStrategy and
+/// CapabilityOutcome::AwaitDependentRun) to measure actual payload size.
+#[tokio::test]
+async fn capability_io_write_capability_result_returns_serialized_payload_byte_len() {
+    let io = ProductLiveCapabilityIo::default();
+    let run_context = loop_run_context("capability-io-byte-len").await;
+    let input_ref = io
+        .stage_input(&run_context, serde_json::json!({ "text": "measure" }))
+        .unwrap();
+
+    let output = serde_json::json!({ "reply": "hello world", "count": 42 });
+    let expected_len = serde_json::to_vec(&output).expect("serialize").len() as u64;
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+
+    let (_, byte_len) = io
+        .write_capability_result(CapabilityResultWrite {
+            run_context: &run_context,
+            input_ref: &input_ref,
+            invocation_id: InvocationId::new(),
+            capability_id: &capability_id,
+            output: output.clone(),
+            display_preview: None,
+        })
+        .await
+        .expect("write capability result");
+
+    assert_eq!(
+        byte_len, expected_len,
+        "write_capability_result must return byte_len equal to the JSON-serialized payload size; \
+         got {byte_len}, expected {expected_len}"
     );
 }
 
@@ -1660,8 +1697,8 @@ impl LoopCapabilityResultWriter for UnusedCapabilityIo {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
-        Ok(LoopResultRef::new("result:adapter-test").unwrap())
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        Ok((LoopResultRef::new("result:adapter-test").unwrap(), 0))
     }
 }
 

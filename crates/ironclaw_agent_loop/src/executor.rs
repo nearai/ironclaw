@@ -15,6 +15,7 @@ mod loop_exit;
 mod mapping;
 mod model;
 mod pipeline;
+mod post_capability;
 mod prompt;
 mod reply_admission;
 mod turn_stop;
@@ -49,6 +50,7 @@ use mapping::{
 };
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};
+use post_capability::PostCapabilityStage;
 use prompt::{PromptInput, PromptStage, PromptStep};
 use reply_admission::{ReplyAdmissionInput, ReplyAdmissionStage, ReplyAdmissionStep};
 use turn_stop::{StopInput, StopObservationInput, StopObservationStep, StopStage, StopStep};

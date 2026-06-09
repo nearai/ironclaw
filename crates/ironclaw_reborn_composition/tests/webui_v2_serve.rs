@@ -27,10 +27,12 @@ use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
     PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
@@ -85,6 +87,217 @@ impl WebuiAuthenticator for MultiUserToken {
             Some(UserId::new(USER).expect("user id"))
         } else {
             None
+        }
+    }
+}
+
+#[tokio::test]
+async fn health_route_is_public_for_platform_probes() {
+    let bundle = RebornWebuiBundle {
+        api: Arc::new(StubServices::default()),
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![],
+    );
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/health")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024).await.expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("health json");
+    assert_eq!(json["status"], "healthy");
+    assert_eq!(json["channel"], "reborn");
+}
+
+#[cfg(feature = "openai-compat-beta")]
+mod openai_compat_mount_tests {
+    use super::*;
+    use ironclaw_product_adapters::{
+        ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductProjectionReadInput,
+        ProductProjectionSubject, ProductWorkflow, ProjectionReadRequest, RedactedString,
+    };
+    use ironclaw_reborn_composition::ProtectedRouteMount;
+    use ironclaw_reborn_openai_compat::{
+        InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection,
+        OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
+        OpenAiChatCompletionsWorkflow, OpenAiCompatRouterState, openai_compat_router_with_state,
+        openai_compat_routes,
+    };
+    use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
+
+    const AGENT: &str = "agent-alpha";
+    const PROJECT: &str = "project-alpha";
+    const THREAD: &str = "thread-openai-chat";
+
+    #[tokio::test]
+    async fn openai_chat_completions_mount_uses_webui_auth_and_product_workflow() {
+        let workflow = Arc::new(GatewayOpenAiWorkflow::default());
+        let chat = Arc::new(OpenAiChatCompletionsWorkflow::new(
+            workflow.clone(),
+            Arc::new(InMemoryOpenAiCompatRefStore::new()),
+            Arc::new(StaticChatProjectionReader::text(
+                "hello through composition",
+            )),
+        ));
+        let mount = ProtectedRouteMount::new(
+            openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(chat)),
+            openai_compat_routes(),
+        );
+        let bundle = RebornWebuiBundle {
+            api: Arc::new(StubServices::default()),
+            product_auth: None,
+            readiness: RebornReadiness::disabled(),
+        };
+        let config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            Arc::new(OnlyValidToken),
+            vec![HeaderValue::from_static("http://localhost:3000")],
+        )
+        .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+        .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+        .with_protected_route_mount(mount);
+        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+        let unauthenticated = app
+            .clone()
+            .oneshot(chat_request(None))
+            .await
+            .expect("oneshot");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(workflow.submit_count(), 0);
+
+        let authenticated = app
+            .oneshot(chat_request(Some(VALID_TOKEN)))
+            .await
+            .expect("oneshot");
+        assert_eq!(authenticated.status(), StatusCode::OK);
+        let body = to_bytes(authenticated.into_body(), 4096)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "hello through composition"
+        );
+        assert_eq!(workflow.submit_count(), 1);
+    }
+
+    fn chat_request(token: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        builder
+            .body(Body::from(
+                json!({
+                    "model": "reborn-test",
+                    "messages": [{"role": "user", "content": "hello"}]
+                })
+                .to_string(),
+            ))
+            .expect("request")
+    }
+
+    #[derive(Default)]
+    struct GatewayOpenAiWorkflow {
+        submit_count: Mutex<usize>,
+    }
+
+    impl GatewayOpenAiWorkflow {
+        fn submit_count(&self) -> usize {
+            *self
+                .submit_count
+                .lock()
+                .expect("submit count lock should not be poisoned")
+        }
+    }
+
+    #[async_trait]
+    impl ProductWorkflow for GatewayOpenAiWorkflow {
+        async fn submit_inbound(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            *self
+                .submit_count
+                .lock()
+                .expect("submit count lock should not be poisoned") += 1;
+            Ok(ProductInboundAck::Accepted {
+                accepted_message_ref: AcceptedMessageRef::new("msg:openai-chat")
+                    .expect("accepted ref"),
+                submitted_run_id: TurnRunId::new(),
+            })
+        }
+
+        async fn read_projection(
+            &self,
+            request: ProductProjectionReadInput,
+        ) -> Result<ProjectionReadRequest, ProductAdapterError> {
+            let ProductProjectionSubject::AdapterExternalRefs { auth_claim, .. } = request.subject
+            else {
+                return Err(ProductAdapterError::Internal {
+                    detail: RedactedString::new("expected adapter refs projection subject"),
+                });
+            };
+            let user_id = UserId::new(auth_claim.subject()).map_err(|error| {
+                ProductAdapterError::Internal {
+                    detail: RedactedString::new(format!("invalid user id: {error}")),
+                }
+            })?;
+            Ok(ProjectionReadRequest {
+                actor: TurnActor::new(user_id.clone()),
+                scope: TurnScope::new_with_owner(
+                    TenantId::new(TENANT).expect("tenant"),
+                    Some(AgentId::new(AGENT).expect("agent")),
+                    Some(ProjectId::new(PROJECT).expect("project")),
+                    ThreadId::new(THREAD).expect("thread"),
+                    Some(user_id),
+                ),
+                after_cursor: request.after_cursor,
+                limit: request.limit,
+            })
+        }
+    }
+
+    struct StaticChatProjectionReader {
+        projection: OpenAiChatCompletionProjection,
+    }
+
+    impl StaticChatProjectionReader {
+        fn text(content: &str) -> Self {
+            Self {
+                projection: OpenAiChatCompletionProjection::text(content),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OpenAiChatCompletionProjectionReader for StaticChatProjectionReader {
+        async fn read_chat_completion_projection(
+            &self,
+            _request: OpenAiChatCompletionProjectionRequest,
+        ) -> Result<
+            OpenAiChatCompletionProjection,
+            ironclaw_reborn_openai_compat::OpenAiCompatHttpError,
+        > {
+            Ok(self.projection.clone())
         }
     }
 }
@@ -449,6 +662,55 @@ impl RebornServicesApi for StubServices {
         Ok(RebornExtensionListResponse {
             extensions: Vec::new(),
         })
+    }
+
+    async fn list_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn search_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn install_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn read_skill_content(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn update_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn remove_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(unused_services_error())
     }
 
     async fn list_extension_registry(

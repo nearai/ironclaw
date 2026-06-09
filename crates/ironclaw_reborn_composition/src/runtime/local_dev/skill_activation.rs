@@ -56,11 +56,18 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
         &self,
         invocation: LocalDevSyntheticCapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        let names = parse_skill_activate_names(&invocation.input)?;
-        let requested_names = names
-            .iter()
+        // Normalise to lowercase at the parse boundary so that `names` (passed
+        // to `activate_skills_for_run`) and the response-filter set both use the
+        // same canonical form. `activate_skills_for_run` matches with
+        // `eq_ignore_ascii_case`, so lowercase input is always accepted. Without
+        // this normalisation, the original-case `names` would be passed to the
+        // registry while the filter set was lowercased, causing a mismatch when
+        // `activation.name` differs in case from the caller's input.
+        let names = parse_skill_activate_names(&invocation.input)?
+            .into_iter()
             .map(|name| name.to_ascii_lowercase())
-            .collect::<HashSet<_>>();
+            .collect::<Vec<_>>();
+        let requested_names = names.iter().cloned().collect::<HashSet<_>>();
         let plan = self
             .skill_activation_source
             .activate_skills_for_run(&invocation.run_context, &names)
@@ -77,7 +84,7 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
             "activated": activated,
             "count": activated.len(),
         });
-        let result_ref = invocation
+        let (result_ref, byte_len) = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {
                 run_context: &invocation.run_context,
@@ -93,6 +100,7 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
             safe_summary: format!("activated {} skill(s)", activated.len()),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len,
         }))
     }
 }

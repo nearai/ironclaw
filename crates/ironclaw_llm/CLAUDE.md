@@ -36,6 +36,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `runtime.rs` | `SwappableLlmProvider` + `LlmReloadHandle` for hot-reloading the provider chain on settings change |
 | `registry.rs` | Provider registry (`ProviderDefinition`, `ProviderProtocol`); resolves backend strings to clients |
 | `resolution.rs` | Full `LlmConfig` resolution for composition roots that select from `providers.json` and need dedicated providers plus the shared provider chain |
+| `tool_args.rs` | Shared sub-step primitives for provider tool-call parsing: fail-loud and silent-fallback JSON arg parsing, ordered reasoning-field probe (Layer 2 of RC3/M9 framework) |
 | `tool_schema.rs` | Tool schema normalization policies (`FlattenOnly` for NearAI, strict OpenAI for `RigAdapter` / Codex) |
 | `transcription/{mod,openai,chat_completions}.rs` | Audio transcription pipeline (Whisper / chat-completions back-ends) |
 | `image_models.rs` | Image-generation model metadata table |
@@ -65,6 +66,7 @@ Codex auth reuse:
 - If Codex is logged in with API-key mode, IronClaw uses the standard OpenAI endpoint.
 - If Codex is logged in with ChatGPT OAuth mode, IronClaw routes to the private `chatgpt.com/backend-api/codex` Responses API via `codex_chatgpt.rs`.
 - ChatGPT mode supports one automatic 401 refresh using the refresh token persisted in `auth.json`.
+- In ChatGPT mode the `/models` list is gated by the reported Codex `client_version`. It is auto-detected from the installed `codex` binary (`codex --version`), falling back to a bundled default. A stale value silently hides newer models (e.g. `gpt-5.5`) the account is entitled to.
 
 ## AWS Bedrock Provider
 

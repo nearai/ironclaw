@@ -1,0 +1,279 @@
+//! Reborn host composition for OpenAI-compatible API routes.
+//!
+//! The route crate owns DTOs and HTTP handlers, but the Reborn host owns the
+//! authority-bearing wiring: authenticated callers, ProductWorkflow,
+//! conversation binding, durable idempotency/ref stores, and projection reads.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::{
+    AgentId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
+    ResourceScope, TenantId, UserId, VirtualPath,
+};
+use ironclaw_product_adapters::{AdapterInstallationId, ProductAdapterId, ProductInboundAck};
+use ironclaw_product_workflow::{
+    DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
+    ProductActorUserResolver, ProductConversationBindingService, ProductInstallationKey,
+    ProductInstallationScope, ProductWorkflowError, StaticProductInstallationResolver,
+};
+use ironclaw_product_workflow_storage::RebornFilesystemIdempotencyLedger;
+use ironclaw_reborn_openai_compat::{
+    OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
+    OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
+    OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow, OpenAiCompatErrorKind,
+    OpenAiCompatHttpError, OpenAiCompatRouterState, openai_compat_router_with_state,
+    openai_compat_routes,
+};
+use ironclaw_reborn_openai_compat_storage::FilesystemOpenAiCompatRefStore;
+use ironclaw_threads::{
+    FinalizedAssistantMessageByRunRequest, SessionThreadError, SessionThreadService, ThreadScope,
+};
+
+use crate::RebornBuildError;
+use crate::RebornRuntime;
+use crate::webui_serve::ProtectedRouteMount;
+
+const OPENAI_COMPAT_LEDGER_USER_ID: &str = "openai-compat";
+const OPENAI_COMPAT_LEDGER_ENGINE_ROOT: &str = "/engine";
+const OPENAI_COMPAT_PROJECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+pub async fn build_openai_compat_route_mount(
+    runtime: &RebornRuntime,
+    tenant_id: TenantId,
+    default_agent_id: AgentId,
+    default_project_id: Option<ProjectId>,
+) -> Result<ProtectedRouteMount, RebornBuildError> {
+    let local_runtime = runtime.services().local_runtime.as_ref().ok_or_else(|| {
+        RebornBuildError::InvalidConfig {
+            reason: "OpenAI-compatible routes require local runtime services".to_string(),
+        }
+    })?;
+    let conversations = Arc::new(
+        local_runtime
+            .durable_trigger_conversation_services()
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("failed to open OpenAI-compatible conversation bindings: {error}"),
+            })?,
+    );
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations.clone();
+    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
+        conversations.clone();
+
+    let adapter_id = ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID)
+        .map_err(invalid_openai_compat_config("adapter_id"))?;
+    let installation_id = AdapterInstallationId::new(OPENAI_COMPAT_INSTALLATION_ID)
+        .map_err(invalid_openai_compat_config("installation_id"))?;
+    let installation_scope = ProductInstallationScope::with_default_scope(
+        tenant_id.clone(),
+        default_agent_id.clone(),
+        default_project_id.clone(),
+    )
+    .with_actor_user_resolver(Arc::new(OpenAiCompatActorUserResolver), actor_pairings);
+    let installation_resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(adapter_id, installation_id),
+        installation_scope,
+    )]);
+    let binding = ProductConversationBindingService::new(conversation_port, installation_resolver);
+    let inbound = Arc::new(DefaultInboundTurnService::new(
+        binding.clone(),
+        runtime.webui_thread_service(),
+        runtime.webui_turn_coordinator(),
+    ));
+    let product_workflow = Arc::new(
+        DefaultProductWorkflow::new(
+            inbound,
+            Arc::new(RebornFilesystemIdempotencyLedger::new(
+                openai_compat_ledger_filesystem(
+                    local_runtime.extension_filesystem.clone(),
+                    &tenant_id,
+                )?,
+                openai_compat_ledger_scope(
+                    tenant_id.clone(),
+                    default_agent_id.clone(),
+                    default_project_id.clone(),
+                )?,
+            )),
+            Arc::new(binding.clone()),
+        )
+        .with_approval_interaction_service(runtime.webui_approval_interaction_service())
+        .with_auth_interaction_service(runtime.webui_auth_interaction_service()),
+    );
+
+    let ref_filesystem: Arc<dyn RootFilesystem> = local_runtime.extension_filesystem.clone();
+    let ref_store = Arc::new(FilesystemOpenAiCompatRefStore::with_root(
+        ref_filesystem,
+        openai_compat_ref_root(&tenant_id)?,
+    ));
+    let projection_reader = Arc::new(OpenAiChatCompletionThreadProjectionReader::new(
+        runtime.webui_thread_service(),
+    ));
+    let workflow = Arc::new(OpenAiChatCompletionsWorkflow::new(
+        product_workflow,
+        ref_store,
+        projection_reader,
+    ));
+    Ok(ProtectedRouteMount::new(
+        openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(workflow)),
+        openai_compat_routes(),
+    ))
+}
+
+#[derive(Debug)]
+struct OpenAiCompatActorUserResolver;
+
+#[async_trait]
+impl ProductActorUserResolver for OpenAiCompatActorUserResolver {
+    async fn resolve_product_actor_user(
+        &self,
+        request: ProductActorUserResolutionRequest,
+    ) -> Result<Option<UserId>, ProductWorkflowError> {
+        if request.adapter_id.as_str() != OPENAI_COMPAT_ADAPTER_ID
+            || request.installation_id.as_str() != OPENAI_COMPAT_INSTALLATION_ID
+            || request.external_actor_ref.kind() != OPENAI_COMPAT_ACTOR_KIND
+        {
+            return Ok(None);
+        }
+        UserId::new(request.external_actor_ref.id())
+            .map(Some)
+            .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
+                reason: format!("invalid OpenAI-compatible actor user id: {error}"),
+            })
+    }
+}
+
+struct OpenAiChatCompletionThreadProjectionReader {
+    thread_service: Arc<dyn SessionThreadService>,
+    poll_interval: Duration,
+}
+
+impl OpenAiChatCompletionThreadProjectionReader {
+    fn new(thread_service: Arc<dyn SessionThreadService>) -> Self {
+        Self {
+            thread_service,
+            poll_interval: OPENAI_COMPAT_PROJECTION_POLL_INTERVAL,
+        }
+    }
+}
+
+#[async_trait]
+impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjectionReader {
+    async fn read_chat_completion_projection(
+        &self,
+        request: OpenAiChatCompletionProjectionRequest,
+    ) -> Result<OpenAiChatCompletionProjection, OpenAiCompatHttpError> {
+        let submitted_run_id = match &request.accepted_ack {
+            ProductInboundAck::Accepted {
+                submitted_run_id, ..
+            } => submitted_run_id.to_string(),
+            _ => return Err(OpenAiCompatHttpError::internal()),
+        };
+        let thread_scope = thread_scope_from_projection_request(&request)?;
+        loop {
+            match self
+                .thread_service
+                .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+                    scope: thread_scope.clone(),
+                    thread_id: request.projection_read.scope.thread_id.clone(),
+                    turn_run_id: submitted_run_id.clone(),
+                })
+                .await
+            {
+                Ok(Some(message)) => {
+                    return Ok(OpenAiChatCompletionProjection::text(
+                        message.content.unwrap_or_default(),
+                    ));
+                }
+                Ok(None) => tokio::time::sleep(self.poll_interval).await,
+                Err(
+                    SessionThreadError::UnknownThread { .. }
+                    | SessionThreadError::ThreadScopeMismatch { .. },
+                ) => {
+                    return Err(OpenAiCompatHttpError::not_found(Some(
+                        "messages".to_string(),
+                    )));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target = "ironclaw::reborn::openai_compat",
+                        error = %error,
+                        "failed to read finalized assistant message for OpenAI-compatible chat completion"
+                    );
+                    return Err(OpenAiCompatHttpError::from_kind(
+                        503,
+                        true,
+                        OpenAiCompatErrorKind::ServiceUnavailable,
+                        None,
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn thread_scope_from_projection_request(
+    request: &OpenAiChatCompletionProjectionRequest,
+) -> Result<ThreadScope, OpenAiCompatHttpError> {
+    let Some(agent_id) = request.projection_read.scope.agent_id.clone() else {
+        return Err(OpenAiCompatHttpError::internal());
+    };
+    Ok(ThreadScope {
+        tenant_id: request.projection_read.scope.tenant_id.clone(),
+        agent_id,
+        project_id: request.projection_read.scope.project_id.clone(),
+        owner_user_id: Some(request.projection_read.actor.user_id.clone()),
+        mission_id: None,
+    })
+}
+
+fn openai_compat_ledger_filesystem(
+    root: Arc<crate::factory::LocalDevRootFilesystem>,
+    tenant_id: &TenantId,
+) -> Result<Arc<ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>, RebornBuildError> {
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(
+        root,
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new(OPENAI_COMPAT_LEDGER_ENGINE_ROOT)?,
+            VirtualPath::new(format!(
+                "/tenants/{}/shared/openai_compat/engine",
+                tenant_id.as_str()
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        )])?,
+    )))
+}
+
+fn openai_compat_ledger_scope(
+    tenant_id: TenantId,
+    default_agent_id: AgentId,
+    default_project_id: Option<ProjectId>,
+) -> Result<ResourceScope, RebornBuildError> {
+    Ok(ResourceScope {
+        tenant_id,
+        user_id: UserId::new(OPENAI_COMPAT_LEDGER_USER_ID)?,
+        agent_id: Some(default_agent_id),
+        project_id: default_project_id,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    })
+}
+
+fn openai_compat_ref_root(tenant_id: &TenantId) -> Result<VirtualPath, RebornBuildError> {
+    Ok(VirtualPath::new(format!(
+        "/tenants/{}/shared/openai_compat/refs",
+        tenant_id.as_str()
+    ))?)
+}
+
+fn invalid_openai_compat_config(
+    field: &'static str,
+) -> impl FnOnce(ironclaw_product_adapters::ProductAdapterError) -> RebornBuildError {
+    move |error| RebornBuildError::InvalidConfig {
+        reason: format!("invalid OpenAI-compatible {field}: {error}"),
+    }
+}

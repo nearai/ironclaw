@@ -9,6 +9,10 @@ use super::{host::LoopSafeSummary, system_inference::SystemInferenceTaskId};
 #[serde(rename_all = "snake_case")]
 pub enum CompactionInitiator {
     Auto,
+    /// Proactive compaction triggered when a single capability result exceeds
+    /// the byte-cap policy threshold. Fires from the PostCapabilityStage
+    /// before the oversized result is appended to the context window.
+    CapabilityResultOverflow,
     Overflow,
     SubagentScoped,
 }

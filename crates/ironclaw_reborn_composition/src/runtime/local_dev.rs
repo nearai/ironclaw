@@ -7,8 +7,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use ironclaw_host_api::{
-    CapabilityId, ExecutionContext, ExtensionId, InvocationId, MountView, RuntimeKind, TrustClass,
-    UserId,
+    CapabilityId, ExecutionContext, ExtensionId, InvocationId, MountView, ResourceScope,
+    RuntimeKind, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
@@ -36,6 +36,7 @@ use ironclaw_turns::{
 };
 
 use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
+use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use crate::{
     RebornServices,
     projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
@@ -78,7 +79,6 @@ pub(super) fn capability_wiring(
     let runtime = services.host_runtime.clone()?;
     let local_runtime = services.local_runtime.as_ref()?;
     let workspace_mounts = local_runtime.workspace_mounts.clone();
-    let skill_mounts = local_runtime.skill_mounts.clone();
     let memory_mounts = local_runtime.memory_mounts.clone();
     let extension_surface_source =
         LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
@@ -96,7 +96,6 @@ pub(super) fn capability_wiring(
             fallback_user_id,
             policy,
             workspace_mounts,
-            skill_mounts,
             memory_mounts,
             extension_surface_source,
             input_resolver: Arc::clone(&capability_input_resolver),
@@ -123,7 +122,6 @@ struct LocalDevLoopCapabilityPortFactory {
     fallback_user_id: UserId,
     policy: Arc<LocalDevCapabilityPolicy>,
     workspace_mounts: MountView,
-    skill_mounts: MountView,
     memory_mounts: MountView,
     extension_surface_source: LocalDevExtensionSurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
@@ -139,7 +137,11 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let workspace_mounts = self.workspace_mounts.clone();
-        let skill_mounts = self.skill_mounts.clone();
+        let skill_mounts = scoped_skill_management_mount_view(&local_dev_resource_scope_for_run(
+            run_context,
+            &self.fallback_user_id,
+        ))
+        .map_err(host_api_agent_loop_error)?;
         let memory_mounts = self.memory_mounts.clone();
         let extension_surface = self
             .extension_surface_source
@@ -469,7 +471,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
         let CapabilityResultWrite {
             run_context,
             input_ref,
@@ -510,7 +512,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             self.display_previews
                 .attach_timeline_message_id(invocation_id, message_id);
         }
-        Ok(result_ref)
+        Ok((result_ref, output_bytes))
     }
 
     async fn update_capability_result(
@@ -518,7 +520,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
         output: serde_json::Value,
-    ) -> Result<(), AgentLoopHostError> {
+    ) -> Result<u64, AgentLoopHostError> {
         ensure_local_dev_ref_scope("result", result_ref.as_str(), run_context)?;
         let bytes = staged_value_bytes(&output)?;
         let mut results = self.results.lock().map_err(|_| capability_io_error())?;
@@ -541,7 +543,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             ));
         }
         results.insert_measured(result_ref.as_str().to_string(), output, bytes);
-        Ok(())
+        Ok(bytes as u64)
     }
 
     async fn delete_capability_result(
@@ -723,6 +725,20 @@ fn append_sanitized_capped(value: &str, output: &mut String) -> bool {
 
 fn model_capability_io_error(error: AgentLoopHostError) -> HostManagedModelError {
     HostManagedModelError::safe(HostManagedModelErrorKind::Unavailable, error.safe_summary)
+}
+
+fn local_dev_resource_scope_for_run(
+    run_context: &LoopRunContext,
+    fallback_user_id: &UserId,
+) -> ResourceScope {
+    let mut scope = run_context.scope.to_resource_scope();
+    scope.user_id = run_context
+        .scope
+        .explicit_owner_user_id()
+        .cloned()
+        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
+        .unwrap_or_else(|| fallback_user_id.clone());
+    scope
 }
 
 fn local_dev_visible_capability_request(
