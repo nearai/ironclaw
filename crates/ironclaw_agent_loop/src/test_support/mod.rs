@@ -477,6 +477,8 @@ pub enum ScriptedCapabilityOutcome {
         gate_ref: String,
         /// Result ref updated when the dependent run completes.
         result_ref: String,
+        /// Byte length of the awaited result (0 for test fakes that don't have one).
+        byte_len: u64,
     },
     /// Spawned child run result.
     SpawnedChildRun {
@@ -484,6 +486,8 @@ pub enum ScriptedCapabilityOutcome {
         child_run_id: TurnRunId,
         /// Result ref.
         result_ref: String,
+        /// Byte length of the spawned-child result (0 for test fakes that don't have one).
+        byte_len: u64,
     },
     /// Failed result.
     Failed {
@@ -1047,6 +1051,7 @@ fn scripted_capability_outcome(
             safe_summary: "completed".to_string(),
             progress,
             terminate_hint,
+            byte_len: 0,
         })),
         ScriptedCapabilityOutcome::ApprovalRequired { gate_ref } => {
             Ok(CapabilityOutcome::ApprovalRequired {
@@ -1070,19 +1075,23 @@ fn scripted_capability_outcome(
         ScriptedCapabilityOutcome::AwaitDependentRun {
             gate_ref,
             result_ref,
+            byte_len,
         } => Ok(CapabilityOutcome::AwaitDependentRun {
             gate_ref: loop_gate_ref(&gate_ref),
             result_ref: loop_result_ref(&result_ref),
             safe_summary: "await dependent run".to_string(),
+            byte_len,
         }),
         ScriptedCapabilityOutcome::SpawnedChildRun {
             child_run_id,
             result_ref,
+            byte_len,
         } => Ok(CapabilityOutcome::SpawnedChildRun {
             child_run_id,
             result_ref: LoopResultRef::new(result_ref)
                 .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
             safe_summary: "spawned child run".to_string(),
+            byte_len,
         }),
         ScriptedCapabilityOutcome::Failed { error_kind } => {
             Ok(CapabilityOutcome::Failed(CapabilityFailure {

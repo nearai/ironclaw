@@ -137,7 +137,7 @@ mod tests {
 
         let picker = asset_text("js/components/slack-channel-picker.js");
         assert!(picker.contains("listSlackAllowedChannels"));
-        assert!(picker.contains("saveSlackAllowedChannels(ids)"));
+        assert!(picker.contains("saveSlackAllowedChannels(channels)"));
 
         let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
         assert!(channels_tab.contains("slackBuiltinStatus"));
@@ -213,7 +213,8 @@ mod tests {
         let layout = asset_text("js/layout/gateway-layout.js");
         assert!(layout.contains("enabled: isAdmin"));
         assert!(layout.contains("const needsOnboarding ="));
-        assert!(layout.contains("isAdmin && !llmProviders.isLoading"));
+        assert!(layout.contains("isAdmin &&"));
+        assert!(layout.contains("shouldRouteToOnboarding({"));
 
         let app = asset_text("js/app/app.js");
         assert!(app.contains("isChecking=${auth.isChecking}"));

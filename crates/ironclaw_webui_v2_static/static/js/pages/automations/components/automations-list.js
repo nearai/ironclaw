@@ -4,13 +4,9 @@ import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives
 import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
-import { filterAutomations } from "../lib/automations-presenters.js";
-
-const AUTOMATION_FILTERS = [
-  { value: "all", labelKey: "automations.filter.all" },
-  { value: "active", labelKey: "automations.filter.active" },
-  { value: "paused", labelKey: "automations.filter.paused" },
-];
+import { AUTOMATION_FILTERS, filterAutomations } from "../lib/automations-presenters.js";
+import { AutomationDetailPanel } from "./automation-detail-panel.js";
+import { RunDots } from "./automation-recent-runs.js";
 
 export function AutomationsList({
   automations,
@@ -18,10 +14,16 @@ export function AutomationsList({
   onFilterChange,
   onRefresh,
   isRefreshing,
+  selectedAutomationId,
+  onSelectAutomation,
 }) {
   const t = useT();
   const filtered = filterAutomations(automations, filter);
   const hasAutomations = automations.length > 0;
+  const selectedAutomation =
+    filtered.find((automation) => automation.automation_id === selectedAutomationId) ||
+    filtered[0] ||
+    null;
 
   return html`
     <div className="space-y-5">
@@ -87,71 +89,89 @@ export function AutomationsList({
             />
           `
         : html`
-            <${Panel} className="overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[820px] border-collapse">
-                  <thead>
-                    <tr className="border-b border-[var(--v2-panel-border)] text-left">
-                      <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                        ${t("automations.table.name")}
-                      </th>
-                      <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                        ${t("automations.table.schedule")}
-                      </th>
-                      <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                        ${t("automations.table.nextRun")}
-                      </th>
-                      <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                        ${t("automations.table.lastRun")}
-                      </th>
-                      <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                        ${t("automations.table.status")}
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${filtered.map((automation) => html`
-                      <tr
-                        key=${automation.automation_id}
-                        className="border-b border-[var(--v2-panel-border)] last:border-0"
-                      >
-                        <td className="max-w-[280px] px-5 py-4 align-top">
-                          <div className="truncate text-sm font-semibold text-iron-100">
-                            ${automation.display_name}
-                          </div>
-                          <div className="mt-1 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-iron-400">
-                            ${automation.automation_id}
-                          </div>
-                        </td>
-                        <td className="px-5 py-4 align-top text-sm text-iron-200">
-                          ${automation.schedule_label}
-                        </td>
-                        <td className="px-5 py-4 align-top text-sm text-iron-200">
-                          ${automation.next_run_label}
-                        </td>
-                        <td className="px-5 py-4 align-top">
-                          <div className="text-sm text-iron-200">
-                            ${automation.last_run_label}
-                          </div>
-                          <div className="mt-2">
-                            <${StatusPill}
-                              tone=${automation.last_status_tone}
-                              label=${automation.last_status_label}
-                            />
-                          </div>
-                        </td>
-                        <td className="px-5 py-4 align-top">
-                          <${StatusPill}
-                            tone=${automation.state_tone}
-                            label=${automation.state_label}
-                          />
-                        </td>
+            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.12fr)_minmax(22rem,0.88fr)]">
+              <${Panel} className="overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[900px] border-collapse">
+                    <thead>
+                      <tr className="border-b border-[var(--v2-panel-border)] text-left">
+                        <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
+                          ${t("automations.table.name")}
+                        </th>
+                        <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
+                          ${t("automations.table.schedule")}
+                        </th>
+                        <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
+                          ${t("automations.table.nextRun")}
+                        </th>
+                        <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
+                          ${t("automations.table.recentRuns")}
+                        </th>
+                        <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
+                          ${t("automations.table.status")}
+                        </th>
                       </tr>
-                    `)}
-                  </tbody>
-                </table>
-              </div>
-            <//>
+                    </thead>
+                    <tbody>
+                      ${filtered.map((automation) => {
+                        const selected =
+                          automation.automation_id === selectedAutomation?.automation_id;
+                        return html`
+                          <tr
+                            key=${automation.automation_id}
+                            className=${cn(
+                              "border-b border-[var(--v2-panel-border)] last:border-0 hover:bg-white/[0.03]",
+                              selected && "bg-[var(--v2-accent-soft)]/30"
+                            )}
+                          >
+                            <td className="max-w-[280px] px-5 py-4 align-top">
+                              <button
+                                type="button"
+                                aria-pressed=${selected}
+                                onClick=${() => onSelectAutomation(automation.automation_id)}
+                                className="block w-full min-w-0 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]"
+                              >
+                                <div className="truncate text-sm font-semibold text-iron-100">
+                                  ${automation.display_name}
+                                </div>
+                                <div className="mt-1 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-iron-400">
+                                  ${automation.automation_id}
+                                </div>
+                              </button>
+                            </td>
+                            <td className="px-5 py-4 align-top text-sm text-iron-200">
+                              ${automation.schedule_label}
+                            </td>
+                            <td className="px-5 py-4 align-top text-sm text-iron-200">
+                              ${automation.next_run_label}
+                            </td>
+                            <td className="px-5 py-4 align-top">
+                              <${RunDots} runs=${automation.recent_runs} />
+                            </td>
+                            <td className="px-5 py-4 align-top">
+                              <${StatusPill}
+                                tone=${automation.has_running_run
+                                  ? "info"
+                                  : automation.has_failed_runs
+                                    ? "danger"
+                                    : automation.state_tone}
+                                label=${automation.has_running_run
+                                  ? t("automations.status.running")
+                                  : automation.has_failed_runs
+                                    ? t("automations.status.needsReview")
+                                    : automation.state_label}
+                              />
+                            </td>
+                          </tr>
+                        `;
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              <//>
+
+              <${AutomationDetailPanel} automation=${selectedAutomation} />
+            </div>
           `}
     </div>
   `;

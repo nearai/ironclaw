@@ -817,6 +817,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             safe_summary: self.capability.safe_summary.clone(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: self.capability.terminate_hint,
+            byte_len: 0,
         }))
     }
 

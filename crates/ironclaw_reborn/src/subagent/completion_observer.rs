@@ -501,17 +501,41 @@ where
         let safe_summary = parent_result_summary(event, &child_output)?;
         if !state.terminal_result_written {
             let payload = background_completion_payload(event, record, &child_output)?;
-            match self
+            let terminal_byte_len = match self
                 .result_writer
                 .update_capability_result(&record.parent_run_context, result_ref, payload)
                 .await
             {
-                Ok(()) => {}
+                Ok(byte_len) => byte_len,
                 Err(error) => return Err(map_host_error(error)),
-            }
+            };
+            // Mark terminal_result_written BEFORE recording byte_len so that
+            // any retry skips the writer (idempotency guard at
+            // `!state.terminal_result_written`) and only re-attempts the
+            // byte-len record.  Trade-off: if record_terminal_byte_len fails,
+            // byte_len stays 0 on the gate state (observability loss) but the
+            // payload is durably written exactly once (no double-write).
             self.gate_store
                 .mark_terminal_result_written(&record.gate_ref, record.child_run_id)
                 .map_err(map_host_error)?;
+            if let Err(error) = self.gate_store.record_terminal_byte_len(
+                &record.gate_ref,
+                record.child_run_id,
+                terminal_byte_len,
+            ) {
+                // Best-effort accounting: byte_len feeds ByteCapStrategy observability,
+                // not durability. A failure here must not block update_parent_result_reference
+                // or downstream delivery. Log at debug; the byte_len stays 0 on the gate
+                // state, which means ByteCapStrategy will miss this particular trip but
+                // the loop still functions correctly.
+                tracing::debug!(
+                    gate_ref = ?record.gate_ref,
+                    child_run_id = %record.child_run_id,
+                    terminal_byte_len,
+                    error = %map_host_error(error),
+                    "failed to record terminal byte_len on gate state — accounting lost, delivery unaffected"
+                );
+            }
         }
         self.update_parent_result_reference(record, event, result_ref, safe_summary)
             .await?;
@@ -1293,9 +1317,9 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             self.writes.lock().unwrap().push(write.output);
-            Ok(self.result_ref.clone())
+            Ok((self.result_ref.clone(), 0))
         }
 
         async fn update_capability_result(
@@ -1303,10 +1327,13 @@ mod tests {
             _run_context: &ironclaw_turns::run_profile::LoopRunContext,
             result_ref: &LoopResultRef,
             output: serde_json::Value,
-        ) -> Result<(), AgentLoopHostError> {
+        ) -> Result<u64, AgentLoopHostError> {
             assert_eq!(result_ref, &self.result_ref);
+            let byte_len = serde_json::to_vec(&output)
+                .map(|v| v.len() as u64)
+                .unwrap_or(0);
             self.writes.lock().unwrap().push(output);
-            Ok(())
+            Ok(byte_len)
         }
     }
 
@@ -1337,9 +1364,9 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             self.writes.lock().unwrap().push(write.output);
-            Ok(self.result_ref.clone())
+            Ok((self.result_ref.clone(), 0))
         }
 
         async fn update_capability_result(
@@ -1347,7 +1374,7 @@ mod tests {
             _run_context: &ironclaw_turns::run_profile::LoopRunContext,
             result_ref: &LoopResultRef,
             output: serde_json::Value,
-        ) -> Result<(), AgentLoopHostError> {
+        ) -> Result<u64, AgentLoopHostError> {
             assert_eq!(result_ref, &self.result_ref);
             let mut calls = self.calls.lock().unwrap();
             *calls += 1;
@@ -1357,8 +1384,11 @@ mod tests {
                     "injected result write failure",
                 ));
             }
+            let byte_len = serde_json::to_vec(&output)
+                .map(|v| v.len() as u64)
+                .unwrap_or(0);
             self.writes.lock().unwrap().push(output);
-            Ok(())
+            Ok(byte_len)
         }
     }
 
@@ -1916,6 +1946,7 @@ mod tests {
             terminal_status: None,
             terminal_event: None,
             terminal_result_written: false,
+            terminal_byte_len: 0,
             descendant_reservation_release_claimed: false,
             descendant_reservation_released: false,
             delivery_claimed: true,
@@ -3804,6 +3835,7 @@ mod tests {
                     owner_user_id: Some(owner.clone()),
                 }),
                 terminal_result_written: true,
+                terminal_byte_len: 0,
                 descendant_reservation_release_claimed: false,
                 descendant_reservation_released: false,
                 delivery_claimed: true,
@@ -4255,6 +4287,7 @@ mod tests {
                     owner_user_id: Some(owner.clone()),
                 }),
                 terminal_result_written: true,
+                terminal_byte_len: 0,
                 descendant_reservation_release_claimed: false,
                 descendant_reservation_released: false,
                 delivery_claimed: true,
@@ -4286,6 +4319,202 @@ mod tests {
                 .unwrap()
                 .delivered_to_parent,
             "failed second record must remain undelivered"
+        );
+    }
+
+    /// Stub result writer that always returns a fixed byte_len from
+    /// `update_capability_result` so the byte-len record path can be asserted
+    /// without depending on the real serialization size.
+    struct FixedBytelenResultWriter {
+        result_ref: LoopResultRef,
+        byte_len: u64,
+    }
+
+    impl FixedBytelenResultWriter {
+        fn new(result_ref: LoopResultRef, byte_len: u64) -> Self {
+            Self {
+                result_ref,
+                byte_len,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for FixedBytelenResultWriter {
+        async fn write_capability_result(
+            &self,
+            _write: CapabilityResultWrite<'_>,
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+            Ok((self.result_ref.clone(), self.byte_len))
+        }
+
+        async fn update_capability_result(
+            &self,
+            _run_context: &ironclaw_turns::run_profile::LoopRunContext,
+            _result_ref: &LoopResultRef,
+            _output: serde_json::Value,
+        ) -> Result<u64, AgentLoopHostError> {
+            Ok(self.byte_len)
+        }
+    }
+
+    #[tokio::test]
+    async fn write_terminal_result_records_non_zero_terminal_byte_len_on_gate_state() {
+        let tenant = TenantId::new("tenant").unwrap();
+        let agent = AgentId::new("agent").unwrap();
+        let owner = UserId::new("owner").unwrap();
+        let parent_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("byte-len-parent-thread").unwrap(),
+        );
+        let child_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("byte-len-child-thread").unwrap(),
+        );
+        let child_thread_scope = ThreadScope {
+            tenant_id: tenant,
+            agent_id: agent,
+            project_id: None,
+            owner_user_id: Some(owner.clone()),
+            mission_id: None,
+        };
+        let parent_run_id = TurnRunId::new();
+        let child_run_id = TurnRunId::new();
+        let result_ref = LoopResultRef::new("result:subagent.byte-len").unwrap();
+
+        // Arrange: child thread with a finalized assistant message so
+        // child_terminal_output can resolve the final_text.
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: child_thread_scope.clone(),
+                thread_id: Some(child_scope.thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let draft = thread_service
+            .append_assistant_draft(AppendAssistantDraftRequest {
+                scope: child_thread_scope.clone(),
+                thread_id: child_scope.thread_id.clone(),
+                turn_run_id: child_run_id.to_string(),
+                content: MessageContent::text("draft answer"),
+            })
+            .await
+            .unwrap();
+        thread_service
+            .finalize_assistant_message(
+                &child_thread_scope,
+                &child_scope.thread_id,
+                draft.message_id,
+                MessageContent::text("final answer"),
+            )
+            .await
+            .unwrap();
+
+        // Arrange: parent thread with the tool-result-reference so
+        // update_parent_result_reference (called at end of write_terminal_result)
+        // can find the message to update.
+        let parent_thread_scope = ThreadScope {
+            tenant_id: parent_scope.tenant_id.clone(),
+            agent_id: parent_scope.agent_id.clone().unwrap(),
+            project_id: None,
+            owner_user_id: Some(owner.clone()),
+            mission_id: None,
+        };
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: parent_thread_scope.clone(),
+                thread_id: Some(parent_scope.thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        thread_service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: parent_thread_scope,
+                thread_id: parent_scope.thread_id.clone(),
+                turn_run_id: parent_run_id.to_string(),
+                result_ref: result_ref.as_str().to_string(),
+                safe_summary: ToolResultSafeSummary::new("subagent spawned").unwrap(),
+                provider_call: None,
+                model_observation: None,
+            })
+            .await
+            .unwrap();
+
+        let gate_ref = GateRef::new(format!("gate:subagent-byte-len-{}", child_run_id)).unwrap();
+        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let mut parent_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("byte-len-parent");
+        parent_run_context.scope = parent_scope.clone();
+        parent_run_context.thread_id = parent_scope.thread_id.clone();
+        parent_run_context.run_id = parent_run_id;
+        gate_store
+            .record_awaited_child(AwaitedChildSetRecord {
+                gate_ref: gate_ref.clone(),
+                parent_run_context,
+                tree_root_run_id: parent_run_id,
+                child_scope: child_scope.clone(),
+                child_run_id,
+                child_thread_id: child_scope.thread_id.clone(),
+                source_binding_ref: SourceBindingRef::new("subagent-source:byte-len").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("subagent-reply:byte-len")
+                    .unwrap(),
+                subagent_kind: SubagentKindId::new("general").unwrap(),
+                spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                    .unwrap(),
+                result_ref: result_ref.clone(),
+                mode: SpawnSubagentMode::Background,
+            })
+            .await
+            .unwrap();
+
+        // The stub writer always returns 65_000 bytes regardless of payload
+        // size — this lets us assert the gate state carries the exact value
+        // returned by update_capability_result.
+        let known_byte_len: u64 = 65_000;
+        let result_writer = Arc::new(FixedBytelenResultWriter::new(result_ref, known_byte_len));
+        let observer = SubagentCompletionObserver::new(
+            Arc::clone(&gate_store),
+            goal_store,
+            Arc::new(RecordingTurnStateStore::default()),
+            result_writer,
+            Arc::new(RecordingCoordinator::default()),
+            thread_service,
+        )
+        .unwrap();
+
+        let state = gate_store.state_for_child(child_run_id).unwrap().unwrap();
+        let terminal_event = AwaitedChildTerminalEvent {
+            status: TurnStatus::Completed,
+            kind: TurnEventKind::Completed,
+            cursor: EventCursor(5),
+            sanitized_reason: None,
+            owner_user_id: Some(owner),
+        };
+        observer
+            .write_terminal_result(&state, &terminal_event)
+            .await
+            .unwrap();
+
+        let after = gate_store.state_for_child(child_run_id).unwrap().unwrap();
+        assert_eq!(
+            after.terminal_byte_len, known_byte_len,
+            "gate state must record the byte_len returned by update_capability_result"
+        );
+        assert!(
+            after.terminal_result_written,
+            "terminal_result_written must be true after a successful write"
         );
     }
 

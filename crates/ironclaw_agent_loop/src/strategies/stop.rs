@@ -80,6 +80,15 @@ impl TurnSummary {
             capability_batch: CapabilityBatchTurnSummary::default(),
         }
     }
+
+    pub(crate) fn compaction_only() -> Self {
+        Self {
+            kind: TurnEndKind::CompactionOnly,
+            assistant_message_ref: None,
+            batch_result_refs: Vec::new(),
+            capability_batch: CapabilityBatchTurnSummary::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -153,6 +162,10 @@ pub(crate) enum TurnEndKind {
     /// The model returned a reply that was rejected before transcript
     /// finalization.
     ReplyRejected,
+    /// The turn ran proactive compaction and skipped the model call entirely.
+    /// No assistant reply, no capability batch — just compaction, observe stop,
+    /// then iterate. Emitted via `PromptStep::SkipModel`.
+    CompactionOnly,
 }
 
 /// Strategy decision after completed-turn observation has already updated

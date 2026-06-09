@@ -38,11 +38,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{Request, State},
     http::{HeaderName, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
+    routing::get,
 };
 use ironclaw_auth::GoogleOAuthRouteConfig;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
@@ -75,6 +76,7 @@ use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+use serde::Serialize;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
 /// decoded attachments plus base64/JSON overhead. Mirrors the existing
@@ -88,6 +90,8 @@ pub(crate) const DEFAULT_WEBUI_MAX_BODY_BYTES: usize = 14 * 1024 * 1024;
 /// fronts an HTML SPA on the same listener.
 pub(crate) const DEFAULT_WEBUI_CSP: &str =
     "default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'";
+
+const REBORN_HEALTH_PATH: &str = "/api/health";
 
 /// Authentication contract the Reborn binary supplies. The composition
 /// layer is intentionally agnostic about WHERE bearer tokens come from
@@ -190,6 +194,10 @@ pub struct WebuiServeConfig {
     /// just like they do to the v2 facade and the product-auth callback —
     /// no side door. Defaults to an empty list.
     pub(crate) public_mounts: Vec<PublicRouteMount>,
+    /// Host-supplied protected route mounts merged into the composed app
+    /// inside the bearer auth layer. These receive the same authenticated
+    /// caller extensions and descriptor-driven policy enforcement as WebUI v2.
+    pub(crate) protected_mounts: Vec<ProtectedRouteMount>,
     /// Optional Google OAuth setup config for Reborn product-auth
     /// credential onboarding. When absent, the mounted Google setup
     /// route fails closed with a sanitized service-unavailable response.
@@ -223,6 +231,23 @@ pub struct PublicRouteMount {
     pub router: Router,
     pub descriptors: Vec<IngressRouteDescriptor>,
     pub drain: Option<Arc<dyn PublicRouteDrain>>,
+}
+
+/// A host-supplied protected sub-router plus the descriptors composition
+/// needs to install the shared per-route policy middleware around it.
+#[derive(Clone)]
+pub struct ProtectedRouteMount {
+    pub router: Router,
+    pub descriptors: Vec<IngressRouteDescriptor>,
+}
+
+impl ProtectedRouteMount {
+    pub fn new(router: Router, descriptors: Vec<IngressRouteDescriptor>) -> Self {
+        Self {
+            router,
+            descriptors,
+        }
+    }
 }
 
 impl PublicRouteMount {
@@ -292,6 +317,7 @@ impl WebuiServeConfig {
             default_agent_id: None,
             default_project_id: None,
             public_mounts: Vec::new(),
+            protected_mounts: Vec::new(),
             google_oauth: None,
             #[cfg(feature = "slack-v2-host-beta")]
             slack_personal_binding: None,
@@ -358,6 +384,15 @@ impl WebuiServeConfig {
     /// surface that follows the same boundary rules).
     pub fn with_public_route_mount(mut self, mount: PublicRouteMount) -> Self {
         self.public_mounts.push(mount);
+        self
+    }
+
+    /// Attach a host-supplied protected sub-router PLUS its route
+    /// descriptors. The router is merged into the same bearer-auth layer
+    /// as WebUI v2, so it receives host-stamped caller extensions and
+    /// descriptor-driven rate/body-limit enforcement.
+    pub fn with_protected_route_mount(mut self, mount: ProtectedRouteMount) -> Self {
+        self.protected_mounts.push(mount);
         self
     }
 
@@ -542,6 +577,7 @@ pub fn webui_v2_app_with_lifecycle(
         .filter(|_| mount_operator_routes)
         .map(slack_channel_route_admin_route_mount);
     let public_mounts = config.public_mounts;
+    let protected_mounts = config.protected_mounts;
     let public_route_drains = PublicRouteDrains::new(
         public_mounts
             .iter()
@@ -571,6 +607,9 @@ pub fn webui_v2_app_with_lifecycle(
     for mount in &public_mounts {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
+    for mount in &protected_mounts {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
     let rate_limit_state = build_rate_limit_state(&descriptors)?;
     let body_limit_state = build_body_limit_state(&descriptors);
     let ws_origin_state = build_websocket_origin_state(
@@ -597,6 +636,9 @@ pub fn webui_v2_app_with_lifecycle(
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
+    for mount in protected_mounts {
+        protected_inner = protected_inner.merge(mount.router);
+    }
     let mut public_inner: Option<Router> = None;
     if let Some(mount) = product_auth_mount {
         protected_inner = protected_inner.merge(mount.protected);
@@ -673,6 +715,12 @@ pub fn webui_v2_app_with_lifecycle(
         app = app.merge(public);
     }
     let app = app
+        // arch-exempt: rate-limit-bypass, platform-probe-only.
+        // This route exists solely for container orchestrator healthchecks.
+        // It performs no state read/write, exposes no tenant data, and must
+        // remain reachable even when the descriptor-driven public route stack
+        // is unavailable or misconfigured.
+        .route(REBORN_HEALTH_PATH, get(reborn_health_handler))
         // SPA static assets served from the embedded
         // `ironclaw_webui_v2_static` bundle. Routed AFTER the
         // route_layer stack above so the SPA does not require bearer
@@ -726,6 +774,19 @@ pub fn webui_v2_app_with_lifecycle(
     })
 }
 
+#[derive(Serialize)]
+struct RebornHealthResponse {
+    status: &'static str,
+    channel: &'static str,
+}
+
+async fn reborn_health_handler() -> Json<RebornHealthResponse> {
+    Json(RebornHealthResponse {
+        status: "healthy",
+        channel: "reborn",
+    })
+}
+
 // ─── auth middleware ──────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -765,6 +826,7 @@ async fn authenticate_request(
     // authenticate users only to reject every v2 mutation/read. The
     // browser body cannot influence either of these identifiers — by
     // contract `WebuiServeConfig` is host-owned.
+    let openai_user_id = user_id.clone();
     let caller = WebUiAuthenticatedCaller::new(
         state.tenant_id.clone(),
         user_id,
@@ -772,6 +834,25 @@ async fn authenticate_request(
         state.default_project_id.clone(),
     );
     request.extensions_mut().insert(caller);
+    #[cfg(feature = "openai-compat-beta")]
+    {
+        let scope = ironclaw_reborn_openai_compat::OpenAiCompatActorScope::new(
+            state.tenant_id.clone(),
+            openai_user_id.clone(),
+            state.default_agent_id.clone(),
+            state.default_project_id.clone(),
+        );
+        let auth_evidence =
+            ironclaw_product_adapters::mark_bearer_token_verified(openai_user_id.as_str());
+        let caller = match ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller::new(
+            scope,
+            auth_evidence,
+        ) {
+            Ok(caller) => caller,
+            Err(_) => return unauthorized(),
+        };
+        request.extensions_mut().insert(caller);
+    }
     next.run(request).await
 }
 

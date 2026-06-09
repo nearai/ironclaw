@@ -242,7 +242,7 @@ impl LoopCapabilityResultWriter for UnusedCapabilityResultWriter {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
             "unused capability result writer",

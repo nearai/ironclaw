@@ -63,6 +63,8 @@ mod oauth_dcr;
 mod oauth_dcr_protocol;
 mod oauth_gate;
 mod oauth_provider_client;
+#[cfg(feature = "openai-compat-beta")]
+mod openai_compat_serve;
 mod outbound_preferences;
 mod product_auth_durable;
 mod product_auth_providers;
@@ -136,7 +138,7 @@ pub use auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
-pub use automation::RebornWebuiAutomationFacade;
+pub use automation::RebornAutomationProductFacade;
 pub use budget::build_default_budget_accountant;
 pub use budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use error::RebornBuildError;
@@ -179,6 +181,8 @@ pub use local_runtime_profile::{
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
+#[cfg(feature = "openai-compat-beta")]
+pub use openai_compat_serve::build_openai_compat_route_mount;
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -222,7 +226,7 @@ pub use slack_actor_identity::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
-    WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+    WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_connectable_channel::{
@@ -283,8 +287,9 @@ pub use webui::{RebornWebuiBundle, build_webui_services};
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_serve::{
-    PublicRouteDrain, PublicRouteDrains, PublicRouteMount, WebuiAuthenticator, WebuiServeConfig,
-    WebuiServeConfigError, WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount, WebuiAuthenticator,
+    WebuiServeConfig, WebuiServeConfigError, WebuiServeError, WebuiV2App, webui_v2_app,
+    webui_v2_app_with_lifecycle,
 };
 
 /// Re-exported identity vocabulary host binaries need to construct
@@ -731,6 +736,18 @@ pub(crate) fn slack_host_state_mount_view(
             VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-channel-routes"))?,
             MountPermissions::read_write_list_delete(),
         ),
+        MountGrant::new(
+            MountAlias::new("/engine/product_workflow/idempotency")?,
+            VirtualPath::new(format!(
+                "/tenants/{tenant_id}/shared/slack-product-workflow/idempotency"
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/outbound")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-outbound"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
     ])
 }
 
@@ -946,31 +963,39 @@ mod mount_view_tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
-    fn slack_host_state_mount_view_grants_delete_only_to_slack_state_root() {
+    fn slack_host_state_mount_view_grants_delete_only_to_slack_state_roots() {
         let scope = sample_scope();
         let view = slack_host_state_mount_view(&scope).unwrap();
-        let resolved = view
-            .resolve(
-                &ScopedPath::new("/tenant-shared/slack-channel-routes/install/team/route.json")
-                    .unwrap(),
-            )
-            .unwrap();
-        assert_eq!(
-            resolved.as_str(),
-            &format!(
-                "/tenants/{}/shared/slack-channel-routes/install/team/route.json",
-                scope.tenant_id.as_str()
-            )
-        );
-        let grant = view
-            .mounts
-            .iter()
-            .find(|grant| grant.alias.as_str() == "/tenant-shared/slack-channel-routes")
-            .expect("slack host-state grant");
-        assert_eq!(
-            grant.permissions,
-            MountPermissions::read_write_list_delete()
-        );
+        for (alias, path, target) in [
+            (
+                "/tenant-shared/slack-channel-routes",
+                "/tenant-shared/slack-channel-routes/install/team/route.json",
+                "slack-channel-routes/install/team/route.json",
+            ),
+            (
+                "/engine/product_workflow/idempotency",
+                "/engine/product_workflow/idempotency/actions/action.json",
+                "slack-product-workflow/idempotency/actions/action.json",
+            ),
+            (
+                "/outbound",
+                "/outbound/deliveries/delivery.json",
+                "slack-outbound/deliveries/delivery.json",
+            ),
+        ] {
+            let (resolved, grant) = view
+                .resolve_with_grant(&ScopedPath::new(path).unwrap())
+                .unwrap();
+            assert_eq!(
+                resolved.as_str(),
+                &format!("/tenants/{}/shared/{target}", scope.tenant_id.as_str())
+            );
+            assert_eq!(grant.alias.as_str(), alias);
+            assert_eq!(
+                grant.permissions,
+                MountPermissions::read_write_list_delete()
+            );
+        }
         assert!(
             view.resolve(&ScopedPath::new("/tenant-shared/other.json").unwrap())
                 .is_err()

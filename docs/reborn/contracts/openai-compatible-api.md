@@ -56,6 +56,9 @@ bind sockets or call `axum::serve`.
   contract crate defines the port and the storage crate provides
   filesystem-backed adapters under `/engine/openai_compat/refs/` with
   per-public-id mapping records plus per-scope idempotency index records.
+  Reborn local-dev host composition places the production route's tenant-owned
+  ref store under `/tenants/{tenant}/shared/openai_compat/refs` on the root
+  filesystem; route handlers still access it only through `OpenAiCompatRefStore`.
 - The in-memory ref store is bounded and evicts the oldest mappings when full.
   Durable filesystem retention and pruning are owned by host composition or the
   storage adapter lifecycle, not by route handlers.
@@ -82,8 +85,11 @@ bind sockets or call `axum::serve`.
 
 ## Non-Streaming Chat Completions
 
-Host composition may mount `openai_compat_router_with_state(...)` with an
-`OpenAiChatCompletionsWorkflow` for `POST /v1/chat/completions`.
+With the `openai-compat-beta` feature, `ironclaw-reborn serve` mounts
+`openai_compat_router_with_state(...)` inside the Reborn protected route stack
+with an `OpenAiChatCompletionsWorkflow` for `POST /v1/chat/completions`.
+Default routers remain fail-closed unless host composition injects that
+workflow state.
 
 The route:
 
@@ -96,7 +102,9 @@ The route:
   through `ProductWorkflow`.
 - Resolves the canonical projection read request through
   `ProductWorkflow::read_projection(...)`, then waits through a
-  composition-supplied projection reader and returns a sanitized Chat
+  composition-supplied projection reader. The local-dev Reborn composition
+  reader polls `SessionThreadService::finalized_assistant_message_by_run` for
+  the accepted run's finalized assistant message and returns a sanitized Chat
   Completions response.
 - Carries the requested public model string as a composition/policy hint for
   the projection reader; the route must not inject the model name into user

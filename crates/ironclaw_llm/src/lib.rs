@@ -42,6 +42,10 @@ pub mod runtime;
 pub mod session;
 pub mod smart_routing;
 mod token_refreshing;
+// arch-exempt: scaffolding, Phase A helpers awaiting first per-provider caller, plan #4522
+// Remove the allow once any production call site references these items.
+#[allow(dead_code)]
+pub(crate) mod tool_args;
 pub mod tool_schema;
 pub mod transcription;
 

@@ -38,9 +38,9 @@ pub use chat::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use chat_workflow::{
-    OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
-    OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow, OpenAiChatModelOnlyTools,
-    OpenAiCompatAuthenticatedCaller,
+    OPENAI_COMPAT_CONVERSATION_PREFIX, OpenAiChatCompletionProjection,
+    OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
+    OpenAiChatCompletionsWorkflow, OpenAiChatModelOnlyTools, OpenAiCompatAuthenticatedCaller,
 };
 pub use descriptors::{
     OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS, OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,
@@ -60,6 +60,10 @@ pub use error::{
 pub use handlers::{
     chat_completions, responses_api_cancel, responses_api_create, responses_api_retrieve,
     responses_v1_cancel, responses_v1_create, responses_v1_retrieve,
+};
+#[cfg(feature = "openai-compat-beta")]
+pub use identity::{
+    OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
 };
 pub use refs::{
     InMemoryOpenAiCompatRefStore, OpenAiChatCompletionId, OpenAiCompatActorScope,

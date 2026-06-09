@@ -8,13 +8,15 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    InMemoryOutboundStateStore, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundError, OutboundPolicyService, OutboundStateStore, ProjectionSubscriptionRecord,
-    ReplyTargetBindingClaim, ReplyTargetBindingValidator, RequestedOutboundContext,
-    RequestedOutboundKind, RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
-    SystemEventReasonCode, ThreadNotificationPolicy, ThreadProjectionAccessClaim,
-    ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef,
-    TriggerSourceKind, UpdateDeliveryStatusRequest,
+    CommunicationPreferenceVersion, DeliveryDefaultScope, InMemoryOutboundStateStore,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundError, OutboundPolicyService,
+    OutboundStateStore, ProjectionSubscriptionRecord, ReplyTargetBindingClaim,
+    ReplyTargetBindingValidator, RequestedOutboundContext, RequestedOutboundKind,
+    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SystemEventReasonCode,
+    ThreadNotificationPolicy, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
+    ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeliveryStatus, EgressCredentialHandle, EgressResponse,
@@ -124,16 +126,19 @@ impl ReplyTargetBindingValidator for FakeReplyTargetBindingValidator {
 
 #[derive(Default)]
 struct FakePreferenceRepository {
-    records: Mutex<HashMap<CommunicationPreferenceKey, CommunicationPreferenceRecord>>,
+    records: Mutex<HashMap<CommunicationPreferenceKey, VersionedCommunicationPreferenceRecord>>,
     load_calls: Mutex<usize>,
 }
 
 impl FakePreferenceRepository {
     fn put_record(&self, record: CommunicationPreferenceRecord) {
-        self.records
-            .lock()
-            .expect("preference lock")
-            .insert(record.key(), record);
+        self.records.lock().expect("preference lock").insert(
+            record.key(),
+            VersionedCommunicationPreferenceRecord {
+                record,
+                version: CommunicationPreferenceVersion::from_raw(1),
+            },
+        );
     }
 
     fn load_calls(&self) -> usize {
@@ -154,7 +159,7 @@ impl CommunicationPreferenceRepository for FakePreferenceRepository {
     async fn load_communication_preference(
         &self,
         key: CommunicationPreferenceKey,
-    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
         *self.load_calls.lock().expect("preference lock") += 1;
         Ok(self
             .records
@@ -162,6 +167,25 @@ impl CommunicationPreferenceRepository for FakePreferenceRepository {
             .expect("preference lock")
             .get(&key)
             .cloned())
+    }
+
+    async fn write_communication_preference(
+        &self,
+        request: WriteCommunicationPreferenceRequest,
+    ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
+        let mut records = self.records.lock().expect("preference lock");
+        let key = request.record.key();
+        let next_version = match (records.get(&key), request.expected_version) {
+            (None, None) => CommunicationPreferenceVersion::from_raw(1),
+            (Some(existing), Some(expected)) if existing.version == expected => expected.next(),
+            _ => return Err(OutboundError::CasConflict),
+        };
+        let record = VersionedCommunicationPreferenceRecord {
+            record: request.record,
+            version: next_version,
+        };
+        records.insert(key, record.clone());
+        Ok(record)
     }
 }
 
@@ -247,8 +271,15 @@ impl CommunicationPreferenceRepository for StatusFailingOutboundStore {
     async fn load_communication_preference(
         &self,
         key: CommunicationPreferenceKey,
-    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
         self.inner.load_communication_preference(key).await
+    }
+
+    async fn write_communication_preference(
+        &self,
+        request: WriteCommunicationPreferenceRequest,
+    ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
+        self.inner.write_communication_preference(request).await
     }
 }
 
@@ -494,11 +525,12 @@ impl ProductAdapter for FailingAdapter {
 }
 
 fn scope() -> TurnScope {
-    TurnScope::new(
+    TurnScope::new_with_owner(
         TenantId::new("tenant-product-outbound").expect("valid tenant"),
         Some(AgentId::new("agent-product-outbound").expect("valid agent")),
         Some(ProjectId::new("project-product-outbound").expect("valid project")),
         ThreadId::new("thread-product-outbound").expect("valid thread"),
+        Some(UserId::new("user-product-outbound").expect("valid user")),
     )
 }
 
@@ -631,8 +663,7 @@ fn seed_preference(repo: &FakePreferenceRepository, scope: &TurnScope) {
 
 fn preference_record(scope: &TurnScope) -> CommunicationPreferenceRecord {
     CommunicationPreferenceRecord {
-        tenant_id: scope.tenant_id.clone(),
-        user_id: actor().user_id.clone(),
+        scope: DeliveryDefaultScope::personal(scope.tenant_id.clone(), actor().user_id.clone()),
         final_reply_target: Some(validated_reply_target()),
         progress_target: None,
         approval_prompt_target: None,
