@@ -189,6 +189,12 @@ pub trait CommunicationPreferenceRepository: Send + Sync {
     /// This convenience path is intentionally insert-only. Callers updating an
     /// existing preference must read the current version and use
     /// [`Self::write_communication_preference`] with `expected_version`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutboundError::CasConflict`] when the scoped preference row
+    /// already exists. Callers that need upsert or update behavior should use
+    /// [`Self::write_communication_preference`] with an observed version.
     async fn put_communication_preference(
         &self,
         record: CommunicationPreferenceRecord,
@@ -218,6 +224,14 @@ mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
     use super::*;
+
+    #[test]
+    fn version_next_saturates_at_u64_max() {
+        assert_eq!(
+            CommunicationPreferenceVersion::from_raw(u64::MAX).next(),
+            CommunicationPreferenceVersion::from_raw(u64::MAX)
+        );
+    }
 
     #[test]
     fn communication_preference_record_deserializes_scoped_and_legacy_payloads() {

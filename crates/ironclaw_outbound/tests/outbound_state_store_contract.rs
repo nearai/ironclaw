@@ -5,8 +5,8 @@ use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FilesystemError,
-    Filter, InMemoryBackend, IndexSpec, Page, RecordVersion, RootFilesystem, ScopedFilesystem,
-    VersionedEntry,
+    FilesystemOperation, Filter, InMemoryBackend, IndexSpec, Page, RecordVersion, RootFilesystem,
+    ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
     AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
@@ -816,6 +816,40 @@ async fn filesystem_store_rejects_communication_preference_update_cas_conflict(
     assert_eq!(load_preference_record(&store, key).await, Some(record));
 }
 
+#[tokio::test]
+async fn filesystem_store_rejects_communication_preference_write_on_unsupported_cas_mount() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let backend = Arc::new(UnsupportedPreferenceCasBackend::new(Arc::clone(&inner)));
+    let store = FilesystemOutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        TEST_OUTBOUND_ROOT,
+    ));
+    let tenant_id = TenantId::new("tenant-outbound-unsupported-cas").unwrap();
+    let user_id = UserId::new("user-outbound-unsupported-cas").unwrap();
+    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
+    let record = CommunicationPreferenceRecord {
+        scope: DeliveryDefaultScope::personal(tenant_id, user_id),
+        final_reply_target: Some(reply_ref("reply-pref-unsupported-cas")),
+        progress_target: Some(reply_ref("reply-pref-unsupported-cas-progress")),
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin-outbound-unsupported-cas").unwrap(),
+    };
+
+    let result = store
+        .write_communication_preference(WriteCommunicationPreferenceRequest {
+            record,
+            expected_version: None,
+        })
+        .await;
+
+    assert!(matches!(result, Err(OutboundError::Backend)));
+    assert_eq!(backend.unsupported_count().await, 1);
+    assert_eq!(load_preference_record(&store, key).await, None);
+}
+
 async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateStore) {
     let scope = turn_scope();
     let default_reply = reply_ref("reply-default");
@@ -1543,6 +1577,88 @@ impl RootFilesystem for VersionRacingBackend {
                     found: None,
                 });
             }
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+/// Test backend that mimics a mount that cannot honor CAS writes for
+/// communication-preference records. An accidental byte fallback would retry
+/// as `CasExpectation::Any` and succeed through the inner backend, so the
+/// test above proves preference writes fail closed instead.
+struct UnsupportedPreferenceCasBackend {
+    inner: Arc<InMemoryBackend>,
+    unsupported: Mutex<u32>,
+}
+
+impl UnsupportedPreferenceCasBackend {
+    fn new(inner: Arc<InMemoryBackend>) -> Self {
+        Self {
+            inner,
+            unsupported: Mutex::new(0),
+        }
+    }
+
+    async fn unsupported_count(&self) -> u32 {
+        *self.unsupported.lock().await
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for UnsupportedPreferenceCasBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if path
+            .as_str()
+            .starts_with(&format!("{TEST_OUTBOUND_ROOT}/communication-preferences/"))
+            && !matches!(cas, CasExpectation::Any)
+        {
+            *self.unsupported.lock().await += 1;
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+            });
         }
         self.inner.put(path, entry, cas).await
     }

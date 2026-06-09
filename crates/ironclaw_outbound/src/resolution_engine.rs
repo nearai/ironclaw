@@ -174,29 +174,21 @@ fn default_preference_key(
     scope: &ironclaw_turns::TurnScope,
     actor: &ironclaw_turns::TurnActor,
 ) -> CommunicationPreferenceKey {
-    if let Some(owner_user_id) = scope.explicit_owner_user_id() {
-        return CommunicationPreferenceKey::personal(
-            scope.tenant_id.clone(),
-            owner_user_id.clone(),
-        );
-    }
-
-    if !scope.has_explicit_thread_owner() {
-        return CommunicationPreferenceKey::personal(
-            scope.tenant_id.clone(),
-            actor.user_id.clone(),
-        );
-    }
-
-    if let Some(agent_id) = scope.agent_id.clone() {
-        return CommunicationPreferenceKey::shared_agent(
+    match (
+        scope.explicit_owner_user_id(),
+        scope.has_explicit_thread_owner(),
+        scope.agent_id.clone(),
+    ) {
+        (Some(owner_user_id), _, _) => {
+            CommunicationPreferenceKey::personal(scope.tenant_id.clone(), owner_user_id.clone())
+        }
+        (None, true, Some(agent_id)) => CommunicationPreferenceKey::shared_agent(
             scope.tenant_id.clone(),
             agent_id,
             scope.project_id.clone(),
-        );
+        ),
+        _ => CommunicationPreferenceKey::personal(scope.tenant_id.clone(), actor.user_id.clone()),
     }
-
-    CommunicationPreferenceKey::personal(scope.tenant_id.clone(), actor.user_id.clone())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -591,6 +583,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn triggered_final_reply_ownerless_without_agent_uses_actor_personal_default() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:personal-default"),
+                Some("reply:personal-progress"),
+                Some("reply:personal-approval"),
+                Some("reply:personal-auth"),
+            ))
+            .await
+            .expect("seed personal preference");
+
+        let candidate = engine
+            .resolve(&CommunicationDeliveryResolutionRequest {
+                scope: ownerless_agentless_scope(),
+                actor: actor("user-a"),
+                modality: CommunicationModality::Text,
+                intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
+                    event_kind: RunNotificationEventKind::FinalReplyReady,
+                    origin: RunNotificationOrigin::Triggered {
+                        trigger: trigger_context(),
+                    },
+                }),
+            })
+            .await
+            .expect("ownerless agentless triggered final reply resolves");
+        let candidate = expect_candidate(candidate);
+
+        assert_eq!(candidate.target, reply_ref("reply:personal-default"));
+        assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
+    }
+
+    #[tokio::test]
     async fn triggered_default_target_uses_explicit_owner_preferences_when_actor_differs() {
         let store = InMemoryOutboundStateStore::default();
         let engine = OutboundResolutionEngine::new(&store);
@@ -951,6 +978,16 @@ mod tests {
         TurnScope::new_with_owner(
             TenantId::new("tenant-a").expect("valid tenant"),
             Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            thread_id("thread-a"),
+            None,
+        )
+    }
+
+    fn ownerless_agentless_scope() -> TurnScope {
+        TurnScope::new_with_owner(
+            TenantId::new("tenant-a").expect("valid tenant"),
+            None,
             Some(ProjectId::new("project-a").expect("valid project")),
             thread_id("thread-a"),
             None,
