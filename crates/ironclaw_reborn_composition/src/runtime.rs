@@ -424,6 +424,8 @@ pub enum RebornRuntimeError {
     OperationCancelled,
     #[error("invalid scope or identifier: {reason}")]
     InvalidArgument { reason: String },
+    #[error("malformed runtime configuration: {reason}")]
+    MalformedConfig { reason: String },
     #[cfg(feature = "root-llm-provider")]
     #[error("llm provider construction failed: {0}")]
     LlmProvider(String),
@@ -2177,6 +2179,11 @@ pub async fn build_reborn_runtime(
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("hook framework activation failed: {error}"),
         })?
+    } else if hooks_config.is_enabled() {
+        return Err(RebornRuntimeError::MalformedConfig {
+            reason: "hook framework is not supported or wired for production runtime launch"
+                .to_string(),
+        });
     } else {
         None
     };
@@ -2940,6 +2947,7 @@ mod tests {
 
     use crate::RebornReadinessState;
     use crate::input::RebornBuildInput;
+    use crate::hooks::HooksActivationConfig;
     use crate::runtime_input::{
         PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
         TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
@@ -3577,6 +3585,69 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "libsql")]
+    async fn production_runtime_rejects_enabled_hooks_without_local_runtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db"))
+                .build()
+                .await
+                .expect("libsql db"),
+        );
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::libsql(
+                crate::RebornCompositionProfile::Production,
+                "runtime-production-hooks-owner",
+                db,
+                dir.path().join("events.db").to_string_lossy(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_production_trust_policy(Arc::new(
+                crate::builtin_first_party_trust_policy().expect("trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: DeploymentMode::HostedMultiTenant,
+                requested_profile: RuntimeProfile::SecureDefault,
+                resolved_profile: RuntimeProfile::SecureDefault,
+                filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+                process_backend: ProcessBackendKind::None,
+                network_mode: NetworkMode::Deny,
+                secret_mode: SecretMode::BrokeredHandles,
+                approval_policy: ApprovalPolicy::AskAlways,
+                audit_mode: AuditMode::Standard,
+            }),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-production-hooks-tenant".to_string(),
+            agent_id: "runtime-production-hooks-agent".to_string(),
+            source_binding_id: "runtime-production-hooks-source".to_string(),
+            reply_target_binding_id: "runtime-production-hooks-reply".to_string(),
+        })
+        .with_hooks_config(HooksActivationConfig::enabled());
+
+        let err = match build_reborn_runtime(input).await {
+            Ok(runtime) => {
+                runtime.shutdown().await.expect("shutdown");
+                panic!("production runtime must reject enabled hooks without hook wiring");
+            }
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(
+                err,
+                super::RebornRuntimeError::MalformedConfig { reason }
+                    if reason.contains("hook framework")
+                        && reason.contains("production runtime launch")
+            ),
+            "expected malformed hook config error, got {err:#}"
+        );
+    }
+
+    #[tokio::test]
+
     async fn local_dev_yolo_records_trusted_laptop_access_audit_event() {
         let root = tempfile::tempdir().expect("tempdir");
         let host_home = root.path().join("host-home");
