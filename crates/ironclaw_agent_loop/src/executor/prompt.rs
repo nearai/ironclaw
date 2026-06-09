@@ -22,7 +22,7 @@ use crate::strategies::CompactionDecision;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
     PendingInputAck, StageContext, apply_capability_filter, cancelled_exit, debug_host_unavailable,
-    failed_exit,
+    failed_exit, pending_approval_resume_candidate,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -48,8 +48,16 @@ pub(super) struct PromptOutput {
     pub(super) rendered_repeated_call_warning: bool,
 }
 
+pub(super) struct ApprovalResumePromptOutput {
+    pub(super) state: LoopExecutionState,
+    pub(super) pending_input_ack: PendingInputAck,
+    pub(super) surface: VisibleCapabilitySurface,
+    pub(super) call: ironclaw_turns::run_profile::CapabilityCallCandidate,
+}
+
 pub(super) enum PromptStep {
     Prepared(Box<PromptOutput>),
+    ResumeApproval(Box<ApprovalResumePromptOutput>),
     Exit(LoopExit),
     /// Compaction-only turn: PromptCompactionStep ran (forced by the
     /// `skip_model_this_iteration` flag), no prompt was assembled, no
@@ -227,6 +235,17 @@ impl<'a> PromptPlanningPipeline<'a> {
         self.state.surface_version = Some(surface.version.clone());
         if let Some(exit) = self.cancel_boundary().await? {
             return Ok(PromptStep::Exit(exit));
+        }
+        if let Some(resume) = self.state.pending_approval_resume.as_ref() {
+            let call = pending_approval_resume_candidate(resume, surface.version.clone());
+            return Ok(PromptStep::ResumeApproval(Box::new(
+                ApprovalResumePromptOutput {
+                    state: self.state,
+                    pending_input_ack: self.pending_input_ack,
+                    surface,
+                    call,
+                },
+            )));
         }
 
         let candidate_bundle = PromptBundleCandidate::build(

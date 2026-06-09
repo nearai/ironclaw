@@ -1057,6 +1057,7 @@ fn scripted_capability_outcome(
             Ok(CapabilityOutcome::ApprovalRequired {
                 gate_ref: loop_gate_ref(&gate_ref),
                 safe_summary: "approval required".to_string(),
+                approval_resume: None,
             })
         }
         ScriptedCapabilityOutcome::AuthRequired { gate_ref } => {

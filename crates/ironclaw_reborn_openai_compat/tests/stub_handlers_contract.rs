@@ -9,16 +9,40 @@ use tower::ServiceExt;
 #[tokio::test]
 async fn mounted_routes_fail_closed_until_product_workflow_is_wired() {
     let cases = [
-        ("POST", "/v1/chat/completions"),
-        ("POST", "/api/v1/responses"),
-        ("POST", "/v1/responses"),
-        ("GET", "/api/v1/responses/resp_123"),
-        ("GET", "/v1/responses/resp_123"),
-        ("POST", "/api/v1/responses/resp_123/cancel"),
-        ("POST", "/v1/responses/resp_123/cancel"),
+        (
+            "POST",
+            "/v1/chat/completions",
+            http::StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "POST",
+            "/api/v1/responses",
+            http::StatusCode::NOT_IMPLEMENTED,
+        ),
+        ("POST", "/v1/responses", http::StatusCode::NOT_IMPLEMENTED),
+        (
+            "GET",
+            "/api/v1/responses/resp_123",
+            http::StatusCode::NOT_IMPLEMENTED,
+        ),
+        (
+            "GET",
+            "/v1/responses/resp_123",
+            http::StatusCode::NOT_IMPLEMENTED,
+        ),
+        (
+            "POST",
+            "/api/v1/responses/resp_123/cancel",
+            http::StatusCode::NOT_IMPLEMENTED,
+        ),
+        (
+            "POST",
+            "/v1/responses/resp_123/cancel",
+            http::StatusCode::NOT_IMPLEMENTED,
+        ),
     ];
 
-    for (method, path) in cases {
+    for (method, path, expected_status) in cases {
         let request = Request::builder()
             .method(method)
             .uri(path)
@@ -30,11 +54,7 @@ async fn mounted_routes_fail_closed_until_product_workflow_is_wired() {
             .await
             .expect("route response");
 
-        assert_eq!(
-            response.status(),
-            http::StatusCode::NOT_IMPLEMENTED,
-            "{path}"
-        );
+        assert_eq!(response.status(), expected_status, "{path}");
         let bytes = response
             .into_body()
             .collect()
@@ -42,10 +62,14 @@ async fn mounted_routes_fail_closed_until_product_workflow_is_wired() {
             .expect("body")
             .to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
-        assert_eq!(body["error"]["code"], "unsupported", "{path}");
-        assert_eq!(
-            body["error"]["message"], "This OpenAI-compatible Reborn route is not wired yet.",
-            "{path}"
-        );
+        if expected_status == http::StatusCode::UNAUTHORIZED {
+            assert_eq!(body["error"]["code"], "authentication_required", "{path}");
+        } else {
+            assert_eq!(body["error"]["code"], "unsupported", "{path}");
+            assert_eq!(
+                body["error"]["message"], "This OpenAI-compatible Reborn route is not wired yet.",
+                "{path}"
+            );
+        }
     }
 }

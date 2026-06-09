@@ -490,6 +490,16 @@ pub enum ProductControlActionPayload {
     CancelRun { run_id: TurnRunId },
 }
 
+impl ProductControlActionPayload {
+    pub fn cancel_run(run_id: &str) -> Result<Self, ProductAdapterError> {
+        let run_id =
+            TurnRunId::parse(run_id).map_err(|_| ProductAdapterError::MalformedInboundPayload {
+                reason: RedactedString::new("invalid run id"),
+            })?;
+        Ok(Self::CancelRun { run_id })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LinkedThreadActionPayload {
     pub action_id: String,
