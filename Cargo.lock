@@ -5360,6 +5360,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "ironclaw_common",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_safety",

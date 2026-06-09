@@ -24,7 +24,12 @@ pub fn normalize_mime_type(mime: &str) -> String {
 }
 
 /// Kind of attachment carried on an incoming message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serializes as a wire-stable snake_case string (`"audio"`, `"image"`,
+/// `"document"`) so it can be persisted in transcript attachment references
+/// and other durable contracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AttachmentKind {
     /// Audio content (voice notes, audio files).
     Audio,

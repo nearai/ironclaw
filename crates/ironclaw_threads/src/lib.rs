@@ -34,19 +34,23 @@ pub use capability_display_preview::{
 pub use contract::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, ContextMessage, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, FinalizedAssistantMessageByRunRequest,
-    GOAL_STATEMENT_MAX_CHARS, GoalStatement, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadRecord, SummaryArtifact, SummaryKind,
-    SummaryModelContextPolicy, ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageRange,
-    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
-    UpdateThreadGoalRequest, UpdateToolResultReferenceRequest,
+    AppendToolResultReferenceRequest, AttachmentRef, ContextMessage, ContextMessages,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    FinalizedAssistantMessageByRunRequest, GOAL_STATEMENT_MAX_CHARS, GoalStatement,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadRecord,
+    SummaryArtifact, SummaryKind, SummaryModelContextPolicy, ThreadGoal, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
+    ThreadScope, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
+    UpdateToolResultReferenceRequest,
 };
 pub use error::SessionThreadError;
+// Re-exposed so transcript-contract consumers (`AttachmentRef`) don't need a
+// direct dependency on `ironclaw_common` for the attachment kind vocabulary.
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};
 pub use in_memory::InMemorySessionThreadService;
+pub use ironclaw_common::AttachmentKind;
 pub use service::SessionThreadService;
 pub use tool_result_reference::{
     ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,

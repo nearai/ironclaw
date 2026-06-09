@@ -459,7 +459,7 @@ pub fn canonical_extension(mime: &str) -> Option<&'static str> {
 /// [`AttachmentKind::Image`]).
 pub fn kind_for_mime(mime: &str) -> AttachmentKind {
     lookup(mime)
-        .map(|format| format.kind.clone())
+        .map(|format| format.kind)
         .unwrap_or_else(|| AttachmentKind::from_mime_type(mime))
 }
 

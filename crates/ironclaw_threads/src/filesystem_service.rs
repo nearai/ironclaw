@@ -748,6 +748,7 @@ where
             .reserve_sequence(&request.scope, &request.thread_id)
             .await?;
         let message_id = ThreadMessageId::new();
+        let (content_text, attachments) = request.content.clone().into_parts();
         let message = ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -761,7 +762,8 @@ where
             turn_run_id: None,
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.clone().into_text()),
+            content: Some(content_text),
+            attachments,
             redaction_ref: None,
         };
         self.write_new_message(&request.scope, &request.thread_id, &message, "message")
@@ -923,6 +925,7 @@ where
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: Some(request.content.into_text()),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         self.write_new_message(
@@ -1032,6 +1035,7 @@ where
             tool_result_ref: Some(envelope.result_ref),
             tool_result_provider_call: provider_call,
             content: Some(content),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         self.write_new_message(
@@ -1088,6 +1092,7 @@ where
             tool_result_ref: request.preview.result_ref.clone(),
             tool_result_provider_call: None,
             content: Some(content),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
@@ -1234,6 +1239,7 @@ where
             |message| {
                 message.status = MessageStatus::Redacted;
                 message.content = None;
+                message.attachments = Vec::new();
                 message.tool_result_provider_call = None;
                 message.redaction_ref = Some(request.redaction_ref.clone());
                 Ok(())
@@ -2004,6 +2010,7 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         tool_result_ref: message.tool_result_ref.clone(),
         tool_result_provider_call: None,
         content: message.content.clone(),
+        attachments: message.attachments.clone(),
         redaction_ref: message.redaction_ref.clone(),
     }
 }

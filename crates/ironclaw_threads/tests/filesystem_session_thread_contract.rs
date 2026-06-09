@@ -17,13 +17,13 @@ use ironclaw_host_api::{
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
-    AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
-    CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, FilesystemSessionThreadService,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
-    ThreadScope, UpdateAssistantDraftRequest,
+    AppendCapabilityDisplayPreviewRequest, AttachmentKind, AttachmentRef,
+    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    FilesystemSessionThreadService, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadScope, UpdateAssistantDraftRequest,
 };
 
 #[tokio::test]
@@ -1119,4 +1119,78 @@ where
     )])
     .expect("mount view");
     Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+}
+
+#[tokio::test]
+async fn filesystem_persists_attachment_refs_and_clears_them_on_redaction() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-attachments", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("attachments");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-attachments").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let attachment = AttachmentRef {
+        id: "att-1".into(),
+        kind: AttachmentKind::Image,
+        mime_type: "image/png".into(),
+        filename: Some("diagram.png".into()),
+        size_bytes: Some(4096),
+        storage_key: Some("attachments/2026-06-09/m1-diagram.png".into()),
+        extracted_text: None,
+    };
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("event-att".into()),
+            content: MessageContent::with_attachments("look at this", vec![attachment.clone()]),
+        })
+        .await
+        .unwrap();
+
+    // Re-open the store over the same backend to prove the refs survive a
+    // serialize → store → deserialize round trip, not just an in-process cache.
+    let reopened = FilesystemSessionThreadService::new(scoped);
+    let history = reopened
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].attachments, vec![attachment]);
+
+    reopened
+        .redact_message(RedactMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            message_id: accepted.message_id,
+            redaction_ref: "redaction:test".into(),
+        })
+        .await
+        .unwrap();
+
+    let after = reopened
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(after.messages[0].status, MessageStatus::Redacted);
+    assert!(after.messages[0].content.is_none());
+    assert!(after.messages[0].attachments.is_empty());
 }

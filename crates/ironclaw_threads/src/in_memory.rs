@@ -146,6 +146,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         let message_id = ThreadMessageId::new();
         let sequence = thread.next_sequence;
         thread.next_sequence += 1;
+        let (content_text, attachments) = request.content.into_parts();
         thread.messages.push(ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -159,7 +160,8 @@ impl SessionThreadService for InMemorySessionThreadService {
             turn_run_id: None,
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.into_text()),
+            content: Some(content_text),
+            attachments,
             redaction_ref: None,
         });
 
@@ -276,6 +278,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: Some(request.content.into_text()),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         thread.next_sequence += 1;
@@ -356,6 +359,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             tool_result_ref: Some(envelope.result_ref),
             tool_result_provider_call: provider_call,
             content: Some(content),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         thread.next_sequence += 1;
@@ -403,6 +407,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             tool_result_ref: request.preview.result_ref.clone(),
             tool_result_provider_call: None,
             content: Some(content),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         thread.next_sequence += 1;
@@ -490,6 +495,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         )?;
         message.status = MessageStatus::Redacted;
         message.content = None;
+        message.attachments = Vec::new();
         message.tool_result_provider_call = None;
         message.redaction_ref = Some(request.redaction_ref);
         Ok(message.clone())
@@ -995,6 +1001,7 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         tool_result_ref: message.tool_result_ref.clone(),
         tool_result_provider_call: None,
         content: message.content.clone(),
+        attachments: message.attachments.clone(),
         redaction_ref: message.redaction_ref.clone(),
     }
 }

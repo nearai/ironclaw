@@ -1,3 +1,4 @@
+use ironclaw_common::AttachmentKind;
 use ironclaw_host_api::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
 
@@ -42,27 +43,86 @@ impl ThreadScope {
     }
 }
 
-/// Safe transcript text accepted by this boundary.
+/// A reference to a single attachment carried alongside a transcript message.
+///
+/// This is a *reference*, never the bytes. Per the crate guardrails the
+/// transcript must not hold raw runtime payloads, host paths, or secrets, so an
+/// `AttachmentRef` carries only metadata plus an opaque `storage_key` (a
+/// rendered scoped path into host-side storage, not a raw host path) and the
+/// extracted/transcribed text once an extractor has run. The bytes live behind
+/// the filesystem authority that owns `storage_key`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentRef {
+    /// Stable identifier for this attachment within its message.
+    pub id: String,
+    /// Image / Audio / Document.
+    pub kind: AttachmentKind,
+    /// MIME type as received at the ingress boundary. Validated upstream
+    /// against the attachment format registry; stored verbatim here.
+    pub mime_type: String,
+    /// Original filename, when the source provided one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// File size in bytes, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// Opaque storage reference for the bytes (a rendered scoped path into
+    /// host-side storage, never a raw host path). `None` until the attachment
+    /// has been landed in storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_key: Option<String>,
+    /// Extracted document text or audio transcript, once an extractor has run.
+    /// Sanitized external data; never raw bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extracted_text: Option<String>,
+}
+
+/// Safe transcript content accepted by this boundary.
 ///
 /// Model visibility is determined by message kind/status at context-read time;
 /// durable UI-only records such as capability previews also store their
-/// sanitized payloads here.
+/// sanitized payloads here. Attachments are carried as references only (see
+/// [`AttachmentRef`]) — never raw bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageContent {
     text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<AttachmentRef>,
 }
 
 impl MessageContent {
     pub fn text(value: impl Into<String>) -> Self {
-        Self { text: value.into() }
+        Self {
+            text: value.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Build content carrying both text and attachment references.
+    pub fn with_attachments(value: impl Into<String>, attachments: Vec<AttachmentRef>) -> Self {
+        Self {
+            text: value.into(),
+            attachments,
+        }
     }
 
     pub fn as_text(&self) -> &str {
         &self.text
     }
 
+    pub fn attachments(&self) -> &[AttachmentRef] {
+        &self.attachments
+    }
+
     pub fn into_text(self) -> String {
         self.text
+    }
+
+    /// Consume the content into its text body and attachment references. Use
+    /// this when persisting both parts so neither is dropped (`into_text`
+    /// alone discards attachments).
+    pub fn into_parts(self) -> (String, Vec<AttachmentRef>) {
+        (self.text, self.attachments)
     }
 }
 
@@ -126,6 +186,10 @@ pub struct ThreadMessageRecord {
     #[serde(default, skip_serializing)]
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
     pub content: Option<String>,
+    /// Attachment references for this message. Empty for messages that carry
+    /// no attachments. Cleared on redaction in parity with `content`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
     pub redaction_ref: Option<String>,
 }
 
@@ -418,4 +482,113 @@ pub struct CreateSummaryArtifactRequest {
 pub struct UpdateThreadGoalRequest {
     pub thread_id: ThreadId,
     pub goal: ThreadGoal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_ref() -> AttachmentRef {
+        AttachmentRef {
+            id: "att-1".to_string(),
+            kind: AttachmentKind::Document,
+            mime_type: "application/pdf".to_string(),
+            filename: Some("report.pdf".to_string()),
+            size_bytes: Some(2048),
+            storage_key: Some("attachments/2026-06-09/m1-report.pdf".to_string()),
+            extracted_text: Some("quarterly numbers".to_string()),
+        }
+    }
+
+    #[test]
+    fn text_constructor_carries_no_attachments() {
+        let content = MessageContent::text("hello");
+        assert_eq!(content.as_text(), "hello");
+        assert!(content.attachments().is_empty());
+    }
+
+    #[test]
+    fn into_parts_preserves_text_and_attachments() {
+        let content = MessageContent::with_attachments("see attached", vec![sample_ref()]);
+        assert_eq!(content.attachments().len(), 1);
+        let (text, attachments) = content.into_parts();
+        assert_eq!(text, "see attached");
+        assert_eq!(attachments, vec![sample_ref()]);
+    }
+
+    #[test]
+    fn into_text_discards_attachments() {
+        // `into_text` is the text-only accessor; callers that must keep
+        // attachments use `into_parts`. This documents the lossy path.
+        let content = MessageContent::with_attachments("body", vec![sample_ref()]);
+        assert_eq!(content.into_text(), "body");
+    }
+
+    #[test]
+    fn message_content_skips_empty_attachments_on_the_wire() {
+        let json = serde_json::to_string(&MessageContent::text("hi")).unwrap();
+        assert_eq!(json, r#"{"text":"hi"}"#);
+    }
+
+    #[test]
+    fn attachment_kind_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&AttachmentKind::Image).unwrap(),
+            r#""image""#
+        );
+        assert_eq!(
+            serde_json::from_str::<AttachmentKind>(r#""document""#).unwrap(),
+            AttachmentKind::Document
+        );
+    }
+
+    #[test]
+    fn attachment_ref_round_trips_and_omits_empty_optionals() {
+        let minimal = AttachmentRef {
+            id: "att-2".to_string(),
+            kind: AttachmentKind::Image,
+            mime_type: "image/png".to_string(),
+            filename: None,
+            size_bytes: None,
+            storage_key: None,
+            extracted_text: None,
+        };
+        let json = serde_json::to_string(&minimal).unwrap();
+        assert_eq!(
+            json,
+            r#"{"id":"att-2","kind":"image","mime_type":"image/png"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<AttachmentRef>(&json).unwrap(),
+            minimal
+        );
+
+        let full = sample_ref();
+        let round =
+            serde_json::from_str::<AttachmentRef>(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert_eq!(round, full);
+    }
+
+    #[test]
+    fn thread_message_record_attachments_default_when_absent() {
+        // Old persisted rows have no `attachments` field; it must default to
+        // empty rather than failing deserialization.
+        let json = r#"{
+            "message_id": "00000000-0000-0000-0000-000000000001",
+            "thread_id": "thread-x",
+            "sequence": 1,
+            "kind": "user",
+            "status": "accepted",
+            "actor_id": null,
+            "source_binding_id": null,
+            "reply_target_binding_id": null,
+            "turn_id": null,
+            "turn_run_id": null,
+            "content": "legacy row",
+            "redaction_ref": null
+        }"#;
+        let record: ThreadMessageRecord = serde_json::from_str(json).unwrap();
+        assert!(record.attachments.is_empty());
+        assert_eq!(record.content.as_deref(), Some("legacy row"));
+    }
 }

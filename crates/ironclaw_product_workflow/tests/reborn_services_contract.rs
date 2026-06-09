@@ -159,6 +159,7 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: Some("timeline from fake M2 port".to_string()),
+            attachments: Vec::new(),
             redaction_ref: None,
         }],
         summary_artifacts: vec![],
