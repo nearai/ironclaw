@@ -49,6 +49,8 @@ impl WebUiV2RouteOptions {
         }
     }
 
+    // Also suppresses `operator/*` routes because the legacy LLM config
+    // surface and the operator command plane share one trusted-operator gate.
     pub const fn without_llm_config_routes() -> Self {
         Self::without_operator_routes()
     }

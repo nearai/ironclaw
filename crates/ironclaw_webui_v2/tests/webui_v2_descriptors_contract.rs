@@ -36,7 +36,8 @@ use ironclaw_webui_v2::{
     WEBUI_V2_ROUTE_START_CODEX_LOGIN, WEBUI_V2_ROUTE_START_NEARAI_LOGIN,
     WEBUI_V2_ROUTE_STREAM_EVENTS, WEBUI_V2_ROUTE_STREAM_EVENTS_WS,
     WEBUI_V2_ROUTE_TEST_LLM_CONNECTION, WEBUI_V2_ROUTE_UPDATE_SKILL,
-    WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, webui_v2_routes,
+    WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, is_webui_v2_operator_webui_config_route_id,
+    webui_v2_routes,
 };
 
 /// Expected policy surface for one route. Everything host composition
@@ -816,6 +817,16 @@ fn route_table_has_exactly_the_expected_routes() {
             actual_ids
         );
     }
+}
+
+#[test]
+fn operator_route_predicate_does_not_match_regular_user_routes() {
+    assert!(is_webui_v2_operator_webui_config_route_id(
+        WEBUI_V2_ROUTE_OPERATOR_STATUS
+    ));
+    assert!(!is_webui_v2_operator_webui_config_route_id(
+        WEBUI_V2_ROUTE_CREATE_THREAD
+    ));
 }
 
 #[test]
