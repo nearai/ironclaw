@@ -15,22 +15,26 @@ use crate::identity::{
 use crate::{
     OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatBindInternalRefs,
     OpenAiCompatHttpError, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,
-    OpenAiCompatProductActionRef, OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck,
-    OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
-    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
-    OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
-    OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject, OpenAiResponsesCreateRequest,
-    OpenAiResponsesInput, OpenAiResponsesInputItem, OpenAiResponsesMessageRole,
+    OpenAiCompatProductActionRef, OpenAiCompatProjectionRef, OpenAiCompatPublicId,
+    OpenAiCompatRecordAcceptedAck, OpenAiCompatRefLookup, OpenAiCompatRefOperation,
+    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore,
+    OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding, OpenAiCompatResourceMapping,
+    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiResponsesCreateRequest, OpenAiResponsesInput, OpenAiResponsesInputItem,
+    OpenAiResponsesMessageRole,
 };
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_host_api::ThreadId;
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     ParsedProductInbound, ProductAdapterId, ProductControlActionPayload, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
-    ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind, TrustedInboundContext,
+    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
+    ProductProjectionSubject, ProductRejection, ProductRejectionKind, ProductTriggerReason,
+    ProductWorkflow, ProductWorkflowRejectionKind, ProjectionReadRequest, TrustedInboundContext,
     UserMessagePayload,
 };
+use ironclaw_turns::{TurnActor, TurnScope};
 
 const DEFAULT_RESPONSES_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -142,11 +146,28 @@ impl OpenAiResponsesWorkflow {
                             &accepted_ack,
                         )
                         .await?;
+                    let projection_read = self
+                        .response_projection_read_request(
+                            &caller,
+                            &mapping,
+                            previous_mapping.as_ref(),
+                        )
+                        .await?;
+                    let mapping = self
+                        .ensure_response_projection_ref(
+                            caller.scope().clone(),
+                            public_id.clone(),
+                            mapping,
+                            &projection_read,
+                        )
+                        .await?;
                     return self
                         .projection_reader
                         .read_response(OpenAiResponseReadRequest {
                             public_id,
                             actor_scope: caller.scope().clone(),
+                            requested_model: Some(request.model.clone()),
+                            projection_read,
                             mapping,
                         })
                         .await;
@@ -176,6 +197,17 @@ impl OpenAiResponsesWorkflow {
             }
         };
         let public_id = response_public_id(&mapping)?;
+        let projection_read = self
+            .response_projection_read_request(&caller, &mapping, previous_mapping.as_ref())
+            .await?;
+        let mapping = self
+            .ensure_response_projection_ref(
+                caller.scope().clone(),
+                public_id.clone(),
+                mapping,
+                &projection_read,
+            )
+            .await?;
 
         let wait_result = tokio::time::timeout(
             self.wait_timeout,
@@ -185,6 +217,7 @@ impl OpenAiResponsesWorkflow {
                     actor_scope: caller.scope().clone(),
                     accepted_ack,
                     requested_model: request.model.clone(),
+                    projection_read: projection_read.clone(),
                     mapping,
                 }),
         )
@@ -198,7 +231,10 @@ impl OpenAiResponsesWorkflow {
             )
         })??;
 
-        if let Some(internal_refs) = wait_result.internal_refs {
+        if let Some(mut internal_refs) = wait_result.internal_refs {
+            internal_refs.projection_ref = Some(projection_ref_from_thread_id(
+                &projection_read.scope.thread_id,
+            )?);
             self.bind_internal_refs(caller.scope().clone(), public_id, internal_refs)
                 .await?;
         }
@@ -222,6 +258,10 @@ impl OpenAiResponsesWorkflow {
             .read_response(OpenAiResponseReadRequest {
                 public_id: response_id,
                 actor_scope: caller.scope().clone(),
+                requested_model: None,
+                projection_read: self
+                    .response_projection_read_request(&caller, &mapping, None)
+                    .await?,
                 mapping,
             })
             .await
@@ -239,6 +279,9 @@ impl OpenAiResponsesWorkflow {
                 OpenAiCompatRefOperation::Cancel,
             )
             .await?;
+        let projection_read = self
+            .response_projection_read_request(&caller, &mapping, None)
+            .await?;
         let run_ref = response_turn_run_ref(&mapping)?;
         let envelope = self.cancel_product_envelope(&caller, &response_id, &run_ref)?;
         let ack = self.product_workflow.submit_inbound(envelope).await?;
@@ -248,6 +291,8 @@ impl OpenAiResponsesWorkflow {
             .read_response(OpenAiResponseReadRequest {
                 public_id: response_id,
                 actor_scope: caller.scope().clone(),
+                requested_model: None,
+                projection_read,
                 mapping,
             })
             .await
@@ -340,6 +385,94 @@ impl OpenAiResponsesWorkflow {
         }
     }
 
+    async fn ensure_response_projection_ref(
+        &self,
+        owner: OpenAiCompatActorScope,
+        public_id: OpenAiResponseId,
+        mapping: OpenAiCompatResourceMapping,
+        projection_read: &ProjectionReadRequest,
+    ) -> Result<OpenAiCompatResourceMapping, OpenAiCompatHttpError> {
+        let Some(mut internal_refs) = mapping.binding.internal_refs().cloned() else {
+            return Ok(mapping);
+        };
+        if internal_refs.projection_ref.is_some() {
+            return Ok(mapping);
+        }
+        internal_refs.projection_ref = Some(projection_ref_from_thread_id(
+            &projection_read.scope.thread_id,
+        )?);
+        self.bind_internal_refs(owner, public_id, internal_refs)
+            .await?
+            .ok_or_else(bind_internal_refs_unavailable)
+    }
+
+    async fn response_projection_read_request(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        mapping: &OpenAiCompatResourceMapping,
+        previous_mapping: Option<&OpenAiCompatResourceMapping>,
+    ) -> Result<ProjectionReadRequest, OpenAiCompatHttpError> {
+        let request = self.response_projection_read_input(caller, mapping, previous_mapping)?;
+        let projection_read = self.product_workflow.read_projection(request).await?;
+        ensure_projection_read_matches_caller(caller, &projection_read)?;
+        Ok(projection_read)
+    }
+
+    fn response_projection_read_input(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        mapping: &OpenAiCompatResourceMapping,
+        previous_mapping: Option<&OpenAiCompatResourceMapping>,
+    ) -> Result<ProductProjectionReadInput, OpenAiCompatHttpError> {
+        if let Some(thread_id) = projection_thread_id(mapping)? {
+            return Ok(ProductProjectionReadInput::new(
+                ProductProjectionSubject::canonical(
+                    TurnActor::new(caller.scope().user_id().clone()),
+                    TurnScope::new_with_owner(
+                        caller.scope().tenant_id().clone(),
+                        caller.scope().agent_id().cloned(),
+                        caller.scope().project_id().cloned(),
+                        thread_id,
+                        Some(caller.scope().user_id().clone()),
+                    ),
+                ),
+                None,
+                None,
+                None,
+            ));
+        }
+
+        let public_id = response_public_id(mapping)?;
+        let Some(auth_claim) = caller.auth_evidence().claim().cloned() else {
+            return Err(OpenAiCompatHttpError::internal());
+        };
+        let conversation_ref = previous_mapping
+            .map(|mapping| mapping.public_id.as_str())
+            .unwrap_or_else(|| public_id.as_str());
+        Ok(ProductProjectionReadInput::new(
+            ProductProjectionSubject::AdapterExternalRefs {
+                adapter_id: self.adapter_id.clone(),
+                installation_id: self.installation_id.clone(),
+                external_event_id: ExternalEventId::new(public_id.as_str())?,
+                external_actor_ref: ExternalActorRef::new(
+                    OPENAI_COMPAT_ACTOR_KIND,
+                    caller.scope().user_id().as_str(),
+                    Option::<String>::None,
+                )?,
+                external_conversation_ref: ExternalConversationRef::new(
+                    None,
+                    format!("{OPENAI_COMPAT_CONVERSATION_PREFIX}:{conversation_ref}"),
+                    None,
+                    None,
+                )?,
+                auth_claim,
+            },
+            None,
+            None,
+            None,
+        ))
+    }
+
     fn response_product_envelope(
         &self,
         caller: &OpenAiCompatAuthenticatedCaller,
@@ -416,6 +549,7 @@ pub struct OpenAiResponseWaitRequest {
     pub actor_scope: OpenAiCompatActorScope,
     pub accepted_ack: ProductInboundAck,
     pub requested_model: String,
+    pub projection_read: ProjectionReadRequest,
     pub mapping: OpenAiCompatResourceMapping,
 }
 
@@ -423,6 +557,8 @@ pub struct OpenAiResponseWaitRequest {
 pub struct OpenAiResponseReadRequest {
     pub public_id: OpenAiResponseId,
     pub actor_scope: OpenAiCompatActorScope,
+    pub requested_model: Option<String>,
+    pub projection_read: ProjectionReadRequest,
     pub mapping: OpenAiCompatResourceMapping,
 }
 
@@ -457,6 +593,54 @@ pub trait OpenAiResponsesProjectionReader: Send + Sync {
         &self,
         request: OpenAiResponseReadRequest,
     ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError>;
+}
+
+fn ensure_projection_read_matches_caller(
+    caller: &OpenAiCompatAuthenticatedCaller,
+    projection_read: &ProjectionReadRequest,
+) -> Result<(), OpenAiCompatHttpError> {
+    let scope = caller.scope();
+    let matches_caller = &projection_read.actor.user_id == scope.user_id()
+        && &projection_read.scope.tenant_id == scope.tenant_id()
+        && projection_read.scope.agent_id.as_ref() == scope.agent_id()
+        && projection_read.scope.project_id.as_ref() == scope.project_id()
+        && projection_read
+            .scope
+            .explicit_owner_user_id()
+            .is_none_or(|owner| owner == scope.user_id());
+    if matches_caller {
+        Ok(())
+    } else {
+        Err(OpenAiCompatHttpError::from_kind(
+            403,
+            false,
+            crate::OpenAiCompatErrorKind::PermissionDenied,
+            None,
+        ))
+    }
+}
+
+fn projection_ref_from_thread_id(
+    thread_id: &ThreadId,
+) -> Result<OpenAiCompatProjectionRef, OpenAiCompatHttpError> {
+    OpenAiCompatProjectionRef::new(format!("thread:{}", thread_id.as_str())).map_err(Into::into)
+}
+
+fn projection_thread_id(
+    mapping: &OpenAiCompatResourceMapping,
+) -> Result<Option<ThreadId>, OpenAiCompatHttpError> {
+    let Some(internal_refs) = mapping.binding.internal_refs() else {
+        return Ok(None);
+    };
+    let Some(projection_ref) = &internal_refs.projection_ref else {
+        return Ok(None);
+    };
+    let Some(thread_id) = projection_ref.as_str().strip_prefix("thread:") else {
+        return Err(OpenAiCompatHttpError::internal());
+    };
+    ThreadId::new(thread_id)
+        .map(Some)
+        .map_err(|_| OpenAiCompatHttpError::internal())
 }
 
 fn validate_responses_request(
