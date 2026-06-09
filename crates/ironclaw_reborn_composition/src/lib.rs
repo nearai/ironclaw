@@ -136,7 +136,7 @@ pub use auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
-pub use automation::RebornWebuiAutomationFacade;
+pub use automation::RebornAutomationProductFacade;
 pub use budget::build_default_budget_accountant;
 pub use budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use error::RebornBuildError;

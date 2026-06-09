@@ -3056,6 +3056,7 @@ fn rebuild_chat_messages_from_db(
                                     .and_then(|v| v.as_str())
                                     .map(String::from),
                                 signature: None,
+                                arguments_parse_error: None,
                             })
                             .collect();
 
@@ -3356,6 +3357,7 @@ mod tests {
                         arguments: serde_json::json!({"prompt": "cat"}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     }],
                     input_tokens: 0,
                     output_tokens: 0,

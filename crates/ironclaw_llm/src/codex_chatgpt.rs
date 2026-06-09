@@ -1020,6 +1020,7 @@ impl LlmProvider for CodexChatGptProvider {
                     arguments: args,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -1243,6 +1244,7 @@ mod tests {
             arguments: json!({"query": "rust"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking...".into()), vec![tc]);
         let items = CodexChatGptProvider::message_to_input_items(&msg);
@@ -1262,6 +1264,7 @@ mod tests {
             arguments: json!({"input": "hello"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let items = CodexChatGptProvider::message_to_input_items(&msg);

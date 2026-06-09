@@ -28,7 +28,8 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, LlmProviderView, RebornAutomationInfo, RebornAutomationSource,
+    LlmProbeRequest, LlmProbeResult, LlmProviderView, RebornAutomationInfo,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
     RebornChannelConnectStrategy, RebornConnectableChannelInfo,
     RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
@@ -656,6 +657,16 @@ fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomat
         next_run_at: None,
         last_run_at: None,
         last_status: None,
+        recent_runs: vec![RebornAutomationRecentRunInfo {
+            run_id: Some(
+                TurnRunId::parse("11111111-1111-1111-1111-111111111111").expect("valid run id"),
+            ),
+            thread_id: ThreadId::new("thread-listed").expect("valid thread id"),
+            fire_slot: None,
+            status: RebornAutomationRecentRunStatus::Running,
+            submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
+            completed_at: None,
+        }],
         is_active: true,
         created_at: None,
     }
@@ -1015,7 +1026,7 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
 }
 
 #[tokio::test]
-async fn list_automations_forwards_query_limit_to_facade() {
+async fn list_automations_forwards_query_limits_to_facade() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -1023,7 +1034,7 @@ async fn list_automations_forwards_query_limit_to_facade() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/api/webchat/v2/automations?limit=5")
+                .uri("/api/webchat/v2/automations?limit=5&run_limit=7")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -1033,6 +1044,14 @@ async fn list_automations_forwards_query_limit_to_facade() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     assert_eq!(body["automations"][0]["automation_id"], "automation-listed");
+    assert_eq!(
+        body["automations"][0]["recent_runs"][0]["thread_id"],
+        "thread-listed"
+    );
+    assert_eq!(
+        body["automations"][0]["recent_runs"][0]["status"],
+        "running"
+    );
 
     let calls = services
         .list_automations_calls
@@ -1041,10 +1060,11 @@ async fn list_automations_forwards_query_limit_to_facade() {
         .clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].limit, Some(5));
+    assert_eq!(calls[0].run_limit, Some(7));
 }
 
 #[tokio::test]
-async fn list_automations_omits_limit_and_forwards_none() {
+async fn list_automations_omits_limits_and_forwards_none() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -1070,6 +1090,7 @@ async fn list_automations_omits_limit_and_forwards_none() {
         .clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].limit, None);
+    assert_eq!(calls[0].run_limit, None);
 }
 
 #[tokio::test]
@@ -1082,6 +1103,33 @@ async fn list_automations_rejects_invalid_limit_query_with_400() {
             Request::builder()
                 .method(Method::GET)
                 .uri("/api/webchat/v2/automations?limit=not-a-number")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        services
+            .list_automations_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "invalid query input must be rejected before reaching the facade"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_rejects_invalid_run_limit_query_with_400() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?run_limit=not-a-number")
                 .body(Body::empty())
                 .expect("request"),
         )
