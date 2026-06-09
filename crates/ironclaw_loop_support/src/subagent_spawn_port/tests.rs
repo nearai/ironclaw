@@ -3109,6 +3109,7 @@ async fn spawn_provider_tool_call_registration_accepts_subagent_type_wire_key() 
             surface_version: candidate.surface_version.clone(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: candidate.input_ref.clone(),
+            approval_resume: None,
         })
         .await
         .expect("invocation must succeed");

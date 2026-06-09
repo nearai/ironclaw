@@ -1650,7 +1650,12 @@ impl HostRuntimeCapabilityHarness {
             Vec::new(),
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-skill-management-user")?,
-            HostRuntimeHarnessOptions::new(skill_mounts()?, None),
+            HostRuntimeHarnessOptions::new(
+                skill_mounts()?,
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            ),
         )
         .await?;
         harness.network_policy = http_test_policy();
@@ -1669,7 +1674,12 @@ impl HostRuntimeCapabilityHarness {
             Vec::new(),
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-trigger-management-user")?,
-            HostRuntimeHarnessOptions::new(MountView::default(), None),
+            HostRuntimeHarnessOptions::new(
+                MountView::default(),
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            ),
         )
         .await
     }
