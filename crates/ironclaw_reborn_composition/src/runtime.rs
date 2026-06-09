@@ -3584,8 +3584,8 @@ mod tests {
         assert_eq!(auth_header, "Bearer sess_reborn_env_token");
     }
 
-    #[tokio::test]
     #[cfg(feature = "libsql")]
+    #[tokio::test]
     async fn production_runtime_rejects_enabled_hooks_without_local_runtime() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = Arc::new(
@@ -3647,7 +3647,6 @@ mod tests {
     }
 
     #[tokio::test]
-
     async fn local_dev_yolo_records_trusted_laptop_access_audit_event() {
         let root = tempfile::tempdir().expect("tempdir");
         let host_home = root.path().join("host-home");
