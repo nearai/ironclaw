@@ -16,13 +16,14 @@ use ironclaw_product_adapters::{
     ProductWorkflow, ProjectionCursor, ProtocolAuthEvidence,
 };
 use ironclaw_reborn_openai_compat::{
-    InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection, OpenAiChatCompletionWaitRequest,
-    OpenAiChatCompletionWaiter, OpenAiChatCompletionsWorkflow, OpenAiChatProjectionStreamRequest,
-    OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatHttpError,
-    OpenAiCompatProjectionStreamer, OpenAiCompatRouterState, OpenAiResponseId,
-    OpenAiResponseObject, OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest,
-    OpenAiResponseStatus, OpenAiResponseWaitRequest, OpenAiResponsesProjectionReader,
-    OpenAiResponsesWorkflow, openai_compat_router_with_state,
+    InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection,
+    OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
+    OpenAiChatCompletionsWorkflow, OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope,
+    OpenAiCompatAuthenticatedCaller, OpenAiCompatHttpError, OpenAiCompatProjectionStreamer,
+    OpenAiCompatRouterState, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
+    OpenAiResponseWaitRequest, OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow,
+    openai_compat_router_with_state,
 };
 use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnRunId};
 use serde_json::json;
@@ -344,13 +345,13 @@ impl ProductWorkflow for FixedAckWorkflow {
     }
 }
 
-struct StaticChatWaiter;
+struct StaticChatReader;
 
 #[async_trait]
-impl OpenAiChatCompletionWaiter for StaticChatWaiter {
-    async fn wait_for_chat_completion(
+impl OpenAiChatCompletionProjectionReader for StaticChatReader {
+    async fn read_chat_completion_projection(
         &self,
-        _request: OpenAiChatCompletionWaitRequest,
+        _request: OpenAiChatCompletionProjectionRequest,
     ) -> Result<OpenAiChatCompletionProjection, OpenAiCompatHttpError> {
         Ok(OpenAiChatCompletionProjection::text("unused"))
     }
@@ -394,7 +395,7 @@ fn router_with_workflow(
         OpenAiChatCompletionsWorkflow::new(
             workflow.clone(),
             ref_store.clone(),
-            Arc::new(StaticChatWaiter),
+            Arc::new(StaticChatReader),
         )
         .with_projection_streamer(streamer.clone()),
     );
