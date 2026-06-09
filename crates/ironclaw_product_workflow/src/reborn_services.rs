@@ -749,7 +749,6 @@ pub trait RebornServicesApi: Send + Sync {
     /// The six LLM-config methods default to "service unavailable" so facade
     /// impls (and test fakes) that don't wire an [`LlmConfigService`] inherit a
     /// safe surface; the default `RebornServices` overrides them all.
-
     async fn get_llm_config(
         &self,
         caller: WebUiAuthenticatedCaller,
