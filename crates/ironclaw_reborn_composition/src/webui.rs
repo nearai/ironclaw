@@ -1,14 +1,18 @@
 use std::sync::Arc;
 
+use chrono::Utc;
+
 use async_trait::async_trait;
 use ironclaw_host_api::{InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
-    ConnectableChannelsProductFacade, RebornServices as ProductRebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
+    ConnectableChannelsProductFacade, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
+    RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
+    StaticOperatorStatusService, WebUiAuthenticatedCaller,
 };
 
 use crate::{
@@ -156,6 +160,9 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         api = api.with_connectable_channels_facade(connectable_channels);
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
+    api = api.with_operator_status_service(Arc::new(StaticOperatorStatusService::new(
+        status_response_from_readiness(&services.readiness),
+    )));
 
     // Compose the operator LLM-config settings service when the runtime was
     // assembled with a boot config. The secret store stays private to this
@@ -707,5 +714,142 @@ mod tests {
 
     fn skill_content(name: &str, description: &str) -> String {
         format!("---\nname: {name}\ndescription: {description}\n---\nUse this skill.\n")
+    }
+}
+
+fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperatorStatusResponse {
+    let mut checks = Vec::new();
+    let runtime_ready = !matches!(
+        readiness.state,
+        crate::RebornReadinessState::Disabled | crate::RebornReadinessState::DevOnly
+    );
+    checks.push(status_check(
+        "runtime",
+        if runtime_ready {
+            RebornOperatorStatusState::Ready
+        } else if matches!(readiness.state, crate::RebornReadinessState::DevOnly) {
+            RebornOperatorStatusState::Degraded
+        } else {
+            RebornOperatorStatusState::NotConfigured
+        },
+        if runtime_ready {
+            RebornOperatorStatusSeverity::Info
+        } else {
+            RebornOperatorStatusSeverity::Warning
+        },
+        format!(
+            "Reborn profile {:?} is {:?}",
+            readiness.profile, readiness.state
+        ),
+        (!runtime_ready).then(|| "finish Reborn runtime setup before production use".to_string()),
+    ));
+    checks.push(bool_check(
+        "storage",
+        readiness.facades.turn_coordinator,
+        "turn coordinator facade is ready",
+        "turn coordinator facade is not wired",
+    ));
+    checks.push(bool_check(
+        "secrets",
+        readiness.facades.product_auth,
+        "product auth and secret-backed flows are ready",
+        "product auth facade is not wired",
+    ));
+    checks.push(bool_check(
+        "provider_model",
+        readiness.facades.host_runtime,
+        "host runtime is ready for model-backed execution",
+        "host runtime is not wired",
+    ));
+    checks.push(status_check(
+        "webui",
+        RebornOperatorStatusState::Ready,
+        RebornOperatorStatusSeverity::Info,
+        "WebUI v2 route facade is mounted".to_string(),
+        None,
+    ));
+    checks.push(bool_check(
+        "trigger_poller",
+        readiness.workers.trigger_poller,
+        "trigger poller worker is ready",
+        "trigger poller worker is not running",
+    ));
+    checks.push(status_check(
+        "channels",
+        RebornOperatorStatusState::Unsupported,
+        RebornOperatorStatusSeverity::Info,
+        "channel-specific readiness probes are not wired yet".to_string(),
+        Some("consult channel setup diagnostics for adapter-specific status".to_string()),
+    ));
+    checks.push(status_check(
+        "extensions",
+        RebornOperatorStatusState::Unsupported,
+        RebornOperatorStatusSeverity::Info,
+        "extension readiness probes are not wired yet".to_string(),
+        Some("use extension inventory and setup endpoints for per-extension status".to_string()),
+    ));
+    let overall = if checks
+        .iter()
+        .any(|check| check.status == RebornOperatorStatusState::Blocked)
+    {
+        RebornOperatorStatusState::Blocked
+    } else if checks.iter().any(|check| {
+        matches!(
+            check.status,
+            RebornOperatorStatusState::Degraded | RebornOperatorStatusState::NotConfigured
+        )
+    }) {
+        RebornOperatorStatusState::Degraded
+    } else {
+        RebornOperatorStatusState::Ready
+    };
+    RebornOperatorStatusResponse {
+        generated_at: Utc::now(),
+        overall,
+        checks,
+    }
+}
+
+fn bool_check(
+    id: &str,
+    ready: bool,
+    ready_summary: &str,
+    missing_summary: &str,
+) -> RebornOperatorStatusCheck {
+    status_check(
+        id,
+        if ready {
+            RebornOperatorStatusState::Ready
+        } else {
+            RebornOperatorStatusState::NotConfigured
+        },
+        if ready {
+            RebornOperatorStatusSeverity::Info
+        } else {
+            RebornOperatorStatusSeverity::Warning
+        },
+        if ready {
+            ready_summary
+        } else {
+            missing_summary
+        }
+        .to_string(),
+        (!ready).then(|| format!("wire the {id} subsystem in Reborn composition")),
+    )
+}
+
+fn status_check(
+    id: &str,
+    status: RebornOperatorStatusState,
+    severity: RebornOperatorStatusSeverity,
+    summary: String,
+    remediation: Option<String>,
+) -> RebornOperatorStatusCheck {
+    RebornOperatorStatusCheck {
+        id: id.to_string(),
+        status,
+        severity,
+        summary,
+        remediation,
     }
 }

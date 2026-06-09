@@ -35,14 +35,17 @@ use ironclaw_product_workflow::{
     RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
     RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogEntry, RebornLogLevel,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
@@ -110,6 +113,9 @@ struct StubServices {
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
     list_connectable_channels_calls: Mutex<usize>,
     next_list_connectable_channels_error: Mutex<Option<RebornServicesError>>,
+    get_operator_status_calls: Mutex<usize>,
+    query_operator_logs_calls: Mutex<Vec<RebornLogQueryRequest>>,
+    control_operator_service_calls: Mutex<Vec<RebornServiceLifecycleRequest>>,
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
@@ -469,6 +475,65 @@ impl RebornServicesApi for StubServices {
                 },
                 command_aliases: vec!["slack".to_string()],
             }],
+        })
+    }
+
+    async fn get_operator_status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        *self.get_operator_status_calls.lock().expect("lock") += 1;
+        Ok(RebornOperatorStatusResponse {
+            generated_at: chrono::Utc::now(),
+            overall: RebornOperatorStatusState::Degraded,
+            checks: vec![RebornOperatorStatusCheck {
+                id: "runtime".to_string(),
+                status: RebornOperatorStatusState::Degraded,
+                severity: RebornOperatorStatusSeverity::Warning,
+                summary: "runtime degraded".to_string(),
+                remediation: Some("finish setup".to_string()),
+            }],
+        })
+    }
+
+    async fn query_operator_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        self.query_operator_logs_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        Ok(RebornLogQueryResponse {
+            source: "test".to_string(),
+            entries: vec![RebornLogEntry {
+                id: "log-1".to_string(),
+                timestamp: chrono::Utc::now(),
+                level: RebornLogLevel::Info,
+                target: "ironclaw_test".to_string(),
+                message: "ready".to_string(),
+            }],
+            next_cursor: Some("log-1".to_string()),
+            tail_supported: true,
+            follow_supported: false,
+        })
+    }
+
+    async fn control_operator_service(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+        self.control_operator_service_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        Ok(RebornServiceLifecycleResponse {
+            action: request.action,
+            state: RebornServiceLifecycleState::Unsupported,
+            message: "unsupported in test".to_string(),
+            remediation: Some("use host service manager".to_string()),
         })
     }
 
@@ -1260,6 +1325,89 @@ async fn get_session_returns_false_operator_capability_when_capabilities_default
     assert_eq!(body["tenant_id"], "tenant-alpha");
     assert_eq!(body["user_id"], "user-alpha");
     assert_eq!(body["capabilities"]["operator_webui_config"], false);
+}
+
+#[tokio::test]
+async fn operator_status_dispatches_through_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/status")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["overall"], "degraded");
+    assert_eq!(body["checks"][0]["id"], "runtime");
+    assert_eq!(*services.get_operator_status_calls.lock().expect("lock"), 1);
+}
+
+#[tokio::test]
+async fn operator_logs_query_dispatches_body_through_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/operator/logs/query")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"limit":5,"level":"info","target":"ironclaw","tail":true}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["source"], "test");
+    assert_eq!(body["entries"][0]["message"], "ready");
+    let calls = services.query_operator_logs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].limit, Some(5));
+    assert_eq!(calls[0].tail, true);
+}
+
+#[tokio::test]
+async fn operator_service_control_dispatches_body_through_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/operator/service")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"action":"status"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["action"], "status");
+    assert_eq!(body["state"], "unsupported");
+    assert_eq!(
+        services
+            .control_operator_service_calls
+            .lock()
+            .expect("lock")
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

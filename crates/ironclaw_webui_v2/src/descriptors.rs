@@ -48,6 +48,9 @@ pub const WEBUI_V2_ROUTE_START_NEARAI_LOGIN: &str = "webui.v2.start_nearai_login
 pub const WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN: &str =
     "webui.v2.complete_nearai_wallet_login";
 pub const WEBUI_V2_ROUTE_START_CODEX_LOGIN: &str = "webui.v2.start_codex_login";
+pub const WEBUI_V2_ROUTE_GET_OPERATOR_STATUS: &str = "webui.v2.operator.status";
+pub const WEBUI_V2_ROUTE_QUERY_OPERATOR_LOGS: &str = "webui.v2.operator.logs.query";
+pub const WEBUI_V2_ROUTE_CONTROL_OPERATOR_SERVICE: &str = "webui.v2.operator.service.control";
 
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
@@ -85,6 +88,9 @@ pub const WEBUI_V2_PATTERN_LIST_LLM_MODELS: &str = "/api/webchat/v2/llm/list-mod
 pub const WEBUI_V2_PATTERN_START_NEARAI_LOGIN: &str = "/api/webchat/v2/llm/nearai/login";
 pub const WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN: &str = "/api/webchat/v2/llm/nearai/wallet";
 pub const WEBUI_V2_PATTERN_START_CODEX_LOGIN: &str = "/api/webchat/v2/llm/codex/login";
+pub const WEBUI_V2_PATTERN_GET_OPERATOR_STATUS: &str = "/api/webchat/v2/operator/status";
+pub const WEBUI_V2_PATTERN_QUERY_OPERATOR_LOGS: &str = "/api/webchat/v2/operator/logs/query";
+pub const WEBUI_V2_PATTERN_CONTROL_OPERATOR_SERVICE: &str = "/api/webchat/v2/operator/service";
 
 /// Return the canonical [`IngressRouteDescriptor`] set for the WebChat v2
 /// beta route surface.
@@ -128,6 +134,9 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         start_nearai_login_descriptor(),
         complete_nearai_wallet_login_descriptor(),
         start_codex_login_descriptor(),
+        get_operator_status_descriptor(),
+        query_operator_logs_descriptor(),
+        control_operator_service_descriptor(),
     ]
 }
 
@@ -148,6 +157,16 @@ pub fn is_webui_v2_llm_config_route_id(route_id: &str) -> bool {
             | WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN
             | WEBUI_V2_ROUTE_START_CODEX_LOGIN
     )
+}
+
+pub fn is_webui_v2_operator_route_id(route_id: &str) -> bool {
+    is_webui_v2_llm_config_route_id(route_id)
+        || matches!(
+            route_id,
+            WEBUI_V2_ROUTE_GET_OPERATOR_STATUS
+                | WEBUI_V2_ROUTE_QUERY_OPERATOR_LOGS
+                | WEBUI_V2_ROUTE_CONTROL_OPERATOR_SERVICE
+        )
 }
 
 fn get_session_descriptor() -> IngressRouteDescriptor {
@@ -618,6 +637,48 @@ fn start_codex_login_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_START_CODEX_LOGIN,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_START_CODEX_LOGIN,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn get_operator_status_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_OPERATOR_STATUS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_GET_OPERATOR_STATUS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn query_operator_logs_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_QUERY_OPERATOR_LOGS,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_QUERY_OPERATOR_LOGS,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+        ),
+    )
+}
+
+fn control_operator_service_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_CONTROL_OPERATOR_SERVICE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_CONTROL_OPERATOR_SERVICE,
         mutation_policy(
             body_limit_kib(4),
             mutation_rate_limit(),

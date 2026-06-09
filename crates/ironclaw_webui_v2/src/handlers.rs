@@ -28,7 +28,9 @@ use ironclaw_product_workflow::{
     RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorStatusResponse, RebornResolveGateResponse, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
@@ -62,6 +64,38 @@ pub async fn get_session(
         user_id: caller.user_id.to_string(),
         capabilities: state.capabilities(),
     })
+}
+
+/// `GET /api/webchat/v2/operator/status`
+pub async fn get_operator_status(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOperatorStatusResponse>, WebUiV2HttpError> {
+    let response = state.services().get_operator_status(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/operator/logs/query`
+pub async fn query_operator_logs(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornLogQueryRequest>,
+) -> Result<Json<RebornLogQueryResponse>, WebUiV2HttpError> {
+    let response = state.services().query_operator_logs(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/operator/service`
+pub async fn control_operator_service(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornServiceLifecycleRequest>,
+) -> Result<Json<RebornServiceLifecycleResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .control_operator_service(caller, body)
+        .await?;
+    Ok(Json(response))
 }
 
 /// `POST /api/webchat/v2/threads`
