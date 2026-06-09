@@ -331,6 +331,7 @@ struct SlackHostBetaOutboundTargetProvider {
     project_id: Option<ProjectId>,
     installation_id: AdapterInstallationId,
     team_id: SlackTeamId,
+    target_id_prefix: String,
     configured_channel_routes: Vec<SlackHostBetaChannelRoute>,
     channel_route_store: Arc<dyn SlackChannelRouteStore>,
 }
@@ -345,6 +346,7 @@ impl SlackHostBetaOutboundTargetProvider {
             agent_id: config.agent_id,
             project_id: config.project_id,
             installation_id: config.installation_id,
+            target_id_prefix: format!("slack:shared-channel:{}:", config.team_id.as_str()),
             team_id: config.team_id,
             configured_channel_routes: config.channel_routes,
             channel_route_store,
@@ -367,10 +369,9 @@ impl SlackHostBetaOutboundTargetProvider {
         &self,
         target_id: &'a RebornOutboundDeliveryTargetId,
     ) -> Option<&'a str> {
-        let prefix = format!("slack:shared-channel:{}:", self.team_id.as_str());
         target_id
             .as_str()
-            .strip_prefix(&prefix)
+            .strip_prefix(&self.target_id_prefix)
             .filter(|channel_id| !channel_id.is_empty())
     }
 
@@ -480,7 +481,6 @@ impl SlackHostBetaOutboundTargetProvider {
                 .filter(|route| !stored_channel_ids.contains(&route.channel_id))
                 .cloned(),
         );
-        routes.sort_by(|left, right| left.channel_id.cmp(&right.channel_id));
         Ok(routes)
     }
 
@@ -527,10 +527,15 @@ impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
         if caller.tenant_id != self.tenant_id {
             return Ok(Vec::new());
         }
-        self.shared_channel_routes()
+        let mut routes = self
+            .shared_channel_routes()
             .await?
             .into_iter()
             .filter(|route| route.subject_user_id == caller.user_id)
+            .collect::<Vec<_>>();
+        routes.sort_by(|left, right| left.channel_id.cmp(&right.channel_id));
+        routes
+            .into_iter()
             .map(|route| self.entry_for_shared_channel_route(&route))
             .collect()
     }
@@ -961,8 +966,9 @@ mod tests {
 
     use super::*;
     use crate::slack_channel_routes::{
-        SlackChannelRouteAdminRouteMount, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
-        WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, slack_channel_route_admin_route_mount,
+        InMemorySlackChannelRouteStore, SlackChannelRouteAdminRouteMount,
+        WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+        slack_channel_route_admin_route_mount,
     };
     use crate::slack_connectable_channel::{
         SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
@@ -2050,6 +2056,18 @@ mod tests {
         assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
         assert_eq!(error.status_code, 503);
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn slack_host_beta_target_id_parser_rejects_empty_channel_suffix() {
+        let provider = SlackHostBetaOutboundTargetProvider::new(
+            config(),
+            Arc::new(InMemorySlackChannelRouteStore::new()),
+        );
+        let target_id =
+            RebornOutboundDeliveryTargetId::new("slack:shared-channel:T0HOST:").expect("target id");
+
+        assert!(provider.channel_id_for_target_id(&target_id).is_none());
     }
 
     #[tokio::test]
