@@ -222,8 +222,122 @@ fn system_resource_scope_round_trips_through_json() {
     // `from_trusted` may produce it, so user input can never collide.
     assert!(TenantId::new(SYSTEM_RESERVED_ID).is_err());
     assert!(UserId::new(SYSTEM_RESERVED_ID).is_err());
-    assert!(serde_json::from_value::<AgentId>(json!(SYSTEM_RESERVED_ID)).is_err());
-    assert!(serde_json::from_value::<ProjectId>(json!(SYSTEM_RESERVED_ID)).is_err());
+}
+
+#[test]
+fn system_sentinel_constructor_produces_the_reserved_value() {
+    // `system_sentinel()` is the blessed cross-crate path for minting a
+    // sentinel-valued id. Pin its identity and pin that `ResourceScope::system`
+    // (which routes through this constructor) classifies as system — this is
+    // the contract the four legitimate sentinel call sites (host_api,
+    // loop_support, turns, threads) depend on.
+    assert_eq!(TenantId::system_sentinel().as_str(), SYSTEM_RESERVED_ID);
+    assert_eq!(UserId::system_sentinel().as_str(), SYSTEM_RESERVED_ID);
+    assert!(ResourceScope::system().is_system());
+}
+
+#[test]
+fn non_opted_in_id_kinds_reject_system_sentinel_on_the_wire() {
+    // Only TenantId and UserId may admit the sentinel during deserialization
+    // (see `accepts_system_sentinel` in ids.rs). Every other id kind must
+    // reject it — a regression in the macro would silently widen the
+    // authority-elevation surface, so each kind asserts independently.
+    let raw = json!(SYSTEM_RESERVED_ID);
+
+    assert!(serde_json::from_value::<AgentId>(raw.clone()).is_err());
+    assert!(serde_json::from_value::<ProjectId>(raw.clone()).is_err());
+    assert!(serde_json::from_value::<MissionId>(raw.clone()).is_err());
+    assert!(serde_json::from_value::<ThreadId>(raw.clone()).is_err());
+    assert!(serde_json::from_value::<ExtensionId>(raw.clone()).is_err());
+    assert!(serde_json::from_value::<PackageId>(raw.clone()).is_err());
+    assert!(serde_json::from_value::<SecretHandle>(raw.clone()).is_err());
+    assert!(serde_json::from_value::<CapabilityId>(raw.clone()).is_err());
+    assert!(serde_json::from_value::<RuntimeCredentialAccountProviderId>(raw.clone()).is_err());
+    assert!(serde_json::from_value::<SystemServiceId>(raw).is_err());
+}
+
+#[test]
+fn tenant_and_user_ids_reject_sentinel_near_misses_on_the_wire() {
+    // The sentinel is exactly `\x1fSYSTEM\x1f`. Any near-miss containing
+    // ANY control byte (including the right one in the wrong place, or
+    // alongside extra content) must be rejected by the validator, otherwise
+    // an attacker who controlled the wire could try to smuggle an
+    // almost-sentinel through the sentinel-aware deserialize path.
+    let control_byte_near_misses = [
+        "\x1eSYSTEM\x1f",   // wrong leading control byte
+        "\x1fSYSTEM\x1e",   // wrong trailing control byte
+        "\x1fSYSTEM",       // missing trailing byte
+        "SYSTEM\x1f",       // missing leading byte
+        "\x1fSYSTEM\x1fx",  // trailing extra
+        "x\x1fSYSTEM\x1f",  // leading extra
+        "\x1fsystem\x1f",   // wrong case
+        "\x1f SYSTEM \x1f", // padded
+    ];
+    for value in control_byte_near_misses {
+        assert!(
+            serde_json::from_value::<TenantId>(json!(value)).is_err(),
+            "TenantId must reject control-byte near-miss {value:?}"
+        );
+        assert!(
+            serde_json::from_value::<UserId>(json!(value)).is_err(),
+            "UserId must reject control-byte near-miss {value:?}"
+        );
+    }
+}
+
+#[test]
+fn sentinel_look_alikes_without_control_bytes_do_not_classify_as_system() {
+    // Strings like "SYSTEM" or "system" deserialize successfully (they are
+    // valid scope-ids), but the sentinel-equality check in
+    // `ResourceScope::is_system` must NOT mistake them for the real sentinel.
+    // This is the wire-level pin: no string a caller can legally supply
+    // through TenantId/UserId may be classified as system.
+    for look_alike in ["SYSTEM", "system", "SYSTEMx"] {
+        let tenant: TenantId = serde_json::from_value(json!(look_alike))
+            .unwrap_or_else(|e| panic!("TenantId should accept {look_alike:?}: {e}"));
+        let user: UserId = serde_json::from_value(json!(look_alike))
+            .unwrap_or_else(|e| panic!("UserId should accept {look_alike:?}: {e}"));
+        assert_ne!(tenant.as_str(), SYSTEM_RESERVED_ID);
+        assert_ne!(user.as_str(), SYSTEM_RESERVED_ID);
+
+        let scope = ResourceScope {
+            tenant_id: tenant,
+            user_id: user,
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        assert!(
+            !scope.is_system(),
+            "{look_alike:?} must never classify as the system sentinel"
+        );
+    }
+}
+
+#[test]
+fn partial_sentinel_resource_scope_is_not_treated_as_system() {
+    // `is_system` requires BOTH tenant_id and user_id to be the sentinel.
+    // If only one field carries the sentinel and the other is a normal id,
+    // the scope must round-trip through JSON without being misclassified.
+    // This pins the contract: no authority decision may key on a single
+    // field of the scope.
+    let mut tenant_only = ResourceScope::system();
+    tenant_only.user_id = UserId::new("alice").unwrap();
+    let encoded = serde_json::to_string(&tenant_only).expect("serialize tenant-only");
+    let decoded: ResourceScope = serde_json::from_str(&encoded).expect("deserialize tenant-only");
+    assert!(!decoded.is_system());
+    assert_eq!(decoded.tenant_id.as_str(), SYSTEM_RESERVED_ID);
+    assert_eq!(decoded.user_id.as_str(), "alice");
+
+    let mut user_only = ResourceScope::system();
+    user_only.tenant_id = TenantId::new("acme").unwrap();
+    let encoded = serde_json::to_string(&user_only).expect("serialize user-only");
+    let decoded: ResourceScope = serde_json::from_str(&encoded).expect("deserialize user-only");
+    assert!(!decoded.is_system());
+    assert_eq!(decoded.tenant_id.as_str(), "acme");
+    assert_eq!(decoded.user_id.as_str(), SYSTEM_RESERVED_ID);
 }
 
 #[test]

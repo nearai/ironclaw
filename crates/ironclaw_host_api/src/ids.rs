@@ -104,6 +104,7 @@ macro_rules! string_id {
     };
     ($name:ident, $kind:literal, $validator:ident, accepts_system_sentinel) => {
         string_id!(@build $name, $kind, $validator);
+        string_id!(@sentinel_constructor $name);
         string_id!(@deserialize_with_sentinel $name);
     };
     (@build $name:ident, $kind:literal, $validator:ident) => {
@@ -160,6 +161,26 @@ macro_rules! string_id {
             }
         }
     };
+    (@sentinel_constructor $name:ident) => {
+        impl $name {
+            /// Construct the [`crate::SYSTEM_RESERVED_ID`] sentinel value of
+            /// this id type.
+            ///
+            /// SECURITY-CRITICAL: this is the blessed path for minting a
+            /// sentinel-valued id. It exists so every authority-elevating
+            /// constructor is `git grep`-able as `system_sentinel`, rather
+            /// than hidden behind the more general `from_trusted` escape
+            /// hatch. New code that needs the sentinel must call this
+            /// method — never `from_trusted(SYSTEM_RESERVED_ID.to_string())`.
+            ///
+            /// `ResourceScope::is_system` returns `true` only when BOTH the
+            /// tenant and user ids of a scope come from this constructor;
+            /// no authority decision may key on a single field.
+            pub fn system_sentinel() -> Self {
+                Self::from_trusted(crate::SYSTEM_RESERVED_ID.to_string())
+            }
+        }
+    };
     (@deserialize_with_sentinel $name:ident) => {
         impl<'de> Deserialize<'de> for $name {
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -170,7 +191,7 @@ macro_rules! string_id {
                 // Admit the system sentinel; `Self::new` rejects its
                 // control bytes, so JSON round-trip needs an explicit bypass.
                 if value == crate::SYSTEM_RESERVED_ID {
-                    return Ok(Self::from_trusted(value));
+                    return Ok(Self::system_sentinel());
                 }
                 Self::new(value).map_err(serde::de::Error::custom)
             }
@@ -216,6 +237,13 @@ macro_rules! uuid_id {
     };
 }
 
+// SECURITY-CRITICAL: `accepts_system_sentinel` opts these id types into
+// admitting [`crate::SYSTEM_RESERVED_ID`] during JSON deserialization and
+// exposes the `system_sentinel()` constructor — the only blessed path that
+// can mint a sentinel-valued id. Every other id kind stays strict and
+// rejects the sentinel on the wire. Adding this flag to any new id type
+// requires security review: any HTTP/RPC endpoint that deserializes such an
+// id from an untrusted request body becomes an authority-elevation vector.
 string_id!(
     TenantId,
     "tenant",

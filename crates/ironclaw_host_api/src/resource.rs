@@ -66,8 +66,8 @@ impl ResourceScope {
     /// validation rejects, so no user-supplied identifier can collide.
     pub fn system() -> Self {
         Self {
-            tenant_id: TenantId::from_trusted(SYSTEM_RESERVED_ID.to_string()),
-            user_id: UserId::from_trusted(SYSTEM_RESERVED_ID.to_string()),
+            tenant_id: TenantId::system_sentinel(),
+            user_id: UserId::system_sentinel(),
             agent_id: None,
             project_id: None,
             mission_id: None,
