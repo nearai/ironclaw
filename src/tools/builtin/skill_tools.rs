@@ -25,6 +25,7 @@ const MAX_CHAIN_DEPS: usize = 10;
 const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 const MAX_ZIP_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TOTAL_UNZIPPED_BYTES: u64 = 20 * 1024 * 1024;
+const SKILL_SCOPE_OWNER_METADATA_KEY: &str = "skill_scope_owner_id";
 
 /// Hard cap on the chain-installer BFS queue to prevent unbounded growth
 /// from nested `requires.skills` fan-out. Even though we stop enqueueing
@@ -198,6 +199,27 @@ fn registry_write(
         );
         poison.into_inner()
     })
+}
+
+async fn registry_for_context(
+    registry: &Arc<std::sync::RwLock<SkillRegistry>>,
+    ctx: &JobContext,
+) -> Result<Arc<std::sync::RwLock<SkillRegistry>>, ToolError> {
+    let Some(owner_id) = ctx
+        .metadata
+        .get(SKILL_SCOPE_OWNER_METADATA_KEY)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(Arc::clone(registry));
+    };
+
+    let mut scoped = {
+        let guard = registry_read(registry);
+        guard.clone_config_for_tenant_user_scope(owner_id, &ctx.user_id)
+    };
+    scoped.discover_all().await;
+    Ok(Arc::new(std::sync::RwLock::new(scoped)))
 }
 
 async fn install_missing_skill_dependencies<F, Fut>(
@@ -573,16 +595,16 @@ impl Tool for SkillListTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let verbose = params
             .get("verbose")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let registry = registry_for_context(&self.registry, ctx).await?;
 
-        let guard = self
-            .registry
+        let guard = registry
             .read()
             .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
 
@@ -672,10 +694,11 @@ impl Tool for SkillSearchTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let query = require_str(&params, "query")?;
+        let registry = registry_for_context(&self.registry, ctx).await?;
 
         // Search the ClawHub catalog (async, best-effort)
         let catalog_outcome = self.catalog.search(query).await;
@@ -689,8 +712,7 @@ impl Tool for SkillSearchTool {
 
         // Search locally loaded skills
         let installed_names: Vec<String> = {
-            let guard = self
-                .registry
+            let guard = registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
             guard
@@ -723,8 +745,7 @@ impl Tool for SkillSearchTool {
         // Find matching local skills (simple substring match)
         let query_lower = query.to_lowercase();
         let local_matches: Vec<serde_json::Value> = {
-            let guard = self
-                .registry
+            let guard = registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
             guard
@@ -852,10 +873,11 @@ impl Tool for SkillInstallTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
+        let registry = registry_for_context(&self.registry, ctx).await?;
         let install_dependencies = params
             .get("install_dependencies")
             .and_then(|v| v.as_bool())
@@ -874,8 +896,7 @@ impl Tool for SkillInstallTool {
         // Dependency installs are not a no-op: when explicitly requested,
         // walk the loaded skill's companion list instead of returning early.
         let loaded_required_skills = {
-            let guard = self
-                .registry
+            let guard = registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
 
@@ -916,7 +937,7 @@ impl Tool for SkillInstallTool {
 
         if let Some(required_skills) = loaded_required_skills {
             let chain_report = install_missing_skill_dependencies(
-                &self.registry,
+                &registry,
                 self.catalog.registry_url(),
                 required_skills,
                 |url| async move { fetch_skill_payload(&url).await },
@@ -964,8 +985,7 @@ impl Tool for SkillInstallTool {
 
         // Check for duplicates and get install_dir under a brief read lock.
         let (user_dir, skill_name_from_parse, install_content) = {
-            let guard = self
-                .registry
+            let guard = registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
 
@@ -1015,7 +1035,7 @@ impl Tool for SkillInstallTool {
             AlreadyInstalled,
         }
         let commit_result: CommitResult = {
-            let mut guard = registry_write(&self.registry);
+            let mut guard = registry_write(&registry);
             if guard.has(&skill_name) {
                 CommitResult::AlreadyInstalled
             } else {
@@ -1061,8 +1081,7 @@ impl Tool for SkillInstallTool {
             ChainInstallReport::default()
         } else if !install_dependencies {
             let missing_required_skills = {
-                let guard = self
-                    .registry
+                let guard = registry
                     .read()
                     .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
                 required_skills
@@ -1077,7 +1096,7 @@ impl Tool for SkillInstallTool {
             }
         } else {
             install_missing_skill_dependencies(
-                &self.registry,
+                &registry,
                 self.catalog.registry_url(),
                 required_skills,
                 |url| async move { fetch_skill_payload(&url).await },
@@ -1966,15 +1985,15 @@ impl Tool for SkillRemoveTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
+        let registry = registry_for_context(&self.registry, ctx).await?;
 
         // Validate removal and get the filesystem path under a brief read lock.
         let skill_path = {
-            let guard = self
-                .registry
+            let guard = registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
             guard
@@ -1989,8 +2008,7 @@ impl Tool for SkillRemoveTool {
 
         // Remove from in-memory registry under a brief write lock.
         {
-            let mut guard = self
-                .registry
+            let mut guard = registry
                 .write()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
             guard
@@ -2227,6 +2245,53 @@ mod tests {
             .expect("disk duplicate install should be a no-op");
         assert_eq!(output.result["status"], "already_installed");
         assert_eq!(output.result["name"], "pikastream-video-meeting");
+    }
+
+    #[tokio::test]
+    async fn skill_install_uses_context_scoped_registry_when_present() {
+        let registry = test_registry();
+        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+        let mut ctx = JobContext::with_user("alice", "chat", "test session");
+        ctx.metadata = serde_json::json!({
+            SKILL_SCOPE_OWNER_METADATA_KEY: "owner",
+        });
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "name": "scoped-chat-skill",
+                    "content": skill_content("scoped-chat-skill", &[]),
+                }),
+                &ctx,
+            )
+            .await
+            .expect("scoped install should succeed");
+
+        assert_eq!(output.result["status"], "installed");
+        assert!(
+            !registry.read().unwrap().has("scoped-chat-skill"),
+            "chat installs for scoped users must not leak into the shared registry"
+        );
+
+        let mut scoped = registry
+            .read()
+            .unwrap()
+            .clone_config_for_tenant_user_scope("owner", "alice");
+        scoped.discover_all().await;
+        assert!(
+            scoped.has("scoped-chat-skill"),
+            "activation must find chat-installed skills in the same scoped registry"
+        );
+
+        let mut other_user = registry
+            .read()
+            .unwrap()
+            .clone_config_for_tenant_user_scope("owner", "bob");
+        other_user.discover_all().await;
+        assert!(
+            !other_user.has("scoped-chat-skill"),
+            "scoped installs must stay isolated from other users"
+        );
     }
 
     #[tokio::test]

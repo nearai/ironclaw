@@ -22,8 +22,8 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
-    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService,
-    ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -50,7 +50,7 @@ use crate::{
         DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
         bounded_source_binding_ref,
     },
-    is_approval_gate_ref, is_auth_gate_ref,
+    is_approval_gate_ref, is_auth_gate_ref, thread_metadata_is_automation_trigger,
 };
 
 mod error;
@@ -69,7 +69,8 @@ pub use llm_config::{
     NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 pub use types::{
-    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornAutomationInfo, RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
@@ -81,11 +82,13 @@ pub use types::{
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -126,6 +129,76 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
         })
     }
 }
+
+#[async_trait]
+pub trait SkillsProductFacade: Send + Sync {
+    async fn list_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn search_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn install_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name, content);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn read_skill_content(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        let _ = (caller, name);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn update_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name, content);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn remove_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedSkillsProductFacade;
+
+impl UnsupportedSkillsProductFacade {
+    pub fn new_static() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl SkillsProductFacade for UnsupportedSkillsProductFacade {}
 
 #[async_trait]
 pub trait OutboundPreferencesProductFacade: Send + Sync {
@@ -255,12 +328,18 @@ impl ProductAgentBoundCaller {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutomationListRequest {
+    pub limit: usize,
+    pub run_limit: usize,
+}
+
 #[async_trait]
 pub trait AutomationProductFacade: Send + Sync {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
-        limit: usize,
+        request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError>;
 }
 
@@ -278,7 +357,7 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
-        _limit: usize,
+        _request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Err(automation_unavailable())
     }
@@ -451,6 +530,43 @@ pub trait RebornServicesApi: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError>;
+
+    async fn list_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError>;
+
+    async fn search_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError>;
+
+    async fn install_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
+
+    async fn read_skill_content(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError>;
+
+    async fn update_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
+
+    async fn remove_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
 
     async fn list_extension_registry(
         &self,
@@ -663,6 +779,7 @@ pub struct RebornServices {
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
+    skills_facade: Arc<dyn SkillsProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
@@ -687,6 +804,7 @@ impl RebornServices {
                 "reborn_lifecycle_facade_unwired",
             )),
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
+            skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
             connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
@@ -724,6 +842,14 @@ impl RebornServices {
         automation_facade: Arc<dyn AutomationProductFacade>,
     ) -> Self {
         self.automation_facade = automation_facade;
+        self
+    }
+
+    pub fn with_skills_product_facade(
+        mut self,
+        skills_facade: Arc<dyn SkillsProductFacade>,
+    ) -> Self {
+        self.skills_facade = skills_facade;
         self
     }
 
@@ -1264,19 +1390,7 @@ impl RebornServicesApi for RebornServices {
             owner_user_id: Some(caller.user_id.clone()),
             mission_id: None,
         };
-        let response = self
-            .thread_service
-            .list_threads_for_scope(ironclaw_threads::ListThreadsForScopeRequest {
-                scope,
-                limit: request.limit,
-                cursor: request.cursor,
-            })
-            .await
-            .map_err(map_thread_error)?;
-        Ok(RebornListThreadsResponse {
-            threads: response.threads,
-            next_cursor: response.next_cursor,
-        })
+        self.list_visible_threads_for_scope(scope, request).await
     }
 
     async fn list_automations(
@@ -1292,9 +1406,10 @@ impl RebornServicesApi for RebornServices {
             ));
         };
         let limit = clamp_automation_list_limit(request.limit);
+        let run_limit = clamp_automation_run_limit(request.run_limit);
         let automations = self
             .automation_facade
-            .list_automations(caller, limit)
+            .list_automations(caller, AutomationListRequest { limit, run_limit })
             .await?;
         Ok(RebornListAutomationsResponse { automations })
     }
@@ -1341,6 +1456,57 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
         extensions::list_extensions(self.lifecycle_facade.as_ref(), caller).await
+    }
+
+    async fn list_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        self.skills_facade.list_skills(caller).await
+    }
+
+    async fn search_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        self.skills_facade.search_skills(caller, query).await
+    }
+
+    async fn install_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade
+            .install_skill(caller, name, content)
+            .await
+    }
+
+    async fn read_skill_content(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        self.skills_facade.read_skill_content(caller, name).await
+    }
+
+    async fn update_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade.update_skill(caller, name, content).await
+    }
+
+    async fn remove_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade.remove_skill(caller, name).await
     }
 
     async fn list_extension_registry(
@@ -1525,6 +1691,77 @@ impl RebornServicesApi for RebornServices {
 }
 
 impl RebornServices {
+    async fn list_visible_threads_for_scope(
+        &self,
+        scope: ThreadScope,
+        request: WebUiListThreadsRequest,
+    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        let visible_limit = clamp_thread_list_limit(request.limit);
+        let fetch_limit = visible_limit
+            .max(THREAD_LIST_FILTER_MIN_FETCH_SIZE)
+            .min(THREAD_LIST_MAX_PAGE_SIZE as usize);
+        let mut cursor = request.cursor;
+        let mut visible_threads = Vec::with_capacity(visible_limit);
+        let mut next_cursor = None;
+        let mut pages_fetched = 0usize;
+
+        while visible_threads.len() < visible_limit {
+            if pages_fetched >= THREAD_LIST_FILTER_MAX_PAGES {
+                tracing::warn!(
+                    cursor = ?cursor,
+                    pages_fetched,
+                    max_pages = THREAD_LIST_FILTER_MAX_PAGES,
+                    visible_threads = visible_threads.len(),
+                    visible_limit,
+                    "thread listing filter page budget exhausted while skipping automation threads"
+                );
+                next_cursor = None;
+                break;
+            }
+            pages_fetched += 1;
+            let response = self
+                .thread_service
+                .list_threads_for_scope(ironclaw_threads::ListThreadsForScopeRequest {
+                    scope: scope.clone(),
+                    limit: Some(fetch_limit as u32),
+                    cursor: cursor.clone(),
+                })
+                .await
+                .map_err(map_thread_error)?;
+            visible_threads.extend(
+                response
+                    .threads
+                    .into_iter()
+                    .filter(|thread| !is_automation_trigger_thread(thread)),
+            );
+            next_cursor = response.next_cursor;
+            let Some(next) = next_cursor.clone() else {
+                break;
+            };
+            if cursor.as_deref() == Some(next.as_str()) {
+                tracing::warn!(
+                    cursor = %next,
+                    "thread listing cursor did not advance while filtering automation threads"
+                );
+                next_cursor = None;
+                break;
+            }
+            cursor = Some(next);
+        }
+
+        if visible_threads.len() > visible_limit {
+            next_cursor = visible_threads
+                .get(visible_limit.saturating_sub(1))
+                .map(|thread| thread.thread_id.as_str().to_string());
+            visible_threads.truncate(visible_limit);
+        }
+
+        Ok(RebornListThreadsResponse {
+            threads: visible_threads,
+            next_cursor,
+        })
+    }
+
     fn thread_operation_lock(&self, scope: &TurnScope) -> Arc<AsyncMutex<()>> {
         let key = thread_operation_key(scope);
         let mut locks = match self.thread_operation_locks.lock() {
@@ -1590,6 +1827,23 @@ impl RebornServices {
 
 fn automation_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(true)
+}
+
+fn is_automation_trigger_thread(thread: &SessionThreadRecord) -> bool {
+    let Some(metadata) = thread.metadata_json.as_deref() else {
+        return false;
+    };
+    match thread_metadata_is_automation_trigger(metadata) {
+        Ok(is_automation_trigger) => is_automation_trigger,
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                thread_id = %thread.thread_id,
+                "failed to parse thread metadata_json for automation filter"
+            );
+            false
+        }
+    }
 }
 
 fn outbound_preferences_unavailable() -> RebornServicesError {
@@ -2268,11 +2522,22 @@ pub const AUTOMATION_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
 /// opaque cursor contract.
 pub const AUTOMATION_LIST_MAX_PAGE_SIZE: u32 = 100;
 
+/// Default number of recent runs returned per automation row.
+pub const AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE: u32 = 25;
+
+/// Hard ceiling for recent runs embedded in each automation row.
+pub const AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE: u32 = 100;
+
 /// Hard ceiling on summary artifacts returned per response. Summary
 /// artifacts are typically much smaller than the message transcript so
 /// this cap is generous; it exists to bound the worst case where a
 /// thread accumulates an unusual number of summaries.
 const TIMELINE_MAX_SUMMARY_ARTIFACTS: usize = 200;
+
+const THREAD_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
+const THREAD_LIST_MAX_PAGE_SIZE: u32 = 200;
+const THREAD_LIST_FILTER_MIN_FETCH_SIZE: usize = 50;
+const THREAD_LIST_FILTER_MAX_PAGES: usize = 20;
 
 fn clamp_timeline_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(TIMELINE_DEFAULT_PAGE_SIZE);
@@ -2280,9 +2545,22 @@ fn clamp_timeline_limit(requested: Option<u32>) -> usize {
     clamped as usize
 }
 
+fn clamp_thread_list_limit(requested: Option<u32>) -> usize {
+    let raw = requested.unwrap_or(THREAD_LIST_DEFAULT_PAGE_SIZE);
+    let clamped = raw.clamp(1, THREAD_LIST_MAX_PAGE_SIZE);
+    clamped as usize
+}
+
 fn clamp_automation_list_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(AUTOMATION_LIST_DEFAULT_PAGE_SIZE);
     let clamped = raw.clamp(1, AUTOMATION_LIST_MAX_PAGE_SIZE);
+    clamped as usize
+}
+
+fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
+    let raw = requested.unwrap_or(AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE);
+    // 0 is intentional: callers suppress embedded run history by passing run_limit=0.
+    let clamped = raw.min(AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE);
     clamped as usize
 }
 

@@ -7,9 +7,10 @@ use chrono::Utc;
 use ironclaw_triggers::{
     ScheduleTriggerSourceProvider, TriggerActiveRunLookup, TriggerActiveRunState,
     TriggerActiveRunStateRequest, TriggerError, TriggerPollerWorker, TriggerPollerWorkerDeps,
-    TriggerPromptMaterializer, TriggerRepository, TrustedTriggerFireSubmitter,
+    TriggerPromptMaterializer, TriggerRepository, TriggerRunHistoryStatus,
+    TrustedTriggerFireSubmitter,
 };
-use ironclaw_turns::TurnPersistenceSnapshot;
+use ironclaw_turns::{TurnPersistenceSnapshot, TurnStatus};
 use rand::Rng;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -198,7 +199,9 @@ fn active_run_index(
         .iter()
         .map(|run| {
             let state = if run.status.is_terminal() {
-                TriggerActiveRunState::Terminal
+                TriggerActiveRunState::Terminal {
+                    status: terminal_run_history_status(run.status),
+                }
             } else {
                 TriggerActiveRunState::Nonterminal
             };
@@ -218,6 +221,26 @@ fn active_run_state_from_index(
         .get(&(request.tenant_id.clone(), request.run_id))
         .copied()
         .unwrap_or(TriggerActiveRunState::Missing)
+}
+
+fn terminal_run_history_status(status: TurnStatus) -> TriggerRunHistoryStatus {
+    debug_assert!(
+        status.is_terminal(),
+        "only terminal turn statuses should be normalized into run-history status"
+    );
+    match status {
+        TurnStatus::Completed => TriggerRunHistoryStatus::Ok,
+        TurnStatus::Cancelled | TurnStatus::Failed | TurnStatus::RecoveryRequired => {
+            TriggerRunHistoryStatus::Error
+        }
+        TurnStatus::Queued
+        | TurnStatus::Running
+        | TurnStatus::BlockedApproval
+        | TurnStatus::BlockedAuth
+        | TurnStatus::BlockedResource
+        | TurnStatus::BlockedDependentRun
+        | TurnStatus::CancelRequested => TriggerRunHistoryStatus::Error,
+    }
 }
 
 #[async_trait]
@@ -365,6 +388,20 @@ mod tests {
         assert_eq!(settings.worker, TriggerPollerWorkerConfig::default());
     }
 
+    #[test]
+    fn terminal_turn_statuses_map_to_run_history_statuses() {
+        let cases = [
+            (TurnStatus::Completed, TriggerRunHistoryStatus::Ok),
+            (TurnStatus::Cancelled, TriggerRunHistoryStatus::Error),
+            (TurnStatus::Failed, TriggerRunHistoryStatus::Error),
+            (TurnStatus::RecoveryRequired, TriggerRunHistoryStatus::Error),
+        ];
+
+        for (turn_status, expected) in cases {
+            assert_eq!(terminal_run_history_status(turn_status), expected);
+        }
+    }
+
     #[tokio::test]
     async fn trigger_poller_runtime_handle_aborts_when_join_times_out() {
         let cancel = CancellationToken::new();
@@ -453,7 +490,12 @@ mod tests {
             .await;
 
         assert!(matches!(results[0], Ok(TriggerActiveRunState::Nonterminal)));
-        assert!(matches!(results[1], Ok(TriggerActiveRunState::Terminal)));
+        assert!(matches!(
+            results[1],
+            Ok(TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok
+            })
+        ));
         assert!(matches!(results[2], Ok(TriggerActiveRunState::Missing)));
     }
 

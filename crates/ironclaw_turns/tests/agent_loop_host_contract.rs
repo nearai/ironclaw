@@ -2035,6 +2035,28 @@ fn capability_denied_reason_kind_is_typed_and_wire_compatible() {
 }
 
 #[test]
+fn capability_result_message_byte_len_round_trips() {
+    let json = serde_json::json!({
+        "result_ref": "result:big",
+        "safe_summary": "big result",
+        "byte_len": 33_001u64
+    });
+    let decoded: CapabilityResultMessage = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded.byte_len, 33_001);
+}
+
+#[test]
+fn capability_result_message_byte_len_defaults_to_zero_for_legacy_payload() {
+    // Legacy hosts that don't yet emit byte_len must still decode cleanly.
+    let json = serde_json::json!({
+        "result_ref": "result:legacy",
+        "safe_summary": "no byte_len field"
+    });
+    let decoded: CapabilityResultMessage = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded.byte_len, 0);
+}
+
+#[test]
 fn capability_progress_accepts_legacy_complete_wire_value() {
     let legacy_result = serde_json::json!({
         "result_ref": "result:legacy-complete",
