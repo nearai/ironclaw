@@ -273,7 +273,11 @@ fn onboard_success_value(outcome: &OnboardOutcome, consents: &OnboardConsents) -
             "include_tool_payloads": consents.include_tool_payloads,
         },
         "next_steps": "Traces are redacted locally and queued; submission requires meeting \
-    the score threshold. Opt out anytime with 'ironclaw traces opt-out'."
+    the score threshold. Optional second opt-in: to appear on the public community \
+    leaderboard, run 'ironclaw-reborn traces profile set --handle <pseudonymous-handle>' \
+    (or 'traces profile token' to mint a paste-able token for the web profile page). \
+    The browser cannot sign device-key requests — the token must be minted by IronClaw. \
+    Opt out anytime with 'ironclaw traces opt-out'."
     });
     // Navigation hints are optional and only included when present (and HTTPS).
     if let Some(ref url) = outcome.community_url {

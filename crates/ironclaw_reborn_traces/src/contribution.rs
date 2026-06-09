@@ -113,6 +113,12 @@ pub enum ConsentScope {
     BenchmarkOnly,
     RankingTraining,
     ModelTraining,
+    /// Contributor has explicitly consented to map their pseudonymous
+    /// principal_ref to a publicly-visible handle via the community
+    /// surface. Does NOT grant any trace-content allowed-uses on its
+    /// own — it gates the /v1/community/profile endpoints. A claim
+    /// scoped to ONLY public_attribution cannot submit traces.
+    PublicAttribution,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2492,6 +2498,9 @@ fn default_allowed_uses_for_scope(scope: ConsentScope) -> Vec<TraceAllowedUse> {
             TraceAllowedUse::ModelTraining,
             TraceAllowedUse::AggregateAnalytics,
         ],
+        // Public attribution grants no trace-content allowed-uses; a claim
+        // scoped to only public_attribution cannot submit traces.
+        ConsentScope::PublicAttribution => Vec::new(),
     }
 }
 
@@ -4949,6 +4958,38 @@ async fn issuer_request_bearer(
     }
 }
 
+/// Build the JSON body sent to the upload-claim issuer for a claim context.
+/// Factored out of `fetch_trace_upload_claim_from_issuer` so the wire shape
+/// (skip-serialized empty/None fields) is unit-testable without an HTTPS
+/// issuer.
+fn build_trace_upload_claim_issuer_request(
+    policy: &StandingTraceContributionPolicy,
+    context: &TraceUploadClaimContext,
+) -> TraceUploadClaimIssuerRequest {
+    // In DeviceKey mode the registered device key is the post-invite credential —
+    // the server does not expect (and must not receive) an invite_code in the body.
+    let invite_code = match policy.auth_mode {
+        TraceUploadAuthMode::WorkloadTokenEnv => policy
+            .upload_token_invite_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+        TraceUploadAuthMode::DeviceKey => None,
+    };
+    TraceUploadClaimIssuerRequest {
+        schema_version: "ironclaw.trace_upload_claim_request.v1",
+        tenant_id: policy.upload_token_tenant_id.clone(),
+        audience: policy.upload_token_audience.clone(),
+        trace_id: context.trace_id,
+        submission_id: context.submission_id,
+        consent_scopes: context.consent_scopes.clone(),
+        allowed_uses: context.allowed_uses.clone(),
+        requested_at: Utc::now(),
+        invite_code,
+    }
+}
+
 async fn fetch_trace_upload_claim_from_issuer(
     policy: &StandingTraceContributionPolicy,
     context: &TraceUploadClaimContext,
@@ -4976,28 +5017,7 @@ async fn fetch_trace_upload_claim_from_issuer(
         .resolve_to_addrs(&host, &resolved_addrs)
         .build()
         .context("failed to build Trace Commons upload token issuer HTTP client")?;
-    // In DeviceKey mode the registered device key is the post-invite credential —
-    // the server does not expect (and must not receive) an invite_code in the body.
-    let invite_code = match policy.auth_mode {
-        TraceUploadAuthMode::WorkloadTokenEnv => policy
-            .upload_token_invite_code
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
-        TraceUploadAuthMode::DeviceKey => None,
-    };
-    let request_body = TraceUploadClaimIssuerRequest {
-        schema_version: "ironclaw.trace_upload_claim_request.v1",
-        tenant_id: policy.upload_token_tenant_id.clone(),
-        audience: policy.upload_token_audience.clone(),
-        trace_id: context.trace_id,
-        submission_id: context.submission_id,
-        consent_scopes: context.consent_scopes.clone(),
-        allowed_uses: context.allowed_uses.clone(),
-        requested_at: Utc::now(),
-        invite_code,
-    };
+    let request_body = build_trace_upload_claim_issuer_request(policy, context);
     let mut request = client
         .post(parsed.clone())
         .header(reqwest::header::ACCEPT, "application/json")
@@ -5244,6 +5264,238 @@ fn trace_upload_claim_issuer_timeout(
 fn safe_trace_upload_claim_issuer_url_label(url: &reqwest::Url) -> String {
     let host = url.host_str().unwrap_or("<unknown-host>");
     format!("{}://{}", url.scheme(), host)
+}
+
+pub const COMMUNITY_PROFILE_HANDLE_MIN_CHARS: usize = 3;
+pub const COMMUNITY_PROFILE_HANDLE_MAX_CHARS: usize = 32;
+pub const COMMUNITY_PROFILE_BIO_MAX_BYTES: usize = 280;
+const COMMUNITY_PROFILE_PATH: &str = "/v1/community/profile";
+
+/// Short-lived claim minted from the upload-claim issuer that authorizes
+/// community-profile management only (consent scope `public_attribution`,
+/// empty allowed-uses). A claim scoped to only `public_attribution` cannot
+/// submit traces — it gates the `/v1/community/profile` endpoints.
+#[derive(Debug, Clone)]
+pub struct ProfileAttributionToken {
+    pub access_token: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_in: Option<i64>,
+}
+
+/// Claim context for the community-profile second opt-in: no trace ids, the
+/// `public_attribution` consent scope only, and no allowed uses.
+fn profile_attribution_claim_context(scope: Option<&str>) -> TraceUploadClaimContext {
+    TraceUploadClaimContext {
+        trace_id: None,
+        submission_id: None,
+        consent_scopes: vec![ConsentScope::PublicAttribution],
+        allowed_uses: Vec::new(),
+        scope_dir: Some(trace_contribution_dir_for_scope(scope)),
+    }
+}
+
+/// Mint a short-lived profile-attribution token from the configured Trace
+/// Commons upload-claim issuer. The token authorizes community-profile
+/// management only and cannot submit traces.
+pub async fn mint_profile_attribution_token_for_scope(
+    scope: Option<&str>,
+) -> anyhow::Result<ProfileAttributionToken> {
+    let policy = read_trace_policy_for_scope(scope)?;
+    mint_profile_attribution_token_with_policy(&policy, scope).await
+}
+
+async fn mint_profile_attribution_token_with_policy(
+    policy: &StandingTraceContributionPolicy,
+    scope: Option<&str>,
+) -> anyhow::Result<ProfileAttributionToken> {
+    anyhow::ensure!(
+        policy.enabled,
+        "not enrolled in Trace Commons — onboard first (run the Trace Commons onboarding \
+         or `ironclaw traces opt-in`)"
+    );
+    anyhow::ensure!(
+        policy
+            .upload_token_issuer_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty()),
+        "Trace Commons upload token issuer URL is not configured; re-run onboarding"
+    );
+    let context = profile_attribution_claim_context(scope);
+    let claim = fetch_trace_upload_claim_from_issuer(policy, &context).await?;
+    Ok(ProfileAttributionToken {
+        access_token: claim.access_token,
+        expires_at: claim.expires_at,
+        expires_in: claim.expires_in,
+    })
+}
+
+/// Create or update the public community profile for this scope. Mints a
+/// fresh profile-attribution token and PUTs the profile to the Trace Commons
+/// community endpoint derived from the policy's issuer URL.
+pub async fn set_community_profile_for_scope(
+    scope: Option<&str>,
+    display_handle: &str,
+    bio: Option<&str>,
+) -> anyhow::Result<()> {
+    let handle = validate_community_profile_handle(display_handle)?;
+    if let Some(bio) = bio {
+        validate_community_profile_bio(bio)?;
+    }
+    let policy = read_trace_policy_for_scope(scope)?;
+    let url = community_profile_url_from_policy(&policy)?;
+    let token = mint_profile_attribution_token_with_policy(&policy, scope).await?;
+    let client = community_profile_http_client(&policy, &url).await?;
+    let body = serde_json::json!({
+        "display_handle": handle,
+        "bio": bio,
+    });
+    execute_community_profile_request(
+        &client,
+        reqwest::Method::PUT,
+        url,
+        &token.access_token,
+        Some(&body),
+    )
+    .await
+}
+
+/// Withdraw the public community profile for this scope (DELETE the profile
+/// resource). Mints a fresh profile-attribution token like
+/// [`set_community_profile_for_scope`].
+pub async fn withdraw_community_profile_for_scope(scope: Option<&str>) -> anyhow::Result<()> {
+    let policy = read_trace_policy_for_scope(scope)?;
+    let url = community_profile_url_from_policy(&policy)?;
+    let token = mint_profile_attribution_token_with_policy(&policy, scope).await?;
+    let client = community_profile_http_client(&policy, &url).await?;
+    execute_community_profile_request(
+        &client,
+        reqwest::Method::DELETE,
+        url,
+        &token.access_token,
+        None,
+    )
+    .await
+}
+
+/// Derive the community-profile endpoint from the policy's upload-claim
+/// issuer URL, keeping scheme/host/port and replacing only the path. The
+/// derived URL inherits the issuer-host hardening (https, allowlisted host,
+/// no embedded credentials/query/fragment).
+fn community_profile_url_from_policy(
+    policy: &StandingTraceContributionPolicy,
+) -> anyhow::Result<reqwest::Url> {
+    let issuer_url = policy
+        .upload_token_issuer_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("Trace Commons upload token issuer URL is not configured")
+        })?;
+    let mut url =
+        reqwest::Url::parse(issuer_url).context("invalid Trace Commons upload token issuer URL")?;
+    validate_trace_upload_claim_issuer_url(&url, &policy.upload_token_issuer_allowed_hosts)?;
+    url.set_path(COMMUNITY_PROFILE_PATH);
+    Ok(url)
+}
+
+fn validate_community_profile_handle(handle: &str) -> anyhow::Result<String> {
+    let trimmed = handle.trim();
+    anyhow::ensure!(
+        trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        "community profile handle may only contain ASCII letters, digits, '-' and '_'"
+    );
+    // All-ASCII at this point, so byte length == character length.
+    anyhow::ensure!(
+        trimmed.len() >= COMMUNITY_PROFILE_HANDLE_MIN_CHARS,
+        "community profile handle must be at least {COMMUNITY_PROFILE_HANDLE_MIN_CHARS} characters"
+    );
+    anyhow::ensure!(
+        trimmed.len() <= COMMUNITY_PROFILE_HANDLE_MAX_CHARS,
+        "community profile handle must be at most {COMMUNITY_PROFILE_HANDLE_MAX_CHARS} characters"
+    );
+    Ok(trimmed.to_string())
+}
+
+fn validate_community_profile_bio(bio: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        bio.len() <= COMMUNITY_PROFILE_BIO_MAX_BYTES,
+        "community profile bio must be at most {COMMUNITY_PROFILE_BIO_MAX_BYTES} bytes"
+    );
+    Ok(())
+}
+
+/// Build the hardened HTTP client for community-profile requests: pinned DNS
+/// resolution against the validated issuer host, bounded timeouts, and no
+/// redirect following — mirroring `fetch_trace_upload_claim_from_issuer`.
+async fn community_profile_http_client(
+    policy: &StandingTraceContributionPolicy,
+    url: &reqwest::Url,
+) -> anyhow::Result<reqwest::Client> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("Trace Commons community profile URL requires a host"))?
+        .to_ascii_lowercase();
+    let port = url.port_or_known_default().ok_or_else(|| {
+        anyhow::anyhow!("Trace Commons community profile URL requires a known port")
+    })?;
+    let resolved_addrs = resolve_trace_upload_claim_issuer_host(&host, port).await?;
+    let timeout = trace_upload_claim_issuer_timeout(policy)?;
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(Duration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("ironclaw-trace-commons-community-profile/0.1")
+        .resolve_to_addrs(&host, &resolved_addrs)
+        .build()
+        .context("failed to build Trace Commons community profile HTTP client")
+}
+
+/// Send a community-profile request and map non-success statuses to a bounded
+/// diagnostic. The bearer token and raw response bodies never appear in
+/// errors or logs — only the bounded JSON `error` field, when present.
+async fn execute_community_profile_request(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: reqwest::Url,
+    access_token: &str,
+    body: Option<&Value>,
+) -> anyhow::Result<()> {
+    let method_label = method.as_str().to_string();
+    let mut request = client
+        .request(method, url.clone())
+        .header(reqwest::header::ACCEPT, "application/json")
+        .bearer_auth(access_token);
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    let response = request.send().await.with_context(|| {
+        format!(
+            "Trace Commons community profile {} request to {} failed",
+            method_label,
+            safe_trace_upload_claim_issuer_url_label(&url)
+        )
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = read_bounded_trace_upload_claim_response(response, &url)
+            .await
+            .unwrap_or_default(); // silent-ok: error-body read best-effort, status alone is diagnostic
+        let label = parse_trace_upload_claim_error_label(&body_text);
+        return Err(anyhow::anyhow!(
+            "Trace Commons community profile {} request to {} rejected: HTTP {}{}",
+            method_label,
+            safe_trace_upload_claim_issuer_url_label(&url),
+            status.as_u16(),
+            label
+                .as_deref()
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -12712,5 +12964,403 @@ mod tests {
             Some("invite-abc"),
             "WorkloadTokenEnv mode must forward invite_code from policy"
         );
+    }
+
+    // ── community profile (public_attribution second opt-in) ────────────────
+
+    #[test]
+    fn community_profile_handle_validation_rejects_bad_handles() {
+        let error = validate_community_profile_handle("ab").expect_err("too short rejected");
+        assert!(error.to_string().contains("at least 3"));
+
+        let long = "a".repeat(33);
+        let error = validate_community_profile_handle(&long).expect_err("too long rejected");
+        assert!(error.to_string().contains("at most 32"));
+
+        for bad in ["bad handle!", "naïve", "pilot.zaki", "pilot/zaki"] {
+            let error =
+                validate_community_profile_handle(bad).expect_err("bad characters rejected");
+            assert!(
+                error.to_string().contains("ASCII letters"),
+                "{bad} should fail the character-set check: {error}"
+            );
+        }
+
+        assert_eq!(
+            validate_community_profile_handle("  pilot_zaki  ").expect("trimmed handle accepted"),
+            "pilot_zaki"
+        );
+        assert_eq!(
+            validate_community_profile_handle("Pilot-Zaki_42").expect("alnum/-/_ accepted"),
+            "Pilot-Zaki_42"
+        );
+    }
+
+    #[test]
+    fn community_profile_bio_validation_bounds_bytes() {
+        validate_community_profile_bio(&"x".repeat(280)).expect("280 bytes accepted");
+        let error =
+            validate_community_profile_bio(&"x".repeat(281)).expect_err("281 bytes rejected");
+        assert!(error.to_string().contains("at most 280 bytes"));
+        // Byte-length, not char-length: 141 two-byte chars = 282 bytes.
+        assert!(validate_community_profile_bio(&"é".repeat(141)).is_err());
+    }
+
+    #[test]
+    fn community_profile_url_derives_from_issuer_url() {
+        let policy = StandingTraceContributionPolicy {
+            upload_token_issuer_url: Some(
+                "https://issuer.example.com:8443/v1/trace-upload-claim".to_string(),
+            ),
+            upload_token_issuer_allowed_hosts: BTreeSet::from(["issuer.example.com".to_string()]),
+            ..Default::default()
+        };
+        let url = community_profile_url_from_policy(&policy).expect("profile URL derives");
+        assert_eq!(
+            url.as_str(),
+            "https://issuer.example.com:8443/v1/community/profile",
+            "scheme/host/port preserved, path replaced"
+        );
+
+        // Issuer-host hardening is inherited: non-allowlisted host rejected.
+        let unlisted = StandingTraceContributionPolicy {
+            upload_token_issuer_url: Some(
+                "https://evil.example.com/v1/trace-upload-claim".to_string(),
+            ),
+            upload_token_issuer_allowed_hosts: BTreeSet::from(["issuer.example.com".to_string()]),
+            ..Default::default()
+        };
+        assert!(community_profile_url_from_policy(&unlisted).is_err());
+
+        // And plain http rejected.
+        let insecure = StandingTraceContributionPolicy {
+            upload_token_issuer_url: Some(
+                "http://issuer.example.com/v1/trace-upload-claim".to_string(),
+            ),
+            upload_token_issuer_allowed_hosts: BTreeSet::from(["issuer.example.com".to_string()]),
+            ..Default::default()
+        };
+        assert!(community_profile_url_from_policy(&insecure).is_err());
+    }
+
+    #[tokio::test]
+    async fn mint_profile_attribution_token_requires_enrollment() {
+        let scope = format!("trace-profile-test-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(Some(&scope), &StandingTraceContributionPolicy::default())
+            .expect("policy writes");
+        let error = mint_profile_attribution_token_for_scope(Some(&scope))
+            .await
+            .expect_err("disabled policy must refuse to mint");
+        assert!(
+            error.to_string().contains("not enrolled in Trace Commons"),
+            "error must point at onboarding: {error}"
+        );
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
+    async fn mint_profile_attribution_token_requires_issuer_url() {
+        let scope = format!("trace-profile-test-{}", Uuid::new_v4());
+        write_trace_policy_for_scope(
+            Some(&scope),
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .expect("policy writes");
+        let error = mint_profile_attribution_token_for_scope(Some(&scope))
+            .await
+            .expect_err("missing issuer URL must refuse to mint");
+        assert!(
+            error.to_string().contains("issuer URL is not configured"),
+            "error must name the missing issuer URL: {error}"
+        );
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[tokio::test]
+    async fn profile_attribution_claim_request_wire_shape_and_mock_issuer_roundtrip() {
+        // The issuer-URL hardening (https + non-loopback) keeps the real
+        // fetch path off local mock servers, so — like the PilotAllowlist
+        // tests above — we assert the wire shape via the factored-out
+        // request builder and confirm a real issuer round-trip of exactly
+        // that body against a mock that rejects any drift.
+        let scope = format!("trace-profile-test-{}", Uuid::new_v4());
+        let context = profile_attribution_claim_context(Some(&scope));
+        let policy = StandingTraceContributionPolicy {
+            auth_mode: TraceUploadAuthMode::WorkloadTokenEnv,
+            upload_token_tenant_id: Some("tenant-a".to_string()),
+            upload_token_audience: Some("trace-commons".to_string()),
+            ..Default::default()
+        };
+        let request = build_trace_upload_claim_issuer_request(&policy, &context);
+        let body = serde_json::to_value(&request).expect("request serializes");
+        assert_eq!(
+            body["consent_scopes"],
+            serde_json::json!(["public_attribution"])
+        );
+        let obj = body.as_object().expect("request body is an object");
+        assert!(
+            !obj.contains_key("allowed_uses"),
+            "empty allowed_uses must be skip-serialized"
+        );
+        assert!(
+            !obj.contains_key("trace_id"),
+            "profile claims carry no trace_id"
+        );
+        assert!(
+            !obj.contains_key("submission_id"),
+            "profile claims carry no submission_id"
+        );
+
+        let mint_token = test_jwt_with_header(serde_json::json!({
+            "alg": "EdDSA",
+            "kid": "managed-key-1"
+        }));
+        let mint_token_for_route = mint_token.clone();
+        let app = axum::Router::new().route(
+            "/v1/trace-upload-claim",
+            axum::routing::post(
+                move |axum::Json(request_body): axum::Json<serde_json::Value>| {
+                    let mint_token = mint_token_for_route.clone();
+                    async move {
+                        let obj = request_body.as_object().cloned().unwrap_or_default();
+                        if request_body["consent_scopes"]
+                            != serde_json::json!(["public_attribution"])
+                            || obj.contains_key("allowed_uses")
+                            || obj.contains_key("trace_id")
+                            || obj.contains_key("submission_id")
+                        {
+                            return (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::Json(serde_json::json!({"error": "unexpected claim body"})),
+                            );
+                        }
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "access_token": mint_token,
+                                "token_type": "Bearer",
+                                "expires_in": 300
+                            })),
+                        )
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock issuer listener binds");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = reqwest::Client::builder()
+            .build()
+            .expect("reqwest client builds");
+        let response = client
+            .post(format!("http://{addr}/v1/trace-upload-claim"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request)
+            .send()
+            .await
+            .expect("mock issuer responds");
+        assert_eq!(
+            response.status().as_u16(),
+            200,
+            "mock issuer must accept the profile claim body"
+        );
+        let claim: TraceUploadClaimIssuerResponse =
+            response.json().await.expect("claim response parses");
+        validate_trace_upload_claim_response(&claim).expect("mock claim passes validation");
+        assert_eq!(claim.access_token, mint_token);
+        assert_eq!(claim.expires_in, Some(300));
+    }
+
+    #[tokio::test]
+    async fn community_profile_put_sends_bearer_and_body() {
+        let token = test_jwt_with_header(serde_json::json!({
+            "alg": "EdDSA",
+            "kid": "managed-key-1"
+        }));
+        let seen: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_for_route = seen.clone();
+        let app = axum::Router::new().route(
+            "/v1/community/profile",
+            axum::routing::put(
+                move |headers: axum::http::HeaderMap,
+                      axum::Json(body): axum::Json<serde_json::Value>| {
+                    let seen = seen_for_route.clone();
+                    async move {
+                        let authorization = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("<missing>")
+                            .to_string();
+                        seen.lock().expect("seen lock").push((authorization, body));
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({"display_handle": "pilot_zaki"})),
+                        )
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock profile listener binds");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = reqwest::Url::parse(&format!("http://{addr}/v1/community/profile"))
+            .expect("profile url parses");
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("reqwest client builds");
+        execute_community_profile_request(
+            &client,
+            reqwest::Method::PUT,
+            url,
+            &token,
+            Some(&serde_json::json!({"display_handle": "pilot_zaki", "bio": null})),
+        )
+        .await
+        .expect("profile PUT succeeds");
+
+        let seen = seen.lock().expect("seen lock");
+        assert_eq!(seen.len(), 1);
+        let (authorization, body) = &seen[0];
+        assert_eq!(authorization, &format!("Bearer {token}"));
+        assert_eq!(
+            body,
+            &serde_json::json!({"display_handle": "pilot_zaki", "bio": null})
+        );
+    }
+
+    #[tokio::test]
+    async fn community_profile_delete_sends_bearer_without_body() {
+        let token = test_jwt_with_header(serde_json::json!({
+            "alg": "EdDSA",
+            "kid": "managed-key-1"
+        }));
+        let seen: Arc<std::sync::Mutex<Vec<(String, usize)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_for_route = seen.clone();
+        let app = axum::Router::new().route(
+            "/v1/community/profile",
+            axum::routing::delete(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let seen = seen_for_route.clone();
+                    async move {
+                        let authorization = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("<missing>")
+                            .to_string();
+                        seen.lock()
+                            .expect("seen lock")
+                            .push((authorization, body.len()));
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock profile listener binds");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = reqwest::Url::parse(&format!("http://{addr}/v1/community/profile"))
+            .expect("profile url parses");
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("reqwest client builds");
+        execute_community_profile_request(&client, reqwest::Method::DELETE, url, &token, None)
+            .await
+            .expect("profile DELETE succeeds");
+
+        let seen = seen.lock().expect("seen lock");
+        assert_eq!(seen.len(), 1);
+        let (authorization, body_len) = &seen[0];
+        assert_eq!(authorization, &format!("Bearer {token}"));
+        assert_eq!(*body_len, 0, "withdraw must send no body");
+    }
+
+    #[tokio::test]
+    async fn community_profile_error_surfaces_bounded_error_field_without_token() {
+        let token = test_jwt_with_header(serde_json::json!({
+            "alg": "EdDSA",
+            "kid": "managed-key-1"
+        }));
+        let app = axum::Router::new().route(
+            "/v1/community/profile",
+            axum::routing::put(|| async {
+                (
+                    axum::http::StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({"error": "display handle already taken"})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock profile listener binds");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = reqwest::Url::parse(&format!("http://{addr}/v1/community/profile"))
+            .expect("profile url parses");
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("reqwest client builds");
+        let error = execute_community_profile_request(
+            &client,
+            reqwest::Method::PUT,
+            url,
+            &token,
+            Some(&serde_json::json!({"display_handle": "pilot_zaki", "bio": null})),
+        )
+        .await
+        .expect_err("conflict must surface as an error");
+
+        let chain = format!("{error:#}");
+        assert!(chain.contains("HTTP 409"), "status surfaces: {chain}");
+        assert!(
+            chain.contains("display handle already taken"),
+            "bounded error field surfaces: {chain}"
+        );
+        assert!(
+            !chain.contains(&token),
+            "bearer token must never appear in errors: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_community_profile_rejects_invalid_handle_before_any_network_call() {
+        // Test through the caller: the public entrypoint must refuse a bad
+        // handle before reading policy or touching the network.
+        let scope = format!("trace-profile-test-{}", Uuid::new_v4());
+        let error = set_community_profile_for_scope(Some(&scope), "x", None)
+            .await
+            .expect_err("short handle must be rejected");
+        assert!(error.to_string().contains("at least 3"));
+
+        let error =
+            set_community_profile_for_scope(Some(&scope), "ok_handle", Some(&"x".repeat(281)))
+                .await
+                .expect_err("oversized bio must be rejected");
+        assert!(error.to_string().contains("at most 280 bytes"));
     }
 }
