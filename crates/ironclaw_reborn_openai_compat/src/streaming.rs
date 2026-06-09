@@ -10,9 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use chrono::Utc;
 use futures_core::Stream;
 use ironclaw_product_adapters::{
     ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
@@ -30,7 +29,9 @@ use crate::{
     OpenAiResponseOutputItemStatus, OpenAiResponseStatus, OpenAiResponsesMessageRole,
 };
 
-const STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const STREAM_INITIAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const STREAM_MAX_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const STREAM_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenAiChatProjectionStreamRequest {
@@ -40,6 +41,7 @@ pub struct OpenAiChatProjectionStreamRequest {
     pub requested_model: String,
     pub model_only_tools: Option<OpenAiChatModelOnlyTools>,
     pub mapping: OpenAiCompatResourceMapping,
+    pub wait_timeout: Duration,
     pub after_cursor: Option<ProjectionCursor>,
 }
 
@@ -50,6 +52,7 @@ pub struct OpenAiResponseProjectionStreamRequest {
     pub accepted_ack: ProductInboundAck,
     pub requested_model: String,
     pub mapping: OpenAiCompatResourceMapping,
+    pub wait_timeout: Duration,
     pub after_cursor: Option<ProjectionCursor>,
 }
 
@@ -70,14 +73,18 @@ pub(crate) fn chat_sse_response(
     streamer: Arc<dyn OpenAiCompatProjectionStreamer>,
     request: OpenAiChatProjectionStreamRequest,
 ) -> Response {
-    Sse::new(chat_sse_stream(streamer, request)).into_response()
+    Sse::new(chat_sse_stream(streamer, request))
+        .keep_alive(KeepAlive::new().interval(STREAM_KEEP_ALIVE_INTERVAL))
+        .into_response()
 }
 
 pub(crate) fn response_sse_response(
     streamer: Arc<dyn OpenAiCompatProjectionStreamer>,
     request: OpenAiResponseProjectionStreamRequest,
 ) -> Response {
-    Sse::new(response_sse_stream(streamer, request)).into_response()
+    Sse::new(response_sse_stream(streamer, request))
+        .keep_alive(KeepAlive::new().interval(STREAM_KEEP_ALIVE_INTERVAL))
+        .into_response()
 }
 
 fn chat_sse_stream(
@@ -85,11 +92,12 @@ fn chat_sse_stream(
     request: OpenAiChatProjectionStreamRequest,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
-        let created = unix_timestamp_now();
+        let created = request.mapping.created_at;
         let public_id = request.public_id.clone();
         let model = request.requested_model.clone();
         let mut after_cursor = request.after_cursor.clone();
         let mut state = TextDeltaState::default();
+        let mut pacing = StreamPacing::new(request.wait_timeout);
 
         yield Ok(chat_chunk_event(OpenAiChatCompletionChunk {
             id: public_id.clone(),
@@ -111,16 +119,30 @@ fn chat_sse_stream(
         loop {
             let mut drain_request = request.clone();
             drain_request.after_cursor = after_cursor.clone();
-            match streamer.drain_chat(drain_request).await {
+            let drain_result = match pacing
+                .timeout(streamer.drain_chat(drain_request))
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    yield Ok(openai_error_event(error));
+                    return;
+                }
+            };
+            match drain_result {
                 Ok(envelopes) => {
                     if envelopes.is_empty() {
-                        tokio::time::sleep(STREAM_POLL_INTERVAL).await;
+                        if let Err(error) = pacing.sleep_after_empty_poll().await {
+                            yield Ok(openai_error_event(error));
+                            return;
+                        }
                         continue;
                     }
+                    pacing.reset_backoff();
                     for envelope in envelopes {
                         after_cursor = Some(envelope.projection_cursor().clone());
-                        let payload = envelope.payload();
-                        match text_from_payload(payload) {
+                        let payload_view = payload_view(envelope.payload());
+                        match payload_view.text {
                             PayloadText::None => {}
                             PayloadText::Update(text) => match state.delta_for(text) {
                                 Ok(Some(delta)) => yield Ok(chat_text_delta_event(&public_id, created, &model, delta)),
@@ -144,7 +166,7 @@ fn chat_sse_stream(
                                 return;
                             }
                         }
-                        match terminal_status_from_payload(payload) {
+                        match payload_view.terminal_status {
                             TerminalStatus::None => {}
                             TerminalStatus::Completed => {
                                 yield Ok(chat_finish_event(&public_id, created, &model));
@@ -172,13 +194,14 @@ fn response_sse_stream(
     request: OpenAiResponseProjectionStreamRequest,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
-        let created = unix_timestamp_now();
+        let created = request.mapping.created_at;
         let public_id = request.public_id.clone();
         let model = request.requested_model.clone();
         let item_id = format!("msg_{}", public_id.as_str());
         let mut sequence_number = 0_u64;
         let mut after_cursor = request.after_cursor.clone();
         let mut state = TextDeltaState::default();
+        let mut pacing = StreamPacing::new(request.wait_timeout);
 
         yield Ok(response_event(
             "response.created",
@@ -193,16 +216,30 @@ fn response_sse_stream(
         loop {
             let mut drain_request = request.clone();
             drain_request.after_cursor = after_cursor.clone();
-            match streamer.drain_response(drain_request).await {
+            let drain_result = match pacing
+                .timeout(streamer.drain_response(drain_request))
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    yield Ok(response_stream_error_event(error));
+                    return;
+                }
+            };
+            match drain_result {
                 Ok(envelopes) => {
                     if envelopes.is_empty() {
-                        tokio::time::sleep(STREAM_POLL_INTERVAL).await;
+                        if let Err(error) = pacing.sleep_after_empty_poll().await {
+                            yield Ok(response_stream_error_event(error));
+                            return;
+                        }
                         continue;
                     }
+                    pacing.reset_backoff();
                     for envelope in envelopes {
                         after_cursor = Some(envelope.projection_cursor().clone());
-                        let payload = envelope.payload();
-                        match text_from_payload(payload) {
+                        let payload_view = payload_view(envelope.payload());
+                        match payload_view.text {
                             PayloadText::None => {}
                             PayloadText::Update(text) => match state.delta_for(text) {
                                 Ok(Some(delta)) => {
@@ -237,8 +274,10 @@ fn response_sse_stream(
                                         return;
                                     }
                                 }
-                                yield Ok(response_text_done_event(&item_id, sequence_number, state.text()));
-                                sequence_number += 1;
+                                if !state.is_empty() {
+                                    yield Ok(response_text_done_event(&item_id, sequence_number, state.text()));
+                                    sequence_number += 1;
+                                }
                                 yield Ok(response_terminal_event(
                                     "response.completed",
                                     sequence_number,
@@ -251,11 +290,13 @@ fn response_sse_stream(
                                 return;
                             }
                         }
-                        match terminal_status_from_payload(payload) {
+                        match payload_view.terminal_status {
                             TerminalStatus::None => {}
                             TerminalStatus::Completed => {
-                                yield Ok(response_text_done_event(&item_id, sequence_number, state.text()));
-                                sequence_number += 1;
+                                if !state.is_empty() {
+                                    yield Ok(response_text_done_event(&item_id, sequence_number, state.text()));
+                                    sequence_number += 1;
+                                }
                                 yield Ok(response_terminal_event(
                                     "response.completed",
                                     sequence_number,
@@ -303,6 +344,56 @@ fn response_sse_stream(
     }
 }
 
+struct StreamPacing {
+    deadline: tokio::time::Instant,
+    backoff: Duration,
+}
+
+impl StreamPacing {
+    fn new(wait_timeout: Duration) -> Self {
+        Self {
+            deadline: tokio::time::Instant::now() + wait_timeout,
+            backoff: STREAM_INITIAL_POLL_INTERVAL,
+        }
+    }
+
+    async fn timeout<F, T>(&self, future: F) -> Result<T, OpenAiCompatHttpError>
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let remaining = self.remaining()?;
+        tokio::time::timeout(remaining, future)
+            .await
+            .map_err(|_| stream_timeout_error())
+    }
+
+    async fn sleep_after_empty_poll(&mut self) -> Result<(), OpenAiCompatHttpError> {
+        let remaining = self.remaining()?;
+        tokio::time::sleep(self.backoff.min(remaining)).await;
+        self.backoff = (self.backoff * 2).min(STREAM_MAX_POLL_INTERVAL);
+        self.remaining().map(|_| ())
+    }
+
+    fn reset_backoff(&mut self) {
+        self.backoff = STREAM_INITIAL_POLL_INTERVAL;
+    }
+
+    fn remaining(&self) -> Result<Duration, OpenAiCompatHttpError> {
+        let remaining = self
+            .deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .ok_or_else(stream_timeout_error)?;
+        if remaining.is_zero() {
+            return Err(stream_timeout_error());
+        }
+        Ok(remaining)
+    }
+}
+
+fn stream_timeout_error() -> OpenAiCompatHttpError {
+    OpenAiCompatHttpError::from_kind(503, true, OpenAiCompatErrorKind::ServiceUnavailable, None)
+}
+
 #[derive(Default)]
 struct TextDeltaState {
     text: String,
@@ -310,23 +401,40 @@ struct TextDeltaState {
 
 impl TextDeltaState {
     fn delta_for(&mut self, next: &str) -> Result<Option<String>, OpenAiCompatHttpError> {
-        if next == self.text {
+        let consumed = self.text.len();
+        if next.len() == consumed {
+            if next.as_bytes() != self.text.as_bytes() {
+                return Err(OpenAiCompatHttpError::from_kind(
+                    500,
+                    false,
+                    OpenAiCompatErrorKind::Internal,
+                    None,
+                ));
+            }
             return Ok(None);
         }
-        let Some(delta) = next.strip_prefix(&self.text) else {
+        if next.len() < consumed
+            || !next.is_char_boundary(consumed)
+            || !next.as_bytes().starts_with(self.text.as_bytes())
+        {
             return Err(OpenAiCompatHttpError::from_kind(
                 500,
                 false,
                 OpenAiCompatErrorKind::Internal,
                 None,
             ));
-        };
-        self.text = next.to_string();
+        }
+        let delta = &next[consumed..];
+        self.text.push_str(delta);
         Ok(Some(delta.to_string()))
     }
 
     fn text(&self) -> &str {
         &self.text
+    }
+
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
     }
 }
 
@@ -338,58 +446,65 @@ enum TerminalStatus {
     Cancelled,
 }
 
-fn terminal_status_from_payload(payload: &ProductOutboundPayload) -> TerminalStatus {
-    match payload {
-        ProductOutboundPayload::ProjectionSnapshot { state }
-        | ProductOutboundPayload::ProjectionUpdate { state } => terminal_status_from_state(state),
-        _ => TerminalStatus::None,
-    }
-}
-
-fn terminal_status_from_state(state: &ProductProjectionState) -> TerminalStatus {
-    state
-        .items
-        .iter()
-        .rev()
-        .find_map(|item| match item {
-            ProductProjectionItem::RunStatus { status, .. } => match status.as_str() {
-                "completed" => Some(TerminalStatus::Completed),
-                "failed" | "killed" => Some(TerminalStatus::Failed),
-                "cancelled" => Some(TerminalStatus::Cancelled),
-                _ => None,
-            },
-            _ => None,
-        })
-        .unwrap_or(TerminalStatus::None)
-}
-
 enum PayloadText<'a> {
     None,
     Update(&'a str),
     Final(&'a str),
 }
 
-fn text_from_payload(payload: &ProductOutboundPayload) -> PayloadText<'_> {
+struct PayloadView<'a> {
+    text: PayloadText<'a>,
+    terminal_status: TerminalStatus,
+}
+
+fn payload_view(payload: &ProductOutboundPayload) -> PayloadView<'_> {
     match payload {
-        ProductOutboundPayload::FinalReply(reply) => PayloadText::Final(&reply.text),
+        ProductOutboundPayload::FinalReply(reply) => PayloadView {
+            text: PayloadText::Final(&reply.text),
+            terminal_status: TerminalStatus::None,
+        },
         ProductOutboundPayload::ProjectionSnapshot { state }
-        | ProductOutboundPayload::ProjectionUpdate { state } => state_text(state)
-            .map(PayloadText::Update)
-            .unwrap_or(PayloadText::None),
+        | ProductOutboundPayload::ProjectionUpdate { state } => projection_state_view(state),
         ProductOutboundPayload::KeepAlive
         | ProductOutboundPayload::Progress(_)
         | ProductOutboundPayload::CapabilityActivity(_)
         | ProductOutboundPayload::CapabilityDisplayPreview(_)
         | ProductOutboundPayload::GatePrompt(_)
-        | ProductOutboundPayload::AuthPrompt(_) => PayloadText::None,
+        | ProductOutboundPayload::AuthPrompt(_) => PayloadView {
+            text: PayloadText::None,
+            terminal_status: TerminalStatus::None,
+        },
     }
 }
 
-fn state_text(state: &ProductProjectionState) -> Option<&str> {
-    state.items.iter().rev().find_map(|item| match item {
-        ProductProjectionItem::Text { body, .. } => Some(body.as_str()),
-        _ => None,
-    })
+fn projection_state_view(state: &ProductProjectionState) -> PayloadView<'_> {
+    let mut text = PayloadText::None;
+    let mut terminal_status = TerminalStatus::None;
+    for item in state.items.iter().rev() {
+        match item {
+            ProductProjectionItem::Text { body, .. } if matches!(text, PayloadText::None) => {
+                text = PayloadText::Update(body.as_str());
+            }
+            ProductProjectionItem::RunStatus { status, .. }
+                if matches!(terminal_status, TerminalStatus::None) =>
+            {
+                terminal_status = match status.as_str() {
+                    "completed" => TerminalStatus::Completed,
+                    "failed" | "killed" => TerminalStatus::Failed,
+                    "cancelled" => TerminalStatus::Cancelled,
+                    _ => TerminalStatus::None,
+                };
+            }
+            _ => {}
+        }
+        if !matches!(text, PayloadText::None) && !matches!(terminal_status, TerminalStatus::None) {
+            break;
+        }
+    }
+    PayloadView {
+        text,
+        terminal_status,
+    }
 }
 
 fn chat_text_delta_event(
@@ -573,9 +688,4 @@ fn response_object(
         incomplete_details: None,
         usage: None,
     }
-}
-
-fn unix_timestamp_now() -> u64 {
-    let timestamp = Utc::now().timestamp();
-    if timestamp < 0 { 0 } else { timestamp as u64 }
 }

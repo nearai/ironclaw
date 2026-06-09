@@ -42,13 +42,13 @@ pub struct ModelInfo {
 }
 
 /// Default NEAR AI model used when no model is configured.
-pub const DEFAULT_MODEL: &str = "Qwen/Qwen3.5-122B-A10B";
+pub const DEFAULT_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 
 /// Fallback model list used by the setup wizard when the `/models` API is
 /// unreachable. Returns `(model_id, display_label)` pairs.
 pub fn default_models() -> Vec<(String, String)> {
     vec![
-        (DEFAULT_MODEL.into(), "Qwen 3.5 122B (default)".into()),
+        (DEFAULT_MODEL.into(), "DeepSeek V4 Flash (default)".into()),
         (
             "Qwen/Qwen3-32B".into(),
             "Qwen 3 32B (smaller, faster)".into(),
@@ -641,6 +641,7 @@ impl LlmProvider for NearAiChatProvider {
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -1361,6 +1362,7 @@ mod tests {
                 arguments: serde_json::json!({"owner": "foo", "repo": "bar"}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             },
             ToolCall {
                 id: "call_2".to_string(),
@@ -1368,6 +1370,7 @@ mod tests {
                 arguments: serde_json::json!({"query": "test"}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             },
         ];
 
@@ -1482,6 +1485,7 @@ mod tests {
             arguments: serde_json::json!({"key": "value"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let chat_msg: ChatCompletionMessage = msg.into();
@@ -1613,6 +1617,7 @@ mod tests {
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -1671,6 +1676,7 @@ mod tests {
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -1772,6 +1778,7 @@ mod tests {
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -2578,6 +2585,7 @@ mod tests {
                 arguments: serde_json::json!({}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             }],
         );
         let chat_msg: ChatCompletionMessage = msg.into();

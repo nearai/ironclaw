@@ -87,7 +87,7 @@ mod tests {
         let payload = SpawnedChildRunPayload {
             child_run_id: TurnRunId::new(),
             child_thread_id: ThreadId::new("child-thread-1").unwrap(),
-            subagent_kind: SubagentKindId::new("researcher").unwrap(),
+            subagent_kind: SubagentKindId::new("planner").unwrap(),
             mode: SubagentSpawnMode::Background,
             status: SubagentSpawnStatus::Spawned,
             output_available: false,
@@ -97,7 +97,7 @@ mod tests {
         };
 
         let value = serde_json::to_value(&payload).unwrap();
-        assert_eq!(value["flavor"], "researcher");
+        assert_eq!(value["flavor"], "planner");
         assert_eq!(value["mode"], "background");
         assert_eq!(value["status"], "spawned");
         assert!(value.get("final_text").is_none());

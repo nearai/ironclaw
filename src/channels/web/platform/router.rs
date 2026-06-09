@@ -54,7 +54,8 @@ use crate::channels::web::handlers::memory::{
     memory_write_handler,
 };
 use crate::channels::web::handlers::skills::{
-    skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
+    skills_get_handler, skills_install_handler, skills_list_handler, skills_remove_handler,
+    skills_search_handler, skills_update_handler,
 };
 use crate::channels::web::handlers::traces::{
     traces_credit_handler, traces_credit_notice_action_handler, traces_credit_notice_handler,
@@ -311,7 +312,9 @@ pub async fn start_server(
         .route("/api/skills/install", post(skills_install_handler))
         .route(
             "/api/skills/{name}",
-            axum::routing::delete(skills_remove_handler),
+            get(skills_get_handler)
+                .put(skills_update_handler)
+                .delete(skills_remove_handler),
         )
         // Settings
         .route("/api/settings", get(settings_list_handler))

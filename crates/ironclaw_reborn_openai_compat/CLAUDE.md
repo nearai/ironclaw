@@ -40,20 +40,30 @@ The `refs` module owns the OpenAI-compatible identity contract:
 
 With `openai-compat-beta`, the default router remains fail-closed unless host
 composition injects `OpenAiCompatRouterState::with_chat_completions(...)`.
-The injected `OpenAiChatCompletionsWorkflow` handles Chat Completions create
-and optional projection-backed SSE streaming:
+`ironclaw_reborn_composition::build_openai_compat_route_mount` performs that
+host wiring for `ironclaw-reborn serve` by mounting the router inside the
+protected Reborn route stack. The injected `OpenAiChatCompletionsWorkflow`
+handles Chat Completions create and optional projection-backed SSE streaming:
 
 - `POST /v1/chat/completions` parses the OpenAI-compatible DTO, reserves an
   opaque `chatcmpl-*` ref with actor-scoped idempotency, and submits the user
   message through the channel-neutral `ProductWorkflow` surface.
-- Non-streaming create waits through a composition-supplied `OpenAiChatCompletionWaiter`.
-  Timeout returns a retryable sanitized API error and does not cancel or detach
-  the underlying product turn.
+- The route resolves the canonical projection read request through
+  `ProductWorkflow::read_projection(...)`, then waits through a
+  composition-supplied `OpenAiChatCompletionProjectionReader`. Timeout returns
+  a retryable sanitized API error and does not cancel or detach the underlying
+  product turn.
+- The canonical projection read actor/scope must match the authenticated caller
+  before the projection reader is invoked.
 - The requested public model string is carried as a composition/policy hint for
-  the waiter; do not inject it into the user transcript text.
+  the projection reader; do not inject it into the user transcript text.
 - Client-supplied `tools` and `tool_choice` are model hints only. They are
-  forwarded on the waiter request as model-only metadata and must not execute as
-  Reborn capabilities from this crate.
+  forwarded on the projection reader request as model-only metadata and must not
+  execute as Reborn capabilities from this crate.
+- `stream: true` is enabled only when host composition injects an
+  `OpenAiCompatProjectionStreamer`. The route translates projection-safe
+  outbound envelopes into OpenAI-compatible SSE without exposing projection
+  cursors, product refs, or backend details.
 - The route requires a verified `OpenAiCompatAuthenticatedCaller` extension
   minted by host auth middleware. Do not mint auth evidence in this crate's
   production feature set.
@@ -63,6 +73,34 @@ and optional projection-backed SSE streaming:
 - This crate still must not call v1 gateway handlers, raw `SseManager`/
   `AppEvent` streams, `ironclaw_llm`, `TurnCoordinator`, projection internals,
   listener APIs, secrets, DBs, or the host runtime directly.
+
+## Responses Workflow
+
+With `openai-compat-beta`, host composition may also inject
+`OpenAiCompatRouterState::with_responses(...)` for the non-streaming Responses
+slice:
+
+- `POST /api/v1/responses` and `POST /v1/responses` reserve opaque `resp_*`
+  refs with actor-scoped idempotency, submit create requests through
+  `ProductWorkflow`, and wait through a composition-supplied
+  `OpenAiResponsesProjectionReader`.
+- `GET /api/v1/responses/{id}` and `GET /v1/responses/{id}` read
+  projection-backed state through an authorized opaque-ref lookup. They must not
+  reconstruct state from legacy messages.
+- `POST /api/v1/responses/{id}/cancel` and `POST /v1/responses/{id}/cancel`
+  submit a typed ProductWorkflow control action for authorized, bound response
+  refs. Unauthorized and nonexistent refs stay indistinguishable at the API
+  boundary.
+- Request `tools` / `tool_choice` remain unsupported in this slice, except that
+  an empty `tools: []` is treated like an omitted field.
+- Client-controlled Responses input is serialized as a structured
+  `openai_compat.responses_input.v1` JSON payload inside `UserMessagePayload`
+  text so CR/LF-delimited role spoofing cannot create synthetic transcript
+  lines while `function_call` `call_id` and `arguments` remain available.
+- `stream: true` uses the same ProductWorkflow submission and opaque ref
+  reservation path, then drains a composition-supplied projection streamer into
+  OpenAI-compatible Responses SSE events. Stalled streams are bounded by the
+  workflow wait timeout and fail with a sanitized retryable service error.
 
 ## DTO Policy
 

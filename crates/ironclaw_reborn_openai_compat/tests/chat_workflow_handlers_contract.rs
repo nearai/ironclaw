@@ -8,29 +8,34 @@ use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
-    AuthRequirement, FakeProductWorkflow, ProductAdapterError, ProductInboundAck,
-    ProductInboundEnvelope, ProductRejection, ProductRejectionKind, ProductWorkflow,
-    ProtocolAuthEvidence, ProtocolAuthFailure, RedactedString,
+    AuthRequirement, FakeProductWorkflow, ProductAdapterError, ProductCommandResultPayload,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
+    ProductProjectionSubject, ProductRejection, ProductRejectionKind, ProductWorkflow,
+    ProjectionReadRequest, ProtocolAuthEvidence, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_reborn_openai_compat::{
-    InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection, OpenAiChatCompletionWaitRequest,
-    OpenAiChatCompletionWaiter, OpenAiChatCompletionsWorkflow, OpenAiChatFinishReason,
-    OpenAiChatToolCall, OpenAiChatToolCallFunction, OpenAiChatToolKind, OpenAiCompatActorScope,
+    InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection,
+    OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
+    OpenAiChatCompletionsWorkflow, OpenAiChatFinishReason, OpenAiChatToolCall,
+    OpenAiChatToolCallFunction, OpenAiChatToolKind, OpenAiCompatActorScope,
     OpenAiCompatAuthenticatedCaller, OpenAiCompatErrorKind, OpenAiCompatHttpError,
-    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
-    OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiUsage, openai_compat_router_with_state,
+    OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs, OpenAiCompatProductActionRef,
+    OpenAiCompatProjectionRef, OpenAiCompatRefLookup, OpenAiCompatRefOperation,
+    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore,
+    OpenAiCompatRequestFingerprint, OpenAiCompatRouteSurface, OpenAiCompatRouterState,
+    OpenAiCompatTurnRunRef, OpenAiUsage, openai_compat_router_with_state,
 };
-use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 #[tokio::test]
 async fn chat_completion_route_submits_product_workflow_and_returns_projection() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let waiter = Arc::new(StaticChatWaiter::text("hello from reborn"));
-    let router = test_router(workflow.clone(), waiter);
+    let projection_reader = Arc::new(StaticChatProjectionReader::text("hello from reborn"));
+    let router = test_router(workflow.clone(), projection_reader);
 
     let response = router
         .oneshot(chat_request(
@@ -61,16 +66,18 @@ async fn chat_completion_route_submits_product_workflow_and_returns_projection()
         envelopes[0].external_event_id().as_str(),
         body["id"].as_str().expect("id")
     );
-    let rendered = serde_json::to_string(envelopes[0].payload()).expect("payload json");
-    assert!(rendered.contains("user: hello"));
-    assert!(!rendered.contains("model: gpt-reborn"));
+    let submitted = submitted_chat_text_json(&envelopes[0]);
+    assert_eq!(submitted["format"], "openai_compat.chat_messages.v1");
+    assert_eq!(submitted["messages"][0]["role"], "user");
+    assert_eq!(submitted["messages"][0]["content"], "hello");
+    assert!(!submitted.to_string().contains("gpt-reborn"));
 }
 
 #[tokio::test]
 async fn chat_completion_idempotency_replays_same_id_and_conflicts_on_different_body() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let waiter = Arc::new(StaticChatWaiter::text("ok"));
-    let router = test_router(workflow.clone(), waiter);
+    let projection_reader = Arc::new(StaticChatProjectionReader::text("ok"));
+    let router = test_router(workflow.clone(), projection_reader);
     let body = json!({
         "model": "gpt-reborn",
         "messages": [{"role": "user", "content": "hello"}]
@@ -121,8 +128,8 @@ async fn chat_completion_idempotency_replays_same_id_and_conflicts_on_different_
 #[tokio::test]
 async fn invalid_chat_completion_does_not_reserve_idempotency_key() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let waiter = Arc::new(StaticChatWaiter::text("ok"));
-    let router = test_router(workflow.clone(), waiter);
+    let projection_reader = Arc::new(StaticChatProjectionReader::text("ok"));
+    let router = test_router(workflow.clone(), projection_reader);
 
     let invalid = router
         .clone()
@@ -157,7 +164,10 @@ async fn invalid_chat_completion_does_not_reserve_idempotency_key() {
 #[tokio::test]
 async fn chat_completion_rejects_malformed_json_body() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+    let router = test_router(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
 
     let response = router
         .oneshot(raw_chat_request("{", None))
@@ -169,9 +179,31 @@ async fn chat_completion_rejects_malformed_json_body() {
 }
 
 #[tokio::test]
+async fn chat_completion_rejects_oversized_raw_body_before_fingerprint_or_workflow() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let service = OpenAiChatCompletionsWorkflow::new(
+        workflow.clone(),
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
+    let oversized = "x".repeat(4 * 1024 * 1024 + 1);
+
+    let error = service
+        .complete_chat(caller(), oversized.as_bytes(), None)
+        .await
+        .expect_err("oversized body rejected");
+
+    assert_eq!(error.status_code(), 400);
+    assert_eq!(workflow.accepted_count(), 0);
+}
+
+#[tokio::test]
 async fn chat_completion_rejects_invalid_idempotency_key_header() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+    let router = test_router(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
 
     let response = router
         .oneshot(chat_request(
@@ -179,7 +211,7 @@ async fn chat_completion_rejects_invalid_idempotency_key_header() {
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
             }),
-            Some("bad key"),
+            Some("bad:key"),
         ))
         .await
         .expect("response");
@@ -191,7 +223,10 @@ async fn chat_completion_rejects_invalid_idempotency_key_header() {
 #[tokio::test]
 async fn chat_completion_deferred_busy_ack_returns_429() {
     let workflow = Arc::new(FixedAckWorkflow::new(deferred_busy_ack()));
-    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
 
     let response = router
         .oneshot(chat_request(
@@ -206,12 +241,93 @@ async fn chat_completion_deferred_busy_ack_returns_429() {
 
     assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(workflow.seen_count(), 1);
+    assert_eq!(workflow.read_count(), 0);
+}
+
+#[tokio::test]
+async fn chat_completion_duplicate_ack_unwraps_to_accepted() {
+    let workflow = Arc::new(FixedAckWorkflow::new(ProductInboundAck::Duplicate {
+        prior: Box::new(accepted_ack()),
+    }));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("ok")),
+    );
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(workflow.seen_count(), 1);
+    assert_eq!(workflow.read_count(), 1);
+}
+
+#[tokio::test]
+async fn chat_completion_noop_ack_returns_internal_error() {
+    let workflow = Arc::new(FixedAckWorkflow::new(ProductInboundAck::NoOp));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(workflow.seen_count(), 1);
+    assert_eq!(workflow.read_count(), 0);
+}
+
+#[tokio::test]
+async fn chat_completion_command_result_ack_returns_internal_error() {
+    let workflow = Arc::new(FixedAckWorkflow::new(ProductInboundAck::CommandResult {
+        command: "unexpected".to_string(),
+        payload: ProductCommandResultPayload::new(json!({"ok": true})),
+    }));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(workflow.seen_count(), 1);
+    assert_eq!(workflow.read_count(), 0);
 }
 
 #[tokio::test]
 async fn chat_completion_idempotency_retries_after_busy_without_500() {
     let workflow = Arc::new(FixedAckWorkflow::new(deferred_busy_ack()));
-    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
     let body = json!({
         "model": "gpt-reborn",
         "messages": [{"role": "user", "content": "hello"}]
@@ -230,6 +346,61 @@ async fn chat_completion_idempotency_retries_after_busy_without_500() {
     assert_eq!(first.status(), http::StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(retry.status(), http::StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(workflow.seen_count(), 2);
+    assert_eq!(workflow.read_count(), 0);
+}
+
+#[tokio::test]
+async fn chat_completion_replayed_pending_ref_submits_and_records_accepted_ack() {
+    let workflow = Arc::new(FixedAckWorkflow::new(accepted_ack()));
+    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let service = OpenAiChatCompletionsWorkflow::new(
+        workflow.clone(),
+        ref_store.clone(),
+        Arc::new(StaticChatProjectionReader::text("ok")),
+    );
+    let router = openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(
+        Arc::new(service),
+    ))
+    .layer(axum::Extension(caller()));
+    let raw_body = json!({
+        "model": "gpt-reborn",
+        "messages": [{"role": "user", "content": "hello"}]
+    })
+    .to_string();
+    let idempotency_key =
+        OpenAiCompatIdempotencyKey::new("pending-key").expect("valid idempotency key");
+    let created = match ref_store
+        .reserve(OpenAiCompatRefReservation::new(
+            caller().scope().clone(),
+            OpenAiCompatRouteSurface::ChatCompletions,
+            OpenAiCompatRequestFingerprint::from_body_bytes(raw_body.as_bytes()),
+            Some(idempotency_key),
+        ))
+        .await
+        .expect("reserve pending ref")
+    {
+        OpenAiCompatRefReservationOutcome::Created(mapping) => mapping,
+        other => panic!("expected created mapping, got {other:?}"),
+    };
+    assert!(created.accepted_ack.is_none());
+
+    let response = router
+        .oneshot(raw_chat_request(raw_body, Some("pending-key")))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(workflow.seen_count(), 1);
+    let replayed = ref_store
+        .lookup_authorized(OpenAiCompatRefLookup::new(
+            caller().scope().clone(),
+            created.public_id,
+            OpenAiCompatRefOperation::Retrieve,
+        ))
+        .await
+        .expect("lookup recorded ref")
+        .expect("ref exists");
+    assert!(replayed.accepted_ack.is_some());
 }
 
 #[tokio::test]
@@ -237,7 +408,10 @@ async fn chat_completion_binding_required_rejection_returns_404() {
     let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
         ProductRejectionKind::BindingRequired,
     )));
-    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
 
     let response = router
         .oneshot(chat_request(
@@ -259,7 +433,10 @@ async fn chat_completion_access_denied_rejection_returns_403() {
     let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
         ProductRejectionKind::AccessDenied,
     )));
-    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
 
     let response = router
         .oneshot(chat_request(
@@ -277,16 +454,95 @@ async fn chat_completion_access_denied_rejection_returns_403() {
 }
 
 #[tokio::test]
-async fn chat_completion_waiter_error_is_propagated_as_response() {
-    let workflow = Arc::new(FixedAckWorkflow::new(accepted_ack()));
-    let router = test_router(
+async fn chat_completion_unknown_installation_rejection_returns_503_retryable() {
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::UnknownInstallation,
+    )));
+    let router = test_router_with_workflow(
         workflow.clone(),
-        Arc::new(ErrorChatWaiter::new(OpenAiCompatHttpError::from_kind(
-            503,
-            true,
-            OpenAiCompatErrorKind::ServiceUnavailable,
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
             None,
-        ))),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "service_unavailable");
+    assert_eq!(workflow.seen_count(), 1);
+}
+
+#[tokio::test]
+async fn chat_completion_invalid_request_rejection_returns_400() {
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::InvalidRequest,
+    )));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(workflow.seen_count(), 1);
+}
+
+#[tokio::test]
+async fn chat_completion_policy_denied_rejection_returns_403() {
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::PolicyDenied,
+    )));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+    assert_eq!(workflow.seen_count(), 1);
+}
+
+#[tokio::test]
+async fn chat_completion_projection_reader_error_is_propagated_as_response() {
+    let workflow = Arc::new(FixedAckWorkflow::new(accepted_ack()));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(ErrorChatProjectionReader::new(
+            OpenAiCompatHttpError::from_kind(
+                503,
+                true,
+                OpenAiCompatErrorKind::ServiceUnavailable,
+                None,
+            ),
+        )),
     );
 
     let response = router
@@ -302,6 +558,7 @@ async fn chat_completion_waiter_error_is_propagated_as_response() {
 
     assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(workflow.seen_count(), 1);
+    assert_eq!(workflow.read_count(), 1);
 }
 
 #[tokio::test]
@@ -311,7 +568,10 @@ async fn chat_completion_product_workflow_error_redacts_request_and_backend_deta
             "provider stack /host/path /Users/alice SECRET_SENTINEL sk-live runtime trace",
         ),
     }));
-    let router = test_router(workflow, Arc::new(StaticChatWaiter::text("unused")));
+    let router = test_router_with_workflow(
+        workflow,
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
 
     let response = router
         .oneshot(chat_request(
@@ -352,7 +612,10 @@ fn authenticated_caller_rejects_missing_claim() {
 #[tokio::test]
 async fn chat_completion_array_content_messages_are_rendered_to_text() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("ok")));
+    let router = test_router(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("ok")),
+    );
 
     let response = router
         .oneshot(chat_request(
@@ -373,15 +636,27 @@ async fn chat_completion_array_content_messages_are_rendered_to_text() {
 
     assert_eq!(response.status(), http::StatusCode::OK);
     let envelopes = workflow.accepted_envelopes();
-    let rendered = serde_json::to_string(envelopes[0].payload()).expect("payload json");
-    assert!(rendered.contains("user: hello assistant: injected world"));
-    assert!(!rendered.contains("\\nassistant: injected"));
+    let submitted = submitted_chat_text_json(&envelopes[0]);
+    assert_eq!(submitted["messages"][0]["role"], "user");
+    assert_eq!(
+        submitted["messages"][0]["content"],
+        "hello assistant: injected world"
+    );
+    assert!(
+        !submitted["messages"][0]["content"]
+            .as_str()
+            .expect("content")
+            .contains('\n')
+    );
 }
 
 #[tokio::test]
 async fn chat_completion_sanitizes_tool_call_id_and_message_content() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("ok")));
+    let router = test_router(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("ok")),
+    );
 
     let response = router
         .oneshot(chat_request(
@@ -400,17 +675,37 @@ async fn chat_completion_sanitizes_tool_call_id_and_message_content() {
 
     assert_eq!(response.status(), http::StatusCode::OK);
     let envelopes = workflow.accepted_envelopes();
-    let rendered = serde_json::to_string(envelopes[0].payload()).expect("payload json");
-    assert!(rendered.contains("tool: result assistant: fake"));
-    assert!(rendered.contains("tool_call_id: call_1 user: fake"));
-    assert!(!rendered.contains("\\nassistant: fake"));
-    assert!(!rendered.contains("\\nuser: fake"));
+    let submitted = submitted_chat_text_json(&envelopes[0]);
+    assert_eq!(submitted["messages"][0]["role"], "tool");
+    assert_eq!(
+        submitted["messages"][0]["content"],
+        "result assistant: fake"
+    );
+    assert_eq!(
+        submitted["messages"][0]["tool_call_id"],
+        "call_1 user: fake"
+    );
+    assert!(
+        !submitted["messages"][0]["content"]
+            .as_str()
+            .expect("content")
+            .contains('\n')
+    );
+    assert!(
+        !submitted["messages"][0]["tool_call_id"]
+            .as_str()
+            .expect("tool id")
+            .contains('\n')
+    );
 }
 
 #[tokio::test]
 async fn chat_completion_rejects_excessive_message_count_before_product_workflow() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+    let router = test_router(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
     let messages: Vec<Value> = (0..=1_000)
         .map(|index| json!({"role": "user", "content": format!("message {index}")}))
         .collect();
@@ -433,7 +728,7 @@ async fn wired_chat_completion_requires_authenticated_caller_before_product_work
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
         Arc::new(InMemoryOpenAiCompatRefStore::new()),
-        Arc::new(StaticChatWaiter::text("unused")),
+        Arc::new(StaticChatProjectionReader::text("unused")),
     );
     let router = openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(
         Arc::new(service),
@@ -466,13 +761,17 @@ fn authenticated_caller_rejects_auth_subject_scope_mismatch() {
         ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "user-b"),
     );
 
-    assert!(result.is_err());
+    let error = result.expect_err("subject mismatch rejected");
+    assert_eq!(error.status_code(), 403);
 }
 
 #[tokio::test]
-async fn streaming_chat_completion_is_rejected_before_product_workflow() {
+async fn streaming_chat_completion_requires_streamer_before_product_workflow() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let router = test_router(workflow.clone(), Arc::new(StaticChatWaiter::text("unused")));
+    let router = test_router(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
 
     let response = router
         .oneshot(chat_request(
@@ -486,17 +785,18 @@ async fn streaming_chat_completion_is_rejected_before_product_workflow() {
         .await
         .expect("response");
 
-    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), http::StatusCode::NOT_IMPLEMENTED);
     assert_eq!(workflow.accepted_count(), 0);
 }
 
 #[tokio::test]
 async fn chat_completion_wait_timeout_returns_retryable_error_without_resubmitting() {
     let workflow = Arc::new(FakeProductWorkflow::new());
+    workflow.program_projection_read_resolution(sample_projection_read_request());
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
         Arc::new(InMemoryOpenAiCompatRefStore::new()),
-        Arc::new(NeverChatWaiter),
+        Arc::new(NeverChatProjectionReader),
     )
     .with_wait_timeout(Duration::from_millis(1));
     let router = openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(
@@ -520,9 +820,70 @@ async fn chat_completion_wait_timeout_returns_retryable_error_without_resubmitti
 }
 
 #[tokio::test]
+async fn projection_reader_is_not_called_when_product_workflow_read_resolution_fails() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let projection_reader = Arc::new(RecordingChatProjectionReader::new(
+        OpenAiChatCompletionProjection::text("should not be read"),
+    ));
+    let service = OpenAiChatCompletionsWorkflow::new(
+        workflow.clone(),
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        projection_reader.clone(),
+    );
+    let router = openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(
+        Arc::new(service),
+    ))
+    .layer(axum::Extension(caller()));
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            Some("read-resolution-key"),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(workflow.read_inputs().len(), 1);
+    assert_eq!(projection_reader.request_count(), 0);
+}
+
+#[tokio::test]
+async fn projection_reader_is_not_called_when_read_resolution_scope_mismatches_caller() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let mut mismatched_read = sample_projection_read_request();
+    mismatched_read.actor = TurnActor::new(UserId::new("user-b").expect("user"));
+    workflow.program_projection_read_resolution(mismatched_read);
+    let projection_reader = Arc::new(RecordingChatProjectionReader::new(
+        OpenAiChatCompletionProjection::text("should not be read"),
+    ));
+    let router = test_router_with_workflow(workflow.clone(), projection_reader.clone());
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            Some("mismatched-read-key"),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(workflow.read_inputs().len(), 1);
+    assert_eq!(projection_reader.request_count(), 0);
+}
+
+#[tokio::test]
 async fn model_only_tool_call_output_shape_is_preserved() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let waiter = Arc::new(StaticChatWaiter::projection(
+    let projection_reader = Arc::new(StaticChatProjectionReader::projection(
         OpenAiChatCompletionProjection {
             assistant_content: None,
             tool_calls: Some(vec![OpenAiChatToolCall {
@@ -551,7 +912,7 @@ async fn model_only_tool_call_output_shape_is_preserved() {
             ),
         },
     ));
-    let router = test_router(workflow, waiter);
+    let router = test_router(workflow, projection_reader);
 
     let response = router
         .oneshot(chat_request(
@@ -580,12 +941,12 @@ async fn model_only_tool_call_output_shape_is_preserved() {
 }
 
 #[tokio::test]
-async fn requested_model_is_forwarded_as_waiter_hint() {
+async fn requested_model_and_projection_read_are_forwarded_to_projection_reader() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let waiter = Arc::new(RecordingChatWaiter::new(
+    let projection_reader = Arc::new(RecordingChatProjectionReader::new(
         OpenAiChatCompletionProjection::text("ok"),
     ));
-    let router = test_router(workflow, waiter.clone());
+    let router = test_router(workflow.clone(), projection_reader.clone());
 
     let response = router
         .oneshot(chat_request(
@@ -599,17 +960,31 @@ async fn requested_model_is_forwarded_as_waiter_hint() {
         .expect("response");
 
     assert_eq!(response.status(), http::StatusCode::OK);
-    let wait_request = waiter.last_request();
-    assert_eq!(wait_request.requested_model, "gpt-reborn-model-hint");
+    let read_inputs = workflow.read_inputs();
+    assert_eq!(read_inputs.len(), 1);
+    assert!(matches!(
+        &read_inputs[0].subject,
+        ProductProjectionSubject::AdapterExternalRefs { .. }
+    ));
+    assert_eq!(read_inputs[0].thread_id_hint, None);
+    assert_eq!(read_inputs[0].after_cursor, None);
+    assert_eq!(read_inputs[0].limit, None);
+
+    let projection_request = projection_reader.last_request();
+    assert_eq!(projection_request.requested_model, "gpt-reborn-model-hint");
+    assert_eq!(
+        projection_request.projection_read,
+        sample_projection_read_request()
+    );
 }
 
 #[tokio::test]
-async fn client_tools_are_forwarded_as_model_only_waiter_metadata() {
+async fn client_tools_are_forwarded_as_model_only_projection_reader_metadata() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let waiter = Arc::new(RecordingChatWaiter::new(
+    let projection_reader = Arc::new(RecordingChatProjectionReader::new(
         OpenAiChatCompletionProjection::text("ok"),
     ));
-    let router = test_router(workflow.clone(), waiter.clone());
+    let router = test_router(workflow.clone(), projection_reader.clone());
 
     let response = router
         .oneshot(chat_request(
@@ -633,8 +1008,8 @@ async fn client_tools_are_forwarded_as_model_only_waiter_metadata() {
         .expect("response");
 
     assert_eq!(response.status(), http::StatusCode::OK);
-    let wait_request = waiter.last_request();
-    let model_only_tools = wait_request
+    let projection_request = projection_reader.last_request();
+    let model_only_tools = projection_request
         .model_only_tools
         .expect("model-only tools forwarded");
     assert_eq!(model_only_tools.tools.len(), 1);
@@ -646,19 +1021,37 @@ async fn client_tools_are_forwarded_as_model_only_waiter_metadata() {
 
     let envelopes = workflow.accepted_envelopes();
     assert_eq!(envelopes.len(), 1);
-    let rendered = serde_json::to_string(envelopes[0].payload()).expect("payload json");
-    assert!(rendered.contains("user: hello"));
-    assert!(!rendered.contains("lookup_order"));
+    let submitted = submitted_chat_text_json(&envelopes[0]);
+    assert_eq!(submitted["messages"][0]["role"], "user");
+    assert_eq!(submitted["messages"][0]["content"], "hello");
+    assert!(!submitted.to_string().contains("lookup_order"));
+}
+
+fn submitted_chat_text_json(envelope: &ProductInboundEnvelope) -> Value {
+    match envelope.payload() {
+        ProductInboundPayload::UserMessage(payload) => {
+            serde_json::from_str(&payload.text).expect("structured chat message text")
+        }
+        other => panic!("expected user-message payload, got {other:?}"),
+    }
 }
 
 fn test_router(
+    workflow: Arc<FakeProductWorkflow>,
+    projection_reader: Arc<dyn OpenAiChatCompletionProjectionReader>,
+) -> axum::Router {
+    workflow.program_projection_read_resolution(sample_projection_read_request());
+    test_router_with_workflow(workflow, projection_reader)
+}
+
+fn test_router_with_workflow(
     workflow: Arc<dyn ProductWorkflow>,
-    waiter: Arc<dyn OpenAiChatCompletionWaiter>,
+    projection_reader: Arc<dyn OpenAiChatCompletionProjectionReader>,
 ) -> axum::Router {
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow,
         Arc::new(InMemoryOpenAiCompatRefStore::new()),
-        waiter,
+        projection_reader,
     );
     openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(Arc::new(
         service,
@@ -704,9 +1097,24 @@ fn caller() -> OpenAiCompatAuthenticatedCaller {
     .expect("caller")
 }
 
+fn sample_projection_read_request() -> ProjectionReadRequest {
+    ProjectionReadRequest {
+        actor: TurnActor::new(UserId::new("user-a").expect("user")),
+        scope: TurnScope::new(
+            TenantId::new("tenant-a").expect("tenant"),
+            Some(AgentId::new("agent-a").expect("agent")),
+            Some(ProjectId::new("project-a").expect("project")),
+            ThreadId::new("thread-openai-chat").expect("thread"),
+        ),
+        after_cursor: None,
+        limit: None,
+    }
+}
+
 struct FixedAckWorkflow {
     ack: ProductInboundAck,
     seen_envelopes: Mutex<Vec<ProductInboundEnvelope>>,
+    read_inputs: Mutex<Vec<ProductProjectionReadInput>>,
 }
 
 impl FixedAckWorkflow {
@@ -714,6 +1122,7 @@ impl FixedAckWorkflow {
         Self {
             ack,
             seen_envelopes: Mutex::new(Vec::new()),
+            read_inputs: Mutex::new(Vec::new()),
         }
     }
 
@@ -722,6 +1131,10 @@ impl FixedAckWorkflow {
             .lock()
             .expect("workflow seen lock")
             .len()
+    }
+
+    fn read_count(&self) -> usize {
+        self.read_inputs.lock().expect("workflow read lock").len()
     }
 }
 
@@ -736,6 +1149,17 @@ impl ProductWorkflow for FixedAckWorkflow {
             .expect("workflow seen lock")
             .push(envelope);
         Ok(self.ack.clone())
+    }
+
+    async fn read_projection(
+        &self,
+        request: ProductProjectionReadInput,
+    ) -> Result<ProjectionReadRequest, ironclaw_product_adapters::ProductAdapterError> {
+        self.read_inputs
+            .lock()
+            .expect("workflow read lock")
+            .push(request);
+        Ok(sample_projection_read_request())
     }
 }
 
@@ -777,11 +1201,11 @@ fn rejected_ack(kind: ProductRejectionKind) -> ProductInboundAck {
     ProductInboundAck::Rejected(ProductRejection::permanent(kind, "test rejection"))
 }
 
-struct StaticChatWaiter {
+struct StaticChatProjectionReader {
     projection: OpenAiChatCompletionProjection,
 }
 
-impl StaticChatWaiter {
+impl StaticChatProjectionReader {
     fn text(content: &str) -> Self {
         Self::projection(OpenAiChatCompletionProjection::text(content))
     }
@@ -792,23 +1216,23 @@ impl StaticChatWaiter {
 }
 
 #[async_trait]
-impl OpenAiChatCompletionWaiter for StaticChatWaiter {
-    async fn wait_for_chat_completion(
+impl OpenAiChatCompletionProjectionReader for StaticChatProjectionReader {
+    async fn read_chat_completion_projection(
         &self,
-        _request: OpenAiChatCompletionWaitRequest,
+        _request: OpenAiChatCompletionProjectionRequest,
     ) -> Result<OpenAiChatCompletionProjection, ironclaw_reborn_openai_compat::OpenAiCompatHttpError>
     {
         Ok(self.projection.clone())
     }
 }
 
-struct NeverChatWaiter;
+struct NeverChatProjectionReader;
 
 #[async_trait]
-impl OpenAiChatCompletionWaiter for NeverChatWaiter {
-    async fn wait_for_chat_completion(
+impl OpenAiChatCompletionProjectionReader for NeverChatProjectionReader {
+    async fn read_chat_completion_projection(
         &self,
-        _request: OpenAiChatCompletionWaitRequest,
+        _request: OpenAiChatCompletionProjectionRequest,
     ) -> Result<OpenAiChatCompletionProjection, ironclaw_reborn_openai_compat::OpenAiCompatHttpError>
     {
         tokio::time::sleep(Duration::from_secs(60)).await;
@@ -816,32 +1240,32 @@ impl OpenAiChatCompletionWaiter for NeverChatWaiter {
     }
 }
 
-struct ErrorChatWaiter {
+struct ErrorChatProjectionReader {
     error: OpenAiCompatHttpError,
 }
 
-impl ErrorChatWaiter {
+impl ErrorChatProjectionReader {
     fn new(error: OpenAiCompatHttpError) -> Self {
         Self { error }
     }
 }
 
 #[async_trait]
-impl OpenAiChatCompletionWaiter for ErrorChatWaiter {
-    async fn wait_for_chat_completion(
+impl OpenAiChatCompletionProjectionReader for ErrorChatProjectionReader {
+    async fn read_chat_completion_projection(
         &self,
-        _request: OpenAiChatCompletionWaitRequest,
+        _request: OpenAiChatCompletionProjectionRequest,
     ) -> Result<OpenAiChatCompletionProjection, OpenAiCompatHttpError> {
         Err(self.error.clone())
     }
 }
 
-struct RecordingChatWaiter {
+struct RecordingChatProjectionReader {
     projection: OpenAiChatCompletionProjection,
-    last_request: Mutex<Option<OpenAiChatCompletionWaitRequest>>,
+    last_request: Mutex<Option<OpenAiChatCompletionProjectionRequest>>,
 }
 
-impl RecordingChatWaiter {
+impl RecordingChatProjectionReader {
     fn new(projection: OpenAiChatCompletionProjection) -> Self {
         Self {
             projection,
@@ -849,23 +1273,35 @@ impl RecordingChatWaiter {
         }
     }
 
-    fn last_request(&self) -> OpenAiChatCompletionWaitRequest {
+    fn last_request(&self) -> OpenAiChatCompletionProjectionRequest {
         self.last_request
             .lock()
-            .expect("waiter request lock")
+            .expect("projection reader request lock")
             .clone()
-            .expect("waiter request captured")
+            .expect("projection reader request captured")
+    }
+
+    fn request_count(&self) -> usize {
+        usize::from(
+            self.last_request
+                .lock()
+                .expect("projection reader request lock")
+                .is_some(),
+        )
     }
 }
 
 #[async_trait]
-impl OpenAiChatCompletionWaiter for RecordingChatWaiter {
-    async fn wait_for_chat_completion(
+impl OpenAiChatCompletionProjectionReader for RecordingChatProjectionReader {
+    async fn read_chat_completion_projection(
         &self,
-        request: OpenAiChatCompletionWaitRequest,
+        request: OpenAiChatCompletionProjectionRequest,
     ) -> Result<OpenAiChatCompletionProjection, ironclaw_reborn_openai_compat::OpenAiCompatHttpError>
     {
-        *self.last_request.lock().expect("waiter request lock") = Some(request);
+        *self
+            .last_request
+            .lock()
+            .expect("projection reader request lock") = Some(request);
         Ok(self.projection.clone())
     }
 }

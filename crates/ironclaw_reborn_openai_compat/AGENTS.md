@@ -12,8 +12,10 @@
 - Chat Completions and Responses API DTOs used by the migration slices.
 - A sanitized OpenAI-compatible error envelope.
 - Feature-gated axum route fragments for host composition to mount.
-- The non-streaming Chat Completions adapter into ProductWorkflow when host
-  composition injects the workflow state.
+- ProductWorkflow-backed Chat Completions and Responses route adapters when
+  host composition injects workflow state.
+- OpenAI-compatible SSE translation for projection-backed streaming slices.
+
 ## Do Not Move In Here
 
 - Listener binding or `axum::serve`.

@@ -2,9 +2,7 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, State};
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
-
-const MAX_IDEMPOTENCY_KEY_LEN: usize = 256;
+use axum::response::Response;
 
 use crate::{
     OpenAiCompatAuthenticatedCaller, OpenAiCompatHttpError, OpenAiCompatIdempotencyKey,
@@ -30,15 +28,9 @@ pub async fn chat_completions(
     };
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     let request = crate::chat_workflow::parse_chat_request(&body)?;
-    if request.stream.unwrap_or(false) && workflow.can_stream() {
-        return workflow
-            .stream_chat_request(caller, request, &body, idempotency_key)
-            .await;
-    }
     workflow
-        .complete_chat_request(caller, request, &body, idempotency_key)
+        .handle_chat_request(caller, request, &body, idempotency_key)
         .await
-        .map(|response| Json(response).into_response())
 }
 
 pub async fn responses_api_create(
@@ -68,7 +60,7 @@ pub async fn responses_v1_create(
         caller,
         headers,
         body,
-        OpenAiCompatRouteSurface::ResponsesV1,
+        OpenAiCompatRouteSurface::ResponsesApi,
     )
     .await
 }
@@ -131,15 +123,9 @@ async fn create_response(
     let caller = require_caller(caller)?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     let request = crate::responses_workflow::parse_response_create_request(&body)?;
-    if request.stream.unwrap_or(false) && workflow.can_stream() {
-        return workflow
-            .stream_response_request(caller, request, &body, idempotency_key, surface)
-            .await;
-    }
     workflow
-        .create_response_request(caller, request, &body, idempotency_key, surface)
+        .handle_response_create_request(caller, request, &body, idempotency_key, surface)
         .await
-        .map(|response| Json(response).into_response())
 }
 
 async fn retrieve_response(
@@ -185,11 +171,6 @@ fn idempotency_key_from_headers(
     let value = value
         .to_str()
         .map_err(|_| OpenAiCompatHttpError::invalid_request(Some("idempotency_key".to_string())))?;
-    if value.len() > MAX_IDEMPOTENCY_KEY_LEN || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
-        return Err(OpenAiCompatHttpError::invalid_request(Some(
-            "idempotency_key".to_string(),
-        )));
-    }
     OpenAiCompatIdempotencyKey::new(value)
         .map(Some)
         .map_err(|_| OpenAiCompatHttpError::invalid_request(Some("idempotency_key".to_string())))

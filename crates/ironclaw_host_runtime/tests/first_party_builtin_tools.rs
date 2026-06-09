@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     io::Write,
     net::{IpAddr, Ipv4Addr},
     path::Path,
@@ -50,8 +50,9 @@ use ironclaw_network::{
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
-    InMemoryTriggerRepository, MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError,
-    TriggerRecord, TriggerRepository,
+    ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
+    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -243,7 +244,7 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
         .get("properties")
         .and_then(Value::as_object)
         .expect("spawn_subagent schema properties");
-    assert!(properties.contains_key("flavor_id"));
+    assert!(properties.contains_key("subagent_type"));
     assert!(properties.contains_key("task"));
     assert!(properties.contains_key("handoff"));
     assert!(!properties.contains_key("mode"));
@@ -952,6 +953,272 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
 }
 
 #[tokio::test]
+async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Historical trigger",
+            "prompt": "Create history rows",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let record = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap()
+        .pop()
+        .expect("persisted trigger");
+    let first_fire_slot = record.next_run_at;
+    let first_run_id = TurnRunId::new();
+    repository
+        .claim_due_fire(ClaimDueFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: first_fire_slot,
+            now: first_fire_slot,
+        })
+        .await
+        .unwrap();
+    repository
+        .mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: first_fire_slot,
+            run_id: first_run_id,
+            submitted_at: first_fire_slot + chrono::Duration::seconds(1),
+            next_run_at: first_fire_slot + chrono::Duration::minutes(1),
+        })
+        .await
+        .unwrap();
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: first_fire_slot,
+            run_id: first_run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .unwrap();
+
+    let second_fire_slot = first_fire_slot + chrono::Duration::minutes(1);
+    let second_run_id = TurnRunId::new();
+    repository
+        .claim_due_fire(ClaimDueFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: second_fire_slot,
+            now: second_fire_slot,
+        })
+        .await
+        .unwrap();
+    repository
+        .mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: second_fire_slot,
+            run_id: second_run_id,
+            submitted_at: second_fire_slot + chrono::Duration::seconds(1),
+            next_run_at: second_fire_slot + chrono::Duration::minutes(1),
+        })
+        .await
+        .unwrap();
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: second_fire_slot,
+            run_id: second_run_id,
+            status: TriggerRunHistoryStatus::Error,
+        })
+        .await
+        .unwrap();
+
+    let third_fire_slot = second_fire_slot + chrono::Duration::minutes(1);
+    let third_run_id = TurnRunId::new();
+    repository
+        .claim_due_fire(ClaimDueFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: third_fire_slot,
+            now: third_fire_slot,
+        })
+        .await
+        .unwrap();
+    repository
+        .mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: record.tenant_id,
+            trigger_id: record.trigger_id,
+            fire_slot: third_fire_slot,
+            run_id: third_run_id,
+            submitted_at: third_fire_slot + chrono::Duration::seconds(1),
+            next_run_at: third_fire_slot + chrono::Duration::minutes(1),
+        })
+        .await
+        .unwrap();
+
+    let listed = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({ "run_limit": 3 }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    let runs = listed["triggers"][0]["recent_runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[0]["run_id"], json!(third_run_id.to_string()));
+    assert_eq!(runs[0]["status"], json!("running"));
+    assert_eq!(runs[0]["completed_at"], Value::Null);
+    assert_eq!(runs[1]["run_id"], json!(second_run_id.to_string()));
+    assert_eq!(runs[1]["status"], json!("error"));
+    assert_ne!(runs[1]["completed_at"], Value::Null);
+    assert_eq!(runs[2]["run_id"], json!(first_run_id.to_string()));
+    assert_eq!(runs[2]["status"], json!("ok"));
+    assert_ne!(runs[2]["completed_at"], Value::Null);
+    assert_eq!(
+        runs[0]["thread_id"].as_str().unwrap().len(),
+        64,
+        "trigger route thread ids are deterministic hex identifiers"
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_list_with_zero_run_limit_returns_empty_recent_runs() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Zero run limit trigger",
+            "prompt": "Create history rows",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let record = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap()
+        .pop()
+        .expect("persisted trigger");
+    seed_completed_trigger_runs(&repository, &record, 1).await;
+
+    let listed = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({ "run_limit": 0 }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(listed["triggers"][0]["recent_runs"], json!([]));
+}
+
+#[tokio::test]
+async fn builtin_trigger_list_clamps_oversized_run_limit_to_max() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Oversized run limit trigger",
+            "prompt": "Create many history rows",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let record = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap()
+        .pop()
+        .expect("persisted trigger");
+    seed_completed_trigger_runs(&repository, &record, 101).await;
+
+    let listed = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({ "run_limit": 200 }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        listed["triggers"][0]["recent_runs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        100
+    );
+}
+
+async fn seed_completed_trigger_runs(
+    repository: &InMemoryTriggerRepository,
+    record: &TriggerRecord,
+    count: usize,
+) {
+    for index in 0..count {
+        let fire_slot = record.next_run_at + chrono::Duration::minutes(index as i64);
+        let run_id = TurnRunId::new();
+        repository
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: record.tenant_id.clone(),
+                trigger_id: record.trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .unwrap();
+        repository
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: record.tenant_id.clone(),
+                trigger_id: record.trigger_id,
+                fire_slot,
+                run_id,
+                submitted_at: fire_slot + chrono::Duration::seconds(1),
+                next_run_at: fire_slot + chrono::Duration::minutes(1),
+            })
+            .await
+            .unwrap();
+        repository
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: record.tenant_id.clone(),
+                trigger_id: record.trigger_id,
+                fire_slot,
+                run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn builtin_trigger_remove_rejects_invalid_trigger_id() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository);
@@ -979,6 +1246,31 @@ async fn builtin_trigger_list_rejects_non_integer_limit() {
         &runtime,
         TRIGGER_LIST_CAPABILITY_ID,
         json!({ "limit": "many" }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_list_rejects_non_integer_run_limit() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_LIST_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({ "run_limit": "many" }),
         context.clone(),
     )
     .await
@@ -1056,6 +1348,32 @@ async fn builtin_trigger_management_maps_repository_errors_to_backend() {
     .await
     .unwrap_err();
     assert_eq!(remove_error, RuntimeFailureKind::Backend);
+}
+
+#[tokio::test]
+async fn builtin_trigger_list_maps_batch_run_history_repository_error_to_backend() {
+    let repository = Arc::new(BatchRunHistoryFailingTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository);
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Batch history failure",
+            "prompt": "Create trigger before listing history",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let error = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Backend);
 }
 
 #[tokio::test]
@@ -6149,6 +6467,11 @@ struct RemoveFailingTriggerRepository {
     remove_attempts: std::sync::Mutex<usize>,
 }
 
+#[derive(Default)]
+struct BatchRunHistoryFailingTriggerRepository {
+    inner: InMemoryTriggerRepository,
+}
+
 impl RemoveFailingTriggerRepository {
     fn remove_attempts(&self) -> usize {
         *self.remove_attempts.lock().unwrap()
@@ -6290,6 +6613,146 @@ impl TriggerRepository for RemoveFailingTriggerRepository {
         request: ironclaw_triggers::ClearActiveFireRequest,
     ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
         self.inner.clear_active_fire(request).await
+    }
+}
+
+#[async_trait]
+impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
+    async fn upsert_trigger(
+        &self,
+        record: ironclaw_triggers::TriggerRecord,
+    ) -> Result<(), ironclaw_triggers::TriggerError> {
+        self.inner.upsert_trigger(record).await
+    }
+
+    async fn get_trigger(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.get_trigger(tenant_id, trigger_id).await
+    }
+
+    async fn list_triggers(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_triggers(tenant_id).await
+    }
+
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner
+            .list_scoped_triggers(tenant_id, creator_user_id, agent_id, project_id, limit)
+            .await
+    }
+
+    async fn remove_trigger(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.remove_trigger(tenant_id, trigger_id).await
+    }
+
+    async fn remove_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner
+            .remove_scoped_trigger(tenant_id, creator_user_id, agent_id, project_id, trigger_id)
+            .await
+    }
+
+    async fn list_due_triggers(
+        &self,
+        now: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_due_triggers(now, limit).await
+    }
+
+    async fn list_active_triggers(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_active_triggers(limit).await
+    }
+
+    async fn list_active_triggers_after(
+        &self,
+        after: Option<ironclaw_triggers::ActiveTriggerScanCursor>,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_active_triggers_after(after, limit).await
+    }
+
+    async fn claim_due_fire(
+        &self,
+        request: ironclaw_triggers::ClaimDueFireRequest,
+    ) -> Result<ironclaw_triggers::ClaimDueFireOutcome, ironclaw_triggers::TriggerError> {
+        self.inner.claim_due_fire(request).await
+    }
+
+    async fn mark_fire_accepted(
+        &self,
+        request: ironclaw_triggers::FireAcceptedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_accepted(request).await
+    }
+
+    async fn mark_fire_replayed(
+        &self,
+        request: ironclaw_triggers::FireReplayedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_replayed(request).await
+    }
+
+    async fn mark_fire_retryable_failed(
+        &self,
+        request: ironclaw_triggers::FireRetryableFailedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_retryable_failed(request).await
+    }
+
+    async fn mark_fire_permanently_failed(
+        &self,
+        request: ironclaw_triggers::FirePermanentFailedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_permanently_failed(request).await
+    }
+
+    async fn mark_fire_terminally_failed(
+        &self,
+        request: ironclaw_triggers::FireTerminalFailedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_terminally_failed(request).await
+    }
+
+    async fn clear_active_fire(
+        &self,
+        request: ironclaw_triggers::ClearActiveFireRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.clear_active_fire(request).await
+    }
+
+    async fn list_trigger_run_history_batch(
+        &self,
+        _tenant_id: TenantId,
+        _trigger_ids: &[ironclaw_triggers::TriggerId],
+        _limit: usize,
+    ) -> Result<HashMap<ironclaw_triggers::TriggerId, Vec<TriggerRunRecord>>, TriggerError> {
+        Err(trigger_backend_error())
     }
 }
 

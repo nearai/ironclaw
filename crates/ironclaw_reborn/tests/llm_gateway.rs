@@ -287,6 +287,7 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
         arguments: serde_json::json!({"message":"hello"}),
         reasoning: None,
         signature: Some("sig-1".to_string()),
+        arguments_parse_error: None,
     }]));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
@@ -455,6 +456,7 @@ async fn gateway_preserves_structured_tool_calls_when_content_has_legacy_marker(
             arguments: serde_json::json!({"message":"hello"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }],
         input_tokens: 1,
         output_tokens: 1,
@@ -492,6 +494,7 @@ async fn gateway_rejects_unknown_provider_tool_call_before_registration() {
             arguments: serde_json::json!({"message":"one"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         },
         ToolCall {
             id: "call_2".to_string(),
@@ -499,6 +502,7 @@ async fn gateway_rejects_unknown_provider_tool_call_before_registration() {
             arguments: serde_json::json!({"message":"two"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         },
     ]));
     let gateway = LlmProviderModelGateway::with_provider_identity(
@@ -527,6 +531,7 @@ async fn gateway_rejects_invalid_provider_tool_batch_before_any_registration() {
             arguments: serde_json::json!({"message":"one"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         },
         ToolCall {
             id: "call_2".to_string(),
@@ -534,6 +539,7 @@ async fn gateway_rejects_invalid_provider_tool_batch_before_any_registration() {
             arguments: serde_json::json!({"message":"x".repeat(20 * 1024)}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         },
     ]));
     let gateway = LlmProviderModelGateway::with_provider_identity(
@@ -562,6 +568,7 @@ async fn gateway_with_two_tool_calls_returns_two_candidates() {
             arguments: serde_json::json!({"message":"one"}),
             reasoning: Some("call reasoning".to_string()),
             signature: None,
+            arguments_parse_error: None,
         },
         ToolCall {
             id: "call_2".to_string(),
@@ -569,6 +576,7 @@ async fn gateway_with_two_tool_calls_returns_two_candidates() {
             arguments: serde_json::json!({"message":"two"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         },
     ]));
     let gateway = LlmProviderModelGateway::with_provider_identity(

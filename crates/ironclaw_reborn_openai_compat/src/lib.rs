@@ -9,6 +9,8 @@
 //! fail-closed; host composition can inject ProductWorkflow-backed Chat,
 //! Responses, and projection-streaming services for the wired Reborn slices.
 
+#[cfg(feature = "openai-compat-beta")]
+mod ack_helpers;
 mod chat;
 #[cfg(feature = "openai-compat-beta")]
 mod chat_workflow;
@@ -16,6 +18,8 @@ mod descriptors;
 mod error;
 #[cfg(feature = "openai-compat-beta")]
 mod handlers;
+#[cfg(feature = "openai-compat-beta")]
+mod identity;
 mod refs;
 mod responses;
 #[cfg(feature = "openai-compat-beta")]
@@ -34,7 +38,8 @@ pub use chat::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use chat_workflow::{
-    OpenAiChatCompletionProjection, OpenAiChatCompletionWaitRequest, OpenAiChatCompletionWaiter,
+    OPENAI_COMPAT_CONVERSATION_PREFIX, OpenAiChatCompletionProjection,
+    OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
     OpenAiChatCompletionsWorkflow, OpenAiChatModelOnlyTools, OpenAiCompatAuthenticatedCaller,
 };
 pub use descriptors::{
@@ -56,6 +61,10 @@ pub use handlers::{
     chat_completions, responses_api_cancel, responses_api_create, responses_api_retrieve,
     responses_v1_cancel, responses_v1_create, responses_v1_retrieve,
 };
+#[cfg(feature = "openai-compat-beta")]
+pub use identity::{
+    OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
+};
 pub use refs::{
     InMemoryOpenAiCompatRefStore, OpenAiChatCompletionId, OpenAiCompatActorScope,
     OpenAiCompatBindInternalRefs, OpenAiCompatIdempotencyConflict, OpenAiCompatIdempotencyKey,
@@ -64,7 +73,7 @@ pub use refs::{
     OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
     OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
     OpenAiCompatResourceBinding, OpenAiCompatResourceKind, OpenAiCompatResourceMapping,
-    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId,
+    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId, unix_timestamp_now,
 };
 pub use responses::{
     OpenAiResponseErrorObject, OpenAiResponseObject, OpenAiResponseOutputItem,
