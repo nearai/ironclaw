@@ -17,7 +17,10 @@ use crate::{
     lifecycle::{
         RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
     },
-    outbound_preferences::{OutboundDeliveryTargetRegistry, RebornOutboundPreferencesFacade},
+    outbound_preferences::{
+        OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
+        RebornOutboundPreferencesFacade,
+    },
     webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
 
@@ -60,13 +63,14 @@ pub fn build_webui_services(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    build_webui_services_with_connectable_channels(runtime, event_stream, None)
+    build_webui_services_with_connectable_channels(runtime, event_stream, None, Vec::new())
 }
 
 pub(crate) fn build_webui_services_with_connectable_channels(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     connectable_channels: Option<Arc<dyn ConnectableChannelsProductFacade>>,
+    outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
     let automation_facade = services
@@ -137,12 +141,16 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         api = api.with_automation_product_facade(automation_facade);
     }
     if let Some(local_runtime) = &services.local_runtime {
-        // GitHub PR #4537 carry-forward tracks real product target providers;
-        // until then this product-neutral facade exposes no targets.
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
             Arc::clone(&local_runtime.outbound_preferences),
-            Arc::new(OutboundDeliveryTargetRegistry::new(vec![])),
+            Arc::new(OutboundDeliveryTargetRegistry::new(
+                outbound_delivery_target_providers,
+            )),
         )));
+    } else if !outbound_delivery_target_providers.is_empty() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "outbound delivery target providers require local runtime services".to_string(),
+        });
     }
     if let Some(connectable_channels) = connectable_channels {
         api = api.with_connectable_channels_facade(connectable_channels);
