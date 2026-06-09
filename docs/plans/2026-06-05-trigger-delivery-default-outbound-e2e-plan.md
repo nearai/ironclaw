@@ -102,11 +102,22 @@ tracked follow-up.
   filesystem backend cannot preserve versioned CAS. Any byte-only local/dev
   overlay is a follow-up and must not silently fall back to unconditional
   writes.
+- Phase 2 intentionally preserves explicit `CasConflict` results for valid
+  versioned preference write races. Do not reintroduce hidden storage-level
+  retry loops that blindly rewrite a complete preference record after a
+  conflict; storage does not know whether the caller intended to merge or
+  replace each slot.
 - Add caller-level tests through the preference repository or product facade,
   not only helper-level tests.
 
 ### Product API Follow-Ups
 
+- Add conflict handling for outbound preference updates in the product API/UI
+  phase. Recommended first behavior: surface a stable conflict response that
+  tells the client to reload the latest preference before retrying. If the UI
+  needs lower-friction saves later, add a bounded product-facade retry that
+  reloads the latest record and reapplies only the requested field, with tests
+  for same-field conflicts and disjoint-field preservation.
 - Expand public modality support in a dedicated API phase before surfacing
   non-text defaults. The outbound repository can store more modalities than
   the current product response DTO intentionally exposes.
