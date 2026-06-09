@@ -8,7 +8,9 @@
 #
 # Railway:
 #   Set Dockerfile path to Dockerfile.reborn and IRONCLAW_REBORN_SERVE_HOST=0.0.0.0.
-#   Railway supplies PORT.
+#   Railway supplies PORT. Set IRONCLAW_REBORN_PROFILE=production plus
+#   IRONCLAW_REBORN_POSTGRES_URL and IRONCLAW_REBORN_SECRET_MASTER_KEY for
+#   durable production storage.
 
 FROM rust:1.92-bookworm AS chef
 
@@ -39,7 +41,7 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features webui-v2-beta,slack-v2-host-beta \
+    --features webui-v2-beta,slack-v2-host-beta,postgres \
     --recipe-path recipe.json
 
 FROM deps AS builder
@@ -57,7 +59,7 @@ RUN mkdir -p src \
 RUN cargo build \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features webui-v2-beta,slack-v2-host-beta \
+    --features webui-v2-beta,slack-v2-host-beta,postgres \
     --bin ironclaw-reborn
 
 FROM debian:bookworm-slim AS runtime
@@ -68,6 +70,7 @@ RUN apt-get update \
 
 COPY --from=builder /app/target/dist/ironclaw-reborn /usr/local/bin/ironclaw-reborn
 COPY docker/reborn/config.toml /opt/ironclaw/reborn/config.toml
+COPY docker/reborn/config.production.toml /opt/ironclaw/reborn/config.production.toml
 COPY docker/reborn/entrypoint.sh /usr/local/bin/ironclaw-reborn-entrypoint
 
 ENV HOME=/home/ironclaw \
@@ -79,6 +82,8 @@ RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
     && mkdir -p /data/ironclaw-reborn /workspace \
     && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn /workspace \
     && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint
+
+VOLUME ["/data/ironclaw-reborn"]
 
 WORKDIR /workspace
 
