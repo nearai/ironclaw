@@ -1515,6 +1515,7 @@ pub async fn build_reborn_runtime(
         hooks: hooks_config,
         budget_defaults,
         budget_event_observer,
+        trajectory_observer,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -1774,6 +1775,7 @@ pub async fn build_reborn_runtime(
         model_gateway,
         milestone_sink.clone(),
         skill_activation_source.clone(),
+        trajectory_observer,
     )
     .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
     let capability_factory = local_dev_capabilities.capability_factory;

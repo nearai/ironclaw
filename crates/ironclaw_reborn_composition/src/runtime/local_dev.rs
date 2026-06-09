@@ -75,6 +75,7 @@ pub(super) fn capability_wiring(
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> Option<LocalDevCapabilityWiring> {
     let runtime = services.host_runtime.clone()?;
     let local_runtime = services.local_runtime.as_ref()?;
@@ -83,11 +84,14 @@ pub(super) fn capability_wiring(
     let extension_surface_source =
         LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-    let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
-        Arc::clone(&display_previews),
-        thread_service,
-        thread_scope,
-    ));
+    let capability_io = Arc::new(
+        LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service,
+            thread_scope,
+        )
+        .with_observer(trajectory_observer),
+    );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
@@ -205,6 +209,8 @@ struct LocalDevCapabilityIo {
     results: StdMutex<StagedValueStore>,
     display_previews: Arc<CapabilityDisplayPreviewStore>,
     durable_previews: Option<DurableCapabilityDisplayPreviewSink>,
+    /// Optional consumer hook: receives each tool call's name/args + result.
+    observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 }
 
 #[derive(Clone)]
@@ -226,6 +232,7 @@ impl LocalDevCapabilityIo {
             results: StdMutex::new(StagedValueStore::default()),
             display_previews,
             durable_previews: None,
+            observer: None,
         }
     }
 
@@ -242,7 +249,17 @@ impl LocalDevCapabilityIo {
                 thread_service,
                 thread_scope,
             }),
+            observer: None,
         }
+    }
+
+    /// Attach a trajectory observer (no-op when `None`).
+    fn with_observer(
+        mut self,
+        observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    ) -> Self {
+        self.observer = observer;
+        self
     }
 
     fn result_output(
@@ -462,6 +479,13 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
             &tool_call.name,
             &tool_call.arguments,
         );
+        if let Some(observer) = &self.observer {
+            observer.on_capability_input(
+                input_ref.as_str(),
+                &tool_call.name,
+                &tool_call.arguments,
+            );
+        }
         Ok(input_ref)
     }
 }
@@ -505,6 +529,9 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             },
             display_preview.as_ref(),
         );
+        if let Some(observer) = &self.observer {
+            observer.on_capability_result(input_ref.as_str(), &output);
+        }
         if let Some(message_id) = self
             .try_append_durable_display_preview(run_context, invocation_id, capability_id)
             .await

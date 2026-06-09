@@ -353,6 +353,7 @@ mod tests {
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
+            None,
         )
         .expect("local-dev capability wiring");
 
@@ -1005,6 +1006,7 @@ mod tests {
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             Some(skill_context.activation_source),
+            None,
         )
         .expect("capability wiring");
         let port = wiring
@@ -1546,6 +1548,7 @@ mod tests {
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
+            None,
         )
         .expect("local-dev capability wiring");
         assert_github_capabilities_visible(&wiring, &run_context).await;
@@ -1580,6 +1583,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
         )
         .expect("local-dev capability wiring");

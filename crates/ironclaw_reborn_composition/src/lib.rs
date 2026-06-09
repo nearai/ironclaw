@@ -41,6 +41,7 @@ mod gsuite;
 mod hooks;
 mod input;
 mod lifecycle;
+mod trajectory_observer;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
 #[cfg(feature = "root-llm-provider")]
@@ -206,6 +207,7 @@ pub use runtime::{
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
+pub use trajectory_observer::RebornTrajectoryObserver;
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::ResolvedRebornLlm;
 pub use runtime_input::{

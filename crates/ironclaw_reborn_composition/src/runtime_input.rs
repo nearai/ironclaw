@@ -282,6 +282,10 @@ pub struct RebornRuntimeInput {
     /// supply their own observer (SSE projection, WS fan-out,
     /// telemetry export) here.
     pub budget_event_observer: Option<Arc<dyn crate::BudgetEventObserver>>,
+    /// Observer that receives each capability/tool invocation + result during a
+    /// run, so a downstream caller can reconstruct the full step-by-step
+    /// trajectory (the sealed runtime otherwise exposes only the final reply).
+    pub trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
     /// Cost table to pair with the model-gateway override. Without this,
@@ -316,6 +320,7 @@ impl RebornRuntimeInput {
             hooks: HooksActivationConfig::default(),
             budget_defaults: None,
             budget_event_observer: None,
+            trajectory_observer: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -344,6 +349,16 @@ impl RebornRuntimeInput {
         observer: Arc<dyn crate::BudgetEventObserver>,
     ) -> Self {
         self.budget_event_observer = Some(observer);
+        self
+    }
+
+    /// Install a trajectory observer that receives each capability/tool call +
+    /// result during a run (for downstream step-by-step trajectory capture).
+    pub fn with_trajectory_observer(
+        mut self,
+        observer: Arc<dyn crate::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer = Some(observer);
         self
     }
 
