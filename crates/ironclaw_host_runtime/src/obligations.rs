@@ -161,7 +161,7 @@ impl RuntimeSecretInjectionStore {
                 capability_id,
                 handle,
             ))
-            .map(|entry| SecretMaterial::from(entry.material.expose_secret().to_string())))
+            .map(|entry| SecretMaterial::from(entry.material.expose_secret())))
     }
 
     /// Discard all staged secrets for a scoped capability before process ownership exists.
