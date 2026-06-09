@@ -90,7 +90,11 @@ pub(super) fn capability_wiring(
             thread_service,
             thread_scope,
         )
-        .with_observer(trajectory_observer),
+        .with_observer(trajectory_observer.clone()),
+    );
+    eprintln!(
+        "[OBS-DEBUG] capability_wiring: observer set = {}",
+        trajectory_observer.is_some()
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
@@ -479,6 +483,12 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
             &tool_call.name,
             &tool_call.arguments,
         );
+        eprintln!(
+            "[OBS-DEBUG] register_provider_tool_call_input: name={} ref={} observer={}",
+            tool_call.name,
+            input_ref.as_str(),
+            self.observer.is_some()
+        );
         if let Some(observer) = &self.observer {
             observer.on_capability_input(
                 input_ref.as_str(),
@@ -528,6 +538,12 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
                 output_bytes,
             },
             display_preview.as_ref(),
+        );
+        eprintln!(
+            "[OBS-DEBUG] write_capability_result: cap={:?} ref={} observer={}",
+            capability_id,
+            input_ref.as_str(),
+            self.observer.is_some()
         );
         if let Some(observer) = &self.observer {
             observer.on_capability_result(input_ref.as_str(), &output);
