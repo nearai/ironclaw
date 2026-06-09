@@ -48,7 +48,7 @@ use crate::tools::mcp::auth::{
     authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
     find_available_port, is_authenticated, register_client,
 };
-use crate::tools::mcp::config::{McpServerConfig, NEARAI_MCP_SERVER_NAME};
+use crate::tools::mcp::config::{McpServerConfig, NEARAI_MCP_SERVER_NAME, OAuthConfig};
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
@@ -884,6 +884,20 @@ impl ExtensionManager {
     #[cfg(test)]
     pub(crate) async fn set_test_wechat_login_poller(&self, poller: TestWechatLoginPoller) {
         *self.test_wechat_login_poller.write().await = Some(poller);
+    }
+
+    /// Test-only accessor for verifying stored MCP server config.
+    ///
+    /// Exposes the private `get_mcp_server` call under a `pub(crate)`
+    /// visibility so handler tests can assert on persisted config fields
+    /// without going through the HTTP layer.
+    #[cfg(test)]
+    pub(crate) async fn get_mcp_server_for_test(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<McpServerConfig, crate::tools::mcp::config::ConfigError> {
+        self.get_mcp_server(name, user_id).await
     }
     /// Enable gateway mode so OAuth flows return auth URLs to the frontend
     /// instead of calling `open::that()` on the server.
@@ -1923,23 +1937,91 @@ impl ExtensionManager {
         kind_hint: Option<ExtensionKind>,
         user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
+        self.install_inner(name, url, kind_hint, HashMap::new(), None, user_id)
+            .await
+    }
+
+    /// Install an MCP server with caller-supplied HTTP `headers` and `oauth`
+    /// credentials embedded in the stored configuration.
+    ///
+    /// Unlike [`install`], which leaves MCP server credentials empty and
+    /// expects the interactive `/setup` flow to fill them in later, this
+    /// method stores the full config in one shot — intended for programmatic
+    /// callers (e.g. the marketplace at managed-agent publish time).
+    ///
+    /// Routing behaviour mirrors [`install`]:
+    /// - Registry-known names resolve through the registry first; credentials
+    ///   are applied to the resulting URL.
+    /// - The reserved `nearai` MCP server ignores supplied credentials (its
+    ///   config derives from environment, not the caller) and logs a warning.
+    /// - URL-only (no registry match) installs call
+    ///   [`install_mcp_with_config`] directly.
+    /// - Non-MCP kinds ignore `headers`/`oauth` (they have no effect on WASM
+    ///   or channel-relay installs) — a debug log records the ignored fields.
+    pub async fn install_with_mcp_config(
+        &self,
+        name: &str,
+        url: Option<&str>,
+        kind_hint: Option<ExtensionKind>,
+        headers: HashMap<String, String>,
+        oauth: Option<OAuthConfig>,
+        user_id: &str,
+    ) -> Result<InstallResult, ExtensionError> {
+        self.install_inner(name, url, kind_hint, headers, oauth, user_id)
+            .await
+    }
+
+    async fn install_inner(
+        &self,
+        name: &str,
+        url: Option<&str>,
+        kind_hint: Option<ExtensionKind>,
+        headers: HashMap<String, String>,
+        oauth: Option<OAuthConfig>,
+        user_id: &str,
+    ) -> Result<InstallResult, ExtensionError> {
         let name = canonicalize_extension_name(name)?;
         let sanitized_url = url.map(sanitize_url_for_logging);
         tracing::info!(extension = %name, url = ?sanitized_url, kind = ?kind_hint, "Installing extension");
 
+        let has_mcp_config = !headers.is_empty() || oauth.is_some();
+
         // If we have a registry entry, use it (prefer kind_hint to resolve collisions)
         if let Some(entry) = self.registry.get_with_kind(&name, kind_hint).await {
-            return self.install_from_entry(&entry, user_id).await.map_err(|e| {
-                tracing::error!(extension = %name, error = %e, "Extension install failed");
-                e
-            });
+            return self
+                .install_from_entry_with_mcp_config(&entry, headers, oauth, user_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(extension = %name, error = %e, "Extension install failed");
+                    e
+                });
+        }
+
+        // Log if credentials were supplied for a non-MCP-server URL install
+        // (or a MCP-server install without a URL, which will fail below).
+        if has_mcp_config {
+            let effective_kind = url
+                .map(|u| kind_hint.unwrap_or_else(|| infer_kind_from_url(u)))
+                .or(kind_hint);
+            if effective_kind != Some(ExtensionKind::McpServer) {
+                tracing::debug!(
+                    extension = %name,
+                    has_headers = !headers.is_empty(),
+                    has_oauth = oauth.is_some(),
+                    "install request carries MCP headers/oauth but effective kind \
+                     is not mcp_server — fields ignored"
+                );
+            }
         }
 
         // If a URL was provided, determine kind and install
         if let Some(url) = url {
             let kind = kind_hint.unwrap_or_else(|| infer_kind_from_url(url));
             return match kind {
-                ExtensionKind::McpServer => self.install_mcp_from_url(&name, url, user_id).await,
+                ExtensionKind::McpServer => {
+                    self.install_mcp_with_config(&name, url, headers, oauth, user_id)
+                        .await
+                }
                 ExtensionKind::WasmTool => self.install_wasm_tool_from_url(&name, url).await,
                 ExtensionKind::WasmChannel => {
                     self.install_wasm_channel_from_url(&name, url, None).await
@@ -3355,8 +3437,36 @@ impl ExtensionManager {
         entry: &RegistryEntry,
         user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
+        self.install_from_entry_with_mcp_config(entry, HashMap::new(), None, user_id)
+            .await
+    }
+
+    /// Registry-entry install path, threading optional MCP credentials.
+    ///
+    /// For non-MCP extension kinds, `headers` and `oauth` are silently
+    /// ignored (they are MCP-specific and have no meaning for WASM tools,
+    /// channel relays, or ACP agents).
+    ///
+    /// For the reserved `nearai` MCP server, credentials are also ignored:
+    /// that server's configuration derives entirely from the environment
+    /// (`NEARAI_API_KEY` / `NEARAI_API_URL`) and cannot be overridden via
+    /// the install API. A warning is emitted so operators can spot
+    /// misconfigured payloads.
+    async fn install_from_entry_with_mcp_config(
+        &self,
+        entry: &RegistryEntry,
+        headers: HashMap<String, String>,
+        oauth: Option<OAuthConfig>,
+        user_id: &str,
+    ) -> Result<InstallResult, ExtensionError> {
         let primary_result = self
-            .try_install_from_source(entry, &entry.source, user_id)
+            .try_install_from_source_with_mcp_config(
+                entry,
+                &entry.source,
+                headers.clone(),
+                oauth.clone(),
+                user_id,
+            )
             .await;
         match fallback_decision(&primary_result, &entry.fallback_source) {
             FallbackDecision::Return => primary_result,
@@ -3372,7 +3482,12 @@ impl ExtensionManager {
                     primary_error = %primary_err,
                     "Primary install failed, trying fallback source"
                 );
-                match self.try_install_from_source(entry, fallback, user_id).await {
+                match self
+                    .try_install_from_source_with_mcp_config(
+                        entry, fallback, headers, oauth, user_id,
+                    )
+                    .await
+                {
                     Ok(result) => Ok(result),
                     Err(fallback_err) => {
                         tracing::error!(
@@ -3387,16 +3502,30 @@ impl ExtensionManager {
         }
     }
 
-    /// Attempt to install an extension using a specific source.
-    async fn try_install_from_source(
+    /// Attempt to install an extension using a specific source, optionally
+    /// embedding MCP credentials (`headers`/`oauth`) into the stored config.
+    async fn try_install_from_source_with_mcp_config(
         &self,
         entry: &RegistryEntry,
         source: &ExtensionSource,
+        headers: HashMap<String, String>,
+        oauth: Option<OAuthConfig>,
         user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
         match entry.kind {
             ExtensionKind::McpServer => {
                 if entry.name == NEARAI_MCP_SERVER_NAME {
+                    if !headers.is_empty() || oauth.is_some() {
+                        tracing::warn!(
+                            extension = %entry.name,
+                            has_headers = !headers.is_empty(),
+                            has_oauth = oauth.is_some(),
+                            "MCP credentials supplied for the reserved '{}' server; \
+                             that server's config derives from environment variables and \
+                             cannot be overridden via the install API — credentials ignored",
+                            NEARAI_MCP_SERVER_NAME
+                        );
+                    }
                     return self.install_nearai_mcp_from_env(user_id).await;
                 }
 
@@ -3409,7 +3538,8 @@ impl ExtensionManager {
                         ));
                     }
                 };
-                self.install_mcp_from_url(&entry.name, &url, user_id).await
+                self.install_mcp_with_config(&entry.name, &url, headers, oauth, user_id)
+                    .await
             }
             ExtensionKind::WasmTool => match source {
                 ExtensionSource::WasmDownload {
@@ -3569,27 +3699,50 @@ impl ExtensionManager {
         })
     }
 
-    async fn install_mcp_from_url(
+    /// Install an MCP server with full configuration in one shot.
+    ///
+    /// This is the single install path for all MCP server installs: both
+    /// the basic URL-only path (`headers` empty, `oauth` `None`) and the
+    /// programmatic path with embedded credentials flow through here.
+    ///
+    /// Previously there was a separate `install_mcp_from_url` wrapper; it
+    /// was removed to keep the code path count low and eliminate the dead
+    /// code. The delegating `install_mcp_from_url` form is equivalent to
+    /// calling this with `headers = HashMap::new(), oauth = None`.
+    ///
+    /// This method embeds caller-supplied `headers` and `oauth` directly into
+    /// the persisted [`McpServerConfig`]. Intended for programmatic callers
+    /// (e.g. the marketplace) that configure credentials at publish time
+    /// instead of through the interactive `/setup` flow.
+    ///
+    /// Returns [`ExtensionError::AlreadyInstalled`] if the server is already
+    /// present for `user_id` — callers that want upsert semantics should use
+    /// [`update_mcp_server_partial`] after a failed install.
+    pub async fn install_mcp_with_config(
         &self,
         name: &str,
         url: &str,
+        headers: HashMap<String, String>,
+        oauth: Option<OAuthConfig>,
         user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
-        // Check if already installed
         if self.get_mcp_server(name, user_id).await.is_ok() {
             return Err(ExtensionError::AlreadyInstalled(name.to_string()));
         }
 
-        let config = McpServerConfig::new(name, url);
-        config
-            .validate()
-            .map_err(|e| ExtensionError::InvalidUrl(e.to_string()))?;
-
+        let mut config = McpServerConfig::new(name, url).with_headers(headers);
+        if let Some(o) = oauth {
+            config = config.with_oauth(o);
+        }
+        // `add_mcp_server` calls `validate()` internally — skip the
+        // redundant call here. The error variant from `add_mcp_server` is
+        // `Config`, which is a reasonable mapping for validation failures
+        // on the install path (url/name validation already ran above).
         self.add_mcp_server(config, user_id)
             .await
             .map_err(|e| ExtensionError::Config(e.to_string()))?;
 
-        tracing::info!("Installed MCP server '{}' at {}", name, url);
+        tracing::info!(extension = %name, url = %url, "Installed MCP server");
 
         Ok(InstallResult {
             name: name.to_string(),
@@ -3599,6 +3752,107 @@ impl ExtensionManager {
                 name
             ),
         })
+    }
+
+    /// Apply a partial update to an installed MCP server.
+    ///
+    /// Only `ExtensionKind::McpServer` supports partial updates; other installed
+    /// extension kinds return [`ExtensionError::WrongKind`]. If no extension
+    /// with `name` exists for `user_id`, returns [`ExtensionError::NotFound`].
+    ///
+    /// The `oauth` argument is a tri-state:
+    /// - `None` — absent from the request: leave existing OAuth config unchanged.
+    /// - `Some(None)` — explicit `null` in the request: clear OAuth config.
+    /// - `Some(Some(config))` — replace OAuth config.
+    ///
+    /// After persisting the new config, the cached [`McpClient`] for
+    /// `(user_id, name)` is evicted from [`McpClientStore`] so the next
+    /// activation re-materialises a client from the updated config.
+    ///
+    /// # Concurrency
+    ///
+    /// Acquires the per-server `mcp_lifecycle_lock` (same lock held by
+    /// `activate_mcp` and `remove`) before reading the existing config.
+    /// This prevents the following interleaving that would silently commit
+    /// stale credentials:
+    ///   1. activate reads OLD config → creates client
+    ///   2. PATCH persists new config + evicts (no-op: client not yet stored)
+    ///   3. activate stores stale-config client → never self-heals
+    pub async fn update_mcp_server_partial(
+        &self,
+        name: &str,
+        url: Option<String>,
+        headers: Option<HashMap<String, String>>,
+        // Tri-state: None = leave unchanged, Some(None) = clear, Some(Some(_)) = replace.
+        oauth: Option<Option<OAuthConfig>>,
+        user_id: &str,
+    ) -> Result<(), ExtensionError> {
+        // Serialise update with activate/remove on this server so we don't
+        // race between reading the existing config and inserting the new
+        // client. See `activate_mcp` for the canonical comment.
+        let lifecycle_lock = self.mcp_lifecycle_lock(name).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
+
+        // Look up the existing config. First check the MCP store; if not
+        // found, use `determine_installed_kind` to tell the caller whether
+        // the name exists as a different extension kind (→ WrongKind) or not
+        // at all (→ NotFound).
+        let mut config = match self.get_mcp_server(name, user_id).await {
+            Ok(c) => c,
+            Err(_) => {
+                // Check whether a non-MCP extension with this name is installed.
+                match self.determine_installed_kind(name, user_id).await {
+                    Ok(kind) => {
+                        return Err(ExtensionError::WrongKind {
+                            kind: format!("{:?}", kind),
+                            reason: "PATCH is only supported for mcp_server extensions".to_string(),
+                        });
+                    }
+                    Err(_) => {
+                        return Err(ExtensionError::NotFound(format!(
+                            "No extension named '{}' found for this user.",
+                            name
+                        )));
+                    }
+                }
+            }
+        };
+
+        if let Some(new_url) = url {
+            // When the URL changes, the previous backend's tool catalog is
+            // stale — clear it so `latent_actions_for_mcp_server` does not
+            // advertise old tools for the new URL while the server is inactive.
+            if config.url != new_url {
+                config.cached_tools.clear();
+            }
+            config.url = new_url;
+        }
+        if let Some(h) = headers {
+            config.headers = h;
+        }
+        // Tri-state: None → unchanged, Some(None) → clear, Some(Some(_)) → replace.
+        match oauth {
+            None => {}
+            Some(new_oauth) => config.oauth = new_oauth,
+        }
+
+        self.update_mcp_server(config, user_id)
+            .await
+            .map_err(|e| ExtensionError::Config(e.to_string()))?;
+
+        // Evict the cached McpClient so the next activation re-connects
+        // with the new config (updated headers, oauth, or URL).
+        // Without this, in-memory clients would continue using stale
+        // credentials until server restart.
+        self.mcp_clients.remove(user_id, name).await;
+
+        tracing::info!(
+            extension = %name,
+            user_id = %user_id,
+            "MCP server config updated; cached client evicted"
+        );
+
+        Ok(())
     }
 
     async fn install_wasm_tool_from_url(
