@@ -2295,7 +2295,7 @@ async fn mcp_http_client_reuses_real_host_staged_network_policy_for_json_rpc_ses
 }
 
 #[tokio::test]
-async fn mcp_http_client_consumes_staged_credential_on_first_session_request() {
+async fn mcp_http_client_reuses_staged_credential_for_json_rpc_session() {
     let network = JsonRpcMcpNetwork::new();
     let network_recorder = network.requests.clone();
     let services = test_obligation_services();
@@ -2332,7 +2332,7 @@ async fn mcp_http_client_consumes_staged_credential_on_first_session_request() {
         }),
     );
 
-    let error = client
+    let output = client
         .call_tool(McpClientRequest {
             provider: ExtensionId::new("mcp").unwrap(),
             capability_id: capability_id.clone(),
@@ -2345,30 +2345,31 @@ async fn mcp_http_client_consumes_staged_credential_on_first_session_request() {
             max_output_bytes: 4096,
         })
         .await
-        .expect_err("one-shot staged credential must not cover the whole MCP session");
-    assert_eq!(error.stable_reason(), "credential_unavailable");
+        .expect("staged MCP credential should cover the whole JSON-RPC session");
+
+    assert_eq!(
+        output.output,
+        json!({"content":[{"type":"text","text":"ok"}],"isError":false})
+    );
     let requests = network_recorder.lock().unwrap();
     assert_eq!(
         requests.len(),
-        1,
-        "initialize should consume the staged credential before initialized/tools-call retry"
+        3,
+        "initialize, initialized notification, and tools/call should all reach transport"
     );
-    assert_eq!(
-        requests[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-staged-mcp-secret".to_string(),
-        )),
-        "initialize must receive the staged MCP credential"
+    assert!(
+        requests.iter().all(|request| {
+            request.headers.iter().any(|(name, value)| {
+                name == "authorization" && value == "Bearer sk-staged-mcp-secret"
+            })
+        }),
+        "every MCP session request must receive the staged credential"
     );
     drop(requests);
 }
 
 #[tokio::test]
-async fn mcp_http_client_consumes_product_auth_staged_credential_on_first_session_request() {
+async fn mcp_http_client_reuses_product_auth_staged_credential_for_json_rpc_session() {
     let network = JsonRpcMcpNetwork::new();
     let network_recorder = network.requests.clone();
     let source_scope = sample_scope();
@@ -2436,7 +2437,7 @@ async fn mcp_http_client_consumes_product_auth_staged_credential_on_first_sessio
         }),
     );
 
-    let error = client
+    let output = client
         .call_tool(McpClientRequest {
             provider: ExtensionId::new("mcp").unwrap(),
             capability_id: capability_id.clone(),
@@ -2449,24 +2450,25 @@ async fn mcp_http_client_consumes_product_auth_staged_credential_on_first_sessio
             max_output_bytes: 4096,
         })
         .await
-        .expect_err("one-shot product-auth credential must not cover the whole MCP session");
-    assert_eq!(error.stable_reason(), "credential_unavailable");
+        .expect("product-auth staged credential should cover the whole MCP JSON-RPC session");
+
+    assert_eq!(
+        output.output,
+        json!({"content":[{"type":"text","text":"ok"}],"isError":false})
+    );
     let requests = network_recorder.lock().unwrap();
     assert_eq!(
         requests.len(),
-        1,
-        "initialize should consume the staged product-auth credential before initialized/tools-call retry"
+        3,
+        "initialize, initialized notification, and tools/call should all reach transport"
     );
-    assert_eq!(
-        requests[0]
+    assert!(
+        requests.iter().all(|request| request
             .headers
             .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-account-scope-mcp-secret".to_string(),
-        )),
-        "initialize must receive the staged product-auth credential"
+            .any(|(name, value)| name == "authorization"
+                && value == "Bearer sk-account-scope-mcp-secret")),
+        "every MCP session request must receive the staged product-auth credential"
     );
     drop(requests);
 }

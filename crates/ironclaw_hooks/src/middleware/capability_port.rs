@@ -304,7 +304,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         enum Slot {
             /// Hook produced a final outcome — no inner call needed.
             Resolved {
-                outcome: CapabilityOutcome,
+                outcome: Box<CapabilityOutcome>,
                 provider: Option<ironclaw_host_api::ExtensionId>,
             },
             /// Hooks allowed; the inner port will produce the outcome.
@@ -326,7 +326,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
                 Some(translated) => {
                     let is_suspension = translated.is_suspension();
                     slots.push(Slot::Resolved {
-                        outcome: translated,
+                        outcome: Box::new(translated),
                         provider,
                     });
                     if is_suspension && stop_on_first_suspension {
@@ -418,7 +418,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         let mut pending_after_stop = false;
         for slot in slots {
             let outcome_and_provider = match slot {
-                Slot::Resolved { outcome, provider } => Some((outcome, provider)),
+                Slot::Resolved { outcome, provider } => Some((*outcome, provider)),
                 Slot::Pending { provider } => {
                     if pending_after_stop {
                         // We already stopped on a prior suspension and
@@ -496,6 +496,7 @@ impl HookedLoopCapabilityPort {
                     Ok(gate_ref) => Some(CapabilityOutcome::ApprovalRequired {
                         gate_ref,
                         safe_summary: reason.as_str().to_string(),
+                        approval_resume: None,
                     }),
                     Err(_) => Some(fail_closed_gate_ref_unavailable(reason.as_str())),
                 }
@@ -847,6 +848,7 @@ mod tests {
                 "input:cap.snapshot.fixture",
             )
             .expect("input ref literal is valid"),
+            approval_resume: None,
         }
     }
 
@@ -892,6 +894,7 @@ mod tests {
                 "input:cap.snapshot.fixture",
             )
             .expect("input ref literal is valid"),
+            approval_resume: None,
         };
         let digest = invocation_arguments_digest(&invocation);
         let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
@@ -952,6 +955,7 @@ mod tests {
                 "input:cap.snapshot.fixture",
             )
             .expect("input ref literal is valid"),
+            approval_resume: None,
         };
         let ctx = port.hook_context(&invocation, None).await;
         let hex: String = ctx
@@ -1046,11 +1050,13 @@ mod tests {
             surface_version: surface.clone(),
             capability_id: cap_id.clone(),
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:a").expect("ok"),
+            approval_resume: None,
         };
         let b = CapabilityInvocation {
             surface_version: surface,
             capability_id: cap_id,
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:b").expect("ok"),
+            approval_resume: None,
         };
         assert_ne!(
             invocation_arguments_digest(&a),
@@ -1063,6 +1069,7 @@ mod tests {
             surface_version: CapabilitySurfaceVersion::new("v1").expect("ok"),
             capability_id: CapabilityId::new(capability).expect("ok"),
             input_ref: CapabilityInputRef::new(format!("input:{capability}")).expect("ok"),
+            approval_resume: None,
         }
     }
 
@@ -1169,6 +1176,7 @@ mod tests {
             CapabilityOutcome::ApprovalRequired {
                 gate_ref,
                 safe_summary,
+                ..
             } => {
                 assert!(gate_ref.as_str().starts_with("gate:hook-approval-"));
                 assert_eq!(safe_summary, "needs approval for this capability");

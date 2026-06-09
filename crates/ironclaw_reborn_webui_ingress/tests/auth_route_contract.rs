@@ -18,6 +18,11 @@
 //!    authenticating, isolated from the OAuth round-trip.
 //! 5. An expired session is rejected at the route layer (the
 //!    `session.rs` unit test only covers `authenticate()` in isolation).
+//! 6. `?token=` is rejected on the WebSocket upgrade route — the
+//!    WS-specific half of the v1 query-token narrowing, locked directly
+//!    rather than inferred from the POST-mutation rejection.
+//! 7. An `ironclaw_session` cookie carrying a valid bearer does not
+//!    authenticate — the v2 cookie-transport beta-break (#4116).
 //!
 //! Supports the authentication slice of the #3615 WebUI security parity
 //! audit.
@@ -85,6 +90,7 @@ const ENV_USER: &str = "operator-user";
 #[derive(Default)]
 struct StubServices {
     create_thread_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    stream_events_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
 }
 
 #[async_trait]
@@ -134,12 +140,18 @@ impl RebornServicesApi for StubServices {
 
     async fn stream_events(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
         _request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        // Returns an empty event page so the SSE route reaches a 200
-        // once auth passes — the `?token=` shim tests assert on the
-        // gateway's auth verdict, not on stream contents.
+        // Record the caller so the `?token=` shim test can assert the
+        // query token was consumed as the session credential and stamped
+        // as that user — not merely that the route reached a 200. Returns
+        // an empty event page so the SSE route reaches 200 once auth
+        // passes.
+        self.stream_events_callers
+            .lock()
+            .expect("lock")
+            .push(caller);
         Ok(RebornStreamEventsResponse { events: Vec::new() })
     }
 
@@ -627,7 +639,7 @@ async fn query_token_honored_on_sse_events_route() {
     // v1 allowed `?token=` on three GET routes; v2 keeps the escape
     // hatch on exactly one — the SSE event stream — because
     // `EventSource` cannot set an `Authorization` header.
-    let (app, _services, store) = session_app();
+    let (app, services, store) = session_app();
     let bearer = store
         .create_session(
             TenantId::new(TENANT).expect("tenant"),
@@ -658,6 +670,37 @@ async fn query_token_honored_on_sse_events_route() {
         with_token.status(),
         StatusCode::OK,
         "a valid `?token=` must authenticate the SSE event stream",
+    );
+
+    // Identity binding: the `?token=` value must be consumed as the
+    // session credential and stamped as that user — not merely yield a
+    // 200. A mis-wire that left the route auth-gated but stamped a
+    // default/empty caller would still 200. The SSE body is a lazy
+    // stream, so the facade's `stream_events` only runs once the body is
+    // polled — drive frames briefly so it runs at least once (the
+    // drain-poll loop may call it several times; assert on identity, not
+    // count).
+    use http_body_util::BodyExt;
+    let mut body = with_token.into_body();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while body.frame().await.is_some() {}
+    })
+    .await;
+
+    let callers = services.stream_events_callers.lock().expect("lock");
+    assert!(
+        !callers.is_empty(),
+        "the authenticated SSE request must reach the facade",
+    );
+    assert_eq!(
+        callers[0].user_id.as_str(),
+        "session-user",
+        "the `?token=` session must be resolved to its owning user_id",
+    );
+    assert_eq!(
+        callers[0].tenant_id.as_str(),
+        TENANT,
+        "tenant comes from trusted host config, not the query token",
     );
 }
 
@@ -692,6 +735,100 @@ async fn query_token_rejected_on_mutation_route() {
         response.status(),
         StatusCode::UNAUTHORIZED,
         "`?token=` must not authenticate a mutation route",
+    );
+    assert_eq!(callers_len(&services), 0, "facade must not be reached");
+}
+
+/// `GET /api/webchat/v2/threads/{id}/ws` (the WebSocket upgrade route)
+/// with an optional `?token=` and no `Authorization` header. A matching
+/// `Origin` is supplied so the same-origin middleware (which runs before
+/// auth) passes and the verdict isolates to the auth layer. `t1` matches
+/// the SSE helper's thread id.
+fn ws_events_request(token: Option<&str>) -> Request<Body> {
+    let uri = match token {
+        Some(token) => format!("/api/webchat/v2/threads/t1/ws?token={token}"),
+        None => "/api/webchat/v2/threads/t1/ws".to_string(),
+    };
+    with_peer(
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            // Origin matches Host so the WS same-origin middleware (which
+            // runs before auth, and requires a Host/canonical_host to
+            // compare against) passes — isolating the verdict to auth.
+            .header(header::HOST, "localhost:1234")
+            .header(header::ORIGIN, "http://localhost:1234")
+            .body(Body::empty())
+            .expect("request"),
+    )
+}
+
+#[tokio::test]
+async fn query_token_rejected_on_websocket_route() {
+    // v1 allowed `?token=` on three GET routes including the WS stream
+    // (`/api/chat/ws`); v2 drops it everywhere except the SSE event
+    // stream. This is a WS-specific beta-break, so lock it directly
+    // rather than inferring it from the POST-mutation rejection: a VALID
+    // session token on the query string of the WS upgrade, with no
+    // `Authorization` header, must NOT authenticate.
+    let (app, _services, store) = session_app();
+    let bearer = store
+        .create_session(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new("session-user").expect("user"),
+            ChronoDuration::hours(1),
+        )
+        .await
+        .expect("create_session")
+        .expose_secret()
+        .to_string();
+
+    let response = app
+        .oneshot(ws_events_request(Some(&bearer)))
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "`?token=` must not authenticate the WebSocket route (v1 WS query-token exception dropped)",
+    );
+}
+
+// ─── cookie session is not a v2 credential ────────────────────────────
+
+#[tokio::test]
+async fn cookie_session_not_honored_on_protected_route() {
+    // v1 accepted an `ironclaw_session` cookie as a credential and set
+    // one on the OAuth callback; v2 never reads or writes cookies (#4116).
+    // A request carrying a VALID session bearer in the `ironclaw_session`
+    // cookie — and no `Authorization` header — must be rejected, proving
+    // the cookie *transport* is dropped (not merely an invalid value).
+    let (app, services, store) = session_app();
+    let bearer = store
+        .create_session(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new("session-user").expect("user"),
+            ChronoDuration::hours(1),
+        )
+        .await
+        .expect("create_session")
+        .expose_secret()
+        .to_string();
+
+    let request = with_peer(
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/webchat/v2/threads")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::COOKIE, format!("ironclaw_session={bearer}"))
+            .body(Body::from(r#"{"client_action_id":"act-1"}"#))
+            .expect("request"),
+    );
+    let response = app.oneshot(request).await.expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "an `ironclaw_session` cookie must not authenticate a v2 route (cookie transport dropped)",
     );
     assert_eq!(callers_len(&services), 0, "facade must not be reached");
 }
@@ -885,4 +1022,134 @@ async fn oidc_signed_token_authenticates_protected_route_and_bad_claims_rejected
         "only the valid token may reach the facade",
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn oidc_hs256_token_rejected_on_route() {
+    // Algorithm-confusion (CVE-class JWT bypass): sign an HS256 token
+    // using the RSA *public* modulus as the HMAC secret, with a `kid`
+    // matching the JWKS key. A verifier that doesn't pin the algorithm
+    // would verify the MAC with the public key and forge a valid caller.
+    // The RS/ES-only allowlist must reject it at the gateway, and the
+    // facade must never be reached. (row 5 — locks the highest-value
+    // OIDC control, which RS256-only tests cannot exercise.)
+    let (_pem, public) = generate_oidc_key();
+    let (jwks_url, server) = spawn_jwks_server(oidc_jwk(&public, OIDC_KID)).await;
+    let (app, services) = oidc_app(jwks_url);
+
+    let now = chrono::Utc::now().timestamp();
+    let claims = json!({
+        "iss": OIDC_ISSUER,
+        "sub": "attacker",
+        "aud": OIDC_AUDIENCE,
+        "exp": now + 600,
+        "iat": now,
+    });
+    let mut header = Header::new(Algorithm::HS256);
+    header.kid = Some(OIDC_KID.to_string());
+    let forged = encode(
+        &header,
+        &claims,
+        &EncodingKey::from_secret(public.n().to_bytes_be().as_slice()),
+    )
+    .expect("sign hs256");
+
+    let response = app
+        .oneshot(create_thread_request(Some(&format!("Bearer {forged}"))))
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "HS256 (alg-confusion) token must be rejected at the route layer",
+    );
+    assert_eq!(
+        callers_len(&services),
+        0,
+        "the forged token must never reach the facade",
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn oidc_not_yet_valid_nbf_token_rejected_on_route() {
+    // row 5 lists `nbf` as a validated claim. A correctly-signed token
+    // with valid iss/aud/exp but a not-before in the future must collapse
+    // to 401 at the gateway (not just inside `authenticate()`), and the
+    // facade must not be reached.
+    let (pem, public) = generate_oidc_key();
+    let (jwks_url, server) = spawn_jwks_server(oidc_jwk(&public, OIDC_KID)).await;
+    let (app, services) = oidc_app(jwks_url);
+
+    let now = chrono::Utc::now().timestamp();
+    let claims = json!({
+        "iss": OIDC_ISSUER,
+        "sub": "alice",
+        "aud": OIDC_AUDIENCE,
+        "exp": now + 600,
+        "iat": now,
+        "nbf": now + 3600,
+    });
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(OIDC_KID.to_string());
+    let token = encode(
+        &header,
+        &claims,
+        &EncodingKey::from_rsa_pem(pem.as_bytes()).expect("encoding key"),
+    )
+    .expect("sign jwt");
+
+    let response = app
+        .oneshot(create_thread_request(Some(&format!("Bearer {token}"))))
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a token whose nbf is in the future must be rejected at the route layer",
+    );
+    assert_eq!(callers_len(&services), 0, "facade must not be reached");
+    server.abort();
+}
+
+// ─── 401 body sanitization (no reason leak) ───────────────────────────
+
+#[tokio::test]
+async fn unauthorized_body_is_generic_and_leaks_no_reason() {
+    // row 9 records failure sanitization as a KEEP: every auth failure
+    // collapses to a fixed generic 401 and the reason is never echoed.
+    // Every other 401 test asserts only the status; this collects the
+    // body and asserts it is the fixed string with no leaked detail
+    // (token value, configured user, expiry/backend cause), so a
+    // regression that interpolated the rejection reason fails loudly.
+    use axum::body::to_bytes;
+
+    let (app, _services) = env_bearer_app();
+    let response = app
+        .oneshot(create_thread_request(Some("Bearer not-the-token")))
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let body = to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    let text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        text, "Invalid or missing auth token",
+        "401 body must be the fixed sanitized string",
+    );
+    for leak in [
+        "not-the-token",
+        ENV_TOKEN,
+        ENV_USER,
+        "expired",
+        "Database",
+        "session",
+    ] {
+        assert!(
+            !text.contains(leak),
+            "401 body must not leak `{leak}`; got: {text}",
+        );
+    }
 }

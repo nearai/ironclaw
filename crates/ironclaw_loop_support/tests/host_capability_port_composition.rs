@@ -216,6 +216,7 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
             surface_version: candidate.surface_version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
+            approval_resume: None,
         })
         .await
         .expect("staged provider input should invoke");
