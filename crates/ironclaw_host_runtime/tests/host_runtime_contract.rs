@@ -23,7 +23,7 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CancelReason, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
     DefaultHostRuntime, HostRuntime, HostRuntimeError, IdempotencyKey, RuntimeBackendHealth,
-    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId, SurfaceKind,
+    RuntimeCapabilityRequest, RuntimeStatusRequest, RuntimeWorkId, SurfaceKind,
     VisibleCapabilityRequest,
 };
 use ironclaw_processes::{
@@ -1603,18 +1603,6 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         RuntimeKind::Wasm,
         TrustClass::UserTrusted,
         grants,
-        MountView::default(),
-    )
-    .unwrap()
-}
-
-fn execution_context_without_grants() -> ExecutionContext {
-    ExecutionContext::local_default(
-        UserId::new("user").unwrap(),
-        ExtensionId::new("caller").unwrap(),
-        RuntimeKind::Wasm,
-        TrustClass::UserTrusted,
-        CapabilitySet::default(),
         MountView::default(),
     )
     .unwrap()

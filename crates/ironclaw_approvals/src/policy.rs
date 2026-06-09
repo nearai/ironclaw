@@ -132,6 +132,8 @@ impl PersistentApprovalPolicyKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistentApprovalPolicy {
     pub key: PersistentApprovalPolicyKey,
+    #[serde(default)]
+    pub grant_id: CapabilityGrantId,
     pub approved_by: Principal,
     pub constraints: GrantConstraints,
     pub source_approval_request_id: Option<ApprovalRequestId>,
@@ -151,7 +153,7 @@ impl PersistentApprovalPolicy {
             return None;
         }
         Some(CapabilityGrant {
-            id: CapabilityGrantId::new(),
+            id: self.grant_id,
             capability: self.key.capability_id.clone(),
             grantee: self.key.grantee.clone(),
             issued_by: self.approved_by.clone(),
@@ -219,11 +221,14 @@ impl PersistentApprovalPolicyStore for InMemoryPersistentApprovalPolicyStore {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Utc::now();
-        let created_at = policies
+        let (created_at, grant_id) = policies
             .get(&key)
-            .map_or(now, |existing| existing.created_at);
+            .map_or((now, CapabilityGrantId::new()), |existing| {
+                (existing.created_at, existing.grant_id)
+            });
         let policy = PersistentApprovalPolicy {
             key: key.clone(),
+            grant_id,
             approved_by: input.approved_by,
             constraints: input.constraints,
             source_approval_request_id: input.source_approval_request_id,
@@ -307,13 +312,19 @@ where
         let path = policy_path(&key)?;
         let existing = self.lookup_versioned(&key).await?;
         let now = Utc::now();
-        let (created_at, cas) = existing
-            .as_ref()
-            .map_or((now, CasExpectation::Absent), |(policy, version)| {
-                (policy.created_at, CasExpectation::Version(*version))
-            });
+        let (created_at, grant_id, cas) = existing.as_ref().map_or(
+            (now, CapabilityGrantId::new(), CasExpectation::Absent),
+            |(policy, version)| {
+                (
+                    policy.created_at,
+                    policy.grant_id,
+                    CasExpectation::Version(*version),
+                )
+            },
+        );
         let policy = PersistentApprovalPolicy {
             key,
+            grant_id,
             approved_by: input.approved_by,
             constraints: input.constraints,
             source_approval_request_id: input.source_approval_request_id,
@@ -551,6 +562,23 @@ mod tests {
         let policy = store.allow(input).await.expect("allow policy");
 
         assert!(policy.active_grant().is_none());
+    }
+
+    #[tokio::test]
+    async fn active_grant_reuses_persisted_policy_grant_id() {
+        let store = InMemoryPersistentApprovalPolicyStore::new();
+        let scope = scope(None, Some("thread-a"));
+        let key = key_for(&scope);
+
+        let policy = store.allow(input(scope)).await.expect("allow policy");
+        let first_grant = policy.active_grant().expect("active grant");
+        let second_grant = policy.active_grant().expect("active grant");
+        let reloaded = store.lookup(&key).await.expect("lookup policy").unwrap();
+        let reloaded_grant = reloaded.active_grant().expect("active grant");
+
+        assert_eq!(policy.grant_id, first_grant.id);
+        assert_eq!(first_grant.id, second_grant.id);
+        assert_eq!(first_grant.id, reloaded_grant.id);
     }
 
     #[tokio::test]
