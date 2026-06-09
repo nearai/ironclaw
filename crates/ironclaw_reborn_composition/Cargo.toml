@@ -56,6 +56,7 @@ slack-v2-host-beta = [
     "webui-v2-beta",
     "dep:ironclaw_slack_v2_adapter",
     "dep:ironclaw_wasm_product_adapters",
+    "dep:ironclaw_product_workflow_storage",
 ]
 libsql = [
     "dep:libsql",
@@ -106,6 +107,7 @@ ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_product_workflow_storage = { path = "../ironclaw_product_workflow_storage", optional = true }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity", optional = true }

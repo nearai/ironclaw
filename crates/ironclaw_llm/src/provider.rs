@@ -302,6 +302,24 @@ pub struct ToolCall {
     /// See #3225.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// Provider-emitted parse failure for the model's tool-call arguments
+    /// JSON. `Some(reason)` when the wire payload was not valid JSON and the
+    /// provider fell back to an empty object; `None` on successful parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments_parse_error: Option<String>,
+}
+
+impl Default for ToolCall {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            arguments: serde_json::Value::Object(serde_json::Map::new()),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }
+    }
 }
 
 /// Generate a tool-call ID that satisfies all providers.
@@ -874,6 +892,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -919,6 +938,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let mut messages = vec![
             ChatMessage::user("test"),
@@ -946,6 +966,7 @@ mod tests {
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let tc2 = ToolCall {
             id: "call_sel_2".to_string(),
@@ -953,6 +974,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let mut messages = vec![
             ChatMessage::system("You are a helpful assistant."),
@@ -998,6 +1020,48 @@ mod tests {
         assert!(messages[2].content.contains("200 OK"));
         assert!(messages[2].tool_call_id.is_none());
         assert!(messages[2].name.is_none());
+    }
+
+    #[test]
+    fn tool_call_legacy_json_without_arguments_parse_error_deserializes() {
+        // Pre-Phase-B trace recordings have no `arguments_parse_error` field.
+        // The #[serde(default)] annotation must keep them deserializing as None.
+        let legacy = r#"{
+            "id": "call_abc",
+            "name": "do_thing",
+            "arguments": {"x": 1}
+        }"#;
+        let tc: ToolCall = serde_json::from_str(legacy).expect("legacy payload should deserialize");
+        assert_eq!(tc.id, "call_abc");
+        assert_eq!(tc.name, "do_thing");
+        assert_eq!(tc.arguments["x"], 1);
+        assert!(tc.reasoning.is_none());
+        assert!(tc.signature.is_none());
+        assert!(tc.arguments_parse_error.is_none());
+    }
+
+    #[test]
+    fn tool_call_with_arguments_parse_error_round_trips() {
+        let original = ToolCall {
+            id: "call_xyz".to_string(),
+            name: "broken_tool".to_string(),
+            arguments: serde_json::json!({}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: Some(
+                "failed to parse tool-call arguments JSON: expected value at line 1 column 1"
+                    .to_string(),
+            ),
+        };
+        let json = serde_json::to_string(&original).expect("should serialize");
+        // Confirm the field is present in the serialized form (skip_serializing_if guards None,
+        // so Some must be emitted).
+        assert!(json.contains("arguments_parse_error"));
+        let decoded: ToolCall = serde_json::from_str(&json).expect("should round-trip");
+        assert_eq!(
+            decoded.arguments_parse_error.as_deref(),
+            Some(original.arguments_parse_error.as_deref().unwrap())
+        );
     }
 
     #[test]

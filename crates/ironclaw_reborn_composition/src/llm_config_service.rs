@@ -61,6 +61,7 @@ impl NearAiLoginStateStore {
     }
 
     #[cfg(any(test, feature = "webui-v2-beta"))]
+    #[allow(dead_code)]
     pub(crate) async fn consume(&self, state: &str) -> bool {
         let mut states = self.states.lock().await;
         let now = Instant::now();
@@ -148,13 +149,9 @@ impl RebornLlmConfigService {
     /// running provider. A reload failure is logged, not fatal — the on-disk
     /// config is authoritative and applies on next restart.
     ///
-    /// The reload swaps the live provider's *inner* backend. It does NOT yet
-    /// update the model gateway's pinned model-profile route or cost table
-    /// (those are built once at boot), so changing the active *model* fully
-    /// applies on restart; for providers that honor per-request model overrides
-    /// the gateway still pins the boot model until then. A swappable model
-    /// gateway (and live reload from a no-LLM cold boot, where no reload handle
-    /// exists at all) is owned by the first-run provider work.
+    /// The reload swaps the live provider's *inner* backend. The gateway's
+    /// model profile is intentionally unpinned so requests use the reloaded
+    /// provider's active model instead of the model selected at boot.
     async fn refresh_running_provider(&self) {
         let Some(reload) = self.reload.as_ref() else {
             // Cold boot: no LLM was configured at startup, so there is no live
@@ -183,11 +180,7 @@ impl RebornLlmConfigService {
         let mut providers = Vec::with_capacity(list.providers.len());
         let mut active = None;
         for info in list.providers {
-            let stored_key_set = self
-                .keys
-                .exists(&info.id)
-                .await
-                .map_err(|_| LlmConfigServiceError::Unavailable)?;
+            let stored_key_set = self.stored_key_set_for_snapshot(&info.id).await;
             let builtin = builtin_registry.find(&info.id).is_some();
             let metadata = info.metadata;
             let env_key_set = metadata.as_ref().is_some_and(metadata_env_key_set);
@@ -227,6 +220,20 @@ impl RebornLlmConfigService {
         }
 
         Ok(LlmConfigSnapshot { providers, active })
+    }
+
+    async fn stored_key_set_for_snapshot(&self, provider_id: &str) -> bool {
+        match self.keys.exists(provider_id).await {
+            Ok(stored_key_set) => stored_key_set,
+            Err(error) => {
+                tracing::warn!(
+                    provider_id,
+                    error = %error,
+                    "LLM provider snapshot could not read stored key metadata; reporting api_key_set=false"
+                );
+                false
+            }
+        }
     }
 
     /// Build a transient provider from a probe request and run a closure
@@ -992,9 +999,12 @@ fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId};
     use ironclaw_reborn_config::{RebornHome, RebornProfile};
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::{
+        InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
+        SecretStore, SecretStoreError,
+    };
 
     fn boot_for_home(reborn_home: &std::path::Path) -> RebornBootConfig {
         let home = RebornHome::resolve_from_env_parts(
@@ -1008,6 +1018,79 @@ mod tests {
 
     fn key_store() -> LlmKeyStore {
         LlmKeyStore::new(Arc::new(InMemorySecretStore::new()))
+    }
+
+    struct MetadataUnavailableSecretStore {
+        inner: InMemorySecretStore,
+    }
+
+    impl MetadataUnavailableSecretStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemorySecretStore::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SecretStore for MetadataUnavailableSecretStore {
+        async fn put(
+            &self,
+            scope: ResourceScope,
+            handle: SecretHandle,
+            material: SecretMaterial,
+        ) -> Result<SecretMetadata, SecretStoreError> {
+            self.inner.put(scope, handle, material).await
+        }
+
+        async fn metadata(
+            &self,
+            _scope: &ResourceScope,
+            _handle: &SecretHandle,
+        ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+            Err(SecretStoreError::StoreUnavailable {
+                reason: "metadata index unavailable".to_string(),
+            })
+        }
+
+        async fn delete(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<bool, SecretStoreError> {
+            self.inner.delete(scope, handle).await
+        }
+
+        async fn lease_once(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<SecretLease, SecretStoreError> {
+            self.inner.lease_once(scope, handle).await
+        }
+
+        async fn consume(
+            &self,
+            scope: &ResourceScope,
+            lease_id: SecretLeaseId,
+        ) -> Result<SecretMaterial, SecretStoreError> {
+            self.inner.consume(scope, lease_id).await
+        }
+
+        async fn revoke(
+            &self,
+            scope: &ResourceScope,
+            lease_id: SecretLeaseId,
+        ) -> Result<SecretLease, SecretStoreError> {
+            self.inner.revoke(scope, lease_id).await
+        }
+
+        async fn leases_for_scope(
+            &self,
+            scope: &ResourceScope,
+        ) -> Result<Vec<SecretLease>, SecretStoreError> {
+            self.inner.leases_for_scope(scope).await
+        }
     }
 
     fn caller() -> WebUiAuthenticatedCaller {
@@ -1320,6 +1403,30 @@ mod tests {
         assert!(
             !nearai.api_key_required,
             "NEAR AI session-token login means API key is not the only setup path"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_survives_stored_key_metadata_unavailable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let keys = LlmKeyStore::new(Arc::new(MetadataUnavailableSecretStore::new()));
+        let service = RebornLlmConfigService::new(boot, keys);
+
+        let snapshot = service
+            .upsert_provider(caller(), upsert_request("acme", Some("sk-acme"), false))
+            .await
+            .expect("provider snapshot must remain available");
+        let acme = snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.id == "acme")
+            .expect("custom provider in snapshot");
+
+        assert!(
+            !acme.api_key_set,
+            "unavailable stored-key metadata must degrade to api_key_set=false"
         );
     }
 

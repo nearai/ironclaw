@@ -98,10 +98,10 @@ pub use subagent_spawn_port::{
     AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, DEFAULT_SUBAGENT_MAX_DEPTH,
     DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN, DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS,
     InMemorySubagentGateResolutionStore, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
-    SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition, SubagentDefinitionResolver,
-    SubagentGateResolutionStore, SubagentGoalRecord, SubagentKindId, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
-    SubagentThreadMetadata,
+    SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition,
+    SubagentDefinitionResolver, SubagentGateResolutionStore, SubagentGoalRecord, SubagentKindId,
+    SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
+    SubagentThreadKind, SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
 pub const COMPACTION_SYSTEM_PROMPT: &str =

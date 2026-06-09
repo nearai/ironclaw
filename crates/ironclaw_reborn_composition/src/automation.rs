@@ -11,9 +11,9 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityRequest, RuntimeFailureKind, TRIGGER_LIST_CAPABILITY_ID,
 };
 use ironclaw_product_workflow::{
-    AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
-    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind,
+    AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
+    RebornAutomationRecentRunInfo, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde::Deserialize;
@@ -22,21 +22,21 @@ use serde_json::{Value, json};
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
-pub struct RebornWebuiAutomationFacade {
+pub struct RebornAutomationProductFacade {
     host_runtime: Arc<dyn HostRuntime>,
     backend_timeout: Duration,
 }
 
-impl std::fmt::Debug for RebornWebuiAutomationFacade {
+impl std::fmt::Debug for RebornAutomationProductFacade {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("RebornWebuiAutomationFacade")
+            .debug_struct("RebornAutomationProductFacade")
             .field("host_runtime", &"Arc<dyn HostRuntime>")
             .finish()
     }
 }
 
-impl RebornWebuiAutomationFacade {
+impl RebornAutomationProductFacade {
     pub(crate) fn new(host_runtime: Arc<dyn HostRuntime>) -> Self {
         Self {
             host_runtime,
@@ -117,18 +117,19 @@ impl RebornWebuiAutomationFacade {
 }
 
 #[async_trait::async_trait]
-impl AutomationProductFacade for RebornWebuiAutomationFacade {
+impl AutomationProductFacade for RebornAutomationProductFacade {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
-        limit: usize,
+        request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         let output = self
             .invoke_trigger(
                 caller,
                 TRIGGER_LIST_CAPABILITY_ID,
                 json!({
-                    "limit": limit,
+                    "limit": request.limit,
+                    "run_limit": request.run_limit,
                 }),
             )
             .await?;
@@ -153,6 +154,8 @@ struct RawAutomationRecord {
     last_run_at: Option<DateTime<Utc>>,
     #[serde(default)]
     last_status: Option<RebornAutomationRunStatus>,
+    #[serde(default)]
+    recent_runs: Vec<RebornAutomationRecentRunInfo>,
     #[serde(default)]
     is_active: bool,
     #[serde(default)]
@@ -196,6 +199,7 @@ fn automation_info(record: RawAutomationRecord) -> Option<RebornAutomationInfo> 
         next_run_at: record.next_run_at,
         last_run_at: record.last_run_at,
         last_status: record.last_status,
+        recent_runs: record.recent_runs,
         is_active: record.is_active,
         created_at: record.created_at,
     })
@@ -229,6 +233,28 @@ fn sanitize_automation_list_output(output: &mut Value) {
         };
         trigger_object.insert("last_status".to_string(), status);
         trigger_object.insert("state".to_string(), state);
+        sanitize_recent_run_statuses(trigger_object);
+    }
+}
+
+fn sanitize_recent_run_statuses(trigger_object: &mut serde_json::Map<String, Value>) {
+    let Some(recent_runs) = trigger_object
+        .get_mut("recent_runs")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for run in recent_runs {
+        let Some(run_object) = run.as_object_mut() else {
+            continue;
+        };
+        let status = match run_object.get("status").and_then(Value::as_str) {
+            Some("running") => Value::String("running".to_string()),
+            Some("ok") => Value::String("ok".to_string()),
+            Some("error") => Value::String("error".to_string()),
+            _ => Value::String("unknown".to_string()),
+        };
+        run_object.insert("status".to_string(), status);
     }
 }
 
@@ -362,7 +388,7 @@ fn map_host_runtime_error(error: HostRuntimeError) -> RebornServicesError {
 }
 
 fn automation_extension_id() -> Result<ExtensionId, RebornServicesError> {
-    ExtensionId::new("reborn.webui.automation").map_err(|_| internal_invariant())
+    ExtensionId::new("reborn.product.automation").map_err(|_| internal_invariant())
 }
 
 fn services_error(
@@ -408,23 +434,23 @@ mod tests {
         RuntimeProcessHandle, RuntimeResourceGate, TRIGGER_LIST_CAPABILITY_ID,
     };
     use ironclaw_product_workflow::{
-        AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationRunStatus,
-        RebornAutomationSource, RebornAutomationState, RebornServicesErrorCode,
-        RebornServicesErrorKind,
+        AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller,
+        RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+        RebornAutomationState, RebornServicesErrorCode, RebornServicesErrorKind,
     };
     use serde_json::{Value, json};
     use tokio::sync::Mutex;
 
-    use super::RebornWebuiAutomationFacade;
+    use super::RebornAutomationProductFacade;
 
     #[tokio::test]
     async fn automation_facade_preserves_caller_scope_and_capability_path() {
         let runtime = Arc::new(RecordingHostRuntime::default());
-        let facade = RebornWebuiAutomationFacade::new(runtime.clone());
+        let facade = RebornAutomationProductFacade::new(runtime.clone());
         let caller = caller();
 
         let automations = facade
-            .list_automations(caller.clone(), 25)
+            .list_automations(caller.clone(), automation_list_request(25, 10))
             .await
             .expect("trigger list output");
 
@@ -439,6 +465,22 @@ mod tests {
         assert_eq!(
             automations[0].last_status,
             Some(RebornAutomationRunStatus::Ok)
+        );
+        assert_eq!(automations[0].recent_runs.len(), 1);
+        assert_eq!(
+            automations[0].recent_runs[0]
+                .run_id
+                .map(|run_id| run_id.to_string())
+                .as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert_eq!(
+            automations[0].recent_runs[0].thread_id.as_str(),
+            "thread-listed"
+        );
+        assert_eq!(
+            automations[0].recent_runs[0].status,
+            RebornAutomationRecentRunStatus::Running
         );
         let request = runtime
             .requests
@@ -460,16 +502,17 @@ mod tests {
         assert_eq!(request.context.resource_scope.project_id, caller.project_id);
         assert_eq!(request.context.trust, TrustClass::UserTrusted);
         assert_eq!(request.input["limit"], 25);
+        assert_eq!(request.input["run_limit"], 10);
     }
 
     #[tokio::test]
     async fn automation_facade_rejects_malformed_trigger_list_output() {
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "unexpected": true
         }))));
 
         let error = facade
-            .list_automations(caller(), 50)
+            .list_automations(caller(), automation_list_request(50, 10))
             .await
             .expect_err("malformed automation output should fail closed");
 
@@ -479,14 +522,14 @@ mod tests {
 
     #[tokio::test]
     async fn automation_facade_rejects_non_array_trigger_list_output() {
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "triggers": {
                 "trigger_id": "trigger-listed"
             }
         }))));
 
         let error = facade
-            .list_automations(caller(), 50)
+            .list_automations(caller(), automation_list_request(50, 10))
             .await
             .expect_err("malformed automation output should fail closed");
 
@@ -505,17 +548,62 @@ mod tests {
             "last_status".to_string(),
             json!({"trace": "internal details", "secret": "token"}),
         );
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "triggers": [Value::Object(trigger)]
         }))));
 
         let automations = facade
-            .list_automations(caller(), 50)
+            .list_automations(caller(), automation_list_request(50, 10))
             .await
             .expect("list automations");
 
         assert_eq!(automations.len(), 1);
         assert_eq!(automations[0].last_status, None);
+    }
+
+    #[tokio::test]
+    async fn automation_facade_sanitizes_malformed_recent_run_status_payloads() {
+        let mut unknown_status = raw_automation(
+            "trigger-unknown-status",
+            "Unknown run status",
+            "0 9 * * *",
+            Some("ok"),
+        )
+        .as_object()
+        .cloned()
+        .expect("object trigger");
+        unknown_status["recent_runs"][0]["status"] = json!("future_state");
+        let mut non_string_status = raw_automation(
+            "trigger-non-string-status",
+            "Non-string run status",
+            "0 10 * * *",
+            Some("ok"),
+        )
+        .as_object()
+        .cloned()
+        .expect("object trigger");
+        non_string_status["recent_runs"][0]["status"] = json!({"raw": "backend-only"});
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
+            "triggers": [
+                Value::Object(unknown_status),
+                Value::Object(non_string_status)
+            ]
+        }))));
+
+        let automations = facade
+            .list_automations(caller(), automation_list_request(50, 10))
+            .await
+            .expect("list automations");
+
+        assert_eq!(automations.len(), 2);
+        assert_eq!(
+            automations[0].recent_runs[0].status,
+            RebornAutomationRecentRunStatus::Unknown
+        );
+        assert_eq!(
+            automations[1].recent_runs[0].status,
+            RebornAutomationRecentRunStatus::Unknown
+        );
     }
 
     #[tokio::test]
@@ -566,7 +654,7 @@ mod tests {
             "is_active": true,
             "created_at": "2026-06-02T18:00:00Z"
         });
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "triggers": [
                 Value::Object(paused),
                 Value::Object(scheduled),
@@ -577,7 +665,7 @@ mod tests {
         }))));
 
         let automations = facade
-            .list_automations(caller(), 50)
+            .list_automations(caller(), automation_list_request(50, 10))
             .await
             .expect("list automations");
 
@@ -591,7 +679,7 @@ mod tests {
 
     #[tokio::test]
     async fn automation_facade_filters_unknown_future_sources() {
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "triggers": [
                 raw_automation("trigger-schedule", "Daily status", "0 9 * * *", Some("ok")),
                 {
@@ -606,7 +694,7 @@ mod tests {
         }))));
 
         let automations = facade
-            .list_automations(caller(), 50)
+            .list_automations(caller(), automation_list_request(50, 10))
             .await
             .expect("list automations");
 
@@ -616,7 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn automation_facade_rejects_malformed_trigger_records() {
-        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
             "triggers": [{
                 "name": "Missing trigger id",
                 "schedule": {"kind": "cron", "expression": "0 9 * * *"},
@@ -627,7 +715,7 @@ mod tests {
         }))));
 
         let error = facade
-            .list_automations(caller(), 50)
+            .list_automations(caller(), automation_list_request(50, 10))
             .await
             .expect_err("malformed record should fail closed");
 
@@ -639,11 +727,11 @@ mod tests {
     #[tokio::test]
     async fn automation_facade_redacts_runtime_failure_messages() {
         let runtime = Arc::new(FailingHostRuntime::new(RuntimeFailureKind::Internal));
-        let facade = RebornWebuiAutomationFacade::new(runtime);
+        let facade = RebornAutomationProductFacade::new(runtime);
         let caller = caller();
 
         let error = facade
-            .list_automations(caller, 10)
+            .list_automations(caller, automation_list_request(10, 5))
             .await
             .expect_err("runtime failure should map to services error");
 
@@ -656,14 +744,14 @@ mod tests {
 
     #[tokio::test]
     async fn automation_facade_times_out_stalled_runtime() {
-        let facade = RebornWebuiAutomationFacade::with_backend_timeout(
+        let facade = RebornAutomationProductFacade::with_backend_timeout(
             Arc::new(HangingHostRuntime),
             std::time::Duration::from_millis(1),
         );
 
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            facade.list_automations(caller(), 10),
+            facade.list_automations(caller(), automation_list_request(10, 5)),
         )
         .await
         .expect("facade timeout should complete promptly")
@@ -741,10 +829,10 @@ mod tests {
 
         for (outcome, code, kind, status_code, retryable) in cases {
             let facade =
-                RebornWebuiAutomationFacade::new(Arc::new(OutcomeHostRuntime::new(outcome)));
+                RebornAutomationProductFacade::new(Arc::new(OutcomeHostRuntime::new(outcome)));
 
             let error = facade
-                .list_automations(caller(), 50)
+                .list_automations(caller(), automation_list_request(50, 10))
                 .await
                 .expect_err("outcome should map to services error");
 
@@ -790,10 +878,10 @@ mod tests {
 
         for (failure_kind, code, kind, status_code, retryable) in cases {
             let facade =
-                RebornWebuiAutomationFacade::new(Arc::new(FailingHostRuntime::new(failure_kind)));
+                RebornAutomationProductFacade::new(Arc::new(FailingHostRuntime::new(failure_kind)));
 
             let error = facade
-                .list_automations(caller(), 10)
+                .list_automations(caller(), automation_list_request(10, 5))
                 .await
                 .expect_err("runtime failure should map to services error");
 
@@ -825,10 +913,10 @@ mod tests {
 
         for (host_error, code, kind, status_code, retryable) in cases {
             let facade =
-                RebornWebuiAutomationFacade::new(Arc::new(ErrorHostRuntime::new(host_error)));
+                RebornAutomationProductFacade::new(Arc::new(ErrorHostRuntime::new(host_error)));
 
             let error = facade
-                .list_automations(caller(), 10)
+                .list_automations(caller(), automation_list_request(10, 5))
                 .await
                 .expect_err("host runtime error should map to services error");
 
@@ -846,6 +934,10 @@ mod tests {
             agent_id: AgentId::new("agent-alpha").expect("valid agent"),
             project_id: Some(ProjectId::new("project-alpha").expect("valid project")),
         }
+    }
+
+    fn automation_list_request(limit: usize, run_limit: usize) -> AutomationListRequest {
+        AutomationListRequest { limit, run_limit }
     }
 
     fn raw_automation(
@@ -866,7 +958,15 @@ mod tests {
             "last_run_at": null,
             "last_status": last_status,
             "is_active": true,
-            "created_at": "2026-06-02T18:00:00Z"
+            "created_at": "2026-06-02T18:00:00Z",
+            "recent_runs": [{
+                "run_id": "11111111-1111-1111-1111-111111111111",
+                "thread_id": "thread-listed",
+                "fire_slot": "2026-06-03T09:00:00Z",
+                "status": "running",
+                "submitted_at": "2026-06-03T09:00:01Z",
+                "completed_at": null
+            }]
         })
     }
 

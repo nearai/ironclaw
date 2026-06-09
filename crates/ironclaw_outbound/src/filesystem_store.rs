@@ -26,9 +26,10 @@
 //!   `delivery_id`. An indexed `scope` projection allows
 //!   `list_delivery_attempts(scope)` to filter within the tenant-scoped
 //!   subtree without materializing every row.
-//! - `/outbound/communication-preferences/<sha256(v1-length-prefixed-key)>.json` — tenant/user
-//!   communication preference row keyed by a hashed `CommunicationPreferenceKey`.
-//!   Reply-target refs remain candidates and do not grant send authority.
+//! - `/outbound/communication-preferences/<sha256(v2-scoped-key)>.json` —
+//!   scoped communication preference row keyed by a hashed
+//!   `CommunicationPreferenceKey`. Reply-target refs remain candidates and do
+//!   not grant send authority.
 
 use std::sync::Arc;
 
@@ -38,7 +39,7 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
     IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId};
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -50,9 +51,11 @@ use crate::validation::{
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
-    CommunicationPreferenceRepository, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundDeliveryId, OutboundError, OutboundStateStore, ProjectionSubscriptionId,
-    ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveryDefaultScope,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError,
+    OutboundStateStore, ProjectionSubscriptionId, ProjectionSubscriptionRecord,
+    ThreadNotificationPolicy, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    WriteCommunicationPreferenceRequest,
 };
 
 /// Maximum number of compare-and-swap retries on a read-then-write path
@@ -232,6 +235,30 @@ where
             .await?
             .map(|(value, _)| value))
     }
+
+    /// Writes preference records with versioned CAS only.
+    ///
+    /// This intentionally bypasses the byte-only fallback used by non-CAS
+    /// helpers: preference updates must fail closed when the mount cannot
+    /// preserve the expected version.
+    async fn put_json_strict_cas<T: Serialize>(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        value: &T,
+        tenant: &TenantId,
+        cas: CasExpectation,
+    ) -> Result<CommunicationPreferenceVersion, OutboundError> {
+        let body = serde_json::to_vec(value).map_err(|_| OutboundError::Serialization)?;
+        let entry = Entry::bytes(body)
+            .with_content_type(ContentType::json())
+            .with_indexed(tenant_id_index_key(), tenant_id_index_value(tenant));
+        self.filesystem
+            .put(scope, path, entry, cas)
+            .await
+            .map(|version| CommunicationPreferenceVersion::from_raw(version.get()))
+            .map_err(map_fs_error)
+    }
 }
 
 #[async_trait]
@@ -239,59 +266,56 @@ impl<F> CommunicationPreferenceRepository for FilesystemOutboundStateStore<F>
 where
     F: RootFilesystem,
 {
-    async fn put_communication_preference(
-        &self,
-        record: CommunicationPreferenceRecord,
-    ) -> Result<(), OutboundError> {
-        validate_communication_preference(&record)?;
-        let key = record.key();
-        let path = communication_preference_path(&key)?;
-        let resource_scope = communication_preference_resource_scope(&key.tenant_id, &key.user_id);
-        for _ in 0..MAX_CAS_RETRIES {
-            let (cas, existing) = match self
-                .get_versioned_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
-                .await?
-            {
-                Some((existing, versioned)) => {
-                    (CasExpectation::Version(versioned.version), Some(existing))
-                }
-                None => (CasExpectation::Absent, None),
-            };
-            if let Some(existing) = existing.as_ref()
-                && existing.key() != key
-            {
-                return Err(OutboundError::Backend);
-            }
-            self.ensure_tenant_id_index(&resource_scope, &communication_preferences_root()?)
-                .await?;
-            match self
-                .put_json(&resource_scope, &path, &record, &record.tenant_id, cas)
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(OutboundError::CasConflict) => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Err(OutboundError::Backend)
-    }
-
     async fn load_communication_preference(
         &self,
         key: CommunicationPreferenceKey,
-    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
         let path = communication_preference_path(&key)?;
-        let resource_scope = communication_preference_resource_scope(&key.tenant_id, &key.user_id);
-        let Some(record) = self
-            .get_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
+        let resource_scope = communication_preference_resource_scope(&key.scope);
+        let Some((record, versioned)) = self
+            .get_versioned_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
             .await?
         else {
             return Ok(None);
         };
-        if record.tenant_id != key.tenant_id || record.user_id != key.user_id {
+        if record.key() != key {
             return Err(OutboundError::Backend);
         }
-        Ok(Some(record))
+        Ok(Some(VersionedCommunicationPreferenceRecord {
+            record,
+            version: CommunicationPreferenceVersion::from_raw(versioned.version.get()),
+        }))
+    }
+
+    async fn write_communication_preference(
+        &self,
+        request: WriteCommunicationPreferenceRequest,
+    ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
+        validate_communication_preference(&request.record)?;
+        let key = request.record.key();
+        let path = communication_preference_path(&key)?;
+        let resource_scope = communication_preference_resource_scope(&key.scope);
+        self.ensure_tenant_id_index(&resource_scope, &communication_preferences_root()?)
+            .await?;
+        let cas = match request.expected_version {
+            Some(version) => CasExpectation::Version(
+                ironclaw_filesystem::RecordVersion::from_backend(version.raw()),
+            ),
+            None => CasExpectation::Absent,
+        };
+        let version = self
+            .put_json_strict_cas(
+                &resource_scope,
+                &path,
+                &request.record,
+                request.record.scope.tenant_id(),
+                cas,
+            )
+            .await?;
+        Ok(VersionedCommunicationPreferenceRecord {
+            record: request.record,
+            version,
+        })
     }
 }
 
@@ -603,29 +627,62 @@ fn communication_preference_path(
     key: &CommunicationPreferenceKey,
 ) -> Result<ScopedPath, OutboundError> {
     let mut hasher = Sha256::new();
-    let tenant = key.tenant_id.as_str();
-    let user = key.user_id.as_str();
-    hasher.update(b"v1:");
-    hasher.update(tenant.len().to_string().as_bytes());
-    hasher.update(b":");
-    hasher.update(tenant.as_bytes());
-    hasher.update(b":");
-    hasher.update(user.len().to_string().as_bytes());
-    hasher.update(b":");
-    hasher.update(user.as_bytes());
+    hasher.update(b"v2:");
+    hash_delivery_default_scope(&mut hasher, &key.scope);
     let digest = hex::encode(hasher.finalize());
     ScopedPath::new(format!("{COMMUNICATION_PREFERENCES_ROOT}/{digest}.json"))
         .map_err(|_| OutboundError::Backend)
 }
 
-fn communication_preference_resource_scope(
-    tenant_id: &TenantId,
-    user_id: &UserId,
-) -> ResourceScope {
-    let mut scope = ResourceScope::system();
-    scope.tenant_id = tenant_id.clone();
-    scope.user_id = user_id.clone();
-    scope
+fn hash_delivery_default_scope(hasher: &mut Sha256, scope: &DeliveryDefaultScope) {
+    match scope {
+        DeliveryDefaultScope::Personal { tenant_id, user_id } => {
+            update_hash_part(hasher, "personal");
+            update_hash_part(hasher, tenant_id.as_str());
+            update_hash_part(hasher, user_id.as_str());
+        }
+        DeliveryDefaultScope::SharedAgent {
+            tenant_id,
+            agent_id,
+            project_id,
+        } => {
+            update_hash_part(hasher, "shared_agent");
+            update_hash_part(hasher, tenant_id.as_str());
+            update_hash_part(hasher, agent_id.as_str());
+            match project_id {
+                Some(project_id) => {
+                    update_hash_part(hasher, "project");
+                    update_hash_part(hasher, project_id.as_str());
+                }
+                None => update_hash_part(hasher, "no_project"),
+            }
+        }
+    }
+}
+
+fn update_hash_part(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn communication_preference_resource_scope(scope: &DeliveryDefaultScope) -> ResourceScope {
+    let mut resource_scope = ResourceScope::system();
+    match scope {
+        DeliveryDefaultScope::Personal { tenant_id, user_id } => {
+            resource_scope.tenant_id = tenant_id.clone();
+            resource_scope.user_id = user_id.clone();
+        }
+        DeliveryDefaultScope::SharedAgent {
+            tenant_id,
+            agent_id,
+            project_id,
+        } => {
+            resource_scope.tenant_id = tenant_id.clone();
+            resource_scope.agent_id = Some(agent_id.clone());
+            resource_scope.project_id = project_id.clone();
+        }
+    }
+    resource_scope
 }
 
 fn deliveries_root() -> Result<ScopedPath, OutboundError> {

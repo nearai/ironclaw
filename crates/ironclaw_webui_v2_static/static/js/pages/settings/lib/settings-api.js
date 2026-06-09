@@ -1,8 +1,8 @@
 import { apiFetch } from "../../../lib/api.js";
 
-// Settings endpoints depend on v1 `/api/settings/*`, `/api/llm/*`,
-// `/api/tools/*`, `/api/skills/*`, etc. Extension reads use the v2
-// registry/list endpoints; the remaining settings APIs are TODO stubs.
+// Settings endpoints depend on v1 `/api/settings/*`, `/api/tools/*`, etc.
+// LLM, extension, and skills reads use v2 endpoints. Remaining settings APIs
+// are TODO stubs.
 
 export function fetchSettingsExport() {
   return Promise.resolve({ settings: {}, todo: true });
@@ -92,13 +92,30 @@ export function fetchExtensionRegistry() {
   return apiFetch("/api/webchat/v2/extensions/registry");
 }
 export function fetchSkills() {
-  return Promise.resolve({ skills: [], todo: true });
+  return apiFetch("/api/webchat/v2/skills");
 }
-export function installSkill(_payload) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 skills endpoint" });
+export function fetchSkillContent(name) {
+  return apiFetch(`/api/webchat/v2/skills/${encodeURIComponent(name)}`);
 }
-export function removeSkill(_name) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 skills endpoint" });
+export function installSkill(payload) {
+  return apiFetch("/api/webchat/v2/skills/install", {
+    method: "POST",
+    headers: { "X-Confirm-Action": "true" },
+    body: JSON.stringify(payload),
+  });
+}
+export function updateSkill(name, payload) {
+  return apiFetch(`/api/webchat/v2/skills/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "X-Confirm-Action": "true" },
+    body: JSON.stringify(payload),
+  });
+}
+export function removeSkill(name) {
+  return apiFetch(`/api/webchat/v2/skills/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: { "X-Confirm-Action": "true" },
+  });
 }
 export function fetchUsers() {
   return Promise.resolve({ users: [], todo: true });

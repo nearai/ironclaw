@@ -696,6 +696,7 @@ mod tests {
             safe_summary: "done".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len: 0,
         })
     }
 

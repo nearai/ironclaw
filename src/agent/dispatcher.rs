@@ -85,12 +85,16 @@ fn chat_job_context(
     message: &IncomingMessage,
     thread_id: Uuid,
     user_tz: chrono_tz::Tz,
+    skill_scope_owner_id: Option<&str>,
 ) -> JobContext {
     let mut job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
         .with_requester_id(&message.sender_id);
     job_ctx.conversation_id = Some(thread_id);
     job_ctx.user_timezone = user_tz.name().to_string();
     job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
+    if let Some(owner_id) = skill_scope_owner_id {
+        job_ctx.metadata["skill_scope_owner_id"] = serde_json::Value::String(owner_id.to_string());
+    }
     job_ctx
 }
 
@@ -290,7 +294,8 @@ impl Agent {
         }
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let mut job_ctx = chat_job_context(message, thread_id, user_tz);
+        let skill_scope_owner_id = self.config.multi_tenant.then(|| self.owner_id());
+        let mut job_ctx = chat_job_context(message, thread_id, user_tz, skill_scope_owner_id);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
 
         // Build system prompts once for this turn. Two variants: with tools
@@ -2051,6 +2056,7 @@ mod tests {
                         arguments: serde_json::json!({}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     },
                     ToolCall {
                         id: ironclaw_llm::generate_tool_call_id(0, 1),
@@ -2058,6 +2064,7 @@ mod tests {
                         arguments: serde_json::json!({"target": "danger"}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     },
                 ],
                 input_tokens: 0,
@@ -2405,6 +2412,7 @@ mod tests {
                     arguments: serde_json::json!({"url": "https://example.com"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 },
                 ToolCall {
                     id: "call_3".to_string(),
@@ -2412,6 +2420,7 @@ mod tests {
                     arguments: serde_json::json!({"message": "done"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 },
             ],
             selected_auth_prompt: Some(crate::agent::session::PendingAuthPrompt::new(
@@ -2831,7 +2840,7 @@ mod tests {
         let thread_id = Uuid::new_v4();
         let message = IncomingMessage::new("web", "test-user", "/plan Ship it");
 
-        let job_ctx = super::chat_job_context(&message, thread_id, chrono_tz::UTC);
+        let job_ctx = super::chat_job_context(&message, thread_id, chrono_tz::UTC, None);
 
         assert_eq!(job_ctx.conversation_id, Some(thread_id));
         assert_eq!(job_ctx.user_timezone, "UTC");
@@ -2917,6 +2926,7 @@ mod tests {
                     arguments: serde_json::json!({"message": "hi"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "echo", "hi"),
@@ -3011,6 +3021,7 @@ mod tests {
                         arguments: serde_json::json!({}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     },
                     ToolCall {
                         id: "c2".to_string(),
@@ -3018,6 +3029,7 @@ mod tests {
                         arguments: serde_json::json!({}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     },
                 ],
             ),
@@ -3053,6 +3065,7 @@ mod tests {
                     arguments: serde_json::json!({}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
             ),
             ChatMessage::tool_result("c1", "echo", "done"),
@@ -3187,6 +3200,7 @@ mod tests {
                     arguments: serde_json::json!({"message": "looping"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
                 input_tokens: 0,
                 output_tokens: 5,
@@ -3507,6 +3521,7 @@ mod tests {
                     arguments: serde_json::json!({}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
                 input_tokens: 0,
                 output_tokens: 5,

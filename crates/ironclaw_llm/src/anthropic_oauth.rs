@@ -684,6 +684,7 @@ fn extract_response_content(response: &AnthropicResponse) -> ExtractedAnthropicR
                     arguments: input.clone(),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 });
             }
         }
@@ -744,6 +745,7 @@ mod tests {
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let messages = vec![
             ChatMessage::user("Search for test"),
