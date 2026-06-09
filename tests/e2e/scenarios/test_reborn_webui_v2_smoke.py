@@ -362,3 +362,73 @@ async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
         remaining = {thread["thread_id"] for thread in relisted.json().get("threads", [])}
         assert drop_id not in remaining, "deleted thread must not reappear in the list"
         assert keep_id in remaining, "untouched thread must remain in the list"
+
+
+def _finalized_assistant_count(timeline: dict) -> int:
+    return sum(
+        1
+        for message in timeline.get("messages", [])
+        if message.get("kind") == "assistant"
+        and message.get("status") == "finalized"
+        and (message.get("content") or "").strip()
+    )
+
+
+async def _send_and_settle(
+    client: httpx.AsyncClient, base_url: str, thread_id: str, content: str, expected: int
+) -> None:
+    """Send a text turn and wait until `expected` assistant replies are finalized.
+
+    Sending while a prior turn is still running defers the message
+    (`deferred_busy`), so each turn must settle before the next is sent.
+    """
+    await _send_message(client, base_url, thread_id, content)
+    for _ in range(90):
+        response = await client.get(
+            f"{base_url}/api/webchat/v2/threads/{thread_id}/timeline", timeout=15
+        )
+        response.raise_for_status()
+        if _finalized_assistant_count(response.json()) >= expected:
+            return
+        await asyncio.sleep(0.5)
+    raise AssertionError(
+        f"Thread {thread_id} did not reach {expected} finalized assistant replies"
+    )
+
+
+async def test_reborn_v2_timeline_pagination(reborn_v2_server):
+    """Timeline honors `limit` and pages older messages via the opaque `next_cursor`."""
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+
+        # Two settled turns -> >= 4 messages, enough to force a second page at limit=2.
+        await _send_and_settle(client, reborn_v2_server, thread_id, "hello one", expected=1)
+        await _send_and_settle(client, reborn_v2_server, thread_id, "hello two", expected=2)
+
+        page1 = await client.get(
+            f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/timeline",
+            params={"limit": 2},
+            timeout=15,
+        )
+        page1.raise_for_status()
+        page1_body = page1.json()
+        assert len(page1_body["messages"]) == 2, page1_body
+        cursor = page1_body.get("next_cursor")
+        assert cursor, f"a thread with >2 messages must expose next_cursor: {page1_body}"
+
+        # httpx URL-encodes the opaque cursor (it is JSON like {"before_message_sequence":N}).
+        page2 = await client.get(
+            f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/timeline",
+            params={"limit": 2, "cursor": cursor},
+            timeout=15,
+        )
+        page2.raise_for_status()
+        page2_body = page2.json()
+        assert page2_body["messages"], f"cursor page must return older messages: {page2_body}"
+
+        page1_seq = {m["sequence"] for m in page1_body["messages"]}
+        page2_seq = {m["sequence"] for m in page2_body["messages"]}
+        assert page1_seq.isdisjoint(page2_seq), (
+            f"paged messages must not overlap: page1={page1_seq} page2={page2_seq}"
+        )
