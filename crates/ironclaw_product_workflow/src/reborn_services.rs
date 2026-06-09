@@ -917,6 +917,12 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
+    /// Return the effective operator config projection.
+    ///
+    /// Until the effective config backend is wired, read-only operator config/status/diagnostic
+    /// surfaces intentionally return typed diagnostic payloads so the browser can explain
+    /// what is unsupported. Mutating or side-effecting operator routes remain fail-closed
+    /// with sanitized service-unavailable errors until their owning service is wired.
     async fn list_operator_config(
         &self,
         caller: WebUiAuthenticatedCaller,

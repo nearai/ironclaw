@@ -36,15 +36,19 @@ use ironclaw_product_workflow::{
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
     RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
     RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorArea,
-    RebornOperatorSetupRequest, RebornOperatorSetupResponse, RebornOperatorSetupStatus,
-    RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigEntry, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOperatorSetupStatus, RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
+    RebornOperatorSurfaceStatus, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
@@ -100,6 +104,8 @@ fn service_unavailable_error(retryable: bool) -> RebornServicesError {
 }
 
 type OperatorSetupCall = (Option<String>, Option<String>, bool, bool);
+type OperatorConfigSetCall = (String, Value);
+type OperatorLogsCall = (Option<u32>, Option<String>);
 
 #[derive(Default)]
 struct StubServices {
@@ -114,7 +120,16 @@ struct StubServices {
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
     list_connectable_channels_calls: Mutex<usize>,
     next_list_connectable_channels_error: Mutex<Option<RebornServicesError>>,
+    get_operator_setup_calls: Mutex<usize>,
     run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
+    list_operator_config_calls: Mutex<usize>,
+    get_operator_config_key_calls: Mutex<Vec<String>>,
+    set_operator_config_key_calls: Mutex<Vec<OperatorConfigSetCall>>,
+    validate_operator_config_calls: Mutex<Vec<Vec<String>>>,
+    get_operator_diagnostics_calls: Mutex<usize>,
+    get_operator_status_calls: Mutex<usize>,
+    query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
+    run_operator_service_lifecycle_calls: Mutex<Vec<RebornOperatorServiceLifecycleAction>>,
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
@@ -481,6 +496,7 @@ impl RebornServicesApi for StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        *self.get_operator_setup_calls.lock().expect("lock") += 1;
         Ok(RebornOperatorSetupResponse {
             area: RebornOperatorArea::Setup,
             status: RebornOperatorSetupStatus::Incomplete,
@@ -523,6 +539,104 @@ impl RebornServicesApi for StubServices {
             ],
             diagnostics: Vec::new(),
         })
+    }
+
+    async fn list_operator_config(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
+        *self.list_operator_config_calls.lock().expect("lock") += 1;
+        Ok(RebornOperatorConfigListResponse {
+            entries: Vec::new(),
+            precedence: Vec::new(),
+            diagnostics: Vec::new(),
+        })
+    }
+
+    async fn get_operator_config_key(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        key: String,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        self.get_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .push(key.clone());
+        Ok(RebornOperatorConfigGetResponse {
+            entry: operator_config_entry(key, serde_json::json!("configured")),
+        })
+    }
+
+    async fn set_operator_config_key(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        key: String,
+        request: RebornOperatorConfigSetRequest,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        self.set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .push((key.clone(), request.value.clone()));
+        Ok(RebornOperatorConfigGetResponse {
+            entry: operator_config_entry(key, request.value),
+        })
+    }
+
+    async fn validate_operator_config(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorConfigValidateRequest,
+    ) -> Result<RebornOperatorConfigValidateResponse, RebornServicesError> {
+        self.validate_operator_config_calls
+            .lock()
+            .expect("lock")
+            .push(request.keys);
+        Ok(RebornOperatorConfigValidateResponse {
+            valid: true,
+            diagnostics: Vec::new(),
+        })
+    }
+
+    async fn get_operator_diagnostics(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        *self.get_operator_diagnostics_calls.lock().expect("lock") += 1;
+        Ok(operator_command_response(RebornOperatorArea::Diagnostics))
+    }
+
+    async fn get_operator_status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        *self.get_operator_status_calls.lock().expect("lock") += 1;
+        Ok(operator_command_response(RebornOperatorArea::Status))
+    }
+
+    async fn query_operator_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        query: RebornOperatorLogsQuery,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.query_operator_logs_calls
+            .lock()
+            .expect("lock")
+            .push((query.limit, query.cursor));
+        Ok(operator_command_response(RebornOperatorArea::Logs))
+    }
+
+    async fn run_operator_service_lifecycle(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorServiceLifecycleRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.run_operator_service_lifecycle_calls
+            .lock()
+            .expect("lock")
+            .push(request.action);
+        Ok(operator_command_response(
+            RebornOperatorArea::ServiceLifecycle,
+        ))
     }
 
     async fn get_outbound_preferences(
@@ -683,6 +797,25 @@ impl RebornServicesApi for StubServices {
             models: vec!["model-a".to_string()],
             message: String::new(),
         })
+    }
+}
+
+fn operator_command_response(area: RebornOperatorArea) -> RebornOperatorCommandPlaneResponse {
+    RebornOperatorCommandPlaneResponse {
+        area,
+        status: RebornOperatorSurfaceStatus::Available,
+        message: "operator route dispatched".to_string(),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn operator_config_entry(key: String, value: Value) -> RebornOperatorConfigEntry {
+    RebornOperatorConfigEntry {
+        key,
+        value,
+        source: "test".to_string(),
+        redacted: false,
+        mutable: true,
     }
 }
 
@@ -1313,6 +1446,237 @@ async fn get_session_returns_false_operator_capability_when_capabilities_default
     assert_eq!(body["tenant_id"], "tenant-alpha");
     assert_eq!(body["user_id"], "user-alpha");
     assert_eq!(body["capabilities"]["operator_webui_config"], false);
+}
+
+#[tokio::test]
+async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/setup")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/operator/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"provider_id":"openai","model":"gpt-5-mini","webui_access_token":"webui-secret"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/config")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/operator/config/validate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"keys":["provider.default","profile.default"]}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/diagnostics")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/status")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/operator/service")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"action":"start"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(*services.get_operator_setup_calls.lock().expect("lock"), 1);
+    assert_eq!(
+        services
+            .run_operator_setup_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [(
+            Some("openai".to_string()),
+            Some("gpt-5-mini".to_string()),
+            false,
+            true
+        )]
+    );
+    assert_eq!(
+        *services.list_operator_config_calls.lock().expect("lock"),
+        1
+    );
+    assert_eq!(
+        services
+            .validate_operator_config_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [vec![
+            "provider.default".to_string(),
+            "profile.default".to_string()
+        ]]
+    );
+    assert_eq!(
+        *services
+            .get_operator_diagnostics_calls
+            .lock()
+            .expect("lock"),
+        1
+    );
+    assert_eq!(
+        services
+            .query_operator_logs_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [(Some(25), Some("after-1".to_string()))]
+    );
+    assert_eq!(
+        services
+            .run_operator_service_lifecycle_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [RebornOperatorServiceLifecycleAction::Start]
+    );
+}
+
+#[tokio::test]
+async fn operator_config_key_routes_dispatch_path_and_body() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/config/provider.default")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/operator/config/provider.default")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"value":{"provider":"openai"}}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        services
+            .get_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        ["provider.default".to_string()]
+    );
+    assert_eq!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [(
+            "provider.default".to_string(),
+            serde_json::json!({ "provider": "openai" })
+        )]
+    );
 }
 
 #[tokio::test]

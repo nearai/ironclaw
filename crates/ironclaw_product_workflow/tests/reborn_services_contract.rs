@@ -5191,11 +5191,28 @@ fn setup_services_with_requirements(
     ))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct SetupUpsertCall {
+    id: String,
+    adapter: String,
+    base_url: Option<String>,
+    default_model: Option<String>,
+    api_key_set: bool,
+    set_active: bool,
+    model: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SetupSetActiveCall {
+    provider_id: String,
+    model: Option<String>,
+}
+
 #[derive(Default)]
 struct SetupRecordingLlmConfigService {
     snapshot_calls: Mutex<usize>,
-    upsert_provider_calls: Mutex<usize>,
-    set_active_calls: Mutex<usize>,
+    upsert_provider_calls: Mutex<Vec<SetupUpsertCall>>,
+    set_active_calls: Mutex<Vec<SetupSetActiveCall>>,
 }
 
 impl SetupRecordingLlmConfigService {
@@ -5204,11 +5221,11 @@ impl SetupRecordingLlmConfigService {
     }
 
     fn upsert_provider_count(&self) -> usize {
-        *self.upsert_provider_calls.lock().expect("lock")
+        self.upsert_provider_calls.lock().expect("lock").len()
     }
 
     fn set_active_count(&self) -> usize {
-        *self.set_active_calls.lock().expect("lock")
+        self.set_active_calls.lock().expect("lock").len()
     }
 
     fn empty_snapshot() -> LlmConfigSnapshot {
@@ -5232,9 +5249,20 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
     async fn upsert_provider(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: UpsertLlmProviderRequest,
+        request: UpsertLlmProviderRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
-        *self.upsert_provider_calls.lock().expect("lock") += 1;
+        self.upsert_provider_calls
+            .lock()
+            .expect("lock")
+            .push(SetupUpsertCall {
+                id: request.id,
+                adapter: request.adapter,
+                base_url: request.base_url,
+                default_model: request.default_model,
+                api_key_set: request.api_key.is_some(),
+                set_active: request.set_active,
+                model: request.model,
+            });
         Ok(Self::empty_snapshot())
     }
 
@@ -5249,9 +5277,15 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
     async fn set_active(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: SetActiveLlmRequest,
+        request: SetActiveLlmRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
-        *self.set_active_calls.lock().expect("lock") += 1;
+        self.set_active_calls
+            .lock()
+            .expect("lock")
+            .push(SetupSetActiveCall {
+                provider_id: request.provider_id,
+                model: request.model,
+            });
         Ok(Self::empty_snapshot())
     }
 
@@ -5320,6 +5354,101 @@ async fn run_operator_setup_requires_provider_id_for_provider_changes() {
         diagnostic.key == "provider_id"
             && diagnostic.reason_code == "operator_setup_provider_id_required"
     }));
+    assert_eq!(llm_config.snapshot_count(), 1);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_upserts_and_activates_provider_config() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_llm_config_service(llm_config.clone());
+
+    services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                base_url: Some("https://api.example.test/v1".to_string()),
+                model: Some("gpt-5-mini".to_string()),
+                api_key: Some(SecretString::from("sk-secret".to_string())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("setup response");
+
+    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(
+        llm_config
+            .upsert_provider_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [SetupUpsertCall {
+            id: "openai".to_string(),
+            adapter: "open_ai_completions".to_string(),
+            base_url: Some("https://api.example.test/v1".to_string()),
+            default_model: Some("gpt-5-mini".to_string()),
+            api_key_set: true,
+            set_active: true,
+            model: Some("gpt-5-mini".to_string()),
+        }]
+    );
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_selects_existing_provider_without_adapter() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_llm_config_service(llm_config.clone());
+
+    services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                model: Some("gpt-5-mini".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("setup response");
+
+    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(
+        llm_config.set_active_calls.lock().expect("lock").as_slice(),
+        [SetupSetActiveCall {
+            provider_id: "openai".to_string(),
+            model: Some("gpt-5-mini".to_string()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn run_operator_setup_without_provider_change_returns_snapshot() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_llm_config_service(llm_config.clone());
+
+    services
+        .run_operator_setup(caller(), RebornOperatorSetupRequest::default())
+        .await
+        .expect("setup response");
+
     assert_eq!(llm_config.snapshot_count(), 1);
     assert_eq!(llm_config.upsert_provider_count(), 0);
     assert_eq!(llm_config.set_active_count(), 0);
