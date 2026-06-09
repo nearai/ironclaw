@@ -19,9 +19,9 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, AutomationListRequest, AutomationProductFacade,
-    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionDecision, ApprovalInteractionService,
+    AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
+    AutomationProductFacade, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
@@ -46,7 +46,7 @@ use ironclaw_product_workflow::{
     StaticConnectableChannelsProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref,
+    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -5606,13 +5606,9 @@ async fn list_threads_hides_automation_trigger_threads() {
             thread_id: Some(automation_thread_id.clone()),
             created_by_actor_id: caller.user_id.as_str().to_string(),
             title: Some("Automation run".to_string()),
-            metadata_json: Some(
-                json!({
-                    "source": "automation_trigger",
-                    "trigger_id": "trigger-scheduled-summary",
-                })
-                .to_string(),
-            ),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-scheduled-summary",
+            )),
         })
         .await
         .expect("automation thread");
@@ -5622,7 +5618,9 @@ async fn list_threads_hides_automation_trigger_threads() {
             thread_id: Some(malformed_metadata_thread_id.clone()),
             created_by_actor_id: caller.user_id.as_str().to_string(),
             title: Some("Malformed metadata chat".to_string()),
-            metadata_json: Some(r#"{"source":"automation_trigger""#.to_string()),
+            metadata_json: Some(format!(
+                r#"{{"source":"{AUTOMATION_TRIGGER_THREAD_SOURCE_TAG}""#
+            )),
         })
         .await
         .expect("malformed metadata thread");
@@ -5666,13 +5664,9 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
             thread_id: Some(automation_thread_id.clone()),
             created_by_actor_id: caller.user_id.as_str().to_string(),
             title: Some("Automation run".to_string()),
-            metadata_json: Some(
-                json!({
-                    "source": "automation_trigger",
-                    "trigger_id": "trigger-scheduled-summary",
-                })
-                .to_string(),
-            ),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-scheduled-summary",
+            )),
         })
         .await
         .expect("automation thread");

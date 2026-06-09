@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
-use ironclaw_turns::{TurnRunId, TurnStatus};
+use ironclaw_turns::TurnRunId;
 
 use super::*;
 use crate::{
@@ -527,7 +527,7 @@ async fn tick_clears_terminal_active_run() {
     repo.upsert_trigger(record).await.expect("insert active");
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
         TriggerActiveRunState::Terminal {
-            status: TurnStatus::Completed,
+            status: TriggerRunHistoryStatus::Ok,
         },
     ));
     let worker = worker(
@@ -583,7 +583,7 @@ async fn tick_records_failed_terminal_active_run_as_error() {
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Terminal {
-                status: TurnStatus::Failed,
+                status: TriggerRunHistoryStatus::Error,
             },
         )),
     );
@@ -652,7 +652,7 @@ async fn tick_active_cleanup_cursor_reaches_terminal_rows_after_blocked_page() {
         Ok(TriggerActiveRunState::Nonterminal),
         Ok(TriggerActiveRunState::Nonterminal),
         Ok(TriggerActiveRunState::Terminal {
-            status: TurnStatus::Completed,
+            status: TriggerRunHistoryStatus::Ok,
         }),
     ]));
     let worker = worker_with_config(
@@ -877,16 +877,16 @@ async fn tick_retries_active_page_when_clear_fails_before_advancing_cursor() {
     ));
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_results(vec![
         Ok(TriggerActiveRunState::Terminal {
-            status: TurnStatus::Completed,
+            status: TriggerRunHistoryStatus::Ok,
         }),
         Ok(TriggerActiveRunState::Terminal {
-            status: TurnStatus::Completed,
+            status: TriggerRunHistoryStatus::Ok,
         }),
         Ok(TriggerActiveRunState::Terminal {
-            status: TurnStatus::Completed,
+            status: TriggerRunHistoryStatus::Ok,
         }),
         Ok(TriggerActiveRunState::Terminal {
-            status: TurnStatus::Completed,
+            status: TriggerRunHistoryStatus::Ok,
         }),
     ]));
     let worker = worker_with_config(
@@ -945,7 +945,7 @@ async fn tick_reports_terminal_active_clear_race() {
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Terminal {
-                status: TurnStatus::Completed,
+                status: TriggerRunHistoryStatus::Ok,
             },
         )),
     );
@@ -985,7 +985,7 @@ async fn tick_clears_terminal_active_and_processes_due_trigger() {
         )])),
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Terminal {
-                status: TurnStatus::Completed,
+                status: TriggerRunHistoryStatus::Ok,
             },
         )),
     );
@@ -1088,10 +1088,10 @@ async fn tick_retries_active_lookup_error_before_advancing_cursor() {
             reason: "turn state unavailable".to_string(),
         }),
         Ok(TriggerActiveRunState::Terminal {
-            status: TurnStatus::Completed,
+            status: TriggerRunHistoryStatus::Ok,
         }),
         Ok(TriggerActiveRunState::Terminal {
-            status: TurnStatus::Completed,
+            status: TriggerRunHistoryStatus::Ok,
         }),
     ]));
     let worker = worker_with_config(
@@ -1202,7 +1202,7 @@ async fn tick_replayed_submit_can_be_cleared_on_a_later_tick_without_stopping_du
         )])),
         Arc::new(RecordingActiveRunLookup::with_results(vec![Ok(
             TriggerActiveRunState::Terminal {
-                status: TurnStatus::Completed,
+                status: TriggerRunHistoryStatus::Ok,
             },
         )])),
     );
@@ -1309,7 +1309,7 @@ async fn tick_keeps_claim_only_active_fire_blocked() {
     let submitter = Arc::new(RecordingSubmitter::with_outcomes(Vec::new()));
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
         TriggerActiveRunState::Terminal {
-            status: TurnStatus::Completed,
+            status: TriggerRunHistoryStatus::Ok,
         },
     ));
     let worker = worker(
@@ -1368,7 +1368,7 @@ async fn tick_active_cleanup_cursor_advances_past_claim_only_record() {
     let submitter = Arc::new(RecordingSubmitter::with_outcomes(Vec::new()));
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
         TriggerActiveRunState::Terminal {
-            status: TurnStatus::Completed,
+            status: TriggerRunHistoryStatus::Ok,
         },
     ));
     let worker = worker_with_config(

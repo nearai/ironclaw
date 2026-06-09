@@ -7,13 +7,13 @@ use ironclaw_conversations::{
     ExternalEventId, InboundTurnError, ResolveConversationRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_product_workflow::automation_trigger_thread_metadata_json;
 use ironclaw_safety::{
     InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest as ThreadAcceptInboundMessageRequest, EnsureThreadRequest,
-    MessageContent, SessionThreadService as CanonicalSessionThreadService,
-    TRIGGER_THREAD_SOURCE_TAG, ThreadScope,
+    MessageContent, SessionThreadService as CanonicalSessionThreadService, ThreadScope,
 };
 use ironclaw_triggers::{
     TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerPromptMaterializer,
@@ -295,7 +295,7 @@ async fn record_trigger_prompt(
             thread_id: Some(resolution.turn_scope.thread_id.clone()),
             created_by_actor_id: resolution.actor.user_id.as_str().to_string(),
             title: None,
-            metadata_json: Some(trigger_thread_metadata_json(trigger_id)),
+            metadata_json: Some(automation_trigger_thread_metadata_json(trigger_id)),
         })
         .await
         .map_err(|error| InboundTurnError::DurableState {
@@ -325,14 +325,6 @@ async fn record_trigger_prompt(
         .map_err(|error| InboundTurnError::DurableState {
             reason: format!("trigger prompt thread record failed: {error}"),
         })
-}
-
-fn trigger_thread_metadata_json(trigger_id: TriggerId) -> String {
-    serde_json::json!({
-        "source": TRIGGER_THREAD_SOURCE_TAG,
-        "trigger_id": trigger_id.to_string(),
-    })
-    .to_string()
 }
 
 fn trigger_authorization_error(error: TriggerFireAuthError) -> TriggerError {
@@ -434,6 +426,7 @@ mod tests {
         MessageIdempotencyStatus, ThreadAccessDecision, trusted_trigger_fire_submitter,
     };
     use ironclaw_host_api::{ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_product_workflow::AUTOMATION_TRIGGER_THREAD_SOURCE_TAG;
     use ironclaw_safety::{InjectionWarning, Severity};
     use ironclaw_threads::{
         AcceptedInboundMessage as CanonicalAcceptedInboundMessage,
@@ -1673,7 +1666,7 @@ mod tests {
                 .expect("trigger thread metadata"),
         )
         .expect("trigger thread metadata json");
-        assert_eq!(metadata["source"], TRIGGER_THREAD_SOURCE_TAG);
+        assert_eq!(metadata["source"], AUTOMATION_TRIGGER_THREAD_SOURCE_TAG);
         assert_eq!(metadata["trigger_id"], trigger_id.to_string());
         let history = thread_service
             .list_thread_history(ThreadHistoryRequest {

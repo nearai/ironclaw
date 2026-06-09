@@ -2786,6 +2786,77 @@ mod fire_claim_contract {
         );
     }
 
+    async fn seed_persisted_run_history(repo: &impl TriggerRepository) -> (TenantId, TriggerId) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000040").expect("ulid");
+        let tenant_id = tenant("tenant-malformed-run-history");
+        let fire_slot = ts(1_704_067_200);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        let expected_next_run_at = record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next slot calculation")
+            .expect("future slot");
+        repo.upsert_trigger(record).await.expect("insert record");
+
+        let claim_now = fire_slot + chrono::Duration::seconds(3);
+        let claimed = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: claim_now,
+            })
+            .await
+            .expect("claim fire");
+        assert!(matches!(claimed, ClaimDueFireOutcome::Claimed(_)));
+
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f90").expect("valid run");
+        repo.mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            run_id,
+            submitted_at: fire_slot + chrono::Duration::seconds(5),
+            next_run_at: expected_next_run_at,
+        })
+        .await
+        .expect("mark fire accepted")
+        .expect("accepted fire should persist");
+
+        (tenant_id, trigger_id)
+    }
+
+    fn malformed_run_history_cases() -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![
+            ("fire_slot", "not-a-timestamp", "fire_slot"),
+            ("run_id", "not-a-uuid", "run_id"),
+            ("thread_id", "not-a-route-thread-id", "route thread id"),
+            ("status", "timed_out", "status"),
+            ("submitted_at", "not-a-timestamp", "submitted_at"),
+            ("completed_at", "not-a-timestamp", "completed_at"),
+        ]
+    }
+
+    async fn assert_malformed_run_history_hydration_errors(
+        repo: &impl TriggerRepository,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        expected: &str,
+    ) {
+        let error = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 10)
+            .await
+            .expect_err("malformed run history row must fail single-trigger hydration");
+        assert_error_contains(error, expected);
+
+        let other_trigger_id = TriggerId::parse("01J00000000000000000000041").expect("ulid");
+        let error = repo
+            .list_trigger_run_history_batch(tenant_id, &[trigger_id, other_trigger_id], 10)
+            .await
+            .expect_err("malformed run history row must fail batched hydration");
+        assert_error_contains(error, expected);
+    }
+
     fn assert_error_contains(error: TriggerError, expected: &str) {
         assert!(
             error.to_string().contains(expected),
@@ -2809,6 +2880,27 @@ mod fire_claim_contract {
     async fn libsql_repository_fire_claim_contract() {
         let (_dir, repo) = build_libsql_repo().await;
         assert_durable_fire_claim_contract(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_repository_rejects_malformed_persisted_run_history_rows() {
+        for (column, value, expected) in malformed_run_history_cases() {
+            let (_dir, db, repo) = build_libsql_repo_with_db().await;
+            let (tenant_id, trigger_id) = seed_persisted_run_history(&repo).await;
+            let conn = db.connect().expect("connect raw libsql");
+            conn.execute(
+                &format!(
+                    "UPDATE trigger_run_history SET {column} = ?1 WHERE tenant_id = ?2 AND trigger_id = ?3"
+                ),
+                libsql::params![value, tenant_id.as_str(), trigger_id.to_string()],
+            )
+            .await
+            .expect("corrupt persisted run history row");
+
+            assert_malformed_run_history_hydration_errors(&repo, tenant_id, trigger_id, expected)
+                .await;
+        }
     }
 
     #[cfg(feature = "libsql")]
@@ -2851,6 +2943,48 @@ mod fire_claim_contract {
         let repo = PostgresTriggerRepository::new(pool.clone());
         repo.run_migrations().await.expect("run migrations");
         assert_durable_fire_claim_contract(&repo).await;
+        clear_postgres_triggers(&pool).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_repository_rejects_malformed_persisted_run_history_rows() {
+        let Some((_container, pool)) = postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        let client = pool.get().await.expect("postgres connection");
+
+        for (column, value, expected) in malformed_run_history_cases() {
+            client
+                .execute("DELETE FROM trigger_run_history", &[])
+                .await
+                .expect("clear trigger run history");
+            client
+                .execute("DELETE FROM trigger_records", &[])
+                .await
+                .expect("clear trigger records");
+
+            let (tenant_id, trigger_id) = seed_persisted_run_history(&repo).await;
+            client
+                .execute(
+                    &format!(
+                        "UPDATE trigger_run_history SET {column} = $1 WHERE tenant_id = $2 AND trigger_id = $3"
+                    ),
+                    &[&value, &tenant_id.as_str(), &trigger_id.to_string()],
+                )
+                .await
+                .expect("corrupt persisted run history row");
+
+            assert_malformed_run_history_hydration_errors(&repo, tenant_id, trigger_id, expected)
+                .await;
+        }
+
+        client
+            .execute("DELETE FROM trigger_run_history", &[])
+            .await
+            .expect("clear trigger run history");
         clear_postgres_triggers(&pool).await;
     }
 

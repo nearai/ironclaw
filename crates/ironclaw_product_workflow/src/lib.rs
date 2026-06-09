@@ -28,6 +28,7 @@ mod action;
 mod approval_interaction;
 mod auth_continuation;
 mod auth_interaction;
+mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
 mod command_dispatch;
@@ -71,6 +72,10 @@ pub use auth_interaction::{
     DefaultAuthInteractionService, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingAuthInteractionView, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, is_auth_gate_ref,
+};
+pub use automation_thread_metadata::{
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
+    thread_metadata_is_automation_trigger,
 };
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,

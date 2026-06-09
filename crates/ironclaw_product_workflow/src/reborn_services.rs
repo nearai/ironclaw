@@ -23,8 +23,7 @@ use ironclaw_product_adapters::{
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
     MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, TRIGGER_THREAD_SOURCE_TAG, ThreadHistoryRequest, ThreadMessageId,
-    ThreadScope,
+    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -51,7 +50,7 @@ use crate::{
         DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
         bounded_source_binding_ref,
     },
-    is_approval_gate_ref, is_auth_gate_ref,
+    is_approval_gate_ref, is_auth_gate_ref, thread_metadata_is_automation_trigger,
 };
 
 mod error;
@@ -1743,14 +1742,8 @@ fn is_automation_trigger_thread(thread: &SessionThreadRecord) -> bool {
     let Some(metadata) = thread.metadata_json.as_deref() else {
         return false;
     };
-    if !metadata.contains(TRIGGER_THREAD_SOURCE_TAG) {
-        return false;
-    }
-    match serde_json::from_str::<serde_json::Value>(metadata) {
-        Ok(metadata) => {
-            metadata.get("source").and_then(serde_json::Value::as_str)
-                == Some(TRIGGER_THREAD_SOURCE_TAG)
-        }
+    match thread_metadata_is_automation_trigger(metadata) {
+        Ok(is_automation_trigger) => is_automation_trigger,
         Err(error) => {
             tracing::debug!(
                 error = %error,

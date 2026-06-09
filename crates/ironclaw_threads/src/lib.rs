@@ -27,9 +27,6 @@ pub use filesystem_service::FilesystemSessionThreadService;
 // to it via semver. Sibling modules import directly through
 // `crate::title::derive_thread_title`.
 
-/// Thread metadata source tag used for host-trusted automation trigger run threads.
-pub const TRIGGER_THREAD_SOURCE_TAG: &str = "automation_trigger";
-
 pub use capability_display_preview::{
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus,
