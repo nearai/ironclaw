@@ -33,7 +33,7 @@ Plus: introduce the `CapabilityResultStore` trait (does not exist today). Introd
 | 11 | Idempotency ledger is **two-phase** (`delivered_at` NULL = pencil, NOT NULL = sealed). Pencil insert claims ownership; gate-store write completes delivery; seal UPDATE marks final. Pencil rows surviving a crash become `retryable` on next boot. | D1 fix. Resolves "crash between ledger insert and gate-store write silently strands the parent loop" bug surfaced by multi-agent review. Matches `IdempotencyLedger::begin_or_replay` precedent. |
 | 12 | Reconciler handles **orphan settlement log rows** (gate cleaned up before delivery) by writing a tombstone + sealing the ledger row in one pass. Counts as `skipped_orphan`, not `failed`. | D9 fix. Resolves "every boot counts cleaned-up gates as `failed` forever" bug. Preserves settlement log append-only invariant. |
 | 13 | `ReplayReport` has six operator-meaningful counters: `redelivered`, `skipped_idempotent`, `retryable`, `skipped_orphan`, `skipped_tombstoned`, `failed`. Only `failed > 0` is actionable. Split between `skipped_orphan` (gate cleaned up) and `skipped_tombstoned` (child pre-tombstoned, gate live) lets operators distinguish gate-cleanup spikes from parent-cancel spikes. | D1+D9. Eliminates "what does `skipped` actually mean here" alert ambiguity. |
-| 14 | Reconciler replay algorithm is **batch-phased**: Phase 0 (bound input via LEFT JOIN), Phase 1 (preflight batch read), Phase 2 (multi-row ledger writes), Phase 3 (parallel capability loads via `buffer_unordered(replay_pool_size)`), Phase 4 (per-row deliver+seal). Phases 0–3 issue O(1) DB calls regardless of pending-row count. | D4 fix. Resolves N+1 query problem surfaced by review. Phase 0 LEFT JOIN bounds replay input by outstanding work, not historical log size — addresses long-term concern (settlement log growth). |
+| 14 | Reconciler replay algorithm is **batch-phased**: Phase 0 (bound input via LEFT JOIN), Phase 1 (preflight batch read), Phase 2 (multi-row ledger writes), Phase 3 (parallel capability loads via input-order-preserving `buffered(replay_pool_size)` — NOT `buffer_unordered` which silently cross-pairs payloads with rows in Phase 4's positional zip), Phase 4 (per-row deliver+seal). Phases 0–3 issue O(1) DB calls regardless of pending-row count. | D4 fix + R4-1 Critical. Resolves N+1 query problem surfaced by review. Phase 0 LEFT JOIN bounds replay input by outstanding work, not historical log size — addresses long-term concern (settlement log growth). |
 | 15 | Reconciler runs in a **background `tokio::spawn` task**, not synchronously at boot. Foreground traffic (incl. blocking subagent calls) is NEVER blocked by replay. Background-mode spawn admission is gated **per-scope** by `ReplayState[scope].completed_at` — rejected with `SubagentSpawnError::ReplayInProgress { try_again_after_ms }` until complete. | D5 fix. Preserves <100 ms foreground cold start regardless of replay backlog. Multi-tenant safe: tenant A's recovery does not gate tenant B's admissions. Background-mode default is OFF through WU-G so user impact is bounded. |
 | 16 | Reconciler uses a **dedicated `replay_pool`** (default 4 DB connections, configurable via `RebornEventStoreConfig.replay_pool_size`), separate from the main runtime connection pool. Prevents replay from starving foreground writes during a recovery storm. | D5 fix. Operationally observable as a distinct metric. Sizing controlled by operator. |
 | 17 | **Active-scope enumeration is eager at boot** via a runs-table query for non-terminal runs. Bounded by active-runs count, not historical user count. Lazy per-scope replay on first traffic is a deferred optimization (would add cold-foreground latency for first-touch tenants after restart). | D5 design choice. Eager wins for foreground SLA at typical scale. |
@@ -362,9 +362,13 @@ BEGIN;
   -- Otherwise:
 
   INSERT OR IGNORE INTO subagent_gate_awaited_children (...) VALUES (...);
-  INSERT OR IGNORE INTO subagent_gate_child_index (tenant_id, child_run_id, gate_ref) VALUES (?, ?, ?);
+  INSERT OR IGNORE INTO subagent_gate_child_index
+    (tenant_id, user_id, agent_id, child_run_id, gate_ref)
+    VALUES (?, ?, ?, ?, ?);
   -- only if terminal status is being inserted directly (background re-hydration):
-  INSERT OR IGNORE INTO subagent_gate_deliverable_queue (tenant_id, child_run_id, gate_ref) VALUES (?, ?, ?);
+  INSERT OR IGNORE INTO subagent_gate_deliverable_queue
+    (tenant_id, user_id, agent_id, child_run_id, gate_ref)
+    VALUES (?, ?, ?, ?, ?);
 
   -- 4. Increment this specific bucket only (no cross-bucket contention).
   UPDATE subagent_gate_capacity_counter
@@ -477,7 +481,7 @@ The delete path's GROUP BY scan is bounded by rows under one `gate_ref` (typical
 - **Settlement log deduplication (resolved).** The settlement log is append-only. Duplicate rows on the same `(gate_ref, child_run_id, terminal_kind)` are *possible* under replay-storm conditions but are **benign**: the idempotency ledger's UNIQUE constraint on `(run_id, child_run_id, terminal_kind)` (§5.4 / §5.5) ensures at most one pencil-receipt insert succeeds; the gate-store record_background_settlement is idempotent on its own primary key; the seal UPDATE is row-level idempotent (`delivered_at IS NULL` guard). Phase 0's LEFT JOIN against the ledger filters out already-sealed rows so duplicate log entries that map to a sealed ledger row are never re-processed. There is no need for a `MIN(id)` ordering choice or a settlement-log UNIQUE constraint at this layer. A future log-rotation / TTL job MAY de-duplicate physically for storage hygiene but that is operational, not correctness-load-bearing.
 - **`deliverable_by_child` as queue table vs. computed view.** Queue table matches in-memory semantics exactly but risks queue/primary-table skew on partial failure. Computed view is always consistent but adds a join on every claim call. Decision recorded in WU-C PR description; recommendation: queue table (matches the lock-free O(1) in-memory contract).
 - **Capacity cap (D6-A + E.A).** `MAX_GATE_RECORDS = 4096` per scope is enforced via the `subagent_gate_capacity_counter` table, **sharded into `CAPACITY_COUNTER_BUCKETS = 16` rows per `(tenant_id, user_id, agent_id)` scope** (operator-tunable per deployment). Spawn picks a bucket via `hash(child_run_id) % K` and increments only that bucket's row. Cap check reads `SUM(undelivered) FROM counter WHERE scope` — cheap with the partial index. This sharding lifts the per-scope spawn throughput ceiling from ~100/sec (single-row lock contention) to ~1600/sec on PostgreSQL at K=16; libSQL deployments retain serialized `BEGIN IMMEDIATE` semantics regardless of K. Drift bound under PostgreSQL with concurrent fan-out is `K - 1` rows over cap (15 at K=16) — bounded and well below the cap itself. The bucket-of-record is stored on `subagent_gate_awaited_children.counter_bucket` at INSERT time so cleanup + delivery paths decrement the correct bucket without rehashing. K is a one-line config knob; raising to K=64 doubles throughput at the cost of slightly more bucket scan on the cap-check SUM (still well under 1 ms). This design scales to mega-tenant deployments (10k+ concurrent spawns under one scope) without falling back to soft caps or background admission control.
-- **`agent_id` nullable contract.** Every scoped query must include `agent_id` in the predicate (`agent_id = ?` OR `agent_id IS NULL`) — never omit it — to avoid cross-agent leakage in multi-agent tenants.
+- **`agent_id` nullable contract.** Every scoped query MUST use the conditional `<agent_predicate>` placeholder per the §1.6 scope-predicate convention: `agent_id = ?` when the caller's `TurnScope.agent_id` is `Some(id)`, and `agent_id IS NULL` when `None`. Blanket `(agent_id = ? OR agent_id IS NULL)` is FORBIDDEN — it lets agent-scoped callers reach system-level (NULL agent_id) rows under the same `(tenant_id, user_id)`.
 
 ---
 
@@ -1103,38 +1107,39 @@ trait SubagentResultTombstoneStore {
 
 // extends SubagentIdempotencyLedger
 trait SubagentIdempotencyLedger {
-    // single-row methods (existing + new):
+    // Single-row methods. LedgerKey embeds scope — no separate scope arg.
     async fn try_insert(
         &self,
         key: LedgerKey,
         delivery_node: String,
     ) -> Result<bool, LedgerError>;  // returns true if inserted, false if pre-existing
-    async fn read(&self, scope: &TurnScope, key: LedgerKey)
+
+    async fn read(&self, key: LedgerKey)
         -> Result<Option<LedgerRow>, LedgerError>;
-    async fn seal(&self, scope: &TurnScope, key: LedgerKey)
+
+    async fn seal(&self, key: LedgerKey)
         -> Result<(), LedgerError>;  // UPDATE SET delivered_at = NOW() WHERE delivered_at IS NULL
 
-    // batch methods (new):
+    // Batch methods.
     async fn upsert_sealed_batch(
         &self,
-        scope: &TurnScope,
         rows: Vec<LedgerKey>,
         delivery_node: String,
     ) -> Result<(), LedgerError>;
+
     async fn insert_pencil_batch(
         &self,
-        scope: &TurnScope,
         rows: Vec<LedgerKey>,
         delivery_node: String,
     ) -> Result<HashSet<LedgerKey>, LedgerError>;  // returns the set actually inserted
+
     async fn read_batch(
         &self,
-        scope: &TurnScope,
         keys: Vec<LedgerKey>,
     ) -> Result<HashMap<LedgerKey, LedgerRow>, LedgerError>;
+
     async fn seal_batch(
         &self,
-        scope: &TurnScope,
         keys: Vec<LedgerKey>,
     ) -> Result<(), LedgerError>;  // multi-row UPDATE; idempotent per-row via delivered_at IS NULL guard
 }
@@ -1157,6 +1162,8 @@ pub struct LedgerRow {
 }
 ```
 
+**Scope source.** `LedgerKey` is the single source of truth for `(tenant_id, user_id, agent_id, run_id, child_run_id, terminal_kind)`. Ledger methods do NOT take a separate `scope: &TurnScope` arg — the caller materializes scope into the key before the call. This eliminates the dual-source-of-scope ambiguity flagged in round-4 review. The same pattern applies to all 7 methods including the single-row variants.
+
 **WU-C MUST land all 8 batch methods + their backing SQL** before the §5.3 algorithm can be implemented. Single-row variants stay for the orphan / tombstone paths in Phase 2a and for the §5.10-flagged manual operator interventions on stuck rows. Pseudocode in §5.3 uses bare method names; backends bind these signatures.
 
 ### 5.3 Replay algorithm
@@ -1172,11 +1179,24 @@ fn replay(scope: &TurnScope) -> ReplayReport:
   //       ON  s.parent_run_id = l.run_id
   //       AND s.child_run_id  = l.child_run_id
   //       AND s.terminal_kind = l.terminal_kind
+  //       AND s.tenant_id     = l.tenant_id
+  //       AND s.user_id       = l.user_id
+  //       AND (s.agent_id IS NOT DISTINCT FROM l.agent_id)   -- NULL-safe equality (works on PG; libSQL substitutes via app layer)
   //   WHERE s.tenant_id = $1 AND s.user_id = $2
   //     AND <agent_predicate_on_s>            -- conditional: s.agent_id = $3 OR s.agent_id IS NULL per caller's scope
   //     AND s.terminal_kind IN ('Completed', 'Failed', 'Cancelled')
   //     AND s.child_run_id IS NOT NULL
   //     AND (l.delivered_at IS NULL OR l.run_id IS NULL);
+  //
+  // **Cross-tenant join safety.** The LEFT JOIN now matches scope columns explicitly.
+  // `IS NOT DISTINCT FROM` is NULL-safe equality on PostgreSQL — both NULLs match,
+  // mixed NULL/non-NULL do not. libSQL does not support `IS NOT DISTINCT FROM`; the
+  // libSQL backend substitutes either
+  //   `(s.agent_id = l.agent_id OR (s.agent_id IS NULL AND l.agent_id IS NULL))`
+  // OR uses application-layer scope-equality after the JOIN. Without scope-matching on
+  // the ledger side, a cross-tenant UUID collision (UUIDs are practically unique but the
+  // JOIN must be defensive) would surface a sealed-elsewhere row and suppress this
+  // tenant's replay.
   pending = settlement_event_log.read_pending_for_scope(scope)
 
   if pending is empty:
@@ -1185,6 +1205,18 @@ fn replay(scope: &TurnScope) -> ReplayReport:
   redelivered = 0; skipped_idempotent = 0
   retryable = 0; skipped_orphan = 0
   skipped_tombstoned = 0; failed = 0
+
+  // ── Phase 0 partial index (perf) ──
+  // The Phase 0 LEFT JOIN against the ledger requires a partial index on
+  // `subagent_idempotency_ledger (tenant_id, user_id, agent_id, run_id,
+  // child_run_id, terminal_kind) WHERE delivered_at IS NULL`. Without it,
+  // the scan grows with ledger size — over months of production load, even
+  // though each scope's pending set is small, the full-ledger scan becomes
+  // the bottleneck. The partial index is documented in §5.4 (libSQL) and
+  // §5.5 (PostgreSQL) as `idx_subagent_idempotency_ledger_pending` — see
+  // those sections for DDL. Operators monitor `pg_stat_user_indexes`
+  // (PostgreSQL) or `EXPLAIN QUERY PLAN` (libSQL) to confirm the partial
+  // index is used.
 
   // ── Phase 1 — preflight (two batched reads) ──
   // Partition `pending` rows into live / orphan / explicit-tombstoned.
@@ -1221,8 +1253,18 @@ fn replay(scope: &TurnScope) -> ReplayReport:
   //   VALUES (?,?,?,?,?,?,?,NOW()), …
   //   ON CONFLICT (run_id, child_run_id, terminal_kind) DO UPDATE
   //     SET delivered_at = COALESCE(subagent_idempotency_ledger.delivered_at, NOW());
-  idempotency_ledger.upsert_sealed_batch(
-    scope, orphan_rows ++ tombstoned_rows, delivery_node=self.node_id)
+  // Map settlement-log rows to ledger keys before batch upsert.
+  cleanup_keys = orphan_rows.iter().chain(tombstoned_rows.iter()).map(|row|
+    LedgerKey {
+      tenant_id: scope.tenant_id.clone(),
+      user_id:   scope.explicit_owner_user_id_or_sentinel(),
+      agent_id:  scope.agent_id.clone(),
+      run_id:    row.parent_run_id,
+      child_run_id: row.child_run_id,
+      terminal_kind: row.terminal_kind,
+    }
+  ).collect()
+  idempotency_ledger.upsert_sealed_batch(cleanup_keys, delivery_node=self.node_id)
   skipped_orphan = orphan_rows.len()
   skipped_tombstoned = tombstoned_rows.len()
 
@@ -1249,17 +1291,20 @@ fn replay(scope: &TurnScope) -> ReplayReport:
       retryable += 1            // pencil from prior crash
       to_attempt.push(row)
 
-  // ── Phase 3 — parallel capability loads (bounded by replay_pool_size) ──
-  // Use buffer_unordered to cap concurrent in-flight loads at the durable
-  // backend's connection-pool size. Megabyte-scale payloads × thousands of
-  // pending rows over a 4-conn pool would otherwise starve foreground
-  // writes. Implementations MUST use buffer_unordered, NOT join_all.
+  // ── Phase 3 — parallel capability loads, ORDER-PRESERVING ──
+  // Use `buffered` not `buffer_unordered` — Phase 4's zip() pairs row
+  // identity with payload positionally, so loads MUST emit in input
+  // order. buffer_unordered would silently cross-pair payloads.
+  // `buffered(replay_pool_size)` caps concurrent in-flight loads at the
+  // durable backend's connection-pool size. Megabyte-scale payloads ×
+  // thousands of pending rows over a 4-conn pool would otherwise starve
+  // foreground writes. Implementations MUST use buffered, NOT join_all.
   load_results = futures::stream::iter(
                    to_attempt.iter().map(|r|
                      capability_result_store.read(scope, &r.result_ref)
                    )
                  )
-                 .buffer_unordered(replay_pool_size)
+                 .buffered(replay_pool_size)
                  .collect::<Vec<_>>()
                  .await
 
@@ -1298,15 +1343,15 @@ fn replay(scope: &TurnScope) -> ReplayReport:
                         skipped_orphan, skipped_tombstoned, failed }
 ```
 
-**Performance shape (D4).** The replay algorithm is phase-batched: each phase issues O(1) DB calls regardless of `len(pending)`. Phase 0 bounds input to outstanding work via a LEFT JOIN against the ledger — historical settled log rows never enter the algorithm. Phase 1 batches both preflight reads. Phase 2 batches both ledger writes (orphan-seal + pencil-claim). Phase 3 parallelizes capability loads via `buffer_unordered(replay_pool_size)` — MUST NOT use `join_all`, which is unbounded and would starve foreground writes when fan-out exceeds the connection pool. Only Phase 4 (deliver + seal) is per-row, and only because each row's gate-store target differs — within Phase 4 the work can be further sharded across a `tokio::JoinSet` if profiling demands it. Net cost is dominated by Phase 4's per-row delivery (~5–30 ms per row depending on backend latency) rather than the historical N+1 round-trip cost. Implementations MUST cap Phase 3 concurrency at the durable backend's connection-pool size via `buffer_unordered(replay_pool_size)`. See §5.6 for the dedicated replay pool guidance. Phase 2a's tombstone writes MUST use `write_tombstones_batch` — a single round-trip for all orphans — not a per-row `write_tombstone` loop. The trait `SubagentResultTombstoneStore` is extended in WU-C with a `write_tombstones_batch(&self, scope: &TurnScope, tombstones: Vec<SubagentResultTombstone>) -> Result<(), TombstoneStoreError>` method. Phase 0's input-bound query MUST include the §1.6 conditional `<agent_predicate>` on `s.agent_id` — agent-scoped callers must not surface settlement-log rows belonging to other agents under the same `(tenant_id, user_id)`. Bind position varies per backend; pass `scope.agent_id` only when `Some`.
+**Performance shape (D4).** The replay algorithm is phase-batched: each phase issues O(1) DB calls regardless of `len(pending)`. Phase 0 bounds input to outstanding work via a LEFT JOIN against the ledger — historical settled log rows never enter the algorithm. Phase 1 batches both preflight reads. Phase 2 batches both ledger writes (orphan-seal + pencil-claim). Phase 3 parallelizes capability loads via input-order preserving `buffered(replay_pool_size)` — MUST NOT use `buffer_unordered` (which emits in completion order, breaking Phase 4's positional zip pairing) and MUST NOT use `join_all` (which is unbounded and would starve foreground writes when fan-out exceeds the connection pool). Only Phase 4 (deliver + seal) is per-row, and only because each row's gate-store target differs — within Phase 4 the work can be further sharded across a `tokio::JoinSet` if profiling demands it. Net cost is dominated by Phase 4's per-row delivery (~5–30 ms per row depending on backend latency) rather than the historical N+1 round-trip cost. Implementations MUST cap Phase 3 concurrency at the durable backend's connection-pool size via `buffered(replay_pool_size)`. See §5.6 for the dedicated replay pool guidance. Phase 2a's tombstone writes MUST use `write_tombstones_batch` — a single round-trip for all orphans — not a per-row `write_tombstone` loop. The trait `SubagentResultTombstoneStore` is extended in WU-C with a `write_tombstones_batch(&self, scope: &TurnScope, tombstones: Vec<SubagentResultTombstone>) -> Result<(), TombstoneStoreError>` method. Phase 0's input-bound query MUST include the §1.6 conditional `<agent_predicate>` on `s.agent_id` — agent-scoped callers must not surface settlement-log rows belonging to other agents under the same `(tenant_id, user_id)`. Bind position varies per backend; pass `scope.agent_id` only when `Some`.
 
 **Concurrency safety.** Two-phase ledger semantics from D1 hold under batching: Phase 2b's multi-row `INSERT OR IGNORE` is row-level idempotent — racing nodes either insert a pencil row or observe an existing one; only one node's seal UPDATE will succeed (the `delivered_at IS NULL` guard arbitrates). The gate-store write in Phase 4 is independently idempotent on its own primary key (per §1). Together: at most one delivery per `(run_id, child_run_id, terminal_kind)` tuple, regardless of replica count, crash count, or fan-out scale.
 
 ### 5.4 Idempotency ledger schema (libSQL)
 
 ```sql
--- crates/ironclaw_reborn_event_store/src/libsql/migrations/
--- 0005_subagent_idempotency_ledger.sql
+-- Migration: inline const in `crates/ironclaw_reborn_event_store/src/libsql/migrations.rs`
+-- under INCREMENTAL_MIGRATIONS array, version assigned per §8.5 numbering.
 
 CREATE TABLE IF NOT EXISTS subagent_idempotency_ledger (
     tenant_id          TEXT NOT NULL,
@@ -1322,6 +1367,14 @@ CREATE TABLE IF NOT EXISTS subagent_idempotency_ledger (
 
 CREATE INDEX IF NOT EXISTS idx_sil_scope
     ON subagent_idempotency_ledger (tenant_id, user_id, agent_id, run_id);
+
+-- Partial index for Phase 0 LEFT JOIN (replay).
+-- Without this, the Phase 0 scan grows with ledger size — over months of
+-- production load the full-ledger scan becomes the Phase 0 bottleneck.
+CREATE INDEX IF NOT EXISTS idx_subagent_idempotency_ledger_pending
+    ON subagent_idempotency_ledger
+       (tenant_id, user_id, agent_id, run_id, child_run_id, terminal_kind)
+    WHERE delivered_at IS NULL;
 ```
 
 Insert:
@@ -1337,15 +1390,16 @@ VALUES (?, ?, ?, ?, ?, ?, ?);
 -- Step 2: pencil-receipt seal (sets delivered_at) (after successful gate-store write).
 UPDATE subagent_idempotency_ledger
    SET delivered_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
- WHERE tenant_id = ? AND run_id = ? AND child_run_id = ? AND terminal_kind = ?
+ WHERE tenant_id = ? AND user_id = ? AND <agent_predicate>
+   AND run_id = ? AND child_run_id = ? AND terminal_kind = ?
    AND delivered_at IS NULL;
 ```
 
 ### 5.5 Idempotency ledger schema (PostgreSQL)
 
 ```sql
--- crates/ironclaw_reborn_event_store/src/postgres/migrations/
--- 0005_subagent_idempotency_ledger.sql
+-- Migration: inline const in `crates/ironclaw_reborn_event_store/src/postgres/migrations.rs`
+-- under INCREMENTAL_MIGRATIONS array, version assigned per §8.5 numbering.
 
 CREATE TABLE IF NOT EXISTS subagent_idempotency_ledger (
     tenant_id          TEXT NOT NULL,
@@ -1355,13 +1409,25 @@ CREATE TABLE IF NOT EXISTS subagent_idempotency_ledger (
     child_run_id       TEXT NOT NULL,
     terminal_kind      TEXT NOT NULL,
     delivered_at       TIMESTAMPTZ,                -- NULL = pencil receipt (mid-flight, retryable on next boot)
-    delivery_node      TEXT NOT NULL,
-    UNIQUE (tenant_id, user_id, agent_id, run_id, child_run_id, terminal_kind)
+    delivery_node      TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_sil_scope
     ON subagent_idempotency_ledger (tenant_id, user_id, agent_id, run_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_subagent_idempotency_ledger_uniq
+    ON subagent_idempotency_ledger
+       (tenant_id, user_id, COALESCE(agent_id, '__non_agent__'),
+        run_id, child_run_id, terminal_kind);
+
+-- Partial index for Phase 0 LEFT JOIN (replay).
+CREATE INDEX IF NOT EXISTS idx_subagent_idempotency_ledger_pending
+    ON subagent_idempotency_ledger
+       (tenant_id, user_id, agent_id, run_id, child_run_id, terminal_kind)
+    WHERE delivered_at IS NULL;
 ```
+
+**Cross-NULL-agent uniqueness (PostgreSQL).** PostgreSQL treats two NULLs as distinct in UNIQUE constraints — without `COALESCE`, two system-level runs (agent_id IS NULL) with the same `(run_id, child_run_id, terminal_kind)` tuple would both INSERT, opening a double-delivery hole. The `COALESCE(agent_id, '__non_agent__')` UNIQUE INDEX collapses NULL-agent rows into a single uniqueness class — matches the pattern used elsewhere in the spec (§1.4 capacity counter).
 
 Insert:
 
@@ -1371,13 +1437,14 @@ INSERT INTO subagent_idempotency_ledger
     (tenant_id, user_id, agent_id, run_id, child_run_id, terminal_kind,
      delivery_node)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (tenant_id, user_id, agent_id, run_id, child_run_id, terminal_kind) DO NOTHING;
+ON CONFLICT (tenant_id, user_id, COALESCE(agent_id, '__non_agent__'), run_id, child_run_id, terminal_kind) DO NOTHING;
 -- Inspect rows_affected() == 0 to detect the "already claimed by another node" case.
 
 -- Step 2: pencil-receipt seal (sets delivered_at) (after successful gate-store write).
 UPDATE subagent_idempotency_ledger
    SET delivered_at = NOW()
- WHERE tenant_id = $1 AND run_id = $2 AND child_run_id = $3 AND terminal_kind = $4
+ WHERE tenant_id = $1 AND user_id = $2 AND <agent_predicate>
+   AND run_id = $? AND child_run_id = $? AND terminal_kind = $?
    AND delivered_at IS NULL;
 ```
 
@@ -1389,13 +1456,15 @@ Both dialects match the in-memory settlement semantics already established in `g
 - Allowlist: `[A-Za-z0-9._-]+`. Reject any other character (or replace with `_`) — the column is read by ops dashboards that may interpret control bytes.
 - On invalid: substitute the literal string `"unknown"` and log a `warn!` line. Never crash the reconciler over a delivery-node validation failure.
 
+WU-C MUST add the test `tests::reconciler_integration::delivery_node_invalid_substituted_to_unknown` in `crates/ironclaw_reborn_event_store/tests/reconciler_integration.rs`. Test cases: (a) oversized 200-char value, (b) embedded control chars `pod\x00foo`, (c) disallowed chars `pod/foo<script>`, (d) empty string. For each case assert (i) `reconciler.replay()` does NOT Err, (ii) the written ledger row has `delivery_node = "unknown"`.
+
 ### 5.6 Composition wire-up
 
 Reconciler runs once per process boot — **detached in a background task**, not blocking foreground traffic. Boot sequence in `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs` (local dev) and the production counterpart in `crates/ironclaw_reborn_composition/src/lib.rs`:
 
 1. `build_reborn_event_stores` constructs the durable backends and returns the `SubagentIdempotencyLedger` instance alongside `RebornEventStores`.
 2. Composition layer creates a concrete `DurableSubagentRestartReconciler` holding references to: settlement event log (scoped reader), `CapabilityResultStore`, `SubagentResultTombstoneStore`, idempotency ledger, gate store. The reconciler is given its own **dedicated DB connection pool** (`replay_pool`, default 4 connections) — separate from the main runtime pool so replay never starves foreground writes during a recovery storm.
-3. **Active-scope enumeration (eager, bounded).** Composition queries the runs table for scopes with non-terminal runs at boot time. This is bounded by active-runs count, not historical user count — typical: low thousands. The enumerated set is `active_scopes: Vec<TurnScope>`. Lazy per-scope replay on first incoming traffic is a future optimization (deferred — would add cold-foreground latency for first-touch tenants after a restart).
+3. **Active-scope enumeration (eager, bounded with hard cap + timeout).** Composition queries the runs table for scopes with non-terminal runs at boot time, capped at `max_active_scopes_at_boot` (default 1000, configurable via `RebornEventStoreConfig.max_active_scopes_at_boot: usize`). Scopes beyond the cap are NOT enumerated eagerly; they fall through to lazy per-scope replay on first incoming traffic (next boot they re-enter the enumeration if still active). The enumeration query runs under a 5-second timeout (configurable via `RebornEventStoreConfig.active_scope_enumeration_timeout: Duration`); a timeout logs `warn!("active-scope enumeration timed out after Xms; X scopes enumerated")` and proceeds with what was returned — replay continues for the partial set, the remainder defers to lazy mode. Operators monitor `reborn_subagent_scope_enumeration_seconds` (histogram) and `reborn_subagent_scopes_capped_total` (counter) to tune the cap. The enumerated set is `active_scopes: Vec<TurnScope>`.
 4. **Background replay dispatch.** Composition stores an `Arc<ReplayState>` keyed by `TurnScope` (or `(tenant_id, agent_id)`), each tracking `{ in_progress: bool, completed_at: Option<Instant>, last_report: Option<ReplayReport> }`. Composition then `tokio::spawn`s one replay task per active scope (or one task that walks `active_scopes` sequentially with `replay_pool` capping concurrency — implementation choice).
 
    **Reconciler replay jitter (A.A).** To prevent fleet-wide replay stampedes at rolling-deploy time, each replica waits a uniform-random delay `0..RECONCILER_REPLAY_JITTER_MS` (default 5000 ms; configurable via `RebornEventStoreConfig.reconciler_replay_jitter_ms`) before launching its first replay task. At a 50-replica deploy that completes within a 30-second window, the jitter spreads ~200 concurrent reconciler connections (50 × `replay_pool=4`) over a wider time band, capping instantaneous DB load at ~40 concurrent reconciler conns instead. Foreground latency stays within SLA during the deploy window. Jitter is taken ONCE per process boot — not per-scope — so a single replica's scopes still run sequentially in arrival order under the per-scope admission gate. Jitter does NOT block foreground or blocking-subagent traffic; only the background replay task pays the jitter cost. Set `reconciler_replay_jitter_ms = 0` for single-node deployments where stampede protection is unnecessary.
@@ -1472,7 +1541,7 @@ Per `.claude/rules/testing.md` "Test Through the Caller" rule — unit tests on 
 3. Drop all in-memory state.
 4. Boot new composition with same durable backend.
 5. Call reconciler.replay(&scope).await.
-6. Assert report.redelivered == 1, skipped == 0, failed == 0.
+6. Assert report.redelivered == 1, skipped_idempotent == 0, skipped_orphan == 0, skipped_tombstoned == 0, failed == 0.
 7. Assert gate store records child as delivered.
 ```
 
@@ -1503,6 +1572,7 @@ Per `.claude/rules/testing.md` "Test Through the Caller" rule — unit tests on 
 1. Write settlement log entry only; do NOT write capability result.
 2. Boot + replay.
 3. Assert failed == 1, redelivered == 0.
+4. Assert idempotency ledger row for `(run_id, child_run_id, terminal_kind)` exists with `delivered_at IS NULL` (pencil receipt preserved — next boot will retry the capability load).
 ```
 
 **`tests::reconciler_integration::reconciler_retries_pencil_receipt_from_crashed_prior_pass`:**
@@ -1535,10 +1605,19 @@ This test guards the two-phase ledger fix (D1): pencil receipts left by a crash 
 
 Guards D9: orphan rows are cleaned up exactly once and never reprocessed.
 
+**`tests::reconciler_integration::delivery_node_invalid_substituted_to_unknown`:**
+
+```
+1. Configure reconciler with `delivery_node` from each of: (a) `"x".repeat(200)`, (b) `"pod\x00foo"`, (c) `"pod/foo<script>"`, (d) `""`.
+2. For each case, run `reconciler.replay(&scope).await`.
+3. Assert no Err returned.
+4. Assert each persisted ledger row has `delivery_node = "unknown"` (literal sanitization output).
+```
+
 **Dual-backend parity test** (libSQL vs PostgreSQL, part of WU-G #4431): run all four bodies against both `RebornLibSqlIdempotencyLedger` and `RebornPostgresIdempotencyLedger`, matching the pattern of `assert_settled_action_survives_reopen_and_replays` in `crates/ironclaw_product_workflow_storage/tests/support/mod.rs`.
 
 All tests go in `crates/ironclaw_reborn_event_store/tests/` (contract-test tier, matching `durable_event_store_contract.rs` + `filesystem_event_log_contract.rs` pattern). Run under `cargo test --features integration` for backend-dependent variants.
-The 6 named tests above live in `crates/ironclaw_reborn_event_store/tests/reconciler_integration.rs`. WU-C MUST land all 6 in the same PR as the `SubagentRestartReconciler` impl — they are the acceptance criteria for the §5.3 algorithm + D1 two-phase ledger + D9 orphan handling invariants.
+The 7 named tests above live in `crates/ironclaw_reborn_event_store/tests/reconciler_integration.rs`. WU-C MUST land all 7 in the same PR as the `SubagentRestartReconciler` impl — they are the acceptance criteria for the §5.3 algorithm + D1 two-phase ledger + D9 orphan handling invariants.
 
 ### 5.10 Risks / open questions
 
@@ -1859,7 +1938,7 @@ All DDL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` for i
 - [ ] WU-C lands the two-phase idempotency ledger (D1): `delivered_at NULL` column nullable; pencil-insert + pen-seal pattern; matches the existing `IdempotencyLedger::begin_or_replay` precedent in `crates/ironclaw_product_workflow/src/ledger.rs`.
 - [ ] WU-C lands orphan-gate handling (D9): reconciler tombstones + seals when `gate_store.gate_exists(gate_ref)` returns false; `gate_exists` becomes a required method on the gate store trait.
 - [ ] WU-C extends `ReplayReport` with `retryable: u32` and `skipped_orphan: u32` counters and updates operator dashboards (`warn!` on `failed > 0` only).
-- [ ] WU-C implements the §5.3 phase-batched replay algorithm: Phase 0 LEFT JOIN, Phase 1 batched preflight, Phase 2 multi-row ledger writes, Phase 3 `buffer_unordered(replay_pool_size)` capability loads, Phase 4 per-row deliver+seal.
+- [ ] WU-C implements the §5.3 phase-batched replay algorithm: Phase 0 LEFT JOIN, Phase 1 batched preflight, Phase 2 multi-row ledger writes, Phase 3 input-order-preserving `buffered(replay_pool_size)` capability loads (NOT `buffer_unordered` — would cross-pair payloads), Phase 4 per-row deliver+seal.
 - [ ] WU-C lands `replay_pool` config (`RebornEventStoreConfig.replay_pool_size: u32`, default 4). Reconciler MUST use this pool exclusively for replay queries.
 - [ ] WU-C dispatches replay via `tokio::spawn` from composition boot, NOT `.await` inline. Foreground traffic accepts immediately on cold start.
 - [ ] WU-C wires the per-scope admission gate: `SpawnSubagentPort` for background mode reads `ReplayState[scope].completed_at` before admitting; rejects with `SubagentSpawnError::ReplayInProgress` until complete. Foreground / blocking-subagent paths never consult this gate.
@@ -1875,6 +1954,7 @@ All DDL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` for i
 - [ ] WU-C lands `seal_batch(scope, Vec<LedgerKey>)` on the idempotency ledger trait + backing SQL (libSQL + PostgreSQL). Phase 4 of §5.3 algorithm requires single multi-row UPDATE seal — per-row seal in a loop reintroduces the N+1 cost.
 - [ ] WU-C lands all 8 reconciler-facing batch methods per §5.2.1 trait signatures: `gates_exist_batch`, `read_tombstones_batch`, `write_tombstones_batch`, `upsert_sealed_batch`, `insert_pencil_batch`, `read_batch`, `seal`, `seal_batch`.
 - [ ] WU-C extends `ReplayReport` with `skipped_tombstoned: u32` (was merged into `skipped_orphan` in earlier drafts). Operator dashboards use the split for alert tuning.
+- [ ] WU-C lands `RebornEventStoreConfig.max_active_scopes_at_boot` (default 1000) and `active_scope_enumeration_timeout` (default 5s). Overflow scopes lazily replayed on first traffic; partial enumeration on timeout proceeds with logged-set + lazy-mode fallback. `reborn_subagent_scope_enumeration_seconds` (histogram) + `reborn_subagent_scopes_capped_total` (counter) metrics exposed.
 
 ## References
 
