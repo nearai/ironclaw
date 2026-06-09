@@ -51,6 +51,15 @@ mod filesystem_store;
 
 pub use filesystem_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
 
+/// Open a PostgreSQL pool using the same TLS policy as the production event
+/// store backend.
+#[cfg(feature = "postgres")]
+pub fn open_postgres_pool(
+    url: SecretString,
+) -> Result<deadpool_postgres::Pool, RebornEventStoreError> {
+    postgres_backed::build_pool(url)
+}
+
 /// Backend configuration for Reborn durable event/audit stores.
 ///
 /// The `Libsql` / `Postgres` variants open a backend-specific
@@ -478,7 +487,7 @@ mod postgres_backed {
     pub(super) async fn build(
         url: SecretString,
     ) -> Result<RebornEventStores, RebornEventStoreError> {
-        let pool = build_pool(url).await?;
+        let pool = build_pool(url)?;
         let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
         filesystem.run_migrations().await.map_err(|source| {
             RebornEventStoreError::backend("postgres", "run migrations", source)
@@ -486,7 +495,7 @@ mod postgres_backed {
         wrap_root_filesystem_as_event_stores(filesystem)
     }
 
-    async fn build_pool(url: SecretString) -> Result<Pool, RebornEventStoreError> {
+    pub(super) fn build_pool(url: SecretString) -> Result<Pool, RebornEventStoreError> {
         let raw_url = url.expose_secret();
         let mut pg_config: Config = raw_url.parse().map_err(|source| {
             RebornEventStoreError::backend("postgres", "parse connection string", source)
@@ -514,6 +523,7 @@ mod postgres_backed {
             Manager::from_config(pg_config, tls, manager_config)
         };
         Pool::builder(manager)
+            .max_size(16)
             .runtime(Runtime::Tokio1)
             .build()
             .map_err(|source| RebornEventStoreError::backend("postgres", "build pool", source))

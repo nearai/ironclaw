@@ -875,6 +875,19 @@ where
     factory::build_postgres_production_host_runtime_services(config).await
 }
 
+/// Open a PostgreSQL pool for Reborn production storage using the same
+/// TLS/cleartext policy enforced by the production event-store backend.
+///
+/// Callers are responsible for validating that production boot selected the
+/// PostgreSQL storage backend and that the URL came from an env-only config
+/// reference before passing it here.
+#[cfg(feature = "postgres")]
+pub fn open_reborn_postgres_pool(
+    url: secrecy::SecretString,
+) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
+    Ok(ironclaw_reborn_event_store::open_postgres_pool(url)?)
+}
+
 #[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
 mod mount_view_tests {
     use super::*;

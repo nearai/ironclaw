@@ -52,6 +52,10 @@ openai-compat-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/openai-compat-beta",
 ]
+# Enable production PostgreSQL storage composition for `ironclaw-reborn`.
+postgres = [
+    "ironclaw_reborn_composition/postgres",
+]
 [dependencies]
 anyhow = "1"
 async-trait = { version = "0.1", optional = true }
