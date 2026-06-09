@@ -107,6 +107,10 @@ tracked follow-up.
   retry loops that blindly rewrite a complete preference record after a
   conflict; storage does not know whether the caller intended to merge or
   replace each slot.
+- Follow-up: extend `WriteCommunicationPreferenceRequest` with an explicit
+  expected key or expected scope before tightening mismatch classification.
+  Then `expected_key != record.key()` can fail as `InvalidRequest`, while true
+  stale-version or missing-row races continue to surface as `CasConflict`.
 - Add caller-level tests through the preference repository or product facade,
   not only helper-level tests.
 
