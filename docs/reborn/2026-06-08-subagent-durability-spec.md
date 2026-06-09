@@ -181,7 +181,7 @@ CREATE INDEX IF NOT EXISTS idx_sgac_child_run_id
 CREATE INDEX IF NOT EXISTS idx_sgac_parent_run_id
     ON subagent_gate_awaited_children (parent_run_id);
 CREATE INDEX IF NOT EXISTS idx_sgac_undelivered_terminal
-    ON subagent_gate_awaited_children (tenant_id, user_id, agent_id, delivered_to_parent)
+    ON subagent_gate_awaited_children (tenant_id, user_id, agent_id, delivered_to_parent, terminal_status)
     WHERE delivered_to_parent = FALSE;
 
 CREATE TABLE IF NOT EXISTS subagent_gate_child_index (
@@ -220,6 +220,7 @@ CREATE TABLE IF NOT EXISTS subagent_gate_settlement_log (
     agent_id        TEXT,
     gate_ref        TEXT    NOT NULL,
     child_run_id    TEXT    NOT NULL,
+    result_ref      TEXT    NOT NULL,
     parent_run_id   TEXT    NOT NULL,
     terminal_status TEXT    NOT NULL,   -- "completed" | "failed" | "cancelled"
     terminal_kind   TEXT    NOT NULL,   -- TurnEventKind serialized
@@ -247,6 +248,7 @@ CREATE TABLE IF NOT EXISTS subagent_gate_settlement_log (
     agent_id        TEXT,
     gate_ref        TEXT        NOT NULL,
     child_run_id    TEXT        NOT NULL,
+    result_ref      TEXT        NOT NULL,
     parent_run_id   TEXT        NOT NULL,
     terminal_status TEXT        NOT NULL,
     terminal_kind   TEXT        NOT NULL,
@@ -263,6 +265,8 @@ CREATE INDEX IF NOT EXISTS idx_sgsl_parent_run_id
 CREATE INDEX IF NOT EXISTS idx_sgsl_child_run_id
     ON subagent_gate_settlement_log (child_run_id);
 ```
+
+**`sanitized_reason` contract.** This column persists a short, sanitized failure reason for operator debugging. Source: the `LoopFailureKind` discriminator OR a fixed-length truncated prefix of the failure message (max 256 chars), with non-ASCII characters stripped. Sanitization MUST occur at the settlement write site (`SubagentCompletionObserver`), not at the log boundary. Raw LLM output, user task descriptions, and unbounded error strings MUST NOT be written here. When in doubt, write NULL — the log row is still actionable from the `terminal_status` + `terminal_kind` columns alone. Prefer a future migration to a constrained `failure_code TEXT` (enum-backed) column if redaction proves error-prone.
 
 The log is **append-only**. Replay reads rows for active parent runs and re-drives `record_child_terminal` on the primary `subagent_gate_awaited_children` table; the `terminal_status IS NULL` guard there makes replay idempotent.
 
@@ -283,7 +287,8 @@ COMMIT;
 BEGIN;
   UPDATE subagent_gate_awaited_children
      SET terminal_status = ?, terminal_event_json = ?, settled_at = datetime('now')
-   WHERE gate_ref = ? AND child_run_id = ? AND terminal_status IS NULL;
+   WHERE gate_ref = ? AND child_run_id = ? AND terminal_status IS NULL
+     AND tenant_id = ? AND user_id = ? AND (agent_id = ? OR agent_id IS NULL);
   -- log row only if the UPDATE above touched a row:
   INSERT INTO subagent_gate_settlement_log (...) VALUES (...);
   INSERT OR IGNORE INTO subagent_gate_deliverable_queue (tenant_id, child_run_id, gate_ref) VALUES (?, ?, ?);
@@ -291,11 +296,27 @@ COMMIT;
 
 -- Delete path (delete_awaited_child equivalent):
 BEGIN;
-  DELETE FROM subagent_gate_deliverable_queue WHERE gate_ref = ?;
-  DELETE FROM subagent_gate_child_index WHERE gate_ref = ?;
-  DELETE FROM subagent_gate_awaited_children WHERE gate_ref = ?;
+  DELETE FROM subagent_gate_deliverable_queue WHERE gate_ref = ? AND tenant_id = ?;
+  DELETE FROM subagent_gate_child_index WHERE gate_ref = ? AND tenant_id = ?;
+  DELETE FROM subagent_gate_awaited_children WHERE gate_ref = ? AND tenant_id = ? AND user_id = ? AND (agent_id = ? OR agent_id IS NULL);
 COMMIT;
 ```
+
+> **Scope predicate is mandatory.** Every UPDATE/DELETE in this section MUST include the full `(tenant_id, user_id, agent_id)` scope predicate matching §8.2. Reviewer-mandated.
+
+**Post-result-write flag update path (separate transaction):**
+
+After the capability result store write completes, the executor issues a single-row UPDATE to flip the `terminal_result_written` flag and record `terminal_byte_len`. This is intentionally separate from the settlement transaction so the capability write can be retried without re-running settlement.
+
+```sql
+UPDATE subagent_gate_awaited_children
+   SET terminal_result_written = 1,
+       terminal_byte_len       = ?
+ WHERE gate_ref = ? AND child_run_id = ? AND terminal_result_written = 0
+   AND tenant_id = ? AND user_id = ? AND (agent_id = ? OR agent_id IS NULL);
+```
+
+PostgreSQL substitutes `terminal_result_written = TRUE` / `= FALSE`. The reconciler treats `terminal_status IS NOT NULL AND terminal_result_written = 0` as "settled but capability result write pending" — it loads the result from the capability result store and flips the flag itself if it finds a written result.
 
 Settlement log rows are **not** deleted on gate cleanup — they remain the replay source of truth for `SubagentRestartReconciler`. PostgreSQL uses `ON CONFLICT DO NOTHING` in place of `INSERT OR IGNORE`.
 
@@ -363,7 +384,7 @@ If `list_dir` on `/turns/subagent-goals/agents/<agent_id>/` is ever needed for r
 
 ### 2.4 Risks / open questions
 
-- **Production-readiness wiring gap.** Composition selects `FilesystemSubagentGoalStore` correctly when the db feature is enabled, but `RebornLoopComponentGraphReadiness.subagent_goal_store` must be set to `RebornComponentReadiness::production_verified(Required)` (not `non_durable`) when `FilesystemSubagentGoalStore` is in use. WU-C must close this.
+- **Production-readiness wiring gap.** Composition selects `FilesystemSubagentGoalStore` correctly when the db feature is enabled, but `RebornLoopComponentGraphReadiness.subagent_goal_store` must be set to `RebornComponentReadiness::production_verified(Required)` (not `non_durable`) when `FilesystemSubagentGoalStore` is in use. WU-C must close this. WU-C MUST also add the symmetric positive test `production_readiness_accepts_filesystem_subagent_goal_store` asserting that `graph.subagent_goal_store = RebornComponentReadiness::production_verified(Required)` yields `RebornLoopProductionStatus::Ready`.
 - **`MAX_GOAL_ENTRIES` eviction not replicated in filesystem store.** In-memory silently evicts oldest at 4096. Filesystem store has no cap — old goals accumulate until explicitly deleted. Lifecycle cleanup of stale goals (runs that completed or were cancelled without a `delete_goal` call) is the reconciler's responsibility.
 - **Restart-resume correctness.** `get_goal` is called during prompt assembly for a restarted subagent run. `FilesystemSubagentGoalStore::get_goal` with libSQL or PostgreSQL backend is durable as soon as `put` returns `Ok`.
 - **Duplicate-key vs restart.** `SubagentCompletionObserver` doesn't retry `put_goal`; `SubagentRestartReconciler` replay might. Recommendation: reconciler skips `put_goal` if `get_goal` succeeds — goal already present means the original write committed.
@@ -485,13 +506,20 @@ The tombstone store and the idempotency ledger (§5) are **distinct concerns at 
 
 **First-writer-wins correction:** The in-memory `BoundedSubagentResultTombstoneStore::write_tombstone` is currently last-writer-wins (calls `HashMap::insert` unconditionally). The durable `FilesystemSubagentTombstoneStore` uses `CasExpectation::Absent` (first-writer-wins). To keep contract uniform: the in-memory store must be corrected to return `Ok(())` on duplicate key without overwriting. Behavioral correction, same PR as durable wire-up. Same change cited in WU-A plan Part 1 soft corrections.
 
+WU-C MUST add the test `write_tombstone_preserves_first_writer_when_second_write_has_different_disposition` to `crates/ironclaw_reborn/src/subagent/tombstone_store.rs` tests module. The test:
+1. Writes tombstone A (`terminal_status = Cancelled`) for some `child_run_id`.
+2. Writes tombstone B (`terminal_status = Completed`) for the same `child_run_id` — must return `Ok(())` (idempotent).
+3. Asserts `read_tombstone` returns tombstone A (first-writer-wins, not B).
+
+The existing `tombstone_store_is_idempotent_by_child_run` test writes identical payloads twice and therefore cannot distinguish first-writer-wins from last-writer-wins — it passes either way. The new test is required to guard the behavioral correction.
+
 ### 3.7 Risks / open questions
 
-- **No scope in the current in-memory key.** Durable `FilesystemSubagentTombstoneStore` includes scope in the path. `write_tombstone` signature may need a scope argument, or scope must be embedded in `SubagentResultTombstone`. WU-C decides and updates the trait before implementing the durable store.
+- **Scope on `write_tombstone` trait signature (resolved in this spec).** The current in-memory `write_tombstone(&self, tombstone: SubagentResultTombstone) -> Result<...>` signature must change to `write_tombstone(&self, scope: &TurnScope, tombstone: SubagentResultTombstone) -> Result<...>` to enable the `ScopedPath` layout in §3.4. This matches the `SubagentGoalStore::put_goal(&self, scope: &TurnScope, ...)` pattern. **WU-C MUST land the trait signature change before implementing `FilesystemSubagentTombstoneStore`.**
 - **Wiring gap is total.** `BoundedSubagentResultTombstoneStore` is never passed to `SubagentCompletionObserver` or `DefaultPlannedRuntimeParts` today. WU-C must (a) add `subagent_result_tombstone_store` field to `DefaultPlannedRuntimeParts`, (b) inject into `SubagentCompletionObserver` (or a helper called from `mark_child_deliveries`), (c) add the tombstone write call in the observer after successful gate delivery.
 - **`SubagentResultDisposition` has only one variant.** Background mode (WU-D) will add at least one more (`Delivered` or `SettledByBackground`). Durable schema is forward-compatible — `TEXT` column / JSON string encoding handles new variants naturally.
 - **Eviction creates a gap.** `MAX_TOMBSTONE_RECORDS = 4096` means in-memory silently loses old tombstones under pressure. Durable store eliminates this gap by design (no eviction). The constant can be removed from the durable implementation; in-memory retains it as a safety valve for local-dev.
-- **Production-readiness classification.** Once `FilesystemSubagentTombstoneStore` is wired, `subagent_result_tombstone_store` field must be set to `production_verified(Required)`. Add a symmetric positive test that the verified composition reports `RebornLoopProductionStatus::Ready`.
+- **Production-readiness classification.** Once `FilesystemSubagentTombstoneStore` is wired, `subagent_result_tombstone_store` field must be set to `production_verified(Required)`. Add a symmetric positive test that the verified composition reports `RebornLoopProductionStatus::Ready`. Name the test `production_readiness_accepts_filesystem_subagent_tombstone_store`. It must assert that setting `graph.subagent_result_tombstone_store = RebornComponentReadiness::production_verified(Required)` (with all other required fields likewise verified) yields `RebornLoopProductionStatus::Ready`.
 
 ---
 
@@ -539,14 +567,10 @@ Soundness eval: "Doc treats the durable swap as drop-in; reality requires introd
 
 ```rust
 use async_trait::async_trait;
-use ironclaw_host_api::ResourceScope;
+use ironclaw_turns::TurnRunId;
+use ironclaw_turns::TurnScope;
 use ironclaw_turns::run_profile::host::LoopResultRef;
 use thiserror::Error;
-
-/// Stable identifier for a single capability invocation result within a run.
-/// Wraps the string-typed `LoopResultRef` at the store boundary; keeps
-/// LoopResultRef opaque per `ironclaw_turns/CLAUDE.md`.
-pub type CapabilityRunId = crate::types::TurnRunId;
 
 #[derive(Debug, Error)]
 pub enum CapabilityResultStoreError {
@@ -569,8 +593,8 @@ pub trait CapabilityResultStore: Send + Sync {
     /// the same invocation.
     async fn write(
         &self,
-        scope: &ResourceScope,
-        run_id: &CapabilityRunId,
+        scope: &TurnScope,
+        run_id: &TurnRunId,
         capability_id: &str,
         payload: serde_json::Value,
     ) -> Result<(LoopResultRef, u64), CapabilityResultStoreError>;
@@ -579,7 +603,7 @@ pub trait CapabilityResultStore: Send + Sync {
     /// ref does not exist (tombstoned or GC'd) rather than erroring.
     async fn read(
         &self,
-        scope: &ResourceScope,
+        scope: &TurnScope,
         result_ref: &LoopResultRef,
     ) -> Result<Option<serde_json::Value>, CapabilityResultStoreError>;
 
@@ -587,8 +611,8 @@ pub trait CapabilityResultStore: Send + Sync {
     /// ascending. Used by SubagentRestartReconciler + PostCapabilityStage drain.
     async fn list_by_run(
         &self,
-        scope: &ResourceScope,
-        run_id: &CapabilityRunId,
+        scope: &TurnScope,
+        run_id: &TurnRunId,
     ) -> Result<Vec<LoopResultRef>, CapabilityResultStoreError>;
 
     /// Mark a result as deleted. Soft-delete via tombstone column to preserve
@@ -596,7 +620,7 @@ pub trait CapabilityResultStore: Send + Sync {
     /// GC jobs. Idempotent.
     async fn tombstone(
         &self,
-        scope: &ResourceScope,
+        scope: &TurnScope,
         result_ref: &LoopResultRef,
     ) -> Result<(), CapabilityResultStoreError>;
 }
@@ -639,15 +663,14 @@ CREATE TABLE IF NOT EXISTS capability_results (
     agent_id      TEXT,                         -- nullable: non-agent runs
     run_id        TEXT NOT NULL,
     capability_id TEXT NOT NULL,
-    result_ref    TEXT NOT NULL,                -- opaque ref minted by write()
+    result_ref    TEXT NOT NULL PRIMARY KEY,     -- opaque ref minted by write()
     byte_len      INTEGER NOT NULL,             -- serialized byte count
-    payload       BLOB NOT NULL,                -- serde_json::to_vec output
+    payload       BLOB NOT NULL                 -- serde_json::to_vec output
+        CHECK (length(payload) <= 8388608),     -- 8 MiB hard cap
     tombstoned_at TEXT,                         -- ISO-8601; NULL = live
     created_at    TEXT NOT NULL
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_capability_results_pk
-    ON capability_results (result_ref);
 CREATE INDEX IF NOT EXISTS idx_capability_results_run
     ON capability_results (tenant_id, user_id, run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_capability_results_cap
@@ -667,15 +690,14 @@ CREATE TABLE IF NOT EXISTS capability_results (
     agent_id      TEXT,
     run_id        TEXT        NOT NULL,
     capability_id TEXT        NOT NULL,
-    result_ref    TEXT        NOT NULL,
+    result_ref    TEXT        NOT NULL PRIMARY KEY,
     byte_len      BIGINT      NOT NULL,
-    payload       JSONB       NOT NULL,         -- native structured storage
+    payload       JSONB       NOT NULL          -- native structured storage
+        CHECK (octet_length(payload::text) <= 8388608),  -- 8 MiB hard cap
     tombstoned_at TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_capability_results_pk
-    ON capability_results (result_ref);
 CREATE INDEX IF NOT EXISTS idx_capability_results_run
     ON capability_results (tenant_id, user_id, run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_capability_results_cap
@@ -761,13 +783,13 @@ pub async fn build_reborn_capability_result_store(
 
 **`production_readiness.rs` wire-up** mirrors the existing `subagent_result_tombstone_store` field pattern. Add `capability_result_store: RebornComponentReadiness` to `RebornLoopComponentGraphReadiness`. Production: `production_verified(Required)`. Local-dev: `non_durable(Required)` → yields `LocalDevDegraded` (warning, not blocker) in `LocalDevTest` mode.
 
-Existing `production_readiness_rejects_in_memory_checkpoint_store` test in `crates/ironclaw_reborn/tests/production_readiness.rs` is the template for a new `production_readiness_rejects_in_memory_capability_result_store` test.
+Existing `production_readiness_rejects_in_memory_checkpoint_store` test in `crates/ironclaw_reborn/tests/production_readiness.rs` is the template for a new `production_readiness_rejects_in_memory_capability_result_store` test. Add the symmetric positive test `production_readiness_accepts_production_verified_capability_result_store` asserting that `graph.capability_result_store = RebornComponentReadiness::production_verified(Required)` yields `RebornLoopProductionStatus::Ready`.
 
 `SubagentRestartReconciler` field (`subagent_restart_reconciler`) is already declared. WU-C flips its `RebornComponentRequirement` from `Optional` to `Required` in the production-verified constructor once a concrete impl exists.
 
 ### 4.9 Risks / open questions
 
-- **Payload size cap.** Current in-memory enforces 4 MiB soft cap on total staged bytes across all results for a run. SQL schema has no column-level size constraint. Implementors choose: (a) enforce per-result cap at application layer before INSERT and surface `CapacityExceeded`, or (b) accept larger payloads and let `PostCapabilityStage` backpressure them. Recommendation: per-result cap (configurable, default 8 MiB) + remove cross-result aggregate limit.
+- **Payload size cap (MUST).** Per-result cap is **8 MiB** enforced at the SQL CHECK constraint AND at the application layer before INSERT. Implementations MUST surface `CapabilityResultStoreError::CapacityExceeded` when a write would exceed the cap. The cross-result aggregate limit that the in-memory impl carried (`ensure_staging_capacity`) is removed — backpressure for total storage growth is owned by `PostCapabilityStage` compaction, not the result store.
 - **GC policy.** Tombstoned rows accumulate indefinitely unless GC runs. Background GC outside WU-C scope — delete rows where `tombstoned_at < NOW() - interval '7 days'` (or configurable). Until GC lands, disk usage grows proportionally to run volume.
 - **Backward-compat for in-flight refs at deploy.** Active runs have refs in old in-memory `HashMap` inside running process. On process restart those refs are lost. Plan mitigation: "accept loss — feature toggle gates user impact." Background mode defaults `false` through WU-G; no parent loop is actively draining background results in production at deploy time. Blocking capability results are consumed before executor returns to loop, so never re-read after restart. The only at-risk refs are between capability call finish and turn transcript commit — milliseconds window.
 - **Ref durability vs. ref opacity.** `LoopResultRef` is opaque per `ironclaw_turns/CLAUDE.md`. Durable store keyed on `result_ref TEXT` preserves opacity — store never interprets ref's internal structure. Format `"result:{run_id}.{uuid}"` is sufficient as a unique store key; no schema migration needed when format changes.
@@ -847,6 +869,9 @@ pub enum ReconcilerError {
 
 ```
 fn replay(scope: &TurnScope) -> ReplayReport:
+  // Reconciler reads ALL settlement-log rows for the scope and checks the
+  // idempotency ledger per row to decide replay. The log itself carries no
+  // delivery flag — no WHERE delivered_at IS NULL or equivalent filter here.
   log entries = settlement_event_log.read_all(scope)
                   WHERE event_kind IN (Completed, Failed, Cancelled)
                   AND   child_run_id IS NOT NULL
@@ -938,8 +963,8 @@ CREATE TABLE IF NOT EXISTS subagent_idempotency_ledger (
     tenant_id          TEXT NOT NULL,
     user_id            TEXT NOT NULL,
     agent_id           TEXT,
-    run_id             UUID NOT NULL,
-    child_run_id       UUID NOT NULL,
+    run_id             TEXT NOT NULL,
+    child_run_id       TEXT NOT NULL,
     terminal_kind      TEXT NOT NULL,
     delivered_at       TIMESTAMPTZ NOT NULL,
     delivery_node      TEXT NOT NULL,
@@ -962,6 +987,12 @@ ON CONFLICT (run_id, child_run_id, terminal_kind) DO NOTHING;
 ```
 
 Both dialects match the in-memory settlement semantics already established in `gate_resolution.rs` where `mark_child_delivered` skips re-recording an already-delivered child (first-writer-wins).
+
+**`delivery_node` contract.** The column records the process / node identity that performed the redelivery — operator debugging only, never load-bearing. Validation MUST happen at the write site (`SubagentRestartReconciler` impl):
+- Source: a deployment-supplied configuration value (env var, config file). MUST NOT be sourced from any user-supplied or network-supplied input.
+- Max length: 128 characters.
+- Allowlist: `[A-Za-z0-9._-]+`. Reject any other character (or replace with `_`) — the column is read by ops dashboards that may interpret control bytes.
+- On invalid: substitute the literal string `"unknown"` and log a `warn!` line. Never crash the reconciler over a delivery-node validation failure.
 
 ### 5.6 Composition wire-up
 
@@ -1024,6 +1055,19 @@ Per `.claude/rules/testing.md` "Test Through the Caller" rule — unit tests on 
 3. Assert failed == 1, redelivered == 0.
 ```
 
+**Crash-between-ledger-insert-and-gate-write test:**
+
+```
+1. Write settlement log entry + capability result + capability result store row.
+2. Pre-insert an idempotency ledger row for the same (run_id, child_run_id, terminal_kind) — simulates the post-crash state after ledger insert but before gate delivery.
+3. Drop all in-memory state. Boot a fresh reconciler against the same durable backend.
+4. Call reconciler.replay(&scope).await.
+5. Assert report.redelivered == 0, report.skipped_idempotent == 1, report.failed == 0.
+6. Assert gate store has no entry for child_run_id (delivery was never completed — the row is stuck).
+```
+
+This test documents and guards the spec's acknowledged tradeoff in §5.3: a node that crashes between ledger insert and gate-store write leaves the entry permanently unrecoverable until a future GC pass tombstones the ledger row.
+
 **Dual-backend parity test** (libSQL vs PostgreSQL, part of WU-G #4431): run all four bodies against both `RebornLibSqlIdempotencyLedger` and `RebornPostgresIdempotencyLedger`, matching the pattern of `assert_settled_action_survives_reopen_and_replays` in `crates/ironclaw_product_workflow_storage/tests/support/mod.rs`.
 
 All tests go in `crates/ironclaw_reborn_event_store/tests/` (contract-test tier, matching `durable_event_store_contract.rs` + `filesystem_event_log_contract.rs` pattern). Run under `cargo test --features integration` for backend-dependent variants.
@@ -1083,12 +1127,12 @@ Rows in durable subagent stores (goal, gate_resolution, tombstone, capability_re
 
 When `subagent.background_enabled` flips back `true` after a rollback period:
 
-1. `SubagentRestartReconciler` runs at boot, scans `subagent_gate_settlement_log` for rows from previous ON-period that were never delivered.
-2. For each row, reconciler checks `subagent_idempotency_ledger` keyed on `(run_id, child_run_id, terminal_kind)`. Any row whose ledger entry already records a `Delivered` outcome is skipped — idempotency guarantee.
-3. Rows with no ledger entry, or expired `Pending` entry, are replayed: reconciler synthesizes `SettledChild` notification, injects into parent loop's mailbox as if child had just settled.
-4. If parent run is no longer active (terminal `TurnStatus`), reconciler records `DiscardedParentGone` tombstone and marks ledger entry as `Delivered` to prevent future replay.
+1. `SubagentRestartReconciler` runs at boot, scans `subagent_gate_settlement_log` for rows from previous ON-period whose parent run is still active.
+2. For each row, reconciler attempts `INSERT OR IGNORE` into `subagent_idempotency_ledger` keyed on `(run_id, child_run_id, terminal_kind)`. A row already present (rows_affected = 0) means a previous reconciler pass already delivered this entry — skip.
+3. Rows where the ledger insert succeeded are replayed: reconciler synthesizes `SettledChild` notification, injects into parent loop's mailbox as if child had just settled.
+4. If the parent run is no longer active (terminal `TurnStatus`), reconciler writes a tombstone via `SubagentResultTombstoneStore` and treats the ledger row as the final-delivered marker — no further replay for this entry on subsequent boots.
 
-**Idempotency invariant:** ledger's `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` semantics ensure reconciler replay racing with live delivery produces exactly one winner. Loser observes `InsertSkipped` and treats row as already delivered.
+**Idempotency invariant:** the ledger's `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` semantics ensure reconciler replay racing with live delivery produces exactly one winner. The loser observes zero rows affected and treats the row as already delivered. The ledger has no `Pending` state today — a row's presence is sufficient evidence of completed delivery. A two-phase ledger with an explicit pending/delivered status is an open design question (see §5.9).
 
 ---
 
@@ -1130,6 +1174,7 @@ The following invariants must be tested against both libSQL and PostgreSQL (unde
 
 - `first_writer_wins_under_concurrent_settle`: two concurrent `mark_child_delivered` calls for same `(gate_ref, child_run_id)` — exactly one returns `true` (gate complete), the other returns `false`; both succeed without error.
 - `mark_delivered_is_idempotent`: calling `mark_child_delivered` twice with same args returns `Ok` on both calls; second returns `false`.
+- `gate_resolution_scoped_query_excludes_rows_from_other_agents`: insert two `AwaitedChildState` rows under the same `(tenant_id, user_id)` but distinct `agent_id` values (A and B); assert that any query/list operation scoped to `agent_id = A` returns only A-owned rows and never any B-owned row. Guards the §1.7 invariant that every scoped query must include `agent_id` in the WHERE predicate.
 
 **Goal store (`SubagentGoalStore` trait — `FilesystemSubagentGoalStore` backed by libSQL/PostgreSQL `RootFilesystem`)**
 
@@ -1218,7 +1263,7 @@ Secondary indexes per store for non-scoped lookup patterns (e.g., lookup by `chi
 Notes:
 
 - `gate_resolution` does not have a unique constraint on `(tenant_id, user_id, agent_id, gate_ref)` alone because a gate may have multiple child entries. Flattened into rows keyed on `(gate_ref, child_run_id)`.
-- `settlement_event_log` is append-only (no UPDATE or DELETE). Reconciler queries with `WHERE delivered_at IS NULL` (or equivalent) and marks rows delivered by writing the ledger entry, not by updating the log row. Preserves log as immutable audit trail.
+- `settlement_event_log` is append-only (no UPDATE or DELETE). Reconciler queries all rows for a scope and checks the idempotency ledger per-row to decide whether to replay (the log itself carries no delivery flag). Marks rows "delivered" by writing the ledger entry, not by updating the log row. Preserves log as immutable audit trail.
 - libSQL stores `tenant_id`, `user_id`, `agent_id` as `TEXT`. PostgreSQL stores them as `TEXT` (not `UUID` typed) to match codebase convention in `libsql_migrations.rs`.
 
 ### 8.4 `TurnScope` as the scope type threading through trait signatures
@@ -1284,6 +1329,7 @@ All DDL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` for i
 - [ ] WU-C wires `BoundedSubagentResultTombstoneStore` into `SubagentCompletionObserver` (the wiring gap from §3.1).
 - [ ] WU-C corrects in-memory tombstone store to first-writer-wins (§3.6).
 - [ ] WU-G adds parity test at `crates/ironclaw_reborn_event_store/tests/parity.rs` per §7.
+- [ ] WU-C lands the `SubagentResultTombstoneStore::write_tombstone` scope-parameter signature change BEFORE implementing `FilesystemSubagentTombstoneStore` (§3.7).
 
 ## References
 
