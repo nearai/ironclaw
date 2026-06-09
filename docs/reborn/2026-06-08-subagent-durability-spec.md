@@ -14,7 +14,7 @@ This sub-spec closes the durability gaps the WU-A implementation plan deferred t
 
 Scope: four in-memory stores (`gate_resolution`, `goal`, `tombstone`, `capability_result`) plus one new write-ahead log (`settlement_event_log`) and one new idempotency table (`idempotency_ledger`). Each gets a typed trait, a libSQL backend, a PostgreSQL backend, and scope-column wiring per `_contract-freeze-index.md` §2 + §8.
 
-Plus: introduce the `CapabilityResultStore` trait (does not exist today). Introduce the `SubagentRestartReconciler` trait (only a stub enum member today). Define the migration / rollback / re-flip behavior under the `subagent.background_enabled` feature toggle. Define the dual-backend parity test (#4431 follow-on).
+Plus: introduce the `CapabilityResultStore` trait (does not exist today). Introduce the `SubagentRestartReconciler` trait (only a stub enum member today). Define the migration / rollback / re-flip behavior under the `subagent.background_enabled` feature toggle. Define the dual-backend parity test (#4431 follow-on). §9 additionally ratifies the parent-initiated child control surface (`subagent_cancel` + `subagent_status`, WU-D scope) because its semantics constrain the WU-C stores.
 
 ### Decisions ratified up front
 
@@ -53,6 +53,9 @@ Plus: introduce the `CapabilityResultStore` trait (does not exist today). Introd
 | 30 | **`ReplayState` is keyed by `(tenant_id, user_id, agent_id)`** — matches active-scope enumeration, metrics labels, and the §1.6 scope-predicate convention. NOT full `TurnScope`: thread-level keying would multiply enumeration and gate-state cardinality for no isolation gain. | R5-8 fix. |
 | 31 | **Reconciler tombstoned/orphan paths also resolve the live gate row** — flip `delivered_to_parent`, decrement the capacity bucket, delete the queue entry — for rows that will never deliver. Without this, every pre-tombstoned child leaks scope capacity until the 4096 cap wedges the scope. Non-replay path: WU-D's parent-cancel flow MUST pair the tombstone write with the same gate-row resolution transaction. | R5-7 fix. |
 | 32 | **`CapabilityResultStoreError::CapacityExceeded` (payload > 8 MiB) surfaces as `CapabilityOutcome::Failed`** with a sanitized size message — it never aborts the loop or fails the turn. The model sees the failure and can retry with a narrower request; compaction policy is unaffected. | R5-10 fix. In-memory store previously evicted silently; hard cap needs a defined failure mode. |
+| 33 | **Parent-initiated child control is two thin actions (`subagent_cancel`, `subagent_status`) over EXISTING host plumbing** (`request_cancel`, run records, lifecycle event projection). No new stores, no new tables, no reconciler changes. Background-mode children only; ships in WU-D behind `subagent.background_enabled`. | §9. Cancel machinery (`CancelRunRequest` + `RunCancellationHandle`) and child enumeration (`children_of`) already exist host-side; the gap is model-visible action surface only. |
+| 34 | **Parent-requested cancel delivers a `Cancelled` settlement; it never tombstones.** Tombstone + `DiscardedByParentCancel` stays reserved for the parent-RUN-cancel cascade (where decision 31's paired gate-row resolution applies). Race-safe via `already_terminal` on `CancelRunResponse` plus the decision-6 first-writer-wins terminal record. New `SanitizedCancelReason::ParentRequested` variant keeps operator dashboards able to split parent-agent cancels from user/operator/policy cancels. | §9.3. Conflating the two flows would either strand capacity (cancel without gate resolution) or vanish a result the parent explicitly waits on. |
+| 35 | **`subagent_status` is metadata-only** — statuses, lifecycle event kinds, ages, `sanitized_reason`. Never mid-flight child content (assistant text, capability outputs, transcript). Settle-time delivery remains the sole sanitization choke point. Richer updates, if ever needed, are child-pushed bounded progress notes (deferred; see §9.4). | §9.4. A mid-flight parent pull of child content would let injection in a child's ingested data reach the parent's context before the settle-time boundary applies. |
 
 The rest of this document fills in mechanics for each store.
 
@@ -2001,6 +2004,79 @@ All DDL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` for i
 
 ---
 
+## Section 9 — Parent-initiated child control: cancel + inspect (WU-D scope, audited here)
+
+WU-B is the right place to pin these semantics because they constrain the WU-C stores (settlement `terminal_kind`, tombstone disposition usage) even though the actions themselves ship in WU-D. Like §5.11, this section ratifies direction without expanding WU-C.
+
+### 9.1 Audit — what exists today
+
+The parent agent currently has NO action surface over a running child: interaction is settle-only (spawn → block or background → terminal result drained via the gate store). But nearly all the underlying plumbing already exists at the host layer:
+
+| Mechanism | Where | Status |
+|---|---|---|
+| Durable cancel request | `TurnStateStore::request_cancel(CancelRunRequest { scope, actor, run_id, reason, idempotency_key }) → CancelRunResponse { status, already_terminal, … }` (`crates/ironclaw_turns/src/request.rs`, `coordinator.rs`) | EXISTS — callers today are product/host surfaces (WebUI cancel, `reborn_services.rs`) |
+| Cooperative in-loop delivery | `RunCancellationFactory` / `RunCancellationHandle` (`crates/ironclaw_loop_support/src/cancellation_port.rs`). `TurnStateRunCancellationFactory` seeds handles from durable run state; wake-driven flip + polling fallback; the child loop observes the handle at iteration boundaries | EXISTS |
+| Subagent-context cancel precedent | `SpawnCompensationState::rollback` (`subagent_spawn_port.rs`) already cancels a just-submitted child: `request_cancel` with `SanitizedCancelReason::Superseded`, idempotency key `subagent-rollback-cancel:{parent_run}:{child_run}` | EXISTS |
+| Cancelled-terminal settlement | `Cancelled` is terminal → flows through `SubagentCompletionObserver::handle_terminal` exactly like `Completed`/`Failed` (gate-store `record_child_terminal`, capacity release) | EXISTS |
+| Child enumeration + status | `TurnSpawnTreeStateStore::children_of(scope, run_id)`, `get_run_record`; `TurnEventProjectionSource::read_turn_events_after` (cursor-paged lifecycle events incl. `RunnerHeartbeat`, `Blocked`) | EXISTS — host-only |
+| Parent-agent capability | none — `spawn_subagent` is the only model-visible subagent action | **GAP** |
+
+So this section adds NO new stores and NO new durability machinery. It defines two thin model-visible actions over existing host plumbing, plus the race / authorization / sanitization rules they must obey.
+
+### 9.2 New actions — `subagent_cancel` + `subagent_status`
+
+Both live next to `spawn_subagent` in `crates/ironclaw_loop_support/src/subagent_spawn_port.rs` (same deps struct, same wiring) and are parent-loop capabilities, model-invokable. Background-mode children only — a parent blocked on a Blocking child is suspended and cannot issue calls — so both actions gate on `subagent.background_enabled` and ship in WU-D.
+
+**`subagent_cancel { child_run_id, reason? }`**
+
+1. **Authorization**: load `get_run_record(scope, child_run_id)`; require the record exists, the scope envelope matches, AND `parent_run_id` equals the calling run (direct children only — a cancelled child's own descendants are handled by the existing run-cancel cascade applied to that child, not by the grandparent reaching down). A scope-matched but non-child run returns `NotFound` — do not leak existence of sibling trees.
+2. Issue `request_cancel` with a new `SanitizedCancelReason::ParentRequested` variant, idempotency key `subagent-parent-cancel:{parent_run}:{child_run}` (mirrors the rollback key format).
+3. Map the response: `already_terminal: true` → `{ status: "already_settled", terminal_status }`; otherwise `{ status: "cancel_requested" }`.
+4. Cancellation stays **cooperative**: the child observes its `RunCancellationHandle` at the next iteration boundary; in-flight capability calls complete or time out under their own budgets. `subagent_cancel` returning is NOT confirmation of termination — the `Cancelled` settlement is.
+
+**`subagent_status { child_run_id? }`**
+
+- Omitted `child_run_id` → snapshot of all live children via `children_of(scope, parent_run_id)`.
+- Returns a metadata-only snapshot per child: `{ child_run_id, flavor, mode, status, last_event_kind, last_event_age_ms, heartbeat_age_ms }`, built from the run record + lifecycle event projection.
+- Read-only. No durable writes, no new tables.
+
+### 9.3 Cancel-vs-settle race + delivery semantics
+
+- **Race**: a cancel and a natural settlement may interleave. Arbitration already exists at two layers: `request_cancel` returns `already_terminal` when it lost, and the gate store's first-writer-wins terminal recording (decision 6) makes the first terminal status (`Completed` OR `Cancelled`) authoritative — `record_child_terminal`'s skip-if-set guard means a later duplicate never overwrites cursor/status/sanitized_reason.
+- **Parent-requested cancel DELIVERS; it never tombstones** (decision 34). The parent asked, so it must observe the outcome: the child settles `Cancelled` → settlement log row (`terminal_kind = Cancelled`) → normal drain path (WU-E) hands the parent a `SettledChild { status: Cancelled }`. The tombstone + `DiscardedByParentCancel` disposition stays reserved for the parent-RUN-cancel cascade (the parent itself dies, so its children's results have no consumer), where decision 31's paired gate-row resolution applies.
+- **Idempotency / replay**: zero ledger changes. `Cancelled` is just another `terminal_kind` value in the `(run_id, child_run_id, terminal_kind)` key; the reconciler replays a crashed-before-delivery `Cancelled` settlement identically to a `Completed` one.
+- **Restart**: the `CancelRequested` status is durable in turn state. A runner re-claiming the child after a restart seeds its cancellation handle from durable run state (`TurnStateRunCancellationFactory` already does this) and settles `Cancelled` without needing a re-signal.
+
+### 9.4 Inspect sanitization boundary
+
+`subagent_status` returns ONLY status metadata — statuses, lifecycle event kinds, ages, `sanitized_reason`. It MUST NOT return any mid-flight child content: no assistant text, no capability outputs, no transcript fragments. Settle-time delivery is the sanitization choke point; a mid-flight parent pull of child content would let injection in a child's ingested data reach the parent's context before that boundary applies (decision 35).
+
+If product needs a richer "latest update" than heartbeat age: **the child pushes, the parent never pulls.** A `report_progress` child capability would write one bounded (≤256 chars), overwrite-in-place progress note onto the child's run record (or goal-store row), surfaced as an extra `progress_note` field in `subagent_status` and passed through the same sanitizer as `sanitized_reason`. This is a **deferred follow-up** — ship metadata-only status first; promote the progress note only if WU-G E2E shows parents polling blindly without it.
+
+Polling cost: `subagent_status` is a model-visible action — each call burns a turn. The capability description must state heartbeat semantics ("children emit heartbeats; status reflects them — re-checking more often than the heartbeat interval returns the same data") so the model doesn't tight-loop. Loop stop-strategies (no-progress detection) already bound the pathological case.
+
+### 9.5 WU mapping
+
+| Item | WU |
+|---|---|
+| `SanitizedCancelReason::ParentRequested` variant + category string | WU-D |
+| `subagent_cancel` action (lineage authz, idempotent request, race mapping) | WU-D |
+| `subagent_status` action (metadata-only snapshot) | WU-D |
+| Cancel-vs-settle race tests (cancel-wins / settle-wins / double-cancel) driven through the spawn port (test-through-the-caller) | WU-D |
+| Verify run-cancel cascade fires for agent-initiated cancels the same way as user-initiated ones (cancelled child's own descendants → decision 31 path) | WU-D |
+| Drain path surfaces `SettledChild { status: Cancelled }` | WU-E |
+| WebUI: "cancelled by parent" badge distinct from user cancel (split on `sanitized_reason` category) | WU-F |
+| E2E: parent spawns background child, cancels mid-run, drains the `Cancelled` settlement; restart-during-cancel variant | WU-G |
+| `report_progress` child-push progress note | Deferred — promote only on WU-G evidence of blind polling |
+
+### 9.6 Risks / open questions
+
+- **Cancel latency is unbounded by a single long capability call.** Cooperative cancellation waits for the iteration boundary; a child stuck in one long `shell`/HTTP capability won't observe the handle until that call's own timeout fires. Acceptable for WU-D (capability budgets bound it); hard-kill is explicitly out of scope.
+- **Status staleness.** The snapshot reads the durable run record + projection — it can lag the live child by one event-flush interval. The `last_event_age_ms` field makes the staleness visible to the model rather than hiding it.
+- **Grandchild visibility.** `subagent_status` shows direct children only. A tree-wide view is a host/WebUI concern (WU-F renders the spawn tree); the parent agent reasons about what it spawned.
+
+---
+
 ## Closing checklist (before WU-C opens)
 
 - [ ] **MERGE-BLOCKING:** WU-C MUST complete `LoopRunContext` credential audit before merging the durable gate-resolution backend. Acceptable resolution: (a) zero sensitive fields found AND compile-time lint added asserting credential-freeness, OR (b) write-site stripping verified with unit tests asserting the persisted JSON contains no token/key field names. WU-C PR description MUST link to the audit document or test. (Per §1.7 sensitivity bullet.)
@@ -2040,6 +2116,9 @@ All DDL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` for i
 - [ ] WU-C verifies whether `RebornEventKind::SubagentReplayCompleted` falls under the events contract freeze; if so, lands the same-PR contract note (§5.7 callout).
 - [ ] WU-C verifies `ScopedFilesystem` `MountView` is per-`(tenant, user)`; if tenant-only, adds `users/<user_id>/` segment to goal + tombstone layouts (§2.4).
 - [ ] WU-C libSQL backends substitute `MAX(a, b)` for `GREATEST` in counter decrements (libSQL/SQLite has no `GREATEST`; unguarded negative decrement would trip the `CHECK` and abort the transaction).
+- [ ] WU-D lands `SanitizedCancelReason::ParentRequested` + the `subagent_cancel` / `subagent_status` actions per §9.2 (direct-child lineage authz, idempotency key `subagent-parent-cancel:{parent_run}:{child_run}`, `already_terminal` → `already_settled` mapping).
+- [ ] WU-D cancel-vs-settle race tests drive the spawn port (cancel-wins / settle-wins / double-cancel); parent-requested cancel asserts a DELIVERED `Cancelled` settlement and NO tombstone (decision 34); run-cancel cascade verified for agent-initiated cancels (§9.5).
+- [ ] WU-E drain path surfaces `SettledChild { status: Cancelled }`; WU-F splits the parent-cancel badge on `sanitized_reason` category; WU-G E2E covers cancel-mid-run + restart-during-cancel (§9.5).
 
 ## References
 
@@ -2055,5 +2134,8 @@ All DDL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` for i
 - `crates/ironclaw_reborn/src/subagent/goal_store.rs` (`InMemoryBoundedSubagentGoalStore`, `FilesystemSubagentGoalStore`)
 - `crates/ironclaw_reborn/src/subagent/tombstone_store.rs` (`BoundedSubagentResultTombstoneStore`)
 - `crates/ironclaw_loop_support/src/capability_port.rs` (`LoopCapabilityResultWriter`)
+- `crates/ironclaw_loop_support/src/cancellation_port.rs` (`RunCancellationFactory`, `RunCancellationHandle`)
+- `crates/ironclaw_loop_support/src/subagent_spawn_port.rs` (`spawn_subagent`, `SpawnCompensationState::rollback` cancel precedent)
+- `crates/ironclaw_turns/src/status.rs` (`SanitizedCancelReason`)
 - `crates/ironclaw_reborn_composition/src/product_live_adapters.rs` (`ProductLiveCapabilityIo`)
 - `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` (boundary rules)
