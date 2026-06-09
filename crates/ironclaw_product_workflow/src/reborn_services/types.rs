@@ -899,6 +899,8 @@ pub struct RebornOperatorCommandPlaneResponse {
     pub area: RebornOperatorArea,
     pub status: RebornOperatorSurfaceStatus,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<RebornOperatorConfigDiagnostic>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -951,6 +953,8 @@ pub struct RebornOperatorConfigListResponse {
     pub entries: Vec<RebornOperatorConfigEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub precedence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<RebornOperatorConfigDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -985,6 +989,8 @@ pub struct RebornOperatorConfigDiagnostic {
     pub severity: RebornOperatorConfigDiagnosticSeverity,
     pub reason_code: String,
     pub message: String,
+    pub owning_area: RebornOperatorArea,
+    pub remediation: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
