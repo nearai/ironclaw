@@ -2,8 +2,8 @@ mod cli;
 mod commands;
 mod context;
 mod dto;
-mod render;
 mod file_write;
+mod render;
 mod runtime;
 
 fn main() -> anyhow::Result<()> {
