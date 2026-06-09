@@ -18,11 +18,11 @@ test("listAutomations reads through the v2 automations route", async () => {
     });
   };
 
-  const response = await listAutomations({ limit: 50 });
+  const response = await listAutomations({ limit: 50, runLimit: 25 });
 
   assert.deepEqual(response, { automations: [] });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].path, "/api/webchat/v2/automations?limit=50");
+  assert.equal(calls[0].path, "/api/webchat/v2/automations?limit=50&run_limit=25");
   assert.equal(calls[0].options.credentials, "same-origin");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
 });

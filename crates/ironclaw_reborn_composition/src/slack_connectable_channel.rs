@@ -39,26 +39,43 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
             SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement
         }
     };
-    build_webui_services_with_slack_connectable_channel(runtime, event_stream, visibility)
+    let outbound_delivery_target_providers = slack_mounts
+        .map(|mounts| vec![Arc::clone(&mounts.outbound_delivery_target_provider)])
+        .unwrap_or_default();
+    build_webui_services_with_connectable_channels(
+        runtime,
+        event_stream,
+        slack_connectable_channels(visibility),
+        outbound_delivery_target_providers,
+    )
 }
 
+#[cfg(test)]
 fn build_webui_services_with_slack_connectable_channel(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     visibility: SlackConnectableChannelVisibility,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    let connectable_channels =
-        (visibility != SlackConnectableChannelVisibility::Hidden).then(|| {
-            let mut channels = vec![slack_inbound_proof_code_connectable_channel()];
-            if visibility
-                == SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement
-            {
-                channels.push(slack_admin_managed_channel_connectable_channel());
-            }
-            Arc::new(StaticConnectableChannelsProductFacade::new(channels))
-                as Arc<dyn ConnectableChannelsProductFacade>
-        });
-    build_webui_services_with_connectable_channels(runtime, event_stream, connectable_channels)
+    build_webui_services_with_connectable_channels(
+        runtime,
+        event_stream,
+        slack_connectable_channels(visibility),
+        Vec::new(),
+    )
+}
+
+fn slack_connectable_channels(
+    visibility: SlackConnectableChannelVisibility,
+) -> Option<Arc<dyn ConnectableChannelsProductFacade>> {
+    (visibility != SlackConnectableChannelVisibility::Hidden).then(|| {
+        let mut channels = vec![slack_inbound_proof_code_connectable_channel()];
+        if visibility == SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement
+        {
+            channels.push(slack_admin_managed_channel_connectable_channel());
+        }
+        Arc::new(StaticConnectableChannelsProductFacade::new(channels))
+            as Arc<dyn ConnectableChannelsProductFacade>
+    })
 }
 
 fn slack_inbound_proof_code_connectable_channel() -> RebornConnectableChannelInfo {
@@ -88,8 +105,8 @@ fn slack_admin_managed_channel_connectable_channel() -> RebornConnectableChannel
         display_name: "Slack".to_string(),
         strategy: RebornChannelConnectStrategy::AdminManagedChannels,
         action: RebornChannelConnectAction {
-            title: "Slack channel access".to_string(),
-            instructions: "Choose the Slack channels this tenant app is allowed to answer in."
+            title: "Slack team agents".to_string(),
+            instructions: "Map Slack channels to the team agents that should answer there."
                 .to_string(),
             input_placeholder: "C0123456789".to_string(),
             submit_label: "Save channels".to_string(),
@@ -127,7 +144,7 @@ mod tests {
         );
         assert_eq!(
             channel.action.instructions,
-            "Choose the Slack channels this tenant app is allowed to answer in."
+            "Map Slack channels to the team agents that should answer there."
         );
         assert!(channel.command_aliases.is_empty());
     }

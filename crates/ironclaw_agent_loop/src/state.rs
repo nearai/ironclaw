@@ -17,9 +17,13 @@ pub use slots::{
     ReplyAdmissionStrategyState, StopStrategyState,
 };
 
+use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, LoopResultRef,
-    run_profile::{CapabilitySurfaceVersion, LoopInputCursor, LoopRunContext},
+    run_profile::{
+        CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion, LoopInputCursor,
+        LoopRunContext, ProviderToolCallReplay,
+    },
 };
 
 /// Initial checkpoint payload schema reserved for the default Reborn loop.
@@ -79,6 +83,25 @@ pub struct LoopExecutionState {
     pub reply_admission_state: ReplyAdmissionStrategyState,
     pub stop_state: StopStrategyState,
     pub gate_state: GateStrategyState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_approval_resume: Option<PendingApprovalResume>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingApprovalResume {
+    pub gate_ref: LoopGateRef,
+    pub capability_id: CapabilityId,
+    pub approval_request_id: ApprovalRequestId,
+    pub resume_token: CapabilityResumeToken,
+    #[serde(default = "CorrelationId::new")]
+    pub correlation_id: CorrelationId,
+    pub surface_version: CapabilitySurfaceVersion,
+    pub input_ref: CapabilityInputRef,
+    pub effective_capability_ids: Vec<CapabilityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_replay: Option<ProviderToolCallReplay>,
+    pub input: serde_json::Value,
+    pub estimate: ResourceEstimate,
 }
 
 impl LoopExecutionState {
@@ -112,6 +135,7 @@ impl LoopExecutionState {
             reply_admission_state: ReplyAdmissionStrategyState::default(),
             stop_state: StopStrategyState::default(),
             gate_state: GateStrategyState::default(),
+            pending_approval_resume: None,
         }
     }
 

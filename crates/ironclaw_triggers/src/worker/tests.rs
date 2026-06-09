@@ -16,8 +16,8 @@ use crate::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerError, TriggerFire,
     TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPromptMaterializer,
-    TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind,
-    TriggerSourceProvider, TriggerState,
+    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerSourceProvider, TriggerState,
 };
 
 fn ts(seconds: i64) -> Timestamp {
@@ -526,7 +526,9 @@ async fn tick_clears_terminal_active_run() {
     record.active_run_ref = Some(run_id);
     repo.upsert_trigger(record).await.expect("insert active");
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
-        TriggerActiveRunState::Terminal,
+        TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        },
     ));
     let worker = worker(
         repo.clone(),
@@ -558,6 +560,48 @@ async fn tick_clears_terminal_active_run() {
         .expect("record present");
     assert_eq!(persisted.active_fire_slot, None);
     assert_eq!(persisted.active_run_ref, None);
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Ok);
+}
+
+#[tokio::test]
+async fn tick_records_failed_terminal_active_run_as_error() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5d").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert active");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Error,
+            },
+        )),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|result| &result.outcome),
+        Some(&TriggerPollerFireOutcome::ClearedTerminalActive { run_id })
+    );
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].run_id, Some(run_id));
+    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
+    assert!(runs[0].completed_at.is_some());
 }
 
 #[tokio::test]
@@ -607,7 +651,9 @@ async fn tick_active_cleanup_cursor_reaches_terminal_rows_after_blocked_page() {
         Ok(TriggerActiveRunState::Nonterminal),
         Ok(TriggerActiveRunState::Nonterminal),
         Ok(TriggerActiveRunState::Nonterminal),
-        Ok(TriggerActiveRunState::Terminal),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
     ]));
     let worker = worker_with_config(
         repo.clone(),
@@ -830,10 +876,18 @@ async fn tick_retries_active_page_when_clear_fails_before_advancing_cursor() {
         second_id,
     ));
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_results(vec![
-        Ok(TriggerActiveRunState::Terminal),
-        Ok(TriggerActiveRunState::Terminal),
-        Ok(TriggerActiveRunState::Terminal),
-        Ok(TriggerActiveRunState::Terminal),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
     ]));
     let worker = worker_with_config(
         repo.clone(),
@@ -890,7 +944,9 @@ async fn tick_reports_terminal_active_clear_race() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::with_state(
-            TriggerActiveRunState::Terminal,
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+            },
         )),
     );
 
@@ -928,7 +984,9 @@ async fn tick_clears_terminal_active_and_processes_due_trigger() {
             },
         )])),
         Arc::new(RecordingActiveRunLookup::with_state(
-            TriggerActiveRunState::Terminal,
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+            },
         )),
     );
 
@@ -1029,8 +1087,12 @@ async fn tick_retries_active_lookup_error_before_advancing_cursor() {
         Err(TriggerError::Backend {
             reason: "turn state unavailable".to_string(),
         }),
-        Ok(TriggerActiveRunState::Terminal),
-        Ok(TriggerActiveRunState::Terminal),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
     ]));
     let worker = worker_with_config(
         repo.clone(),
@@ -1139,7 +1201,9 @@ async fn tick_replayed_submit_can_be_cleared_on_a_later_tick_without_stopping_du
             },
         )])),
         Arc::new(RecordingActiveRunLookup::with_results(vec![Ok(
-            TriggerActiveRunState::Terminal,
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+            },
         )])),
     );
 
@@ -1244,7 +1308,9 @@ async fn tick_keeps_claim_only_active_fire_blocked() {
     let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
     let submitter = Arc::new(RecordingSubmitter::with_outcomes(Vec::new()));
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
-        TriggerActiveRunState::Terminal,
+        TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        },
     ));
     let worker = worker(
         repo.clone(),
@@ -1301,7 +1367,9 @@ async fn tick_active_cleanup_cursor_advances_past_claim_only_record() {
     let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
     let submitter = Arc::new(RecordingSubmitter::with_outcomes(Vec::new()));
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
-        TriggerActiveRunState::Terminal,
+        TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        },
     ));
     let worker = worker_with_config(
         repo.clone(),

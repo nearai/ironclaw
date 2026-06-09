@@ -7,6 +7,7 @@ use ironclaw_conversations::{
     ExternalEventId, InboundTurnError, ResolveConversationRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_product_workflow::automation_trigger_thread_metadata_json;
 use ironclaw_safety::{
     InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
 };
@@ -193,6 +194,7 @@ where
         let accepted = record_trigger_prompt(
             Arc::clone(&self.thread_service),
             &resolution,
+            fire.identity.trigger_id(),
             &fire.prompt,
             fire.identity.external_event_id().as_str(),
             &self.default_agent_id,
@@ -269,6 +271,7 @@ fn trigger_resolve_request(
 async fn record_trigger_prompt(
     thread_service: Arc<dyn CanonicalSessionThreadService>,
     resolution: &ConversationBindingResolution,
+    trigger_id: TriggerId,
     prompt: &str,
     external_event_id: &str,
     default_agent_id: &AgentId,
@@ -292,7 +295,7 @@ async fn record_trigger_prompt(
             thread_id: Some(resolution.turn_scope.thread_id.clone()),
             created_by_actor_id: resolution.actor.user_id.as_str().to_string(),
             title: None,
-            metadata_json: None,
+            metadata_json: Some(automation_trigger_thread_metadata_json(trigger_id)),
         })
         .await
         .map_err(|error| InboundTurnError::DurableState {
@@ -423,6 +426,7 @@ mod tests {
         MessageIdempotencyStatus, ThreadAccessDecision, trusted_trigger_fire_submitter,
     };
     use ironclaw_host_api::{ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_product_workflow::AUTOMATION_TRIGGER_THREAD_SOURCE_TAG;
     use ironclaw_safety::{InjectionWarning, Severity};
     use ironclaw_threads::{
         AcceptedInboundMessage as CanonicalAcceptedInboundMessage,
@@ -1505,6 +1509,7 @@ mod tests {
         record_trigger_prompt(
             thread_service.clone(),
             &resolution,
+            TriggerId::new(),
             "summarize unread mail",
             "event-trigger-hook",
             &agent_id,
@@ -1515,6 +1520,7 @@ mod tests {
         record_trigger_prompt(
             thread_service.clone(),
             &resolution,
+            TriggerId::new(),
             "summarize unread mail",
             "event-trigger-hook",
             &agent_id,
@@ -1653,6 +1659,15 @@ mod tests {
             .threads
             .first()
             .expect("worker path records trigger prompt");
+        let metadata: serde_json::Value = serde_json::from_str(
+            thread
+                .metadata_json
+                .as_deref()
+                .expect("trigger thread metadata"),
+        )
+        .expect("trigger thread metadata json");
+        assert_eq!(metadata["source"], AUTOMATION_TRIGGER_THREAD_SOURCE_TAG);
+        assert_eq!(metadata["trigger_id"], trigger_id.to_string());
         let history = thread_service
             .list_thread_history(ThreadHistoryRequest {
                 scope: expected_scope,

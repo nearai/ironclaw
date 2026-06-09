@@ -9,13 +9,13 @@ use ironclaw_product_adapters::{
     ExternalConversationRef, ExternalEventId, FakeOutboundDeliverySink, FakeProductWorkflow,
     FakeProjectionStream, FakeProtocolHttpEgress, InboundCommandPayload, OutboundDeliverySink,
     ParsedProductInbound, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId,
-    ProductAttachmentDescriptor, ProductAttachmentKind, ProductCapabilityFlag, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductOutboundTarget, ProductProjectionItem, ProductProjectionReadInput,
-    ProductProjectionState, ProductProjectionSubject, ProductProjectionSubscribeInput,
-    ProductRejection, ProductRejectionKind, ProductSurfaceKind, ProductTriggerReason,
-    ProductWorkflow, ProjectionCursor, ProjectionReadRequest, ProjectionStream,
-    ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolHttpEgress,
+    ProductAttachmentDescriptor, ProductAttachmentKind, ProductCapabilityFlag,
+    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
+    ProductProjectionReadInput, ProductProjectionState, ProductProjectionSubject,
+    ProductProjectionSubscribeInput, ProductRejection, ProductRejectionKind, ProductSurfaceKind,
+    ProductTriggerReason, ProductWorkflow, ProjectionCursor, ProjectionReadRequest,
+    ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolHttpEgress,
     ProtocolHttpEgressError, REDACTED_PLACEHOLDER, RedactedDebug, RedactedString,
     TrustedInboundContext, UserMessagePayload,
 };
@@ -272,6 +272,13 @@ async fn workflow_returns_programmed_outcomes() {
         .await
         .expect("reject");
     assert!(matches!(reject_ack, ProductInboundAck::Rejected(_)));
+}
+
+#[test]
+fn control_action_cancel_run_validates_run_id() {
+    assert!(ProductControlActionPayload::cancel_run("").is_err());
+    assert!(ProductControlActionPayload::cancel_run("not-a-run-id").is_err());
+    assert!(ProductControlActionPayload::cancel_run(&TurnRunId::new().to_string()).is_ok());
 }
 
 #[tokio::test]

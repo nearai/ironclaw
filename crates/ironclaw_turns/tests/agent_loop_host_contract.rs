@@ -99,6 +99,7 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
     host.push_capability_outcome(CapabilityOutcome::ApprovalRequired {
         gate_ref: LoopGateRef::new("gate:approval-needed").unwrap(),
         safe_summary: "approval required".to_string(),
+        approval_resume: None,
     });
 
     let reply_exit = ReplyDriver
@@ -1893,6 +1894,7 @@ async fn capability_invocations_must_cite_visible_surface_before_host_dispatch()
             surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
             capability_id: foreign,
             input_ref: CapabilityInputRef::new("input:opaque-agent-loop-host-sentinel").unwrap(),
+            approval_resume: None,
         })
         .await
         .unwrap_err();
@@ -2205,6 +2207,7 @@ impl AgentLoopDriver for CapabilityDriver {
                 surface_version: surface.version,
                 capability_id: surface.descriptors[0].capability_id.clone(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-arguments").unwrap(),
+                approval_resume: None,
             })
             .await
             .map_err(driver_error)?;

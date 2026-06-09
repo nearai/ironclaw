@@ -17,8 +17,10 @@ use ironclaw_product_adapters::{
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
-    AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, ApprovalInteractionDecision,
-    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
+    AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
+    AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionDecision, ApprovalInteractionService,
+    AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
     AutomationProductFacade, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
@@ -28,29 +30,32 @@ use ironclaw_product_workflow::{
     LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
-    ProductWorkflowError, RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource,
+    ProductWorkflowError, RebornAutomationInfo, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
     RebornGetRunStateRequest, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornServices,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     StaticConnectableChannelsProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref,
+    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, InMemorySessionThreadService, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    EnsureThreadRequest, InMemorySessionThreadService, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
@@ -106,6 +111,10 @@ fn caller_for_user_with_project(
 
 fn run_id_string() -> String {
     "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18".to_string()
+}
+
+fn automation_run_id() -> TurnRunId {
+    TurnRunId::parse("11111111-1111-1111-1111-111111111111").expect("valid automation run id")
 }
 
 fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> ThreadHistory {
@@ -746,6 +755,7 @@ impl LifecycleProductFacade for ListingLifecycleFacade {
 struct ListAutomationCall {
     caller: ProductAgentBoundCaller,
     limit: usize,
+    run_limit: usize,
 }
 
 #[derive(Default)]
@@ -764,12 +774,16 @@ impl AutomationProductFacade for RecordingAutomationFacade {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
-        limit: usize,
+        request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         self.list_calls
             .lock()
             .expect("lock")
-            .push(ListAutomationCall { caller, limit });
+            .push(ListAutomationCall {
+                caller,
+                limit: request.limit,
+                run_limit: request.run_limit,
+            });
         Ok(vec![automation_info(
             "trigger-listed",
             "Daily status",
@@ -789,7 +803,7 @@ impl AutomationProductFacade for StaticAutomationFacade {
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
-        _limit: usize,
+        _request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Ok(self.output.clone())
     }
@@ -831,6 +845,7 @@ impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
         self.get_calls.lock().expect("lock").push(caller);
         Ok(RebornOutboundPreferencesResponse {
             final_reply_target: Some(outbound_target_summary("slack-dm-alpha")),
+            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
             default_modality: RebornOutboundDeliveryModality::Text,
         })
     }
@@ -846,6 +861,7 @@ impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
             .push(OutboundPreferencesSetCall { caller, request });
         Ok(RebornOutboundPreferencesResponse {
             final_reply_target: Some(outbound_target_summary("slack-dm-beta")),
+            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
             default_modality: RebornOutboundDeliveryModality::Text,
         })
     }
@@ -897,6 +913,14 @@ fn automation_info(
         next_run_at: Some("2026-06-03T09:00:00Z".parse().expect("next run")),
         last_run_at: None,
         last_status,
+        recent_runs: vec![RebornAutomationRecentRunInfo {
+            run_id: Some(automation_run_id()),
+            thread_id: ThreadId::new("thread-listed").expect("valid thread id"),
+            fire_slot: Some("2026-06-03T09:00:00Z".parse().expect("fire slot")),
+            status: RebornAutomationRecentRunStatus::Ok,
+            submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
+            completed_at: Some("2026-06-03T09:00:42Z".parse().expect("completed at")),
+        }],
         is_active: true,
         created_at: Some("2026-06-02T18:00:00Z".parse().expect("created at")),
     }
@@ -1157,12 +1181,15 @@ impl SessionThreadService for ScopeMismatchThreadStub {
 enum ScriptedThreadBehavior {
     BackendHistory,
     History(Box<ThreadHistory>),
+    ListPages,
     SubmittedReplay { turn_run_id: Option<String> },
 }
 
 struct ScriptedThreadService {
     behavior: ScriptedThreadBehavior,
     history_requests: Mutex<Vec<ThreadHistoryRequest>>,
+    list_requests: Mutex<Vec<ListThreadsForScopeRequest>>,
+    list_responses: Mutex<Vec<ListThreadsForScopeResponse>>,
 }
 
 impl ScriptedThreadService {
@@ -1170,6 +1197,8 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::BackendHistory,
             history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
         }
     }
 
@@ -1177,6 +1206,17 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::History(Box::new(history)),
             history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn list_pages(responses: Vec<ListThreadsForScopeResponse>) -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::ListPages,
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(responses),
         }
     }
 
@@ -1184,11 +1224,17 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::SubmittedReplay { turn_run_id },
             history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
         }
     }
 
     fn history_requests(&self) -> Vec<ThreadHistoryRequest> {
         self.history_requests.lock().expect("lock").clone()
+    }
+
+    fn list_requests(&self) -> Vec<ListThreadsForScopeRequest> {
+        self.list_requests.lock().expect("lock").clone()
     }
 }
 
@@ -1207,6 +1253,7 @@ impl SessionThreadService for ScriptedThreadService {
                 "backend detail /host/path secret-token".to_string(),
             )),
             ScriptedThreadBehavior::History(history) => Ok(history.as_ref().clone()),
+            ScriptedThreadBehavior::ListPages => scripted_stub_unreachable("list_thread_history"),
             ScriptedThreadBehavior::SubmittedReplay { .. } => Ok(ThreadHistory {
                 thread: SessionThreadRecord {
                     scope: request.scope,
@@ -1254,7 +1301,9 @@ impl SessionThreadService for ScriptedThreadService {
                     turn_run_id: turn_run_id.clone(),
                 }))
             }
-            ScriptedThreadBehavior::BackendHistory | ScriptedThreadBehavior::History(_) => {
+            ScriptedThreadBehavior::BackendHistory
+            | ScriptedThreadBehavior::History(_)
+            | ScriptedThreadBehavior::ListPages => {
                 scripted_stub_unreachable("replay_accepted_inbound_message")
             }
         }
@@ -1351,6 +1400,23 @@ impl SessionThreadService for ScriptedThreadService {
         _request: CreateSummaryArtifactRequest,
     ) -> Result<SummaryArtifact, SessionThreadError> {
         scripted_stub_unreachable("create_summary_artifact")
+    }
+
+    async fn list_threads_for_scope(
+        &self,
+        request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        match &self.behavior {
+            ScriptedThreadBehavior::ListPages => {
+                self.list_requests.lock().expect("lock").push(request);
+                let mut responses = self.list_responses.lock().expect("lock");
+                if responses.is_empty() {
+                    scripted_stub_unreachable("list_threads_for_scope");
+                }
+                Ok(responses.remove(0))
+            }
+            _ => scripted_stub_unreachable("list_threads_for_scope"),
+        }
     }
 }
 
@@ -3959,7 +4025,13 @@ async fn list_automation_dispatches_through_product_facade() {
     .with_automation_product_facade(automation_facade.clone());
 
     let listed = services
-        .list_automations(caller(), WebUiListAutomationsRequest { limit: Some(10) })
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: Some(10),
+                run_limit: None,
+            },
+        )
         .await
         .expect("list automations");
     assert_eq!(listed.automations.len(), 1);
@@ -3975,6 +4047,15 @@ async fn list_automation_dispatches_through_product_facade() {
         listed.automations[0].last_status,
         Some(RebornAutomationRunStatus::Ok)
     );
+    assert_eq!(listed.automations[0].recent_runs.len(), 1);
+    assert_eq!(
+        listed.automations[0].recent_runs[0].status,
+        RebornAutomationRecentRunStatus::Ok
+    );
+    assert_eq!(
+        listed.automations[0].recent_runs[0].thread_id.as_str(),
+        "thread-listed"
+    );
 
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
@@ -3989,6 +4070,11 @@ async fn list_automation_dispatches_through_product_facade() {
         Some("project-alpha")
     );
     assert_eq!(list_calls[0].limit, 10);
+    assert_eq!(
+        list_calls[0].run_limit, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE as usize,
+        "omitted automation run history limit must use AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE ({})",
+        AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE
+    );
 }
 
 #[tokio::test]
@@ -4122,6 +4208,7 @@ fn set_outbound_preferences_empty_json_defaults_final_target_to_none() {
 fn outbound_preferences_response_preserves_client_json_shape() {
     let response = RebornOutboundPreferencesResponse {
         final_reply_target: Some(outbound_target_summary("slack-dm-alpha")),
+        final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
         default_modality: RebornOutboundDeliveryModality::Text,
     };
 
@@ -4135,6 +4222,7 @@ fn outbound_preferences_response_preserves_client_json_shape() {
                 "display_name": "Slack DM",
                 "description": "Slack direct message",
             },
+            "final_reply_target_status": "available",
             "default_modality": "text",
         })
     );
@@ -4151,8 +4239,78 @@ fn outbound_preferences_response_empty_json_defaults_to_text_without_target() {
 
     assert!(response.final_reply_target.is_none());
     assert_eq!(
+        response.final_reply_target_status,
+        RebornOutboundDeliveryTargetStatus::NoneConfigured
+    );
+    assert_eq!(
         response.default_modality,
         RebornOutboundDeliveryModality::Text
+    );
+}
+
+#[test]
+fn outbound_preferences_response_missing_status_defaults_to_available_when_target_present() {
+    let response: RebornOutboundPreferencesResponse = serde_json::from_value(json!({
+        "final_reply_target": {
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        },
+        "default_modality": "text",
+    }))
+    .expect("deserialize legacy preferences response");
+
+    assert_eq!(
+        response.final_reply_target_status,
+        RebornOutboundDeliveryTargetStatus::Available
+    );
+    assert!(response.final_reply_target.is_some());
+    assert_eq!(
+        response.default_modality,
+        RebornOutboundDeliveryModality::Text
+    );
+}
+
+#[test]
+fn outbound_preferences_response_serializes_unavailable_status_without_target() {
+    let response = RebornOutboundPreferencesResponse {
+        final_reply_target: None,
+        final_reply_target_status: RebornOutboundDeliveryTargetStatus::Unavailable,
+        default_modality: RebornOutboundDeliveryModality::Text,
+    };
+
+    let serialized =
+        serde_json::to_value(&response).expect("serialize unavailable preferences response");
+    assert_eq!(
+        serialized,
+        json!({
+            "final_reply_target_status": "unavailable",
+            "default_modality": "text",
+        })
+    );
+
+    let deserialized: RebornOutboundPreferencesResponse =
+        serde_json::from_value(serialized).expect("deserialize unavailable preferences response");
+    assert_eq!(deserialized, response);
+}
+
+#[test]
+fn outbound_preferences_response_serializes_none_configured_status_explicitly() {
+    let response = RebornOutboundPreferencesResponse {
+        final_reply_target: None,
+        final_reply_target_status: RebornOutboundDeliveryTargetStatus::NoneConfigured,
+        default_modality: RebornOutboundDeliveryModality::Text,
+    };
+
+    let serialized =
+        serde_json::to_value(&response).expect("serialize none configured preferences response");
+    assert_eq!(
+        serialized,
+        json!({
+            "final_reply_target_status": "none_configured",
+            "default_modality": "text",
+        })
     );
 }
 
@@ -4613,7 +4771,10 @@ async fn list_automations_rejects_missing_agent_id() {
     let err = services
         .list_automations(
             caller_without_agent(),
-            WebUiListAutomationsRequest { limit: Some(10) },
+            WebUiListAutomationsRequest {
+                limit: Some(10),
+                run_limit: None,
+            },
         )
         .await
         .expect_err("missing agent id should fail closed");
@@ -4637,6 +4798,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
             caller(),
             WebUiListAutomationsRequest {
                 limit: Some(u32::MAX),
+                run_limit: None,
             },
         )
         .await
@@ -4661,7 +4823,13 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(caller(), WebUiListAutomationsRequest { limit: Some(0) })
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: Some(0),
+                run_limit: None,
+            },
+        )
         .await
         .expect("list automations");
 
@@ -4683,7 +4851,13 @@ async fn list_automations_uses_default_limit_when_omitted() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(caller(), WebUiListAutomationsRequest { limit: None })
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: None,
+                run_limit: None,
+            },
+        )
         .await
         .expect("list automations");
 
@@ -4693,6 +4867,63 @@ async fn list_automations_uses_default_limit_when_omitted() {
         list_calls[0].limit, AUTOMATION_LIST_DEFAULT_PAGE_SIZE as usize,
         "omitted automation list limit must use AUTOMATION_LIST_DEFAULT_PAGE_SIZE ({})",
         AUTOMATION_LIST_DEFAULT_PAGE_SIZE
+    );
+}
+
+#[tokio::test]
+async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: None,
+                run_limit: Some(u32::MAX),
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(
+        list_calls[0].run_limit, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE as usize,
+        "automation run history limit must be clamped to AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE ({}) before the product facade",
+        AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE
+    );
+}
+
+#[tokio::test]
+async fn list_automations_allows_zero_run_limit_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: None,
+                run_limit: Some(0),
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(
+        list_calls[0].run_limit, 0,
+        "explicit zero automation run history limit must disable embedded run history"
     );
 }
 
@@ -4715,6 +4946,81 @@ fn reborn_automation_state_round_trips_serde_for_every_variant() {
             serde_json::from_str(&serialized).expect("deserialize state");
         assert_eq!(deserialized, state);
     }
+}
+
+#[test]
+fn reborn_automation_recent_run_info_round_trips_typed_ids_and_preserves_unknown_status() {
+    let recent_run = RebornAutomationRecentRunInfo {
+        run_id: Some(automation_run_id()),
+        thread_id: ThreadId::new("thread-listed").expect("valid thread id"),
+        fire_slot: Some("2026-06-03T09:00:00Z".parse().expect("fire slot")),
+        status: RebornAutomationRecentRunStatus::Running,
+        submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
+        completed_at: None,
+    };
+
+    let serialized = serde_json::to_value(&recent_run).expect("serialize recent run");
+    assert_eq!(
+        serialized,
+        json!({
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "thread_id": "thread-listed",
+            "fire_slot": "2026-06-03T09:00:00Z",
+            "status": "running",
+            "submitted_at": "2026-06-03T09:00:01Z",
+        })
+    );
+
+    let deserialized: RebornAutomationRecentRunInfo =
+        serde_json::from_value(serialized).expect("deserialize recent run");
+    assert_eq!(deserialized, recent_run);
+
+    let future_status: RebornAutomationRecentRunInfo = serde_json::from_value(json!({
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "thread_id": "thread-listed",
+        "status": "cancelled",
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect("deserialize future recent run status");
+    assert_eq!(
+        future_status.status,
+        RebornAutomationRecentRunStatus::Unknown
+    );
+
+    let defaulted_status: RebornAutomationRecentRunInfo = serde_json::from_value(json!({
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "thread_id": "thread-listed",
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect("deserialize defaulted recent run status");
+    assert_eq!(
+        defaulted_status.status,
+        RebornAutomationRecentRunStatus::Unknown
+    );
+
+    serde_json::from_value::<RebornAutomationRecentRunInfo>(json!({
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "thread_id": "thread-listed",
+        "status": { "backend": "future" },
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect_err("recent run rejects malformed status");
+
+    serde_json::from_value::<RebornAutomationRecentRunInfo>(json!({
+        "run_id": "not-a-uuid",
+        "thread_id": "thread-listed",
+        "status": "running",
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect_err("recent run rejects malformed run_id");
+
+    serde_json::from_value::<RebornAutomationRecentRunInfo>(json!({
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "thread_id": "thread/listed",
+        "status": "running",
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect_err("recent run rejects malformed thread_id");
 }
 
 #[tokio::test]
@@ -5387,4 +5693,281 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
         "wire code must be snake_case `unavailable`; got: {json}"
     );
     assert_eq!(json["retryable"], true);
+}
+
+#[tokio::test]
+async fn list_threads_hides_automation_trigger_threads() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let caller = caller();
+    let visible_thread_id = ThreadId::new("thread-visible").expect("visible thread id");
+    let automation_thread_id = ThreadId::new("thread-automation").expect("automation thread id");
+    let malformed_metadata_thread_id =
+        ThreadId::new("thread-malformed-metadata").expect("malformed metadata thread id");
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("visible thread");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(automation_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Automation run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-scheduled-summary",
+            )),
+        })
+        .await
+        .expect("automation thread");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(malformed_metadata_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Malformed metadata chat".to_string()),
+            metadata_json: Some(format!(
+                r#"{{"source":"{AUTOMATION_TRIGGER_THREAD_SOURCE_TAG}""#
+            )),
+        })
+        .await
+        .expect("malformed metadata thread");
+
+    let response = services
+        .list_threads(caller, WebUiListThreadsRequest::default())
+        .await
+        .expect("list threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(thread_ids.len(), 2);
+    assert!(thread_ids.contains(&visible_thread_id));
+    assert!(thread_ids.contains(&malformed_metadata_thread_id));
+    assert!(
+        !thread_ids.contains(&automation_thread_id),
+        "automation trigger threads should be accessible by direct id but hidden from the chat list",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_threads() {
+    let caller = caller();
+    let scope = thread_scope_for(&caller);
+    let automation_thread = |thread_id: &str| SessionThreadRecord {
+        scope: scope.clone(),
+        thread_id: ThreadId::new(thread_id).expect("automation thread id"),
+        created_by_actor_id: caller.user_id.as_str().to_string(),
+        title: Some(format!("Automation run {thread_id}")),
+        metadata_json: Some(automation_trigger_thread_metadata_json(
+            "trigger-scheduled-summary",
+        )),
+        goal: None,
+    };
+    let stalled_cursor = "cursor-stalled".to_string();
+    let thread_service = Arc::new(ScriptedThreadService::list_pages(vec![
+        ListThreadsForScopeResponse {
+            threads: vec![automation_thread("thread-automation-stall-1")],
+            next_cursor: Some(stalled_cursor.clone()),
+        },
+        ListThreadsForScopeResponse {
+            threads: vec![automation_thread("thread-automation-stall-2")],
+            next_cursor: Some(stalled_cursor.clone()),
+        },
+    ]));
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        services.list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                limit: Some(2),
+                cursor: None,
+            },
+        ),
+    )
+    .await
+    .expect("list_threads should terminate when backend cursor stalls")
+    .expect("list threads");
+
+    assert!(
+        response.threads.is_empty(),
+        "automation trigger threads must stay hidden even when every fetched page is filtered",
+    );
+    assert_eq!(
+        response.next_cursor, None,
+        "stalled cursor must be cleared so callers do not keep replaying the same filtered page",
+    );
+    let list_requests = thread_service.list_requests();
+    assert_eq!(
+        list_requests.len(),
+        2,
+        "facade should fetch the stalled page once and then break on the repeated cursor",
+    );
+    assert_eq!(list_requests[0].cursor, None);
+    assert_eq!(list_requests[1].cursor.as_deref(), Some("cursor-stalled"));
+}
+
+#[tokio::test]
+async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
+    let caller = caller();
+    let scope = thread_scope_for(&caller);
+    let automation_thread = |index: usize| SessionThreadRecord {
+        scope: scope.clone(),
+        thread_id: ThreadId::new(format!("thread-automation-budget-{index:02}"))
+            .expect("automation thread id"),
+        created_by_actor_id: caller.user_id.as_str().to_string(),
+        title: Some(format!("Automation run {index}")),
+        metadata_json: Some(automation_trigger_thread_metadata_json(
+            "trigger-scheduled-summary",
+        )),
+        goal: None,
+    };
+    let responses = (0..20)
+        .map(|index| ListThreadsForScopeResponse {
+            threads: vec![automation_thread(index)],
+            next_cursor: Some(format!("cursor-{index:02}")),
+        })
+        .collect::<Vec<_>>();
+    let thread_service = Arc::new(ScriptedThreadService::list_pages(responses));
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                limit: Some(1),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("list threads");
+
+    assert!(
+        response.threads.is_empty(),
+        "automation trigger threads must stay hidden when filter pages are exhausted",
+    );
+    assert_eq!(
+        response.next_cursor, None,
+        "filter page budget exhaustion must clear the cursor so callers do not keep scanning",
+    );
+    let list_requests = thread_service.list_requests();
+    assert_eq!(
+        list_requests.len(),
+        20,
+        "facade must enforce a hard cap on filtered backend pages",
+    );
+    assert!(
+        list_requests
+            .iter()
+            .all(|request| request.limit == Some(50)),
+        "facade should use a fixed candidate page size instead of shrinking toward one"
+    );
+}
+
+#[tokio::test]
+async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let caller = caller();
+    let automation_thread_id = ThreadId::new("thread-a-automation").expect("automation thread id");
+    let first_visible_thread_id =
+        ThreadId::new("thread-b-visible").expect("first visible thread id");
+    let second_visible_thread_id =
+        ThreadId::new("thread-c-visible").expect("second visible thread id");
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(automation_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Automation run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-scheduled-summary",
+            )),
+        })
+        .await
+        .expect("automation thread");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(first_visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("First visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("first visible thread");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(second_visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Second visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("second visible thread");
+
+    let first_page = services
+        .list_threads(
+            caller.clone(),
+            WebUiListThreadsRequest {
+                limit: Some(1),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("list first visible page");
+    assert_eq!(
+        first_page
+            .threads
+            .iter()
+            .map(|thread| thread.thread_id.clone())
+            .collect::<Vec<_>>(),
+        vec![first_visible_thread_id],
+    );
+    assert_eq!(first_page.next_cursor.as_deref(), Some("thread-b-visible"));
+
+    let second_page = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                limit: Some(1),
+                cursor: first_page.next_cursor,
+            },
+        )
+        .await
+        .expect("list second visible page");
+    assert_eq!(
+        second_page
+            .threads
+            .iter()
+            .map(|thread| thread.thread_id.clone())
+            .collect::<Vec<_>>(),
+        vec![second_visible_thread_id],
+    );
+    assert_eq!(second_page.next_cursor, None);
 }

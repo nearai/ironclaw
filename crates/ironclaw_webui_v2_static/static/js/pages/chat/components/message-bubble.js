@@ -111,7 +111,10 @@ function MessageBubbleImpl({ message, onRetry }) {
   const showActions = (role === "assistant" || role === "user") && !isOptimistic;
 
   return html`
-    <div className=${["group flex flex-col", isUser ? "items-end" : "items-start"].join(" ")}>
+    <div
+      data-testid=${`msg-${role}`}
+      className=${["group flex flex-col", isUser ? "items-end" : "items-start"].join(" ")}
+    >
       <div className="flex min-w-0 max-w-[85%] flex-col gap-1">
         <div
           className=${[
