@@ -325,6 +325,13 @@ The log is **append-only**. Replay reads rows for active parent runs and re-driv
 
 ### 1.6 Atomic migration
 
+**Scope-predicate convention.** Every UPDATE and DELETE in this section MUST scope by the caller's full `TurnScope`. The `agent_id` predicate is **conditional**:
+
+- When the caller's `TurnScope.agent_id` is `Some(id)`: emit `agent_id = ?` (and bind `id`).
+- When the caller's `TurnScope.agent_id` is `None`: emit `agent_id IS NULL`.
+
+NEVER unconditionally emit `(agent_id = ? OR agent_id IS NULL)` — that pattern lets agent-scoped callers reach system-level (non-agent) rows under the same `(tenant_id, user_id)`, breaking cross-agent isolation. The pseudocode below uses a placeholder `<agent_predicate>` which the application binds per the rule above.
+
 The insert/settle/delete paths must move all three tables under one transaction so a partial crash can't leave the indexes pointing at a missing primary row (or vice versa).
 
 ```sql
@@ -342,7 +349,7 @@ BEGIN;
   --    serialize per-scope; PostgreSQL adds SELECT ... FOR UPDATE on
   --    each bucket row that will be written (see §1.4 note below).
   SELECT COALESCE(SUM(undelivered), 0) FROM subagent_gate_capacity_counter
-   WHERE tenant_id = ? AND user_id = ? AND agent_id = ?;
+   WHERE tenant_id = ? AND user_id = ? AND <agent_predicate>;
   -- If SUM >= 4096: ROLLBACK + return CapacityExceeded.
   -- Otherwise:
 
@@ -354,7 +361,7 @@ BEGIN;
   -- 4. Increment this specific bucket only (no cross-bucket contention).
   UPDATE subagent_gate_capacity_counter
      SET undelivered = undelivered + 1
-   WHERE tenant_id = ? AND user_id = ? AND agent_id = ? AND bucket = ?;
+   WHERE tenant_id = ? AND user_id = ? AND <agent_predicate> AND bucket = ?;
 COMMIT;
 ```
 
@@ -370,7 +377,7 @@ BEGIN;
   UPDATE subagent_gate_awaited_children
      SET terminal_status = ?, terminal_event_json = ?, settled_at = datetime('now')
    WHERE gate_ref = ? AND child_run_id = ? AND terminal_status IS NULL
-     AND tenant_id = ? AND user_id = ? AND (agent_id = ? OR agent_id IS NULL);
+     AND tenant_id = ? AND user_id = ? AND <agent_predicate>;
   -- log row only if the UPDATE above touched a row:
   INSERT INTO subagent_gate_settlement_log (...) VALUES (...);
   INSERT OR IGNORE INTO subagent_gate_deliverable_queue (tenant_id, child_run_id, gate_ref) VALUES (?, ?, ?);
@@ -390,7 +397,7 @@ UPDATE subagent_gate_awaited_children
    SET terminal_result_written = 1,
        terminal_byte_len       = ?
  WHERE gate_ref = ? AND child_run_id = ? AND terminal_result_written = 0
-   AND tenant_id = ? AND user_id = ? AND (agent_id = ? OR agent_id IS NULL);
+   AND tenant_id = ? AND user_id = ? AND <agent_predicate>;
 ```
 
 PostgreSQL substitutes `terminal_result_written = TRUE` / `= FALSE`. The reconciler treats `terminal_status IS NOT NULL AND terminal_result_written = 0` as "settled but capability result write pending" — it loads the result from the capability result store and flips the flag itself if it finds a written result.
@@ -402,16 +409,19 @@ Settlement log rows are **not** deleted on gate cleanup — they remain the repl
 ```sql
 BEGIN;
   UPDATE subagent_gate_awaited_children
-     SET delivered_to_parent = 1
+     SET delivery_claimed = 1,
+         delivered_to_parent = 1
    WHERE gate_ref = ? AND child_run_id = ?
-     AND tenant_id = ? AND user_id = ? AND (agent_id = ? OR agent_id IS NULL)
+     AND tenant_id = ? AND user_id = ? AND <agent_predicate>
      AND delivered_to_parent = 0;
-  -- Decrement THIS spawn's bucket (computed from child_run_id at insert time).
+  -- Decrement THIS spawn's bucket (counter_bucket recorded at INSERT).
   UPDATE subagent_gate_capacity_counter
      SET undelivered = GREATEST(undelivered - 1, 0)
-   WHERE tenant_id = ? AND user_id = ? AND agent_id = ? AND bucket = ?;
+   WHERE tenant_id = ? AND user_id = ? AND <agent_predicate>
+     AND bucket = ?;
+  -- Delete the SPECIFIC child's queue entry — NOT all queue entries for the gate.
   DELETE FROM subagent_gate_deliverable_queue
-   WHERE gate_ref = ? AND tenant_id = ?;
+   WHERE gate_ref = ? AND child_run_id = ? AND tenant_id = ?;
 COMMIT;
 ```
 
@@ -421,37 +431,27 @@ PostgreSQL substitutes `delivered_to_parent = TRUE` and `GREATEST` works as-is. 
 
 ```sql
 BEGIN;
-  -- Group rows to delete by their bucket so we can decrement each bucket
-  -- by its row count in one pass. Bucket is recoverable from child_run_id
-  -- at write time, so we either:
-  --   (a) JOIN to recompute bucket = hash(child_run_id) % K (libSQL has no
-  --       native hash; use a stored hash column on awaited_children), OR
-  --   (b) just touch ALL buckets at once with a per-bucket UPDATE.
-  -- (a) is preferred; awaited_children may carry a `counter_bucket INTEGER NOT NULL`
-  -- column populated at INSERT time. The simpler shape stored in WU-C
-  -- implementation; this spec mandates the column exists. See §1.3/§1.4
-  -- amendment: awaited_children gets a `counter_bucket INTEGER NOT NULL`
-  -- column to record which counter bucket was incremented at INSERT.
-
-  -- (a) Count rows about to be deleted, grouped by counter_bucket.
+  -- (a) Count rows to delete, grouped by counter_bucket.
   SELECT counter_bucket, COUNT(*) FROM subagent_gate_awaited_children
    WHERE gate_ref = ?
-     AND tenant_id = ? AND user_id = ? AND (agent_id = ? OR agent_id IS NULL)
+     AND tenant_id = ? AND user_id = ? AND <agent_predicate>
      AND delivered_to_parent = 0
    GROUP BY counter_bucket;
   -- Result: (bucket, N) tuples. Application iterates.
 
-  DELETE FROM subagent_gate_deliverable_queue WHERE gate_ref = ? AND tenant_id = ?;
-  DELETE FROM subagent_gate_child_index      WHERE gate_ref = ? AND tenant_id = ?;
+  DELETE FROM subagent_gate_deliverable_queue
+   WHERE gate_ref = ? AND tenant_id = ? AND user_id = ?;
+  DELETE FROM subagent_gate_child_index
+   WHERE gate_ref = ? AND tenant_id = ? AND user_id = ?;
   DELETE FROM subagent_gate_awaited_children
-   WHERE gate_ref = ?
-     AND tenant_id = ? AND user_id = ? AND (agent_id = ? OR agent_id IS NULL);
+   WHERE gate_ref = ? AND tenant_id = ? AND user_id = ? AND <agent_predicate>;
 
-  -- (b) Decrement each touched bucket by its count. App-side loop:
+  -- (b) Decrement each touched bucket by its row count. App-side loop:
   --   for (bucket, n) in result:
   --     UPDATE subagent_gate_capacity_counter
   --        SET undelivered = GREATEST(undelivered - n, 0)
-  --      WHERE tenant_id = ? AND user_id = ? AND agent_id = ? AND bucket = ?;
+  --      WHERE tenant_id = ? AND user_id = ? AND <agent_predicate>
+  --        AND bucket = ?;
 COMMIT;
 ```
 
@@ -459,9 +459,13 @@ The delete path's GROUP BY scan is bounded by rows under one `gate_ref` (typical
 
 ### 1.7 Risks / open questions
 
-- **`child_scope_json` / `parent_run_context_json` size.** `LoopRunContext` is a complex struct (strategy configuration included). JSONB sidesteps normalization but blocks queries against context fields. If the reconciler ever needs to query by `parent_run_context.scope.agent_id`, those columns must be promoted. For now, top-level indexed columns (`tenant_id`, `user_id`, `agent_id`, `parent_run_id`) cover the scoped-scan needs.
+- **`child_scope_json` / `parent_run_context_json` size + sensitivity (audit required).** `LoopRunContext` is a complex struct (strategy configuration included). Two concerns:
+
+  - *Size*: storing as JSON/JSONB blob sidesteps schema normalization but blocks queries against context fields. If the reconciler ever needs to query by `parent_run_context.scope.agent_id`, those columns must be promoted to first-class SQL columns. For now, top-level indexed columns (`tenant_id`, `user_id`, `agent_id`, `parent_run_id`) cover the scoped-scan needs.
+
+  - *Sensitivity*: WU-C MUST audit `LoopRunContext` fields before implementation and confirm none of them carry credentials, API keys, LLM provider tokens, or other sensitive material. If any sensitive field is found, the write-site MUST strip it before serialization. If no sensitive field exists, WU-C MUST add a compile-time lint or test asserting `LoopRunContext` remains credential-free (any future field addition must re-verify). Persisting plaintext credentials in a durable, replicated table is unacceptable. This is a closing-checklist gate.
 - **`user_id` derivation.** `TurnScope` does not carry an explicit `user_id` directly; it surfaces the owner through `TurnThreadOwner::ExplicitUser.owner_user_id` or falls back to the system sentinel. The durable schema uses `user_id TEXT NOT NULL` — the insert path resolves `TurnScope::explicit_owner_user_id()` and writes the sentinel (`ironclaw_host_api::SYSTEM_RESERVED_ID`) when the owner is `ActorFallback` or `Ownerless`.
-- **Settlement log deduplication.** The log is append-only; replay may write duplicate `(gate_ref, child_run_id)` rows. Reconciler selects `MIN(id)` (first-writer) or relies on the `terminal_status IS NULL` guard on the primary table. Decide which is authoritative for replay ordering before WU-C opens.
+- **Settlement log deduplication (resolved).** The settlement log is append-only. Duplicate rows on the same `(gate_ref, child_run_id, terminal_kind)` are *possible* under replay-storm conditions but are **benign**: the idempotency ledger's UNIQUE constraint on `(run_id, child_run_id, terminal_kind)` (§5.4 / §5.5) ensures at most one pencil-receipt insert succeeds; the gate-store record_background_settlement is idempotent on its own primary key; the seal UPDATE is row-level idempotent (`delivered_at IS NULL` guard). Phase 0's LEFT JOIN against the ledger filters out already-sealed rows so duplicate log entries that map to a sealed ledger row are never re-processed. There is no need for a `MIN(id)` ordering choice or a settlement-log UNIQUE constraint at this layer. A future log-rotation / TTL job MAY de-duplicate physically for storage hygiene but that is operational, not correctness-load-bearing.
 - **`deliverable_by_child` as queue table vs. computed view.** Queue table matches in-memory semantics exactly but risks queue/primary-table skew on partial failure. Computed view is always consistent but adds a join on every claim call. Decision recorded in WU-C PR description; recommendation: queue table (matches the lock-free O(1) in-memory contract).
 - **Capacity cap (D6-A + E.A).** `MAX_GATE_RECORDS = 4096` per scope is enforced via the `subagent_gate_capacity_counter` table, **sharded into `CAPACITY_COUNTER_BUCKETS = 16` rows per `(tenant_id, user_id, agent_id)` scope** (operator-tunable per deployment). Spawn picks a bucket via `hash(child_run_id) % K` and increments only that bucket's row. Cap check reads `SUM(undelivered) FROM counter WHERE scope` — cheap with the partial index. This sharding lifts the per-scope spawn throughput ceiling from ~100/sec (single-row lock contention) to ~1600/sec on PostgreSQL at K=16; libSQL deployments retain serialized `BEGIN IMMEDIATE` semantics regardless of K. Drift bound under PostgreSQL with concurrent fan-out is `K - 1` rows over cap (15 at K=16) — bounded and well below the cap itself. The bucket-of-record is stored on `subagent_gate_awaited_children.counter_bucket` at INSERT time so cleanup + delivery paths decrement the correct bucket without rehashing. K is a one-line config knob; raising to K=64 doubles throughput at the cost of slightly more bucket scan on the cap-check SUM (still well under 1 ms). This design scales to mega-tenant deployments (10k+ concurrent spawns under one scope) without falling back to soft caps or background admission control.
 - **`agent_id` nullable contract.** Every scoped query must include `agent_id` in the predicate (`agent_id = ?` OR `agent_id IS NULL`) — never omit it — to avoid cross-agent leakage in multi-agent tenants.
@@ -538,7 +542,11 @@ If `list_dir` on `/turns/subagent-goals/agents/<agent_id>/` is ever needed for r
 
 **Key shape:** `child_run_id: TurnRunId`. Note: **no `TurnScope` in the key.** The in-memory store keys on global-UUID uniqueness.
 
-**Value:** `SubagentResultTombstone { child_run_id: TurnRunId, terminal_status: TurnStatus, disposition: SubagentResultDisposition }`. `SubagentResultDisposition` is currently single-variant: `DiscardedByParentCancel`.
+**Value:** `SubagentResultTombstone { child_run_id: TurnRunId, terminal_status: TurnStatus, disposition: SubagentResultDisposition }`. `SubagentResultDisposition` variants:
+- `DiscardedByParentCancel` (in-memory store today)
+- `DiscardedParentGone` (WU-C addition — emitted by `SubagentRestartReconciler` when an orphan row is detected during replay; see §5.3 Phase 2a)
+
+WU-D may add more (e.g. `Delivered`, `SettledByBackground`); WU-C must accept additional variants without breaking serde round-trip.
 
 **Internal data structure:** `TombstoneInner { by_child: HashMap<TurnRunId, SubagentResultTombstone>, insertion_order: VecDeque<TurnRunId> }` behind `std::sync::Mutex`. Bounded at `MAX_TOMBSTONE_RECORDS = 4096`. Write semantics: `write_tombstone` is **last-writer-wins** in memory today. This must be corrected to first-writer-wins to match the durable backend — see §3.6.
 
@@ -652,7 +660,7 @@ The existing `tombstone_store_is_idempotent_by_child_run` test writes identical 
 
 - **Scope on `write_tombstone` trait signature (resolved in this spec).** The current in-memory `write_tombstone(&self, tombstone: SubagentResultTombstone) -> Result<...>` signature must change to `write_tombstone(&self, scope: &TurnScope, tombstone: SubagentResultTombstone) -> Result<...>` to enable the `ScopedPath` layout in §3.4. This matches the `SubagentGoalStore::put_goal(&self, scope: &TurnScope, ...)` pattern. **WU-C MUST land the trait signature change before implementing `FilesystemSubagentTombstoneStore`.**
 - **Wiring gap is total.** `BoundedSubagentResultTombstoneStore` is never passed to `SubagentCompletionObserver` or `DefaultPlannedRuntimeParts` today. WU-C must (a) add `subagent_result_tombstone_store` field to `DefaultPlannedRuntimeParts`, (b) inject into `SubagentCompletionObserver` (or a helper called from `mark_child_deliveries`), (c) add the tombstone write call in the observer after successful gate delivery.
-- **`SubagentResultDisposition` has only one variant.** Background mode (WU-D) will add at least one more (`Delivered` or `SettledByBackground`). Durable schema is forward-compatible — `TEXT` column / JSON string encoding handles new variants naturally.
+- **`SubagentResultDisposition` variant additions.** WU-C MUST add `DiscardedParentGone` (used by §5.3 Phase 2a reconciler orphan-cleanup). WU-D will add `Delivered` and/or `SettledByBackground`. The TEXT-column / JSON-string serialization handles new variants forward-compatibly — older code that doesn't recognize a variant must round-trip the raw string, not error.
 - **Eviction creates a gap.** `MAX_TOMBSTONE_RECORDS = 4096` means in-memory silently loses old tombstones under pressure. Durable store eliminates this gap by design (no eviction). The constant can be removed from the durable implementation; in-memory retains it as a safety valve for local-dev.
 - **Production-readiness classification.** Once `FilesystemSubagentTombstoneStore` is wired, `subagent_result_tombstone_store` field must be set to `production_verified(Required)`. Add a symmetric positive test that the verified composition reports `RebornLoopProductionStatus::Ready`. Name the test `production_readiness_accepts_filesystem_subagent_tombstone_store`. It must assert that setting `graph.subagent_result_tombstone_store = RebornComponentReadiness::production_verified(Required)` (with all other required fields likewise verified) yields `RebornLoopProductionStatus::Ready`.
 
@@ -795,7 +803,7 @@ Capability results are the wrong shape for `ScopedFilesystem`:
 - **Atomic tombstone.** Setting `tombstoned_at` while reading `byte_len` is a single `UPDATE ... WHERE result_ref = $1` in SQL.
 - **`ironclaw_reborn_event_store` already has libSQL and PostgreSQL typed-repo backends** for `DurableEventLog`. The `capability_results` table follows the same module shape: `crates/ironclaw_reborn_event_store/src/libsql/capability_result_repo.rs` and `.../postgres/capability_result_repo.rs`. No new dependency; existing feature flags gate respective backends.
 
-**In-memory impl** (`InMemoryCapabilityResultStore`) retained as `local_dev` fallback — same role as `InMemoryDurableEventLog`. Wraps `Mutex<HashMap<String, serde_json::Value>>` (no `BoundedRing` — production-readiness check gates its use to `LocalDevTest` mode).
+**In-memory impl** (`InMemoryCapabilityResultStore`) retained as `local_dev` fallback — same role as `InMemoryDurableEventLog`. Wraps `Mutex<HashMap<String, Vec<u8>>>` (no `BoundedRing` — production-readiness check gates its use to `LocalDevTest` mode).
 
 **Implementation note.** Both libSQL and PostgreSQL backends use a single statement: `INSERT INTO capability_results (..., payload, byte_len) VALUES (..., ?, ?)` with `byte_len = payload.len() as u64`. No `serde_json` call inside the backend. PostgreSQL's JSONB column accepts a `bytea`/`Vec<u8>` parameter via `payload::jsonb` cast: the Postgres driver converts the bytes to JSONB representation server-side. libSQL stores raw bytes in BLOB. The in-memory `InMemoryCapabilityResultStore` holds `Mutex<HashMap<String, Vec<u8>>>` — keys are the opaque ref strings, values are the serialized bytes. Round-trip parity is byte-exact across all three impls: bytes in == bytes out.
 
@@ -892,6 +900,16 @@ async fn write_capability_result(
     Ok((result_ref, byte_len))
 }
 ```
+
+**`scope_from_run_context` helper.** Defined in `crates/ironclaw_reborn_composition`. Maps `LoopRunContext` → `TurnScope`. Field mapping:
+
+- `TurnScope.tenant_id`        ← `run_context.tenant_id`
+- `TurnScope.agent_id`         ← `run_context.scope.agent_id` (Option<AgentId>)
+- `TurnScope.project_id`       ← `run_context.scope.project_id`
+- `TurnScope.thread_id`        ← `run_context.thread_id`
+- `TurnScope.thread_owner`     ← `run_context.thread_owner`
+
+`user_id` is NOT a field on `TurnScope` directly — it is resolved at query-bind time via `TurnScope::explicit_owner_user_id()`, falling back to the `SYSTEM_RESERVED_ID` sentinel for `Ownerless` / `ActorFallback` runs (see §8.4). The helper MUST NOT drop or substitute `agent_id` — bypass of this rule reintroduces the cross-agent IDOR class.
 
 **Why this shape.** The executor serializes `write.output` exactly once via `serde_json::to_vec`. The resulting bytes are moved (not cloned) into the store, which INSERTs them directly into the BLOB/JSONB column. `byte_len` is `bytes.len() as u64` — derived from the same bytes, no extra work. Result: one serialization, one allocation, zero tree-walks per capability call. At the scale of 100s of calls per second per node with megabyte-scale payloads, this saves ~50% of capability-write CPU vs the prior double-serialize approach.
 
@@ -1037,11 +1055,11 @@ fn replay(scope: &TurnScope) -> ReplayReport:
   // PostgreSQL example:
   //   SELECT s.* FROM subagent_gate_settlement_log s
   //     LEFT JOIN subagent_idempotency_ledger l
-  //       ON  s.run_id        = l.run_id
+  //       ON  s.parent_run_id = l.run_id
   //       AND s.child_run_id  = l.child_run_id
   //       AND s.terminal_kind = l.terminal_kind
   //   WHERE s.tenant_id = $1 AND s.user_id = $2
-  //     AND s.event_kind IN ('Completed', 'Failed', 'Cancelled')
+  //     AND s.terminal_kind IN ('Completed', 'Failed', 'Cancelled')
   //     AND s.child_run_id IS NOT NULL
   //     AND (l.delivered_at IS NULL OR l.run_id IS NULL);
   pending = settlement_event_log.read_pending_for_scope(scope)
@@ -1068,14 +1086,18 @@ fn replay(scope: &TurnScope) -> ReplayReport:
   (live_rows, tombstoned_rows) = live_rows.partition(
                                    |r| !tombstoned_child_ids.contains(&r.child_run_id))
 
-  // ── Phase 2a — orphan + tombstoned cleanup (one multi-row write each) ──
-  for row in orphan_rows:
-    tombstone_store.write_tombstone(
-      scope, SubagentResultTombstone {
-        child_run_id: row.child_run_id,
-        terminal_status: row.terminal_status,
-        disposition: SubagentResultDisposition::DiscardedParentGone,
-      })
+  // ── Phase 2a — orphan + tombstoned cleanup (batched) ──
+  // Build all tombstones for orphan rows, write in ONE batched call.
+  // The trait MUST provide write_tombstones_batch; per-row write_tombstone
+  // calls in a for-loop reintroduce N+1 latency in the recovery hot path.
+  orphan_tombstones = orphan_rows.iter().map(|row|
+    SubagentResultTombstone {
+      child_run_id: row.child_run_id,
+      terminal_status: row.terminal_status,
+      disposition: SubagentResultDisposition::DiscardedParentGone,
+    }
+  ).collect()
+  tombstone_store.write_tombstones_batch(scope, orphan_tombstones)
   // PostgreSQL multi-row upsert (single round-trip):
   //   INSERT INTO subagent_idempotency_ledger
   //     (tenant_id, user_id, agent_id, run_id, child_run_id, terminal_kind,
@@ -1110,12 +1132,19 @@ fn replay(scope: &TurnScope) -> ReplayReport:
       retryable += 1            // pencil from prior crash
       to_attempt.push(row)
 
-  // ── Phase 3 — parallel capability loads ──
-  // join_all caps at the durable backend's connection pool. Capability
-  // payloads can be megabyte-scale; parallelize the reads.
-  load_results = join_all(to_attempt.iter().map(|r|
-    capability_result_store.load(scope, &r.result_ref)
-  ))
+  // ── Phase 3 — parallel capability loads (bounded by replay_pool_size) ──
+  // Use buffer_unordered to cap concurrent in-flight loads at the durable
+  // backend's connection-pool size. Megabyte-scale payloads × thousands of
+  // pending rows over a 4-conn pool would otherwise starve foreground
+  // writes. Implementations MUST use buffer_unordered, NOT join_all.
+  load_results = futures::stream::iter(
+                   to_attempt.iter().map(|r|
+                     capability_result_store.load(scope, &r.result_ref)
+                   )
+                 )
+                 .buffer_unordered(replay_pool_size)
+                 .collect::<Vec<_>>()
+                 .await
 
   // ── Phase 4 — per-row deliver + seal (sequential per row, parallel-OK) ──
   // Per-row because each row delivers to a different parent's mailbox.
@@ -1145,7 +1174,7 @@ fn replay(scope: &TurnScope) -> ReplayReport:
                         skipped_orphan, failed }
 ```
 
-**Performance shape (D4).** The replay algorithm is phase-batched: each phase issues O(1) DB calls regardless of `len(pending)`. Phase 0 bounds input to outstanding work via a LEFT JOIN against the ledger — historical settled log rows never enter the algorithm. Phase 1 batches both preflight reads. Phase 2 batches both ledger writes (orphan-seal + pencil-claim). Phase 3 parallelizes capability loads via `join_all`. Only Phase 4 (deliver + seal) is per-row, and only because each row's gate-store target differs — within Phase 4 the work can be further sharded across a `tokio::JoinSet` if profiling demands it. Net cost is dominated by Phase 4's per-row delivery (~5–30 ms per row depending on backend latency) rather than the historical N+1 round-trip cost. Implementations MUST cap Phase 3 concurrency at the durable backend's connection-pool size; running `join_all` over thousands of futures with a 4-connection pool will starve foreground writes. See §5.6 for the dedicated replay pool guidance.
+**Performance shape (D4).** The replay algorithm is phase-batched: each phase issues O(1) DB calls regardless of `len(pending)`. Phase 0 bounds input to outstanding work via a LEFT JOIN against the ledger — historical settled log rows never enter the algorithm. Phase 1 batches both preflight reads. Phase 2 batches both ledger writes (orphan-seal + pencil-claim). Phase 3 parallelizes capability loads via `join_all`. Only Phase 4 (deliver + seal) is per-row, and only because each row's gate-store target differs — within Phase 4 the work can be further sharded across a `tokio::JoinSet` if profiling demands it. Net cost is dominated by Phase 4's per-row delivery (~5–30 ms per row depending on backend latency) rather than the historical N+1 round-trip cost. Implementations MUST cap Phase 3 concurrency at the durable backend's connection-pool size; running `join_all` over thousands of futures with a 4-connection pool will starve foreground writes. See §5.6 for the dedicated replay pool guidance. Phase 2a's tombstone writes MUST use `write_tombstones_batch` — a single round-trip for all orphans — not a per-row `write_tombstone` loop. The trait `SubagentResultTombstoneStore` is extended in WU-C with a `write_tombstones_batch(&self, scope: &TurnScope, tombstones: Vec<SubagentResultTombstone>) -> Result<(), TombstoneStoreError>` method.
 
 **Concurrency safety.** Two-phase ledger semantics from D1 hold under batching: Phase 2b's multi-row `INSERT OR IGNORE` is row-level idempotent — racing nodes either insert a pencil row or observe an existing one; only one node's seal UPDATE will succeed (the `delivered_at IS NULL` guard arbitrates). The gate-store write in Phase 4 is independently idempotent on its own primary key (per §1). Together: at most one delivery per `(run_id, child_run_id, terminal_kind)` tuple, regardless of replica count, crash count, or fan-out scale.
 
@@ -1181,7 +1210,7 @@ INSERT OR IGNORE INTO subagent_idempotency_ledger
 VALUES (?, ?, ?, ?, ?, ?, ?);
 -- Inspect changes() == 0 to detect the "already claimed by another node" case.
 
--- Step 2: pen-receipt seal (after successful gate-store write).
+-- Step 2: pencil-receipt seal (sets delivered_at) (after successful gate-store write).
 UPDATE subagent_idempotency_ledger
    SET delivered_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
  WHERE tenant_id = ? AND run_id = ? AND child_run_id = ? AND terminal_kind = ?
@@ -1221,7 +1250,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (run_id, child_run_id, terminal_kind) DO NOTHING;
 -- Inspect rows_affected() == 0 to detect the "already claimed by another node" case.
 
--- Step 2: pen-receipt seal (after successful gate-store write).
+-- Step 2: pencil-receipt seal (sets delivered_at) (after successful gate-store write).
 UPDATE subagent_idempotency_ledger
    SET delivered_at = NOW()
  WHERE tenant_id = $1 AND run_id = $2 AND child_run_id = $3 AND terminal_kind = $4
@@ -1303,7 +1332,7 @@ RebornEventKind::SubagentReplayCompleted {
 
 All new types — `SubagentRestartReconciler` trait, `ReplayReport`, `ReconcilerError`, `DurableSubagentRestartReconciler` (libSQL impl), `DurableSubagentRestartReconcilerPostgres` (PostgreSQL impl), `NoopSubagentRestartReconciler`, and the `subagent_idempotency_ledger` migration files — live in `crates/ironclaw_reborn_event_store/`. Canonical owner of Reborn durable backend selection (`events.md` §2). Existing `BoundaryRule` covers it. Already holds both libSQL and filesystem backends. Adding typed repositories for the idempotency ledger here follows the same pattern as the existing libSQL-backed durable event log.
 
-### 5.8 Test plan
+### 5.9 Test plan
 
 Per `.claude/rules/testing.md` "Test Through the Caller" rule — unit tests on reconciler helper functions alone are not sufficient because `replay` gates a gate-store side effect (background child delivery) through multiple intervening components.
 
@@ -1327,7 +1356,7 @@ Per `.claude/rules/testing.md` "Test Through the Caller" rule — unit tests on 
 ```
 1. Run the setup from replay test above.
 2. Call reconciler.replay(&scope).await second time.
-3. Assert report.redelivered == 0, skipped == 1, failed == 0.
+3. Assert report.redelivered == 0, skipped_idempotent == 1, failed == 0.
 4. Assert gate store entry count is still 1.
 ```
 
@@ -1337,8 +1366,10 @@ Per `.claude/rules/testing.md` "Test Through the Caller" rule — unit tests on 
 1. Write settlement log entry + capability result.
 2. Write tombstone for child_run_id (simulates parent-cancel after settle, before crash).
 3. Boot + replay.
-4. Assert failed == 1, redelivered == 0.
+4. Assert report.skipped_orphan == 1, redelivered == 0, failed == 0.
+   // Tombstone detected in Phase 1 → moved to tombstoned_rows → sealed+skipped.
 5. Assert gate store has no entry for child_run_id.
+6. Assert the idempotency ledger row exists with delivered_at NOT NULL (sealed).
 ```
 
 **Missing-capability-result test:**
@@ -1383,7 +1414,7 @@ Guards D9: orphan rows are cleaned up exactly once and never reprocessed.
 
 All tests go in `crates/ironclaw_reborn_event_store/tests/` (contract-test tier, matching `durable_event_store_contract.rs` + `filesystem_event_log_contract.rs` pattern). Run under `cargo test --features integration` for backend-dependent variants.
 
-### 5.9 Risks / open questions
+### 5.10 Risks / open questions
 
 - **Replay throughput.** Crash mid-flight on large fan-out (e.g., 100 children all settled) → reconciler reads 100 log entries, 100 ledger `INSERT OR IGNORE` attempts, 100 gate store writes synchronously with boot. Bounded by `SubagentSpawnLimits.max_depth` = 1 + future `max_concurrent_background_children` cap → per-boot replay time bounded. If concurrent cap is raised significantly, reconciler should be made non-blocking (run in background task, gate new background spawn acceptance until replay completes). Track as follow-up when WU-D sets the concurrent cap.
 - **Stale-children GC.** Orphan cleanup (D9) handles the case where the parent run is gone by the time the reconciler runs — those entries are tombstoned and sealed in one pass. Stale tombstones from a deployment where `BoundedSubagentResultTombstoneStore` evicted entries before the durable migration are a separate concern; the durable `FilesystemSubagentTombstoneStore` (§3) eliminates eviction by construction. A time-based TTL GC for long-completed ledger rows is a future optimization, not a correctness requirement under A+A.
@@ -1393,7 +1424,7 @@ All tests go in `crates/ironclaw_reborn_event_store/tests/` (contract-test tier,
 - **Settlement log growth.** Phase 0's LEFT JOIN bounds replay input by outstanding pencil-or-missing rows, so replay's scan size stays proportional to outstanding work — not historical log size. Long-term, sealed rows older than (e.g.) 90 days should be moved to a `subagent_gate_settlement_log_archive` table or summarized via materialized view. Track as ops follow-up; not WU-C scope.
 - **Replay pool sizing under load.** Default `replay_pool_size = 4` is fine for typical fan-outs. At sustained 1000+ pending rows per scope, tuning to 8 or 16 may be warranted. Operators surface this via the `replay_duration_seconds` P95 metric. Spec does not mandate auto-tuning; sizing knob is operator-controlled per `RebornEventStoreConfig`.
 
-### 5.10 HA leader election (future, NOT WU-C scope)
+### 5.11 HA leader election (future, NOT WU-C scope)
 
 **Problem.** In an HA active-active deployment, every replica's reconciler runs `replay` on all scopes the replica owns. Phase 2b's `INSERT OR IGNORE` arbitrates correctness, but every replica performs the same scan + writes — N× redundant DB load. At a 50-replica × 100-scope deployment that's 5,000 reconciler scan+write transactions per boot, all hitting the same row partitions. The A.A jitter mitigates the deploy-time burst but does not reduce total work.
 
