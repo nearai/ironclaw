@@ -1,0 +1,474 @@
+//! Caller-level network-control contract for the WebChat v2 surface,
+//! focused on the gaps that the composition crate's `webui_v2_serve.rs`
+//! and the OAuth-route tests do NOT already cover — the rules that ride
+//! on the **host-owned public SSO mount** (`webui_v2_auth_router`) plus
+//! the CORS fail-closed default.
+//!
+//! Already locked elsewhere (cross-referenced, not duplicated here):
+//! CORS allow / reject-with-configured-origin, descriptor body-limit 413
+//! and rate-limit 429 on the v2 facade routes, and WebSocket
+//! same-origin 403 all live in
+//! `ironclaw_reborn_composition/tests/webui_v2_serve.rs`; OAuth CSRF
+//! state single-use, cross-provider replay, and redirect sanitization
+//! live in `google_oauth_routes.rs` / `pending.rs`.
+//!
+//! This file adds, by driving the composed `webui_v2_app` through
+//! `tower::ServiceExt::oneshot`:
+//!
+//! 1. The public SSO routes inherit the descriptor-driven **per-IP**
+//!    rate limit (`/auth/login/{provider}` → 429 after the 60/60s
+//!    budget) — a distinct scope from the facade's per-caller limiter.
+//! 2. The SSO `POST /auth/session/exchange` route enforces its 1 KiB
+//!    body cap (oversized → 413 before the handler runs).
+//! 3. An empty CORS allow-list fails closed — no `Access-Control-Allow-
+//!    Origin` is echoed for any cross-origin preflight.
+//!
+//! Supports the CSRF/origin/CORS + body/rate/connection-limit slice of
+//! the #3615 WebUI security parity audit.
+
+#![cfg(feature = "dev-in-memory-session")]
+
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{HeaderValue, Method, Request, StatusCode, header};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_product_workflow::{
+    LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
+};
+use ironclaw_reborn_composition::{
+    RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
+};
+use ironclaw_reborn_webui_ingress::{
+    EmailUserDirectory, InMemorySessionStore, OAuthError, OAuthProvider, OAuthProviderName,
+    OAuthRouterConfig, OAuthUserProfile, SessionAuthenticator, SessionStore, webui_v2_auth_router,
+};
+use ironclaw_threads::{SessionThreadRecord, ThreadScope};
+use tower::ServiceExt;
+
+const TENANT: &str = "tenant-a";
+const AGENT: &str = "agent-default";
+const PROJECT: &str = "project-default";
+const PROVIDER: &str = "google";
+
+// ─── stub facade ──────────────────────────────────────────────────────
+
+/// Minimal `RebornServicesApi` — these tests never reach a v2 handler
+/// (every assertion is decided by a middleware: rate limit, body limit,
+/// or CORS), so every method rejects/panics. Mirrors the stub shape in
+/// `session_round_trip.rs`.
+#[derive(Default)]
+struct StubServices {
+    create_thread_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
+}
+
+#[async_trait]
+impl RebornServicesApi for StubServices {
+    async fn create_thread(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        _request: WebUiCreateThreadRequest,
+    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        self.create_thread_callers
+            .lock()
+            .expect("lock")
+            .push(caller);
+        Ok(RebornCreateThreadResponse {
+            thread: SessionThreadRecord {
+                thread_id: ThreadId::new("thread.fake").expect("thread"),
+                scope: ThreadScope {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    agent_id: AgentId::new("agent.fake").expect("agent"),
+                    project_id: Some(ProjectId::new("project.fake").expect("project")),
+                    owner_user_id: Some(UserId::new("alice@example.com").expect("user")),
+                    mission_id: None,
+                },
+                created_by_actor_id: "alice@example.com".to_string(),
+                title: None,
+                metadata_json: None,
+                goal: None,
+            },
+        })
+    }
+
+    async fn submit_turn(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiSendMessageRequest,
+    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        unreachable!("network-limit tests do not drive submit_turn")
+    }
+
+    async fn get_timeline(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornTimelineRequest,
+    ) -> Result<RebornTimelineResponse, RebornServicesError> {
+        unreachable!("network-limit tests do not drive get_timeline")
+    }
+
+    async fn stream_events(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+        unreachable!("network-limit tests do not drive stream_events")
+    }
+
+    async fn get_run_state(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornGetRunStateRequest,
+    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
+        unreachable!("network-limit tests do not drive get_run_state")
+    }
+
+    async fn cancel_run(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiCancelRunRequest,
+    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+        unreachable!("network-limit tests do not drive cancel_run")
+    }
+
+    async fn resolve_gate(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiResolveGateRequest,
+    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        unreachable!("network-limit tests do not drive resolve_gate")
+    }
+
+    async fn list_threads(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiListThreadsRequest,
+    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        Ok(RebornListThreadsResponse {
+            threads: Vec::new(),
+            next_cursor: None,
+        })
+    }
+
+    async fn delete_thread(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
+        unreachable!("network-limit tests do not drive delete_thread")
+    }
+
+    async fn list_automations(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn get_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_extensions(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn search_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn install_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn read_skill_content(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn update_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn remove_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_extension_registry(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn install_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn activate_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn remove_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn setup_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+        _request: WebUiSetupExtensionRequest,
+    ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+}
+
+// ─── stub OAuth provider ──────────────────────────────────────────────
+
+/// Minimal provider so `/auth/login/{provider}` resolves and mints a
+/// pending flow + redirect. `exchange_code` is never reached by these
+/// tests. Mirrors the stub in `session_round_trip.rs`.
+struct StubProvider {
+    name: OAuthProviderName,
+}
+
+impl StubProvider {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            name: OAuthProviderName::new(PROVIDER).expect("name"),
+        })
+    }
+}
+
+#[async_trait]
+impl OAuthProvider for StubProvider {
+    fn name(&self) -> &OAuthProviderName {
+        &self.name
+    }
+    fn authorization_url(&self, callback_url: &str, state: &str, _challenge: &str) -> String {
+        format!(
+            "https://accounts.google.test/o/oauth2/v2/auth?redirect_uri={}&state={}",
+            urlencoding::encode(callback_url),
+            urlencoding::encode(state),
+        )
+    }
+    async fn exchange_code(
+        &self,
+        _code: &str,
+        _callback_url: &str,
+        _verifier: &str,
+    ) -> Result<OAuthUserProfile, OAuthError> {
+        unreachable!("network-limit tests do not drive the OAuth callback")
+    }
+}
+
+// ─── harness ──────────────────────────────────────────────────────────
+
+/// Compose `webui_v2_app` with a session authenticator plus the public
+/// SSO mount, parameterized on the CORS allow-list so the fail-closed
+/// case can pass an empty list.
+fn build_app(allowed_origins: Vec<HeaderValue>) -> axum::Router {
+    let session_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let authenticator = Arc::new(SessionAuthenticator::new(session_store.clone()));
+
+    let oauth_mount = webui_v2_auth_router(OAuthRouterConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        session_store as Arc<dyn SessionStore>,
+        Arc::new(EmailUserDirectory),
+        vec![StubProvider::new() as Arc<dyn OAuthProvider>],
+        "https://gateway.example",
+    ));
+
+    let bundle = RebornWebuiBundle {
+        api: Arc::new(StubServices::default()),
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        authenticator,
+        allowed_origins,
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_public_route_mount(oauth_mount);
+    webui_v2_app(bundle, config).expect("webui v2 app")
+}
+
+fn default_origins() -> Vec<HeaderValue> {
+    vec![HeaderValue::from_static("http://localhost:1234")]
+}
+
+/// Tag a request with a fixed peer address so the per-IP rate limiter
+/// keys every request in a test to the same bucket. Host composition
+/// injects this via `into_make_service_with_connect_info`.
+fn with_peer(mut req: Request<Body>) -> Request<Body> {
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
+    req
+}
+
+fn login_request() -> Request<Body> {
+    with_peer(
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/auth/login/{PROVIDER}?redirect_after=%2Fv2"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+}
+
+// ─── tests ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn sso_login_enforces_per_ip_rate_limit() {
+    // The public SSO mount declares `RateLimitScope::PerIp` at 60 req /
+    // 60s on `/auth/login/{provider}` (a different scope from the v2
+    // facade's per-caller limiter). A single IP must be cut off after
+    // the budget so an unauthenticated login flood is bounded.
+    let app = build_app(default_origins());
+
+    for i in 0..60 {
+        let response = app.clone().oneshot(login_request()).await.expect("oneshot");
+        assert_eq!(
+            response.status(),
+            StatusCode::TEMPORARY_REDIRECT,
+            "login {i} within budget must redirect to the provider",
+        );
+    }
+
+    let blocked = app.oneshot(login_request()).await.expect("oneshot");
+    assert_eq!(
+        blocked.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the 61st login from the same IP must be rate-limited",
+    );
+}
+
+#[tokio::test]
+async fn sso_session_exchange_enforces_body_limit() {
+    // `POST /auth/session/exchange` declares a 1 KiB body cap. An
+    // oversized payload must be rejected with 413 before the handler
+    // parses it (defense against unbounded request bodies on a public
+    // route).
+    let app = build_app(default_origins());
+
+    let oversized = "x".repeat(2048);
+    let request = with_peer(
+        Request::builder()
+            .method(Method::POST)
+            .uri("/auth/session/exchange")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(oversized))
+            .expect("request"),
+    );
+    let response = app.oneshot(request).await.expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "an oversized exchange body must be rejected with 413",
+    );
+}
+
+#[tokio::test]
+async fn empty_cors_allowlist_fails_closed() {
+    // An empty allow-list must reject every cross-origin request by
+    // never echoing `Access-Control-Allow-Origin` — the gateway must
+    // not reflect an attacker-supplied origin.
+    let app = build_app(Vec::new());
+
+    let preflight = with_peer(
+        Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/webchat/v2/threads")
+            .header(header::ORIGIN, "http://evil.example.com")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .body(Body::empty())
+            .expect("request"),
+    );
+    let response = app.oneshot(preflight).await.expect("oneshot");
+    assert!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none(),
+        "an empty CORS allow-list must not echo any origin",
+    );
+}
