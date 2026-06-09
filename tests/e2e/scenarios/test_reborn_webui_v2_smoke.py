@@ -187,10 +187,25 @@ async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_fac
 
 @pytest.fixture(scope="module")
 async def reborn_v2_browser():
-    """Chromium instance for the v2 smoke (independent of the legacy gateway)."""
+    """Chromium instance for the v2 smoke (independent of the legacy gateway).
+
+    Chromium's cold start can contend with the binary build and server startup,
+    so launch with a generous timeout and one retry rather than letting the
+    default 30s connect window flake the whole module.
+    """
+    from playwright.async_api import Error as PlaywrightError
+
     headless = os.environ.get("HEADED", "").strip() not in ("1", "true")
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+        browser = None
+        for attempt in range(3):
+            try:
+                browser = await p.chromium.launch(headless=headless, timeout=60000)
+                break
+            except PlaywrightError:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(1)
         yield browser
         await browser.close()
 
