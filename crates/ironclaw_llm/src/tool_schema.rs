@@ -1,5 +1,7 @@
 use serde_json::Value as JsonValue;
 
+use crate::provider::{ToolCall, ToolDefinition};
+
 /// Policy for shaping tool schemas at the provider boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToolSchemaPolicy {
@@ -398,9 +400,234 @@ fn make_nullable(schema: &mut JsonValue) {
     }
 }
 
+/// Strip "unset optional" placeholder values that the strict-mode tool-schema
+/// transform induces, from each tool call's arguments.
+///
+/// `shape_tool_schema(StrictOpenAi, ..)` forces every property to be `required`
+/// and makes the originally-optional ones nullable, because OpenAI strict
+/// function-calling has no notion of an absent property. Models therefore fill
+/// the optionals they aren't using with a placeholder — `null` for most, `""`
+/// for some (e.g. gpt-5.2-codex). Validating those against the tool's *original*
+/// schema (where the fields are optional and non-nullable) would reject them, so
+/// this removes them: the inverse of that transform, keyed on the effective
+/// `required` set (the original schema's, unioned across `oneOf`/`anyOf`/`allOf`
+/// variants — so tagged-enum tools keep their variant-required fields), leaving
+/// required fields and genuinely provided values intact.
+///
+/// `strip_empty_strings` should be `true` only for the codex family, which fills
+/// unset optionals with `""`; other strict providers send `null`, so passing
+/// `false` preserves a deliberately-empty string they may have sent.
+///
+/// Only the strict providers (Codex / OpenAI / `RigAdapter`) call this; NEAR
+/// AI's `FlattenOnly` path never induces the placeholders and must not be
+/// touched. (When the RC3/M9 `NormalizingProvider` decorator lands it should
+/// adopt this as a Class-A shape invariant.)
+pub(crate) fn strip_unset_optional_fields(
+    tool_calls: &mut [ToolCall],
+    tools: &[ToolDefinition],
+    strip_empty_strings: bool,
+) {
+    for call in tool_calls.iter_mut() {
+        if let Some(tool) = tools.iter().find(|tool| tool.name == call.name) {
+            strip_unset_optionals_in_value(
+                &mut call.arguments,
+                &tool.parameters,
+                strip_empty_strings,
+            );
+        }
+    }
+}
+
+/// Recursive worker for [`strip_unset_optional_fields`]: walks `value` alongside
+/// its original `schema`, dropping unset-placeholder values on the fields the
+/// schema's *top-level* `required` marks optional, and recursing into nested
+/// objects and array items.
+///
+/// Top-level on purpose: a tagged-enum tool is a top-level `oneOf`/`anyOf`, which
+/// the forward transform (`flatten_top_level`) rewrites to `required: []` +
+/// `additionalProperties: true`, so dropping every placeholder is exactly what
+/// collapses the model's reply to the single variant it populated. Unioning the
+/// variants' `required` sets would keep a non-selected variant's placeholder and
+/// make the args match more than one `oneOf` branch (regressing e.g.
+/// `skill_install`/`routine`), so keep it top-level.
+fn strip_unset_optionals_in_value(
+    value: &mut JsonValue,
+    schema: &JsonValue,
+    strip_empty_strings: bool,
+) {
+    match value {
+        JsonValue::Object(map) => {
+            let required: Vec<&str> = schema
+                .get("required")
+                .and_then(JsonValue::as_array)
+                .map(|names| names.iter().filter_map(JsonValue::as_str).collect())
+                .unwrap_or_default();
+            let properties = schema.get("properties").and_then(JsonValue::as_object);
+            let to_remove: Vec<String> = map
+                .iter()
+                .filter(|(key, val)| {
+                    !required.contains(&key.as_str())
+                        && is_unset_placeholder(val, strip_empty_strings)
+                })
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in &to_remove {
+                map.remove(key);
+            }
+            for (key, val) in map.iter_mut() {
+                if let Some(prop_schema) = properties.and_then(|props| props.get(key.as_str())) {
+                    strip_unset_optionals_in_value(val, prop_schema, strip_empty_strings);
+                }
+            }
+        }
+        JsonValue::Array(items) => {
+            if let Some(item_schema) = schema.get("items") {
+                for item in items.iter_mut() {
+                    strip_unset_optionals_in_value(item, item_schema, strip_empty_strings);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A value the model emitted only as a strict-mode placeholder for an unset
+/// field: `null` always, or an empty string when `strip_empty_strings` is set.
+/// The codex family fills unset optionals with `""`; other strict providers send
+/// `null`, so their callers pass `false` to preserve a deliberately-empty string.
+fn is_unset_placeholder(value: &JsonValue, strip_empty_strings: bool) -> bool {
+    match value {
+        JsonValue::Null => true,
+        JsonValue::String(string) => strip_empty_strings && string.is_empty(),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_strip_unset_optional_fields_drops_optional_null_and_empty() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "operation": { "type": "string" },
+                "format": { "type": "string" },
+                "timezone": { "type": "string" }
+            }
+        });
+        let mut value = serde_json::json!({ "operation": "now", "format": null, "timezone": "" });
+        strip_unset_optionals_in_value(&mut value, &schema, true);
+        assert_eq!(value, serde_json::json!({ "operation": "now" }));
+    }
+
+    #[test]
+    fn test_strip_unset_optional_fields_keeps_required_placeholders() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "id": { "type": "string" }, "note": { "type": "string" } },
+            "required": ["id"]
+        });
+        let mut value = serde_json::json!({ "id": null, "note": null });
+        strip_unset_optionals_in_value(&mut value, &schema, true);
+        // The required `id` is kept (it surfaces as a validation error
+        // downstream); only the optional `note` placeholder is dropped.
+        assert_eq!(value, serde_json::json!({ "id": null }));
+    }
+
+    #[test]
+    fn test_strip_unset_optional_fields_collapses_top_level_oneof_to_one_variant() {
+        // A tagged-enum tool (top-level `oneOf`, mirroring `skill_install`) has no
+        // top-level `required`, and the forward transform flattens it to a
+        // permissive object. The model populates the variant it chose (`url`) and
+        // leaves the other variant's field as a placeholder; stripping every
+        // placeholder collapses the args to the single matching variant. Verified
+        // end-to-end on a live build by driving `skill_install` through the agent
+        // (the call passed validation and reached the approval gate). Unioning the
+        // variants' `required` would instead keep `content` and match both.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": { "type": "string" },
+                "url": { "type": "string" }
+            },
+            "oneOf": [ { "required": ["content"] }, { "required": ["url"] } ],
+            "additionalProperties": false
+        });
+        let mut value = serde_json::json!({ "url": "https://example.com/SKILL.md", "content": "" });
+        strip_unset_optionals_in_value(&mut value, &schema, true);
+        assert_eq!(
+            value,
+            serde_json::json!({ "url": "https://example.com/SKILL.md" })
+        );
+    }
+
+    #[test]
+    fn test_strip_unset_optional_fields_recurses_objects_and_arrays() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": { "a": { "type": "string" }, "b": { "type": "string" } },
+                        "required": ["a"]
+                    }
+                }
+            }
+        });
+        let mut value =
+            serde_json::json!({ "items": [ { "a": "x", "b": null }, { "a": "y", "b": "" } ] });
+        strip_unset_optionals_in_value(&mut value, &schema, true);
+        assert_eq!(
+            value,
+            serde_json::json!({ "items": [ { "a": "x" }, { "a": "y" } ] })
+        );
+    }
+
+    #[test]
+    fn test_strip_unset_optional_fields_preserves_empty_string_when_disabled() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "prefix": { "type": "string" } }
+        });
+        // With empty-string stripping off (non-codex providers), a deliberately
+        // empty optional string is preserved...
+        let mut keep = serde_json::json!({ "prefix": "" });
+        strip_unset_optionals_in_value(&mut keep, &schema, false);
+        assert_eq!(keep, serde_json::json!({ "prefix": "" }));
+        // ...but `null` is always a placeholder and is still dropped.
+        let mut drop_null = serde_json::json!({ "prefix": null });
+        strip_unset_optionals_in_value(&mut drop_null, &schema, false);
+        assert_eq!(drop_null, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_strip_unset_optional_fields_matches_calls_to_their_tool_schema() {
+        let tools = vec![ToolDefinition {
+            name: "time".to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "operation": { "type": "string" }, "format": { "type": "string" } }
+            }),
+        }];
+        let mut calls = vec![ToolCall {
+            id: "1".to_string(),
+            name: "time".to_string(),
+            arguments: serde_json::json!({ "operation": "now", "format": null }),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }];
+        strip_unset_optional_fields(&mut calls, &tools, true);
+        assert_eq!(
+            calls[0].arguments,
+            serde_json::json!({ "operation": "now" })
+        );
+    }
 
     #[test]
     fn test_flatten_only_preserves_optional_object_fields() {
