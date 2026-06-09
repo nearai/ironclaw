@@ -93,10 +93,17 @@ impl ParsedInvite {
         format!("{}/v1/onboard", self.origin)
     }
 
-    /// SHA-256 hex of the invite code — used for the pending key filename
-    /// and matches the server's allowlist subject_hash scheme.
+    /// Canonical server allowlist subject hash for the invite code.
     pub fn invite_hash(&self) -> String {
-        hex::encode(Sha256::digest(self.code.as_bytes()))
+        let mut hasher = Sha256::new();
+        hasher.update(b"invite:");
+        hasher.update(self.code.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    /// Filename-safe stable id for local pending key material.
+    pub fn pending_key_hash(&self) -> String {
+        self.invite_hash().replace(':', "_")
     }
 }
 
@@ -264,10 +271,14 @@ mod tests {
     }
 
     #[test]
-    fn invite_hash_is_sha256_hex() {
+    fn invite_hash_is_sha256_prefixed_hex() {
         let p = ParsedInvite::parse("https://h.example/onboard#INVAAAA").unwrap();
-        assert_eq!(p.invite_hash().len(), 64);
-        assert!(p.invite_hash().chars().all(|c| c.is_ascii_hexdigit()));
+        let hash = p.invite_hash();
+        assert_eq!(hash.len(), 71);
+        let digest = hash
+            .strip_prefix("sha256:")
+            .expect("invite hash must use canonical sha256 prefix");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -279,7 +290,16 @@ mod tests {
         let p = ParsedInvite::parse("https://h.example/onboard#INVAAAA").unwrap();
         assert_eq!(
             p.invite_hash(),
-            "d46e4ce5d6bce3d361751cd8d176d1c7f0bf626419939cfc317cacd481e6cfd2"
+            "sha256:06f41d1d6db426b1a7da035727af91450134b3711b4903e5c701bb912ec5737a"
+        );
+    }
+
+    #[test]
+    fn pending_key_hash_is_filename_safe() {
+        let p = ParsedInvite::parse("https://h.example/onboard#INVAAAA").unwrap();
+        assert_eq!(
+            p.pending_key_hash(),
+            "sha256_06f41d1d6db426b1a7da035727af91450134b3711b4903e5c701bb912ec5737a"
         );
     }
 

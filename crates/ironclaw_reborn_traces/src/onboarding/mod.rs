@@ -213,7 +213,7 @@ pub async fn onboard_at_dir_with_sink(
     let invite = ParsedInvite::parse(invite_url)?;
 
     // Step 2: Stage the keypair BEFORE any network call (retry-safe).
-    let pending = DeviceKeypair::load_or_generate_pending(dir, &invite.invite_hash())?;
+    let pending = DeviceKeypair::load_or_generate_pending(dir, &invite.pending_key_hash())?;
 
     // Step 3: POST to the onboard endpoint. Terminal invite rejections discard
     // the pending key inside this call; transient failures keep it for retry.
@@ -261,7 +261,7 @@ pub async fn onboard_at_dir_with_sink(
     // the pending file must NOT fail the call. A stale pending file is
     // harmless and self-heals — any later retry reloads the same key, performs
     // the idempotent tenant-file + policy overwrite, and discards it again.
-    if let Err(e) = DeviceKeypair::discard_pending(dir, &invite.invite_hash()) {
+    if let Err(e) = DeviceKeypair::discard_pending(dir, &invite.pending_key_hash()) {
         tracing::debug!("onboarding finalize: failed to remove pending device key (harmless): {e}");
     }
 
@@ -335,7 +335,8 @@ async fn post_onboard_request(
             OnboardErrorCode::InviteNotValid
                 | OnboardErrorCode::InviteMalformed
                 | OnboardErrorCode::DeviceKeyMalformed
-        ) && let Err(discard_err) = DeviceKeypair::discard_pending(dir, &invite.invite_hash())
+        ) && let Err(discard_err) =
+            DeviceKeypair::discard_pending(dir, &invite.pending_key_hash())
         {
             // Log cleanup failure (no key material; path is local and low-sensitivity).
             tracing::debug!(
@@ -636,9 +637,10 @@ mod tests {
             device_key::tenant_hash("tenant-a")
         ));
         assert!(tenant_key.exists(), "tenant key file must exist");
-        let pending = dir
-            .path()
-            .join(format!("device_keys/pending/{}.json", invite.invite_hash()));
+        let pending = dir.path().join(format!(
+            "device_keys/pending/{}.json",
+            invite.pending_key_hash()
+        ));
         assert!(
             !pending.exists(),
             "pending file must be gone after the post-policy-write finalize"
@@ -708,9 +710,10 @@ mod tests {
 
         // Pending key directory should be empty or not contain the pending file.
         let invite = ParsedInvite::parse(&invite_url).unwrap();
-        let pending = dir
-            .path()
-            .join(format!("device_keys/pending/{}.json", invite.invite_hash()));
+        let pending = dir.path().join(format!(
+            "device_keys/pending/{}.json",
+            invite.pending_key_hash()
+        ));
         assert!(
             !pending.exists(),
             "pending key must be discarded on InviteNotValid"
@@ -738,9 +741,10 @@ mod tests {
 
         // Pending file must still exist for retry.
         let invite = ParsedInvite::parse(&invite_url).unwrap();
-        let pending = dir
-            .path()
-            .join(format!("device_keys/pending/{}.json", invite.invite_hash()));
+        let pending = dir.path().join(format!(
+            "device_keys/pending/{}.json",
+            invite.pending_key_hash()
+        ));
         assert!(
             pending.exists(),
             "pending key must be retained on transient error"
@@ -864,9 +868,10 @@ mod tests {
 
         // Read the staged pending key's public key for later comparison.
         let invite = ParsedInvite::parse(&invite_url).unwrap();
-        let pending_path = dir
-            .path()
-            .join(format!("device_keys/pending/{}.json", invite.invite_hash()));
+        let pending_path = dir.path().join(format!(
+            "device_keys/pending/{}.json",
+            invite.pending_key_hash()
+        ));
         assert!(
             pending_path.exists(),
             "pending file must exist after transient failure"
@@ -935,9 +940,10 @@ mod tests {
 
         // The pending key MUST survive the failed policy write (no lockout).
         let invite = ParsedInvite::parse(&invite_url).unwrap();
-        let pending_path = dir
-            .path()
-            .join(format!("device_keys/pending/{}.json", invite.invite_hash()));
+        let pending_path = dir.path().join(format!(
+            "device_keys/pending/{}.json",
+            invite.pending_key_hash()
+        ));
         assert!(
             pending_path.exists(),
             "pending key must survive a failed policy write"
@@ -1154,7 +1160,8 @@ mod tests {
         // Stage the pending key the same way onboard_at_dir will, so we can
         // derive the device_key_id the client will cross-check against.
         let invite = ParsedInvite::parse(invite_url).unwrap();
-        let pending = DeviceKeypair::load_or_generate_pending(dir, &invite.invite_hash()).unwrap();
+        let pending =
+            DeviceKeypair::load_or_generate_pending(dir, &invite.pending_key_hash()).unwrap();
         let device_key_id = derive_device_key_id(&pending.public_key_b64).unwrap();
         serde_json::to_vec(&serde_json::json!({
             "schema_version": "trace_commons.onboard_response.v1",
@@ -1221,9 +1228,10 @@ mod tests {
             "expected InviteRejected(InviteNotValid), got: {err}"
         );
         let invite = ParsedInvite::parse(invite_url).unwrap();
-        let pending = dir
-            .path()
-            .join(format!("device_keys/pending/{}.json", invite.invite_hash()));
+        let pending = dir.path().join(format!(
+            "device_keys/pending/{}.json",
+            invite.pending_key_hash()
+        ));
         assert!(
             !pending.exists(),
             "pending key must be discarded on InviteNotValid through the sink"
