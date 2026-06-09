@@ -3,7 +3,6 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile.reborn"
 
 [deploy]
-startCommand = "/usr/local/bin/ironclaw-reborn-entrypoint"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
