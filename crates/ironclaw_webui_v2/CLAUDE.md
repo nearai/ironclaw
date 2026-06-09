@@ -78,6 +78,8 @@ browser-reachable.
 | `webui.v2.operator.get_setup` | GET | `/api/webchat/v2/operator/setup` | None | `ProjectionOnly` |
 | `webui.v2.operator.run_setup` | POST | `/api/webchat/v2/operator/setup` | None | `ProductWorkflow` |
 | `webui.v2.operator.list_config` | GET | `/api/webchat/v2/operator/config` | None | `ProjectionOnly` |
+| `webui.v2.operator.get_config_key` | GET | `/api/webchat/v2/operator/config/{key}` | None | `ProjectionOnly` |
+| `webui.v2.operator.set_config_key` | POST | `/api/webchat/v2/operator/config/{key}` | None | `ProductWorkflow` |
 | `webui.v2.operator.validate_config` | POST | `/api/webchat/v2/operator/config/validate` | None | `ProductWorkflow` |
 | `webui.v2.operator.diagnostics` | GET | `/api/webchat/v2/operator/diagnostics` | None | `ProjectionOnly` |
 | `webui.v2.operator.status` | GET | `/api/webchat/v2/operator/status` | None | `ProjectionOnly` |
