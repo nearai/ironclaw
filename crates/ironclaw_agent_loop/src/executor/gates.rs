@@ -68,6 +68,8 @@ impl ExecutorStage<GateInput> for GateStage {
                         approval_request_id: resume.approval_request_id,
                         invocation_id: resume.invocation_id,
                         input_ref: resume.input_ref,
+                        input: resume.input,
+                        estimate: resume.estimate,
                     });
                 match CheckpointStage.cancel_if_requested(ctx, state).await? {
                     CancelCheck::Continue(next) => state = *next,

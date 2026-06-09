@@ -304,7 +304,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         enum Slot {
             /// Hook produced a final outcome — no inner call needed.
             Resolved {
-                outcome: CapabilityOutcome,
+                outcome: Box<CapabilityOutcome>,
                 provider: Option<ironclaw_host_api::ExtensionId>,
             },
             /// Hooks allowed; the inner port will produce the outcome.
@@ -326,7 +326,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
                 Some(translated) => {
                     let is_suspension = translated.is_suspension();
                     slots.push(Slot::Resolved {
-                        outcome: translated,
+                        outcome: Box::new(translated),
                         provider,
                     });
                     if is_suspension && stop_on_first_suspension {
@@ -418,7 +418,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         let mut pending_after_stop = false;
         for slot in slots {
             let outcome_and_provider = match slot {
-                Slot::Resolved { outcome, provider } => Some((outcome, provider)),
+                Slot::Resolved { outcome, provider } => Some((*outcome, provider)),
                 Slot::Pending { provider } => {
                     if pending_after_stop {
                         // We already stopped on a prior suspension and

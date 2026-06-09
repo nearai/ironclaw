@@ -641,6 +641,8 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
     else {
         panic!("approval gate must carry resume metadata, got {first:?}");
     };
+    assert_eq!(resume.input, serde_json::json!({ "message": "hello" }));
+    assert_eq!(resume.estimate, ResourceEstimate::default());
 
     let surface = port
         .visible_capabilities(VisibleCapabilityRequest {})

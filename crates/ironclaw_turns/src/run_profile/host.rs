@@ -6,8 +6,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, RuntimeCredentialAuthRequirement,
-    RuntimeKind, ThreadId,
+    ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, ResourceEstimate,
+    RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -1390,6 +1390,8 @@ pub struct CapabilityApprovalResume {
     pub approval_request_id: ApprovalRequestId,
     pub invocation_id: InvocationId,
     pub input_ref: CapabilityInputRef,
+    pub input: serde_json::Value,
+    pub estimate: ResourceEstimate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

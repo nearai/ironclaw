@@ -1,4 +1,4 @@
-use ironclaw_host_api::{ApprovalRequestId, InvocationId};
+use ironclaw_host_api::{ApprovalRequestId, InvocationId, ResourceEstimate};
 use ironclaw_turns::{
     LoopCancelledReasonKind, LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopFailureKind,
     LoopGateRef, LoopResultRef, TurnRunId,
@@ -1766,6 +1766,8 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
         approval_request_id: ApprovalRequestId::new(),
         invocation_id: InvocationId::new(),
         input_ref: original_input_ref.clone(),
+        input: serde_json::json!({ "message": "hello" }),
+        estimate: ResourceEstimate::default(),
     };
     let completed_ref = LoopResultRef::new("result:approval-resumed").expect("valid");
     let mut replayed_response = calls_response();
@@ -1813,6 +1815,8 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
         approval_resume.approval_request_id
     );
     assert_eq!(pending_resume.invocation_id, approval_resume.invocation_id);
+    assert_eq!(pending_resume.input, approval_resume.input);
+    assert_eq!(pending_resume.estimate, approval_resume.estimate);
 
     let second_exit = executor
         .execute_family(&crate::families::default(), &host, before_block_state)

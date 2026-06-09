@@ -17,7 +17,7 @@ pub use slots::{
     ReplyAdmissionStrategyState, StopStrategyState,
 };
 
-use ironclaw_host_api::{ApprovalRequestId, CapabilityId, InvocationId};
+use ironclaw_host_api::{ApprovalRequestId, CapabilityId, InvocationId, ResourceEstimate};
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, LoopResultRef,
     run_profile::{CapabilityInputRef, CapabilitySurfaceVersion, LoopInputCursor, LoopRunContext},
@@ -91,6 +91,8 @@ pub struct PendingApprovalResume {
     pub approval_request_id: ApprovalRequestId,
     pub invocation_id: InvocationId,
     pub input_ref: CapabilityInputRef,
+    pub input: serde_json::Value,
+    pub estimate: ResourceEstimate,
 }
 
 impl LoopExecutionState {

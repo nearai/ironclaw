@@ -143,6 +143,8 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                                     approval_request_id: resume.approval_request_id,
                                     invocation_id: resume.invocation_id,
                                     input_ref: resume.input_ref,
+                                    input: resume.input,
+                                    estimate: resume.estimate,
                                 },
                             );
                         capability_invocation_from_candidate(call, resume)

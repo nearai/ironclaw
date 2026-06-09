@@ -6,8 +6,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
-    ExecutionContext, ExtensionId, InvocationId, MountView, Principal, RuntimeKind,
-    sha256_digest_token,
+    ExecutionContext, ExtensionId, InvocationId, MountView, Principal, ResourceEstimate,
+    RuntimeKind, sha256_digest_token,
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
@@ -28,6 +28,7 @@ use ironclaw_turns::{
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
+use serde_json::Value;
 use tokio::sync::Notify;
 
 mod provider_input;
@@ -333,11 +334,35 @@ enum DispatchRecord {
 
 struct RuntimeOutcomeCompletion<'a> {
     input_ref: &'a CapabilityInputRef,
+    input: Option<&'a Value>,
+    estimate: Option<&'a ResourceEstimate>,
     invocation_id: InvocationId,
     requested_capability_id: &'a CapabilityId,
     provider: ExtensionId,
     runtime: RuntimeKind,
     outcome: RuntimeCapabilityOutcome,
+}
+
+struct RuntimeOutcomeConversion<'a> {
+    input_ref: &'a CapabilityInputRef,
+    input: Option<&'a Value>,
+    estimate: Option<&'a ResourceEstimate>,
+    invocation_id: InvocationId,
+    requested_capability_id: &'a CapabilityId,
+    outcome: RuntimeCapabilityOutcome,
+}
+
+impl<'a> RuntimeOutcomeCompletion<'a> {
+    fn conversion(&self) -> RuntimeOutcomeConversion<'a> {
+        RuntimeOutcomeConversion {
+            input_ref: self.input_ref,
+            input: self.input,
+            estimate: self.estimate,
+            invocation_id: self.invocation_id,
+            requested_capability_id: self.requested_capability_id,
+            outcome: self.outcome.clone(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -812,10 +837,7 @@ impl HostRuntimeLoopCapabilityPort {
         let result = runtime_outcome_to_loop(
             &self.run_context,
             self.result_writer.as_ref(),
-            completion.input_ref,
-            completion.invocation_id,
-            completion.requested_capability_id,
-            completion.outcome.clone(),
+            completion.conversion(),
         )
         .await;
         if should_retry_result_write(&completion.outcome, &result) {
@@ -1163,6 +1185,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                                 &idempotency_key,
                                 RuntimeOutcomeCompletion {
                                     input_ref: effective_input_ref,
+                                    input: None,
+                                    estimate: None,
                                     invocation_id,
                                     requested_capability_id: &requested_capability_id,
                                     provider: capability.provider.clone(),
@@ -1175,10 +1199,14 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     let result = runtime_outcome_to_loop(
                         &self.run_context,
                         self.result_writer.as_ref(),
-                        effective_input_ref,
-                        invocation_id,
-                        &requested_capability_id,
-                        outcome,
+                        RuntimeOutcomeConversion {
+                            input_ref: effective_input_ref,
+                            input: None,
+                            estimate: None,
+                            invocation_id,
+                            requested_capability_id: &requested_capability_id,
+                            outcome,
+                        },
                     )
                     .await;
                     self.record_loop_completed(&idempotency_key, result.clone())?;
@@ -1224,32 +1252,39 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 safe_summary: "capability provider trust is unavailable".to_string(),
             }));
         };
-        let input = self
-            .input_resolver
-            .resolve_capability_input(&self.run_context, effective_input_ref)
-            .await?;
-        let input = match prepare_provider_arguments_with_detail(
-            &input,
-            &capability.parameters_schema,
-            "capability input",
-        ) {
-            Ok(input) => input,
-            Err(error)
-                if error.error.kind == AgentLoopHostErrorKind::InvalidInvocation
-                    && is_provider_tool_call_input_ref(effective_input_ref) =>
-            {
-                let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                    error_kind: CapabilityFailureKind::InvalidInput,
-                    safe_summary: error.error.safe_summary,
-                    detail: error.detail,
-                }));
-                guard.commit();
-                self.record_loop_completed(&idempotency_key, result.clone())?;
-                return result;
-            }
-            Err(error) => return Err(error.error),
+        let (input, estimate) = if let Some(resume) = request.approval_resume.as_ref() {
+            (resume.input.clone(), resume.estimate.clone())
+        } else {
+            let input = self
+                .input_resolver
+                .resolve_capability_input(&self.run_context, effective_input_ref)
+                .await?;
+            let input = match prepare_provider_arguments_with_detail(
+                &input,
+                &capability.parameters_schema,
+                "capability input",
+            ) {
+                Ok(input) => input,
+                Err(error)
+                    if error.error.kind == AgentLoopHostErrorKind::InvalidInvocation
+                        && is_provider_tool_call_input_ref(effective_input_ref) =>
+                {
+                    let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                        error_kind: CapabilityFailureKind::InvalidInput,
+                        safe_summary: error.error.safe_summary,
+                        detail: error.detail,
+                    }));
+                    guard.commit();
+                    self.record_loop_completed(&idempotency_key, result.clone())?;
+                    return result;
+                }
+                Err(error) => return Err(error.error),
+            };
+            (
+                host_runtime_input_for_capability(&request.capability_id, input)?,
+                capability.estimate.clone(),
+            )
         };
-        let input = host_runtime_input_for_capability(&request.capability_id, input)?;
         let mut invocation_context = invocation_context_from_visible(
             &self.visible_request.context,
             &self.run_context,
@@ -1285,8 +1320,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     invocation_context,
                     resume.approval_request_id,
                     request.capability_id,
-                    capability.estimate,
-                    input,
+                    estimate.clone(),
+                    input.clone(),
                     trust_decision,
                 )
                 .with_idempotency_key(idempotency_key.clone());
@@ -1296,8 +1331,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 let runtime_request = RuntimeCapabilityRequest::new(
                     invocation_context,
                     request.capability_id,
-                    capability.estimate,
-                    input,
+                    estimate.clone(),
+                    input.clone(),
                     trust_decision,
                 )
                 .with_idempotency_key(idempotency_key.clone());
@@ -1330,6 +1365,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             &idempotency_key,
             RuntimeOutcomeCompletion {
                 input_ref: effective_input_ref,
+                input: Some(&input),
+                estimate: Some(&estimate),
                 invocation_id,
                 requested_capability_id: &requested_capability_id,
                 provider,
@@ -1800,19 +1837,16 @@ fn loop_surface_version(
 async fn runtime_outcome_to_loop(
     run_context: &LoopRunContext,
     result_writer: &(dyn LoopCapabilityResultWriter + Send + Sync),
-    input_ref: &CapabilityInputRef,
-    invocation_id: InvocationId,
-    requested_capability_id: &CapabilityId,
-    outcome: RuntimeCapabilityOutcome,
+    conversion: RuntimeOutcomeConversion<'_>,
 ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-    ensure_runtime_outcome_matches(requested_capability_id, &outcome)?;
-    Ok(match outcome {
+    ensure_runtime_outcome_matches(conversion.requested_capability_id, &conversion.outcome)?;
+    Ok(match conversion.outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
             let (result_ref, byte_len) = result_writer
                 .write_capability_result(CapabilityResultWrite {
                     run_context,
-                    input_ref,
-                    invocation_id,
+                    input_ref: conversion.input_ref,
+                    invocation_id: conversion.invocation_id,
                     capability_id: &completed.capability_id,
                     output: completed.output.clone(),
                     display_preview: completed.display_preview.clone(),
@@ -1826,15 +1860,31 @@ async fn runtime_outcome_to_loop(
                 byte_len,
             })
         }
-        RuntimeCapabilityOutcome::ApprovalRequired(gate) => CapabilityOutcome::ApprovalRequired {
-            gate_ref: loop_gate_ref("approval", gate.approval_request_id.to_string())?,
-            safe_summary: blocked_summary(gate.reason).to_string(),
-            approval_resume: Some(ironclaw_turns::run_profile::CapabilityApprovalResume {
-                approval_request_id: gate.approval_request_id,
-                invocation_id,
-                input_ref: input_ref.clone(),
-            }),
-        },
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
+            let input = conversion.input.ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "approval resume replay input is unavailable",
+                )
+            })?;
+            let estimate = conversion.estimate.ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "approval resume replay estimate is unavailable",
+                )
+            })?;
+            CapabilityOutcome::ApprovalRequired {
+                gate_ref: loop_gate_ref("approval", gate.approval_request_id.to_string())?,
+                safe_summary: blocked_summary(gate.reason).to_string(),
+                approval_resume: Some(ironclaw_turns::run_profile::CapabilityApprovalResume {
+                    approval_request_id: gate.approval_request_id,
+                    invocation_id: conversion.invocation_id,
+                    input_ref: conversion.input_ref.clone(),
+                    input: input.clone(),
+                    estimate: estimate.clone(),
+                }),
+            }
+        }
         RuntimeCapabilityOutcome::AuthRequired(gate) => CapabilityOutcome::AuthRequired {
             gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
             credential_requirements: gate.credential_requirements,
