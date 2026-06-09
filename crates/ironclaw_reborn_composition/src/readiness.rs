@@ -1,6 +1,10 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::RebornCompositionProfile;
+use ironclaw_host_runtime::{
+    ProductionWiringComponent, ProductionWiringIssue, ProductionWiringIssueKind,
+    ProductionWiringReport,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -295,6 +299,71 @@ impl RebornReadinessDiagnostic {
             status: RebornReadinessDiagnosticStatus::Blocking,
             blocks_production: true,
         })
+    }
+
+    pub fn from_production_wiring_report(
+        profile: RebornCompositionProfile,
+        report: &ProductionWiringReport,
+    ) -> Vec<Self> {
+        if !profile.requires_production_shape() {
+            return Vec::new();
+        }
+
+        report
+            .issues()
+            .iter()
+            .map(|issue| Self::from_production_wiring_issue(profile, issue))
+            .collect()
+    }
+
+    pub fn from_production_wiring_issue(
+        profile: RebornCompositionProfile,
+        issue: &ProductionWiringIssue,
+    ) -> Self {
+        Self::production_blocker(profile, issue.component().into(), issue.kind().into())
+    }
+}
+
+impl From<ProductionWiringComponent> for RebornReadinessDiagnosticComponent {
+    fn from(component: ProductionWiringComponent) -> Self {
+        match component {
+            ProductionWiringComponent::RuntimeBackend => Self::RuntimeBackend,
+            ProductionWiringComponent::RuntimePolicy => Self::RuntimePolicy,
+            ProductionWiringComponent::TrustPolicy => Self::TrustPolicy,
+            ProductionWiringComponent::Filesystem => Self::Filesystem,
+            ProductionWiringComponent::ResourceGovernor => Self::ResourceGovernor,
+            ProductionWiringComponent::ProcessStore => Self::ProcessStore,
+            ProductionWiringComponent::ProcessResultStore => Self::ProcessResultStore,
+            ProductionWiringComponent::RunState => Self::RunState,
+            ProductionWiringComponent::ApprovalRequests => Self::ApprovalRequests,
+            ProductionWiringComponent::CapabilityLeases => Self::CapabilityLeases,
+            ProductionWiringComponent::EventSink => Self::EventSink,
+            ProductionWiringComponent::AuditSink => Self::AuditSink,
+            ProductionWiringComponent::SecretStore => Self::SecretStore,
+            ProductionWiringComponent::CredentialAccountStore => Self::CredentialAccountStore,
+            ProductionWiringComponent::CredentialSessionStore => Self::CredentialSessionStore,
+            ProductionWiringComponent::RuntimeHttpEgress => Self::RuntimeHttpEgress,
+            ProductionWiringComponent::RuntimeProcessPort => Self::RuntimeProcessPort,
+            ProductionWiringComponent::WasmCredentialProvider => Self::WasmCredentialProvider,
+            ProductionWiringComponent::ScriptRuntime => Self::ScriptRuntime,
+            ProductionWiringComponent::McpRuntime => Self::McpRuntime,
+            ProductionWiringComponent::WasmRuntime => Self::WasmRuntime,
+            ProductionWiringComponent::FirstPartyRuntime => Self::FirstPartyRuntime,
+            ProductionWiringComponent::TurnState => Self::TurnState,
+            ProductionWiringComponent::RunProfileResolver => Self::RunProfileResolver,
+            ProductionWiringComponent::TurnRunWakeNotifier => Self::TurnRunWakeNotifier,
+        }
+    }
+}
+
+impl From<ProductionWiringIssueKind> for RebornReadinessDiagnosticReason {
+    fn from(kind: ProductionWiringIssueKind) -> Self {
+        match kind {
+            ProductionWiringIssueKind::Missing => Self::Missing,
+            ProductionWiringIssueKind::UnsupportedRequirement => Self::Unsupported,
+            ProductionWiringIssueKind::LocalOnlyImplementation => Self::LocalOnly,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation => Self::Unverified,
+        }
     }
 }
 

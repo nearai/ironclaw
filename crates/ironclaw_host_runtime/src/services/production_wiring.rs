@@ -148,6 +148,15 @@ pub struct ProductionWiringIssue {
 }
 
 impl ProductionWiringIssue {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(component: ProductionWiringComponent, kind: ProductionWiringIssueKind) -> Self {
+        Self {
+            component,
+            kind,
+            implementation: None,
+        }
+    }
+
     pub fn component(&self) -> ProductionWiringComponent {
         self.component
     }
@@ -168,6 +177,11 @@ pub struct ProductionWiringReport {
 }
 
 impl ProductionWiringReport {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(issues: Vec<ProductionWiringIssue>) -> Self {
+        Self { issues }
+    }
+
     pub fn issues(&self) -> &[ProductionWiringIssue] {
         &self.issues
     }

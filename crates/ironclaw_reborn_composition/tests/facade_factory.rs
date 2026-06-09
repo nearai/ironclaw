@@ -38,6 +38,11 @@ use ironclaw_reborn_composition::{
     RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
     RebornReadinessDiagnostic, RebornReadinessState, build_reborn_services,
 };
+#[cfg(feature = "libsql")]
+use ironclaw_reborn_composition::{
+    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
+    RebornReadinessDiagnosticStatus,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -903,6 +908,45 @@ async fn production_rejects_local_only_runtime_policy() {
         ),
         "local-only runtime policy should fail production wiring: {report:?}"
     );
+    let diagnostics = RebornReadinessDiagnostic::from_production_wiring_report(
+        RebornCompositionProfile::Production,
+        &report,
+    );
+    assert!(
+        RebornReadinessDiagnostic::from_production_wiring_report(
+            RebornCompositionProfile::LocalDev,
+            &report,
+        )
+        .is_empty(),
+        "production wiring reports should not produce production diagnostics for local-dev profiles"
+    );
+    assert!(
+        diagnostics.contains(&RebornReadinessDiagnostic::production_blocker(
+            RebornCompositionProfile::Production,
+            RebornReadinessDiagnosticComponent::RuntimePolicy,
+            RebornReadinessDiagnosticReason::LocalOnly,
+        )),
+        "runtime policy local-only issue should map to readiness diagnostics: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics.contains(&RebornReadinessDiagnostic::production_blocker(
+            RebornCompositionProfile::Production,
+            RebornReadinessDiagnosticComponent::RuntimeProcessPort,
+            RebornReadinessDiagnosticReason::LocalOnly,
+        )),
+        "runtime process port local-only issue should map to readiness diagnostics: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.status == RebornReadinessDiagnosticStatus::Blocking)
+    );
+    let serialized = serde_json::to_string(&diagnostics).unwrap();
+    assert!(!serialized.contains("LocalOnlyImplementation"));
+    assert!(!serialized.contains("EffectiveRuntimePolicy"));
+    assert!(!serialized.contains("ironclaw_"));
+    assert!(!serialized.contains("/root/"));
+    assert!(!serialized.contains("postgres://"));
 }
 
 #[cfg(feature = "libsql")]
