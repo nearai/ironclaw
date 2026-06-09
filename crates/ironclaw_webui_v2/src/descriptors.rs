@@ -48,9 +48,14 @@ pub const WEBUI_V2_ROUTE_START_NEARAI_LOGIN: &str = "webui.v2.start_nearai_login
 pub const WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN: &str =
     "webui.v2.complete_nearai_wallet_login";
 pub const WEBUI_V2_ROUTE_START_CODEX_LOGIN: &str = "webui.v2.start_codex_login";
-pub const WEBUI_V2_ROUTE_GET_OPERATOR_STATUS: &str = "webui.v2.operator.status";
-pub const WEBUI_V2_ROUTE_QUERY_OPERATOR_LOGS: &str = "webui.v2.operator.logs.query";
-pub const WEBUI_V2_ROUTE_CONTROL_OPERATOR_SERVICE: &str = "webui.v2.operator.service.control";
+pub const WEBUI_V2_ROUTE_OPERATOR_GET_SETUP: &str = "webui.v2.operator.get_setup";
+pub const WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP: &str = "webui.v2.operator.run_setup";
+pub const WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG: &str = "webui.v2.operator.list_config";
+pub const WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG: &str = "webui.v2.operator.validate_config";
+pub const WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS: &str = "webui.v2.operator.diagnostics";
+pub const WEBUI_V2_ROUTE_OPERATOR_STATUS: &str = "webui.v2.operator.status";
+pub const WEBUI_V2_ROUTE_OPERATOR_LOGS: &str = "webui.v2.operator.logs";
+pub const WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE: &str = "webui.v2.operator.service_lifecycle";
 
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
@@ -88,9 +93,14 @@ pub const WEBUI_V2_PATTERN_LIST_LLM_MODELS: &str = "/api/webchat/v2/llm/list-mod
 pub const WEBUI_V2_PATTERN_START_NEARAI_LOGIN: &str = "/api/webchat/v2/llm/nearai/login";
 pub const WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN: &str = "/api/webchat/v2/llm/nearai/wallet";
 pub const WEBUI_V2_PATTERN_START_CODEX_LOGIN: &str = "/api/webchat/v2/llm/codex/login";
-pub const WEBUI_V2_PATTERN_GET_OPERATOR_STATUS: &str = "/api/webchat/v2/operator/status";
-pub const WEBUI_V2_PATTERN_QUERY_OPERATOR_LOGS: &str = "/api/webchat/v2/operator/logs/query";
-pub const WEBUI_V2_PATTERN_CONTROL_OPERATOR_SERVICE: &str = "/api/webchat/v2/operator/service";
+pub const WEBUI_V2_PATTERN_OPERATOR_SETUP: &str = "/api/webchat/v2/operator/setup";
+pub const WEBUI_V2_PATTERN_OPERATOR_CONFIG: &str = "/api/webchat/v2/operator/config";
+pub const WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE: &str =
+    "/api/webchat/v2/operator/config/validate";
+pub const WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS: &str = "/api/webchat/v2/operator/diagnostics";
+pub const WEBUI_V2_PATTERN_OPERATOR_STATUS: &str = "/api/webchat/v2/operator/status";
+pub const WEBUI_V2_PATTERN_OPERATOR_LOGS: &str = "/api/webchat/v2/operator/logs";
+pub const WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE: &str = "/api/webchat/v2/operator/service";
 
 /// Return the canonical [`IngressRouteDescriptor`] set for the WebChat v2
 /// beta route surface.
@@ -134,9 +144,14 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         start_nearai_login_descriptor(),
         complete_nearai_wallet_login_descriptor(),
         start_codex_login_descriptor(),
-        get_operator_status_descriptor(),
-        query_operator_logs_descriptor(),
-        control_operator_service_descriptor(),
+        operator_get_setup_descriptor(),
+        operator_run_setup_descriptor(),
+        operator_list_config_descriptor(),
+        operator_validate_config_descriptor(),
+        operator_diagnostics_descriptor(),
+        operator_status_descriptor(),
+        operator_logs_descriptor(),
+        operator_service_lifecycle_descriptor(),
     ]
 }
 
@@ -159,13 +174,19 @@ pub fn is_webui_v2_llm_config_route_id(route_id: &str) -> bool {
     )
 }
 
-pub fn is_webui_v2_operator_route_id(route_id: &str) -> bool {
+/// Returns whether a route id belongs to any operator-wide WebUI config surface.
+pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
     is_webui_v2_llm_config_route_id(route_id)
         || matches!(
             route_id,
-            WEBUI_V2_ROUTE_GET_OPERATOR_STATUS
-                | WEBUI_V2_ROUTE_QUERY_OPERATOR_LOGS
-                | WEBUI_V2_ROUTE_CONTROL_OPERATOR_SERVICE
+            WEBUI_V2_ROUTE_OPERATOR_GET_SETUP
+                | WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP
+                | WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG
+                | WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG
+                | WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS
+                | WEBUI_V2_ROUTE_OPERATOR_STATUS
+                | WEBUI_V2_ROUTE_OPERATOR_LOGS
+                | WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE
         )
 }
 
@@ -646,11 +667,11 @@ fn start_codex_login_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn get_operator_status_descriptor() -> IngressRouteDescriptor {
+fn operator_get_setup_descriptor() -> IngressRouteDescriptor {
     descriptor(
-        WEBUI_V2_ROUTE_GET_OPERATOR_STATUS,
+        WEBUI_V2_ROUTE_OPERATOR_GET_SETUP,
         NetworkMethod::Get,
-        WEBUI_V2_PATTERN_GET_OPERATOR_STATUS,
+        WEBUI_V2_PATTERN_OPERATOR_SETUP,
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
@@ -660,25 +681,95 @@ fn get_operator_status_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn query_operator_logs_descriptor() -> IngressRouteDescriptor {
+fn operator_run_setup_descriptor() -> IngressRouteDescriptor {
     descriptor(
-        WEBUI_V2_ROUTE_QUERY_OPERATOR_LOGS,
+        WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP,
         NetworkMethod::Post,
-        WEBUI_V2_PATTERN_QUERY_OPERATOR_LOGS,
+        WEBUI_V2_PATTERN_OPERATOR_SETUP,
         mutation_policy(
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProjectionOnly,
+            AllowedEffectPath::ProductWorkflow,
         ),
     )
 }
 
-fn control_operator_service_descriptor() -> IngressRouteDescriptor {
+fn operator_list_config_descriptor() -> IngressRouteDescriptor {
     descriptor(
-        WEBUI_V2_ROUTE_CONTROL_OPERATOR_SERVICE,
+        WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_OPERATOR_CONFIG,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn operator_validate_config_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG,
         NetworkMethod::Post,
-        WEBUI_V2_PATTERN_CONTROL_OPERATOR_SERVICE,
+        WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn operator_diagnostics_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn operator_status_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_OPERATOR_STATUS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_OPERATOR_STATUS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn operator_logs_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_OPERATOR_LOGS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_OPERATOR_LOGS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn operator_service_lifecycle_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE,
         mutation_policy(
             body_limit_kib(4),
             mutation_rate_limit(),

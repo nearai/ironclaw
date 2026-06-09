@@ -50,7 +50,7 @@ use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
-    is_webui_v2_operator_route_id, webui_v2_router_with_options,
+    is_webui_v2_operator_webui_config_route_id, webui_v2_router_with_options,
 };
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -554,8 +554,9 @@ pub fn webui_v2_app_with_lifecycle(
     );
     let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
     if !mount_operator_routes {
-        descriptors
-            .retain(|descriptor| !is_webui_v2_operator_route_id(descriptor.route_id().as_str()));
+        descriptors.retain(|descriptor| {
+            !is_webui_v2_operator_webui_config_route_id(descriptor.route_id().as_str())
+        });
     }
     if let Some(mount) = &product_auth_mount {
         descriptors.extend(mount.descriptors.iter().cloned());

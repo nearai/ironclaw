@@ -15,21 +15,22 @@ use serde::Serialize;
 
 use crate::descriptors::{
     WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_CANCEL_RUN,
-    WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_PATTERN_CONTROL_OPERATOR_SERVICE,
-    WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER,
-    WEBUI_V2_PATTERN_DELETE_THREAD, WEBUI_V2_PATTERN_GET_LLM_CONFIG,
-    WEBUI_V2_PATTERN_GET_OPERATOR_STATUS, WEBUI_V2_PATTERN_GET_SESSION,
-    WEBUI_V2_PATTERN_GET_TIMELINE, WEBUI_V2_PATTERN_INSTALL_EXTENSION,
-    WEBUI_V2_PATTERN_INSTALL_SKILL, WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
-    WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS, WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
-    WEBUI_V2_PATTERN_LIST_EXTENSIONS, WEBUI_V2_PATTERN_LIST_LLM_MODELS,
-    WEBUI_V2_PATTERN_LIST_SKILLS, WEBUI_V2_PATTERN_QUERY_OPERATOR_LOGS,
-    WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
-    WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
-    WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SKILL_DETAIL,
-    WEBUI_V2_PATTERN_START_CODEX_LOGIN, WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
-    WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
-    WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
+    WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_PATTERN_CREATE_THREAD,
+    WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER, WEBUI_V2_PATTERN_DELETE_THREAD,
+    WEBUI_V2_PATTERN_GET_LLM_CONFIG, WEBUI_V2_PATTERN_GET_SESSION, WEBUI_V2_PATTERN_GET_TIMELINE,
+    WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_INSTALL_SKILL,
+    WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS,
+    WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
+    WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_LIST_SKILLS,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG, WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
+    WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS, WEBUI_V2_PATTERN_OPERATOR_LOGS,
+    WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE, WEBUI_V2_PATTERN_OPERATOR_SETUP,
+    WEBUI_V2_PATTERN_OPERATOR_STATUS, WEBUI_V2_PATTERN_REMOVE_EXTENSION,
+    WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE,
+    WEBUI_V2_PATTERN_SET_ACTIVE_LLM, WEBUI_V2_PATTERN_SETUP_EXTENSION,
+    WEBUI_V2_PATTERN_SKILL_DETAIL, WEBUI_V2_PATTERN_START_CODEX_LOGIN,
+    WEBUI_V2_PATTERN_START_NEARAI_LOGIN, WEBUI_V2_PATTERN_STREAM_EVENTS,
+    WEBUI_V2_PATTERN_STREAM_EVENTS_WS, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
 };
 use crate::handlers;
 use crate::sse_capacity::SseCapacity;
@@ -37,28 +38,25 @@ use crate::sse_capacity::SseCapacity;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebUiV2RouteOptions {
     pub mount_llm_config_routes: bool,
-    pub mount_operator_control_routes: bool,
+    pub mount_operator_routes: bool,
 }
 
 impl WebUiV2RouteOptions {
     pub const fn all() -> Self {
         Self {
             mount_llm_config_routes: true,
-            mount_operator_control_routes: true,
+            mount_operator_routes: true,
         }
     }
 
     pub const fn without_llm_config_routes() -> Self {
-        Self {
-            mount_llm_config_routes: false,
-            mount_operator_control_routes: true,
-        }
+        Self::without_operator_routes()
     }
 
     pub const fn without_operator_routes() -> Self {
         Self {
             mount_llm_config_routes: false,
-            mount_operator_control_routes: false,
+            mount_operator_routes: false,
         }
     }
 }
@@ -238,6 +236,37 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             .route(
                 WEBUI_V2_PATTERN_START_CODEX_LOGIN,
                 post(handlers::start_codex_login),
+            );
+    }
+    if options.mount_operator_routes {
+        router = router
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_SETUP,
+                get(handlers::get_operator_setup).post(handlers::run_operator_setup),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_CONFIG,
+                get(handlers::list_operator_config),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
+                post(handlers::validate_operator_config),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS,
+                get(handlers::get_operator_diagnostics),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_STATUS,
+                get(handlers::get_operator_status),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_LOGS,
+                get(handlers::query_operator_logs),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE,
+                post(handlers::run_operator_service_lifecycle),
             );
     }
     router.with_state(state)

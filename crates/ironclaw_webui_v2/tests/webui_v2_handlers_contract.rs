@@ -1328,9 +1328,14 @@ async fn get_session_returns_false_operator_capability_when_capabilities_default
 }
 
 #[tokio::test]
-async fn operator_status_dispatches_through_facade() {
+async fn operator_route_defaults_to_sanitized_service_unavailable() {
     let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
+    let router = router_with_capabilities(
+        services,
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
 
     let response = router
         .oneshot(
@@ -1343,71 +1348,11 @@ async fn operator_status_dispatches_through_facade() {
         .await
         .expect("oneshot");
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = read_json(response).await;
-    assert_eq!(body["overall"], "degraded");
-    assert_eq!(body["checks"][0]["id"], "runtime");
-    assert_eq!(*services.get_operator_status_calls.lock().expect("lock"), 1);
-}
-
-#[tokio::test]
-async fn operator_logs_query_dispatches_body_through_facade() {
-    let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/operator/logs/query")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"limit":5,"level":"info","target":"ironclaw","tail":true}"#,
-                ))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_json(response).await;
-    assert_eq!(body["source"], "test");
-    assert_eq!(body["entries"][0]["message"], "ready");
-    let calls = services.query_operator_logs_calls.lock().expect("lock");
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].limit, Some(5));
-    assert!(calls[0].tail);
-}
-
-#[tokio::test]
-async fn operator_service_control_dispatches_body_through_facade() {
-    let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/operator/service")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"action":"status"}"#))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_json(response).await;
-    assert_eq!(body["action"], "status");
-    assert_eq!(body["state"], "unsupported");
-    assert_eq!(
-        services
-            .control_operator_service_calls
-            .lock()
-            .expect("lock")
-            .len(),
-        1
-    );
+    assert_eq!(body["error"], "unavailable");
+    assert_eq!(body["kind"], "service_unavailable");
+    assert_eq!(body["retryable"], false);
 }
 
 #[tokio::test]
