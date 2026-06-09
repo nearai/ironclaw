@@ -154,7 +154,13 @@ impl DefaultApprovalInteractionService {
         }
         let mut terms = self.lease_terms_provider.lease_terms_for(&gate).await?;
         terms.issued_by = Principal::User(request.actor.user_id.clone());
-        let persistent_terms = persistent.then(|| terms.clone());
+        if persistent {
+            self.lease_terms_provider
+                .persistent_approval_allowed(&gate)
+                .await?;
+            self.persist_allow_policy(&request, &gate, terms.clone())
+                .await?;
+        }
         match (status, action) {
             (ApprovalStatus::Pending, ApprovalCapabilityAction::Dispatch) => {
                 self.resolver
@@ -181,9 +187,6 @@ impl DefaultApprovalInteractionService {
                     ApprovalInteractionRejectionKind::StaleGate,
                 ));
             }
-        }
-        if let Some(terms) = persistent_terms {
-            self.persist_allow_policy(&request, &gate, terms).await?;
         }
 
         let response = self
@@ -393,6 +396,9 @@ impl ApprovalInteractionService for DefaultApprovalInteractionService {
             ) => {
                 let mut terms = self.lease_terms_provider.lease_terms_for(&gate).await?;
                 terms.issued_by = Principal::User(request.actor.user_id.clone());
+                self.lease_terms_provider
+                    .persistent_approval_allowed(&gate)
+                    .await?;
                 self.persist_allow_policy(&request, &gate, terms).await?;
                 self.replay_approved_gate(request, run_id).await
             }

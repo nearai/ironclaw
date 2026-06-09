@@ -258,6 +258,10 @@ This slice intentionally keeps approval resolution narrow:
   approval interaction decisions at the current Reborn sandbox scope
   (`tenant_id`, `user_id`, optional `agent_id`, and `project_id` when present,
   otherwise `thread_id`)
+- persistent approval is fail-closed by manifest policy: the current default
+  only allows durable reuse for capabilities whose manifest
+  `default_permission` is `allow`; `ask` and `deny` remain one-shot approval
+  gates and are re-checked before any stored policy is injected as authority
 - revoke is exposed at the policy-store layer for future product integration;
   no user-facing revoke flow is defined in this slice
 

@@ -16,6 +16,13 @@ pub trait ApprovalLeaseTermsProvider: Send + Sync {
         &self,
         gate: &ApprovalGateRecord,
     ) -> Result<LeaseApproval, ProductWorkflowError>;
+
+    async fn persistent_approval_allowed(
+        &self,
+        _gate: &ApprovalGateRecord,
+    ) -> Result<(), ProductWorkflowError> {
+        Ok(())
+    }
 }
 
 #[async_trait]

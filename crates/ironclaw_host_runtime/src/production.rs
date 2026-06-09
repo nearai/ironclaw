@@ -18,6 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_approvals::{
     PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalScope, permission_mode_allows_persistent_approval,
 };
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
@@ -29,7 +30,7 @@ use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRe
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
-    PackageSource, PermissionMode, Principal, ResourceScope, RuntimeCredentialAuthRequirement,
+    PackageSource, Principal, ResourceScope, RuntimeCredentialAuthRequirement,
     RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy,
     sha256_digest_token,
 };
@@ -967,29 +968,31 @@ impl DefaultHostRuntime {
         let Some(descriptor) = registry.get_capability(capability_id) else {
             return;
         };
-        if descriptor.default_permission == PermissionMode::Deny {
+        if !permission_mode_allows_persistent_approval(descriptor.default_permission) {
             tracing::debug!(
                 capability_id = %capability_id,
-                "persistent approval skipped for manifest-denied capability"
+                permission = ?descriptor.default_permission,
+                "persistent approval skipped for manifest policy"
             );
             return;
         }
+        let scope = match PersistentApprovalScope::from_resource_scope(&context.resource_scope) {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    error = %error,
+                    "persistent approval lookup skipped for unsupported scope"
+                );
+                return;
+            }
+        };
         for grantee in persistent_approval_grantees(context) {
-            let key = match PersistentApprovalPolicyKey::new(
-                &context.resource_scope,
+            let key = PersistentApprovalPolicyKey {
+                scope: scope.clone(),
                 action,
-                capability_id.clone(),
+                capability_id: capability_id.clone(),
                 grantee,
-            ) {
-                Ok(key) => key,
-                Err(error) => {
-                    tracing::debug!(
-                        capability_id = %capability_id,
-                        error = %error,
-                        "persistent approval lookup skipped for unsupported scope"
-                    );
-                    continue;
-                }
             };
             let policy = match policies.lookup(&key).await {
                 Ok(policy) => policy,

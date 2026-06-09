@@ -20,7 +20,7 @@ pub use policy::{
     FilesystemPersistentApprovalPolicyStore, InMemoryPersistentApprovalPolicyStore,
     PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
     PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
-    PersistentApprovalScope,
+    PersistentApprovalScope, permission_mode_allows_persistent_approval,
 };
 
 pub struct ApprovalResolver<'a, A, L>

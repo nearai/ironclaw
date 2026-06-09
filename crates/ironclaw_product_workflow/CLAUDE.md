@@ -65,9 +65,11 @@ projection read model built from them. Approve/deny decisions must go through
 `ApprovalResolutionPort` and `TurnCoordinator`; product/WebUI code must not
 directly execute tools or mutate approval stores ad hoc. `AlwaysAllow` is
 limited to approval gates backed by the durable persistent approval-policy port;
-generic gate fallback remains one-shot only. High-value signing and attested
-approvals require a separate service shape with canonical payload attestation
-and must not be folded into this redacted click-approval DTO.
+generic gate fallback remains one-shot only. Persistent approval policy checks
+must be performed before approval/resume side effects and must fail closed when
+the capability manifest does not allow durable reuse. High-value signing and
+attested approvals require a separate service shape with canonical payload
+attestation and must not be folded into this redacted click-approval DTO.
 
 Auth interactions are auth-required gates only. Pending auth DTOs must be
 redacted, scoped, and derived from typed auth-flow state plus the parked

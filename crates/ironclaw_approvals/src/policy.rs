@@ -10,13 +10,17 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     Action, ApprovalRequestId, CapabilityGrant, CapabilityGrantId, CapabilityId, GrantConstraints,
-    HostApiError, Principal, ProjectId, ResourceScope, ScopedPath, TenantId, ThreadId, UserId,
-    sha256_digest_token,
+    HostApiError, PermissionMode, Principal, ProjectId, ResourceScope, ScopedPath, TenantId,
+    ThreadId, UserId, sha256_digest_token,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const POLICY_PREFIX: &str = "/approvals/persistent";
+
+pub fn permission_mode_allows_persistent_approval(permission: PermissionMode) -> bool {
+    matches!(permission, PermissionMode::Allow)
+}
 
 #[derive(Debug, Error)]
 pub enum PersistentApprovalPolicyError {

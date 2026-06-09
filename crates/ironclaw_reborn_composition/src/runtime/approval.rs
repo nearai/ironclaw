@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_approvals::LeaseApproval;
+use ironclaw_approvals::{LeaseApproval, permission_mode_allows_persistent_approval};
+use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{EffectKind, MountView, Principal};
 use ironclaw_product_workflow::{
     ApprovalGateRecord, ApprovalInteractionRejectionKind, ApprovalLeaseTermsProvider,
@@ -17,6 +18,7 @@ use super::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
 
 pub(super) struct LocalDevApprovalLeaseTermsProvider {
     policy: Arc<LocalDevCapabilityPolicy>,
+    registry: Arc<ExtensionRegistry>,
     workspace_mounts: MountView,
     skill_mounts: MountView,
     memory_mounts: MountView,
@@ -26,6 +28,7 @@ pub(super) struct LocalDevApprovalLeaseTermsProvider {
 impl LocalDevApprovalLeaseTermsProvider {
     pub(super) fn new(
         policy: Arc<LocalDevCapabilityPolicy>,
+        registry: Arc<ExtensionRegistry>,
         workspace_mounts: MountView,
         skill_mounts: MountView,
         memory_mounts: MountView,
@@ -33,6 +36,7 @@ impl LocalDevApprovalLeaseTermsProvider {
     ) -> Self {
         Self {
             policy,
+            registry,
             workspace_mounts,
             skill_mounts,
             memory_mounts,
@@ -123,6 +127,28 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
             }
         }
     }
+
+    async fn persistent_approval_allowed(
+        &self,
+        gate: &ApprovalGateRecord,
+    ) -> Result<(), ProductWorkflowError> {
+        let action = LocalDevApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
+            .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::UnsupportedAction,
+            })?;
+        let Some(descriptor) = self.registry.get_capability(action.capability_id()) else {
+            return Err(ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
+            });
+        };
+        if permission_mode_allows_persistent_approval(descriptor.default_permission) {
+            Ok(())
+        } else {
+            Err(ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
+            })
+        }
+    }
 }
 
 fn lease_terms_unavailable() -> ProductWorkflowError {
@@ -168,6 +194,7 @@ mod tests {
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
             Arc::new(local_dev_capability_policy().expect("policy parses")),
+            Arc::new(ExtensionRegistry::new()),
             MountView::default(),
             MountView::default(),
             MountView::default(),
@@ -235,6 +262,7 @@ mod tests {
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
             Arc::new(local_dev_capability_policy().expect("policy parses")),
+            Arc::new(ExtensionRegistry::new()),
             MountView::default(),
             MountView::default(),
             MountView::default(),
@@ -299,4 +327,5 @@ mod tests {
         )
         .expect("approval gate record")
     }
+
 }

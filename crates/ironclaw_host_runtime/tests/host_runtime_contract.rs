@@ -27,7 +27,7 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CancelReason, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
     DefaultHostRuntime, HostRuntime, HostRuntimeError, IdempotencyKey, RuntimeBackendHealth,
-    RuntimeCapabilityRequest, RuntimeStatusRequest, RuntimeWorkId, SurfaceKind,
+    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId, SurfaceKind,
     VisibleCapabilityRequest,
 };
 use ironclaw_processes::{
@@ -174,6 +174,70 @@ async fn default_runtime_uses_persistent_policy_as_dispatch_authority() {
         other => panic!("expected Completed outcome, got {:?}", other),
     }
     assert!(dispatcher.has_request());
+}
+
+#[tokio::test]
+async fn default_runtime_does_not_reuse_persistent_policy_for_manifest_ask() {
+    let registry = Arc::new(registry_with_echo_capability_permission("ask"));
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let context = execution_context_without_grants();
+    policies
+        .allow(PersistentApprovalPolicyInput {
+            scope: context.resource_scope.clone(),
+            action: PersistentApprovalAction::Dispatch,
+            capability_id: capability_id(),
+            grantee: Principal::Extension(context.extension_id.clone()),
+            approved_by: Principal::User(context.user_id.clone()),
+            constraints: GrantConstraints {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+            source_approval_request_id: None,
+        })
+        .await
+        .expect("seed persistent policy");
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_run_state(run_state)
+    .with_approval_requests(approval_requests)
+    .with_persistent_approval_policies(policy_store);
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "hello"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.capability_id, capability_id());
+            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+        }
+        other => panic!("expected authorization failure, got {:?}", other),
+    }
+    assert!(!dispatcher.has_request());
 }
 
 #[tokio::test]
@@ -1603,7 +1667,31 @@ impl TrustAwareCapabilityDispatchAuthorizer for ApprovalAuthorizer {
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = parse_manifest(ECHO_MANIFEST);
+    registry_with_echo_capability_permission("allow")
+}
+
+fn registry_with_echo_capability_permission(permission: &str) -> ExtensionRegistry {
+    let manifest = format!(
+        r#"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+description = "Echo test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "echo.wasm"
+
+[[capabilities]]
+id = "echo.say"
+description = "Echoes input"
+effects = ["dispatch_capability"]
+default_permission = "{permission}"
+parameters_schema = {{}}
+"#
+    );
+    let manifest = parse_manifest(&manifest);
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/echo").unwrap(),
@@ -1706,22 +1794,3 @@ fn capability_id() -> CapabilityId {
 fn extension_id() -> ExtensionId {
     ExtensionId::new("echo").unwrap()
 }
-
-const ECHO_MANIFEST: &str = r#"
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-description = "Echo test extension"
-trust = "third_party"
-
-[runtime]
-kind = "wasm"
-module = "echo.wasm"
-
-[[capabilities]]
-id = "echo.say"
-description = "Echoes input"
-effects = ["dispatch_capability"]
-default_permission = "allow"
-parameters_schema = {}
-"#;

@@ -1966,6 +1966,7 @@ pub async fn build_reborn_runtime(
             approval_read_model,
             Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
                 local_dev_capability_policy,
+                Arc::clone(&local_runtime.extension_registry),
                 local_runtime.workspace_mounts.clone(),
                 local_runtime.skill_mounts.clone(),
                 local_runtime.memory_mounts.clone(),

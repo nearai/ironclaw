@@ -3927,7 +3927,10 @@ async fn approval_gate_resolution_with_persistent_flag_uses_approval_interaction
         .await
         .expect("persistent approval resolution succeeds");
 
-    assert_eq!(response.status, "queued");
+    assert!(matches!(
+        response,
+        RebornResolveGateResponse::Resumed(response) if response.status == TurnStatus::Queued
+    ));
     assert_eq!(approval_interactions.resolution_count(), 1);
     assert_eq!(
         approval_interactions
