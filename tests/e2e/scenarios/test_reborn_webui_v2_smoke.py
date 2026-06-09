@@ -328,3 +328,37 @@ async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server)
     await expect(reborn_v2_page.locator(SEL_V2["msg_assistant"]).first).to_contain_text(
         "Hello", timeout=30000
     )
+
+
+async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
+    """Threads are listed for the caller and deletion removes the thread and transcript."""
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        keep_id = await _create_thread(client, reborn_v2_server)
+        drop_id = await _create_thread(client, reborn_v2_server)
+
+        listed = await client.get(f"{reborn_v2_server}/api/webchat/v2/threads", timeout=15)
+        listed.raise_for_status()
+        ids = {thread["thread_id"] for thread in listed.json().get("threads", [])}
+        assert {keep_id, drop_id} <= ids, f"both threads should be listed, got {ids}"
+
+        deleted = await client.request(
+            "DELETE", f"{reborn_v2_server}/api/webchat/v2/threads/{drop_id}", timeout=15
+        )
+        assert deleted.status_code == 200, deleted.text
+
+        # Transcript is gone (404, not an empty timeline) and re-delete is idempotent-404.
+        gone = await client.get(
+            f"{reborn_v2_server}/api/webchat/v2/threads/{drop_id}/timeline", timeout=15
+        )
+        assert gone.status_code == 404, gone.text
+        re_delete = await client.request(
+            "DELETE", f"{reborn_v2_server}/api/webchat/v2/threads/{drop_id}", timeout=15
+        )
+        assert re_delete.status_code == 404, re_delete.text
+
+        relisted = await client.get(f"{reborn_v2_server}/api/webchat/v2/threads", timeout=15)
+        relisted.raise_for_status()
+        remaining = {thread["thread_id"] for thread in relisted.json().get("threads", [])}
+        assert drop_id not in remaining, "deleted thread must not reappear in the list"
+        assert keep_id in remaining, "untouched thread must remain in the list"
