@@ -153,6 +153,14 @@ pub fn child_bucket(child_run_id_str: &str, k: u32) -> u32 {
 /// the scope. [`DurableSubagentGateResolutionStore::record_awaited_child`]
 /// returns [`GateResolutionStoreError::CapacityExceeded`] when the sum already
 /// equals this value. Mirrors `MAX_GATE_RECORDS` in the in-memory store.
+///
+/// This cap is **advisory back-pressure, not a hard invariant**: the
+/// check-then-increment sequence is not serialized across concurrent spawns
+/// (by design — the bucketed counter exists to keep the spawn hot path free
+/// of a single contended row, spec decisions 20/21), so a burst of
+/// simultaneous spawns may transiently overshoot the cap by up to the number
+/// of in-flight spawns. Callers must not rely on the cap as an exact upper
+/// bound.
 pub const MAX_GATE_RECORDS: u32 = 4096;
 
 /// Durable persistence layer for subagent gate-resolution state (spec §1).
