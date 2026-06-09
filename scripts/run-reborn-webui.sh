@@ -32,6 +32,17 @@ MODEL="${MODEL:-}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-3000}"
 
+# This launcher prints a login URL for a browser, so a fixed port is required.
+# `serve --port 0` (kernel-picks-a-free-port) is for test harnesses only and
+# would print an unusable http://HOST:0/v2 here.
+if [ "$PORT" = "0" ]; then
+  echo "error: PORT=0 (kernel-assigned port) isn't usable for browser onboarding." >&2
+  echo "       Set a fixed PORT, or run the test-harness form directly:" >&2
+  echo "       cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta \\" >&2
+  echo "         --bin ironclaw-reborn -- serve --port 0" >&2
+  exit 1
+fi
+
 # Run cargo from the workspace root regardless of where the script is invoked.
 REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
