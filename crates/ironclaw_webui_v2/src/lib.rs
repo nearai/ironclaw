@@ -2,7 +2,7 @@
 //!
 //! This crate ships the minimal native WebUI v2 route set on top of the
 //! [`ironclaw_product_workflow::RebornServicesApi`] facade. It is off by
-//! default - enable the `webui-v2-beta` Cargo feature to compile it in.
+//! default — enable the `webui-v2-beta` Cargo feature to compile it in.
 //!
 //! ## Boundaries
 //!
