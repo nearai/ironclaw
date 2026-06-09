@@ -5,8 +5,9 @@
 #   - keeps the Reborn home OUTSIDE the repo (serve uses the cwd as the
 #     local-dev workspace root and rejects overlap with it);
 #   - configures the model route via `models set-provider`;
-#   - generates the WebUI bearer token and matches the WebUI user to the
-#     config identity owner so serve doesn't refuse to start.
+#   - generates the WebUI bearer token and sets the WebUI user to the home's
+#     `[identity].default_owner` (falling back to `reborn-cli`, config init's
+#     default) so serve's owner check doesn't refuse to start.
 #
 # Usage:
 #   scripts/run-reborn-webui.sh                 # NEAR AI defaults
@@ -48,7 +49,6 @@ REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 export IRONCLAW_REBORN_HOME="${IRONCLAW_REBORN_HOME:-$HOME/.ironclaw-reborn-demo}"
-export IRONCLAW_REBORN_WEBUI_USER_ID="${IRONCLAW_REBORN_WEBUI_USER_ID:-reborn-cli}"
 
 # Resolve the home to an absolute path and reject any path inside the repo,
 # which would trip the workspace/skill-root overlap validation in serve.
@@ -79,6 +79,17 @@ if [ -n "$MODEL" ]; then
 fi
 echo "==> Configuring model route: provider=$PROVIDER ${MODEL:+model=$MODEL}"
 "${CARGO[@]}" "${set_provider_args[@]}"
+
+# Match the WebUI user to the home's identity owner so serve's owner check
+# passes (set-provider has now written/seeded config.toml). A caller-supplied
+# IRONCLAW_REBORN_WEBUI_USER_ID wins; otherwise read [identity].default_owner
+# from the config, falling back to reborn-cli (config init's default).
+config_file="$IRONCLAW_REBORN_HOME/config.toml"
+config_owner=""
+if [ -f "$config_file" ]; then
+  config_owner="$(sed -n 's/^[[:space:]]*default_owner[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config_file" | head -1)"
+fi
+export IRONCLAW_REBORN_WEBUI_USER_ID="${IRONCLAW_REBORN_WEBUI_USER_ID:-${config_owner:-reborn-cli}}"
 
 # Discover the credential env var for this provider and warn if it is unset.
 key_env="$("${CARGO[@]}" models status 2>/dev/null \

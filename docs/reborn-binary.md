@@ -207,12 +207,15 @@ TID=$(curl -s -X POST "$BASE/threads" -H "$AUTH" -H 'Content-Type: application/j
 curl -s -X POST "$BASE/threads/$TID/messages" -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"client_action_id":"smoke-msg-1","content":"Reply with exactly: NEARAI_OK"}'
 
-# poll the timeline for the finalized assistant message
+# read the timeline. Turn execution is async, so re-run this until an
+# assistant message with status "finalized" appears (usually a second or two).
 curl -s "$BASE/threads/$TID/timeline" -H "$AUTH" | python3 -m json.tool
 ```
 
 A healthy run shows a `kind: "assistant"`, `status: "finalized"` message in
-`messages[]` with the model's reply. `GET /api/health` returns
+`messages[]` with the model's reply (the first read right after sending may
+still show only the user message — repeat the timeline request until it
+finalizes). `GET /api/health` returns
 `{"status":"healthy","channel":"reborn"}` and `/v2` serves the UI; `/` is
 intentionally a 404. CORS is fail-closed with no allowed origins, so drive it
 from a browser on the same host against `127.0.0.1`.
