@@ -31,6 +31,7 @@ use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{
     SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
 };
+use secrecy::ExposeSecret;
 
 use crate::{
     ToolCallHttpEgress,
@@ -143,6 +144,24 @@ impl RuntimeSecretInjectionStore {
                 handle,
             ))
             .map(|entry| entry.material))
+    }
+
+    pub(crate) fn clone_material(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMaterial>, RuntimeSecretInjectionStoreError> {
+        let now = Instant::now();
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        Ok(secrets
+            .get(&RuntimeSecretInjectionKey::new(
+                scope,
+                capability_id,
+                handle,
+            ))
+            .map(|entry| SecretMaterial::from(entry.material.expose_secret().to_string())))
     }
 
     /// Discard all staged secrets for a scoped capability before process ownership exists.
