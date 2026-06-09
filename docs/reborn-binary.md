@@ -144,11 +144,19 @@ single-line `Error:` and exits.
 | `workspace root must not overlap default skill root /skills` | Reborn home is **inside** the current working directory | Point `IRONCLAW_REBORN_HOME` at a path outside your repo/cwd. |
 
 The workspace-overlap one is the easiest to trip: `serve`/`run`/`repl` use the
-**current working directory** as the local-dev workspace root, and the skill
-root lives under `<reborn-home>/local-dev/skills`. If the home is nested inside
-the cwd (e.g. `IRONCLAW_REBORN_HOME="$PWD/.reborn-home"`), the two paths overlap
-and boot is rejected. Keep the home outside the directory you launch from — the
-default `~/.ironclaw/reborn` already satisfies this.
+**current working directory** as the local-dev workspace root, and boot is
+rejected if that root overlaps any default storage root Reborn manages —
+`/skills` (`<reborn-home>/local-dev/skills`), `/tenant-shared/skills`,
+`/system/skills`, or `/system/extensions`. If the home is nested inside the cwd
+(e.g. `IRONCLAW_REBORN_HOME="$PWD/.reborn-home"`), those roots fall under the
+workspace root and boot is rejected. Keep the home outside the directory you
+launch from — the default `~/.ironclaw/reborn` already satisfies this.
+
+(Resolved per-user skills live under
+`<reborn-home>/local-dev/tenants/default/users/<owner>/skills`; the flat
+`local-dev/skills` is a legacy root that is backfilled into that tenant-scoped
+path. The validation above guards the legacy/default roots, which is why the
+error names `/skills`.)
 
 ### Smoke-test a turn over the API
 
