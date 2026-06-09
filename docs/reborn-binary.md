@@ -38,13 +38,13 @@ ironclaw-reborn models set-provider openai --model gpt-5-mini
 ironclaw-reborn onboard
 ironclaw-reborn onboard --dry-run
 ironclaw-reborn onboard --force
-ironclaw-reborn onboard --import-history
+ironclaw-reborn onboard --import-history   # flag parsed, but history import not wired yet
 ironclaw-reborn profile list
 ironclaw-reborn profile list --json
 ironclaw-reborn repl
 ironclaw-reborn run
 ironclaw-reborn run --confirm-host-access
-ironclaw-reborn serve
+ironclaw-reborn serve                      # only compiled in with --features webui-v2-beta
 ironclaw-reborn serve --confirm-host-access
 ironclaw-reborn skills list
 ironclaw-reborn skills list --json
@@ -63,9 +63,11 @@ It intentionally does not yet support:
 - long-lived Reborn runtime services.
 
 The WebChat v2 web UI **is** supported through `serve`, but only when the
-binary is built with `--features webui-v2-beta`. It is an early beta operator
-surface, not a production gateway. See
-[Running with the WebUI (`serve`)](#running-with-the-webui-serve).
+binary is built with `--features webui-v2-beta`. The `serve` subcommand is
+compiled behind that feature, so without it `serve` does not exist in the binary
+at all — it will not appear in `--help` and `ironclaw-reborn serve` errors as an
+unknown subcommand. It is an early beta operator surface, not a production
+gateway. See [Running with the WebUI (`serve`)](#running-with-the-webui-serve).
 
 ## Running with the WebUI (`serve`)
 
@@ -84,8 +86,8 @@ PROVIDER=openai scripts/run-reborn-webui.sh
 ```
 
 It prints the login token and the `http://127.0.0.1:3000/v2` URL. Override
-`PROVIDER`, `MODEL`, `HOST`, `PORT`, or `IRONCLAW_REBORN_HOME` via the
-environment. The manual steps below are equivalent.
+`PROVIDER`, `MODEL`, `REBORN_HOST`, `REBORN_PORT`, or `IRONCLAW_REBORN_HOME` via
+the environment. The manual steps below are equivalent.
 
 ### Quick start
 
