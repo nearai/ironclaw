@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+
 use crate::state::{IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
-use ironclaw_turns::run_profile::{LoopRunContext, PromptContextTokenBudget};
+use ironclaw_host_api::CapabilityId;
+use ironclaw_turns::run_profile::{CompactionInitiator, LoopRunContext, PromptContextTokenBudget};
 
 /// Decides whether to replace older transcript context with a host-managed summary.
 ///
@@ -152,6 +155,91 @@ pub(super) fn is_eligible_user_boundary(
         && !matches_deferred_boundary
 }
 
+/// Proactive compaction trigger evaluated by `PostCapabilityStage` after a
+/// capability batch flushes. Inspects per-capability byte accounting on
+/// `state.post_capability_state.pending_capability_bytes` and decides whether
+/// any individual capability has exceeded its configured cap, returning the
+/// `CompactionInitiator` variant that should be emitted in the resulting
+/// `LoopProgressEvent::CompactionStarted` event.
+///
+/// The name `CompactionForceStrategy` distinguishes this from `CompactionStrategy`
+/// (which decides when/how to run normal compaction) — this trait specifically
+/// decides whether to FORCE a compact-then-skip-model on the next iteration
+/// based on per-capability byte accounting.
+///
+/// Future impls (e.g. `BudgetFractionStrategy` for #4311) drop in alongside
+/// `ByteCapStrategy` without changing call sites.
+pub(crate) trait CompactionForceStrategy: Send + Sync {
+    fn should_force_compact(&self, state: &LoopExecutionState) -> Option<CompactionInitiator>;
+}
+
+/// Per-capability byte-cap compaction force strategy. Trips compaction when any
+/// single capability id has accumulated more than its configured byte cap in
+/// `pending_capability_bytes` during the current turn.
+///
+/// v2 (`BudgetFractionStrategy`) will land alongside this once #4311 budget
+/// governance collapse merges.
+#[derive(Debug, Clone)]
+pub(crate) struct ByteCapStrategy {
+    caps: BTreeMap<CapabilityId, u64>,
+    default_cap: u64,
+}
+
+impl ByteCapStrategy {
+    /// Default cap applied to any capability not explicitly listed.
+    pub const DEFAULT_FALLBACK_CAP_BYTES: u64 = 32_000;
+
+    /// Built-in default caps. Override or extend via `with_cap`.
+    pub fn with_defaults() -> Self {
+        let mut caps = BTreeMap::new();
+        // spawn_subagent results can carry larger structured payloads.
+        caps.insert(
+            CapabilityId::new("builtin.spawn_subagent").expect("builtin capability id"), // safety: compile-time constant builtin id, structurally valid by construction
+            48_000,
+        );
+        // http + web_fetch occasionally return large pages/JSON.
+        caps.insert(
+            CapabilityId::new("builtin.http").expect("builtin capability id"), // safety: compile-time constant builtin id, structurally valid by construction
+            32_000,
+        );
+        caps.insert(
+            CapabilityId::new("builtin.web_fetch").expect("builtin capability id"), // safety: compile-time constant builtin id, structurally valid by construction
+            32_000,
+        );
+        Self {
+            caps,
+            default_cap: Self::DEFAULT_FALLBACK_CAP_BYTES,
+        }
+    }
+
+    pub fn with_cap(mut self, capability_id: CapabilityId, cap_bytes: u64) -> Self {
+        self.caps.insert(capability_id, cap_bytes);
+        self
+    }
+}
+
+impl Default for ByteCapStrategy {
+    fn default() -> Self {
+        Self::with_defaults()
+    }
+}
+
+impl CompactionForceStrategy for ByteCapStrategy {
+    fn should_force_compact(&self, state: &LoopExecutionState) -> Option<CompactionInitiator> {
+        for (capability_id, bytes) in &state.post_capability_state.pending_capability_bytes {
+            let cap = self
+                .caps
+                .get(capability_id)
+                .copied()
+                .unwrap_or(self.default_cap);
+            if *bytes > cap {
+                return Some(CompactionInitiator::CapabilityResultOverflow);
+            }
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +247,7 @@ mod tests {
         CompactionPromptSnapshot, CompactionStrategyState, DeferredCompactionWatermark,
         LoopExecutionState, MessageIndexEntry,
     };
+    use ironclaw_host_api::CapabilityId;
     use ironclaw_turns::run_profile::PromptContextTokenBudget;
 
     #[test]
@@ -648,5 +737,89 @@ mod tests {
         );
 
         assert_eq!(boundary, Some(1));
+    }
+
+    // --- ByteCapStrategy tests ---
+
+    #[test]
+    fn byte_cap_strategy_trips_when_capability_exceeds_cap() {
+        let context = crate::test_support::test_run_context("byte-cap-policy-trips");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        let id = CapabilityId::new("builtin.http").expect("valid capability");
+        // 32_000 is the cap; 32_001 exceeds it.
+        state
+            .post_capability_state
+            .pending_capability_bytes
+            .insert(id, 32_001);
+
+        let strategy = ByteCapStrategy::with_defaults();
+        assert_eq!(
+            strategy.should_force_compact(&state),
+            Some(CompactionInitiator::CapabilityResultOverflow)
+        );
+    }
+
+    #[test]
+    fn byte_cap_strategy_skips_when_under_threshold() {
+        let context = crate::test_support::test_run_context("byte-cap-policy-under");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        let http_id = CapabilityId::new("builtin.http").expect("valid capability");
+        let subagent_id = CapabilityId::new("builtin.spawn_subagent").expect("valid capability");
+        // Both under their respective caps.
+        state
+            .post_capability_state
+            .pending_capability_bytes
+            .insert(http_id, 31_999);
+        state
+            .post_capability_state
+            .pending_capability_bytes
+            .insert(subagent_id, 47_999);
+
+        let strategy = ByteCapStrategy::with_defaults();
+        assert_eq!(strategy.should_force_compact(&state), None);
+    }
+
+    #[test]
+    fn byte_cap_strategy_uses_default_cap_for_unknown_capability() {
+        let context = crate::test_support::test_run_context("byte-cap-policy-unknown");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        let id = CapabilityId::new("custom.unknown_tool").expect("valid capability");
+        // DEFAULT_FALLBACK_CAP_BYTES is 32_000; 32_001 exceeds it.
+        state
+            .post_capability_state
+            .pending_capability_bytes
+            .insert(id, ByteCapStrategy::DEFAULT_FALLBACK_CAP_BYTES + 1);
+
+        let strategy = ByteCapStrategy::with_defaults();
+        assert_eq!(
+            strategy.should_force_compact(&state),
+            Some(CompactionInitiator::CapabilityResultOverflow)
+        );
+    }
+
+    #[test]
+    fn byte_cap_strategy_empty_accumulator_returns_none() {
+        let context = crate::test_support::test_run_context("byte-cap-policy-empty");
+        let state = LoopExecutionState::initial_for_run(&context);
+        // pending_capability_bytes is empty by default.
+        let strategy = ByteCapStrategy::with_defaults();
+        assert_eq!(strategy.should_force_compact(&state), None);
+    }
+
+    #[test]
+    fn byte_cap_strategy_with_cap_overrides_default_cap() {
+        let ctx = crate::test_support::test_run_context("byte-cap-with-cap");
+        let mut state = LoopExecutionState::initial_for_run(&ctx);
+        let id = CapabilityId::new("custom.large_tool").unwrap();
+        state
+            .post_capability_state
+            .pending_capability_bytes
+            .insert(id.clone(), 5_000);
+        // Default cap (32_000) would NOT trip at 5_000; custom cap of 4_000 should trip.
+        let strategy = ByteCapStrategy::with_defaults().with_cap(id, 4_000);
+        assert_eq!(
+            strategy.should_force_compact(&state),
+            Some(CompactionInitiator::CapabilityResultOverflow)
+        );
     }
 }

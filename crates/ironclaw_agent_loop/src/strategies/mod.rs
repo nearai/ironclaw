@@ -37,7 +37,10 @@ pub(crate) use batch::{
 };
 pub(crate) use budget::{BudgetStrategy, DefaultBudgetStrategy};
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};
-pub(crate) use compaction::{CompactionDecision, CompactionStrategy, DefaultCompactionStrategy};
+pub(crate) use compaction::{
+    ByteCapStrategy, CompactionDecision, CompactionForceStrategy, CompactionStrategy,
+    DefaultCompactionStrategy,
+};
 pub(crate) use context::{ContextPlan, ContextStrategy, DefaultContextStrategy};
 pub(crate) use drain::{DefaultInputDrainStrategy, InputDrainStrategy};
 pub(crate) use gate::{

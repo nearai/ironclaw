@@ -68,6 +68,26 @@ test("normalizeAutomations handles empty and malformed schedule payloads", () =>
   assert.equal(automations[0].last_status_tone, "muted");
 });
 
+test("normalizeAutomations preserves legacy last_run_at when recent history is empty", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "legacy-run",
+        name: "Legacy run",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        last_run_at: "2026-06-04T16:01:00Z",
+        last_status: "ok",
+        recent_runs: [],
+      },
+    ],
+  });
+
+  assert.equal(automations.length, 1);
+  assert.match(automations[0].last_run_label, /Jun 4/);
+  assert.equal(automations[0].last_status_label, "Done");
+});
+
 test("scheduleLabel presents common recurring schedules in friendly language", () => {
   assert.equal(scheduleLabel("30 14 * * *"), "Every day at 2:30 PM");
   assert.equal(scheduleLabel("0 30 14 * * *"), "Every day at 2:30 PM");
@@ -133,7 +153,8 @@ test("filterAutomations, sorting, and summary use browser-visible active state",
   assert.deepEqual(automationSummary(automations), {
     scheduled: 3,
     active: 2,
-    paused: 1,
+    running: 0,
+    failures: 0,
     nextRun: automations[0].next_run_label,
   });
 });
@@ -156,7 +177,8 @@ test("automationSummary ignores unparseable next_run_at values", () => {
   assert.deepEqual(automationSummary(automations), {
     scheduled: 1,
     active: 1,
-    paused: 0,
+    running: 0,
+    failures: 0,
     nextRun: null,
   });
 });
@@ -176,4 +198,73 @@ test("normalizeAutomations preserves explicit unknown state even when is_active 
 
   assert.equal(automations[0].state_label, "Unknown");
   assert.equal(automations[0].state_tone, "muted");
+});
+
+test("normalizeAutomations presents bounded recent run history", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "daily",
+        name: "Daily summary",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        next_run_at: "2026-06-06T16:00:00Z",
+        recent_runs: [
+          {
+            status: "error",
+            fire_slot: "2026-06-04T16:00:00Z",
+            submitted_at: "2026-06-04T16:00:01Z",
+            completed_at: "2026-06-04T16:03:00Z",
+            thread_id: "thread-error",
+            run_id: "run-error",
+          },
+          {
+            status: "running",
+            fired_at: "2026-06-05T16:00:00Z",
+            submitted_at: "2026-06-05T16:00:01Z",
+            thread_id: "thread-running",
+            run_id: "run-running",
+          },
+          {
+            status: "ok",
+            fire_slot: "2026-06-03T16:00:00Z",
+            submitted_at: "2026-06-03T16:00:01Z",
+            completed_at: "2026-06-03T16:02:00Z",
+            thread_id: "thread-ok",
+            run_id: "run-ok",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(automations[0].recent_runs.length, 3);
+  assert.deepEqual(
+    automations[0].recent_runs.map((run) => run.run_id),
+    ["run-running", "run-error", "run-ok"],
+  );
+  assert.equal(automations[0].has_running_run, true);
+  assert.equal(automations[0].has_failed_runs, true);
+  assert.equal(automations[0].latest_run.run_id, "run-running");
+  assert.equal(automations[0].current_run.run_id, "run-running");
+  assert.match(automations[0].last_run_label, /Jun 4/);
+  assert.equal(automations[0].last_status_label, "Error");
+  assert.equal(automations[0].last_status_tone, "danger");
+  assert.equal(automations[0].recent_runs[0].chat_path, "/chat/thread-running");
+  assert.equal(automations[0].success_rate_label, "50% visible runs");
+  assert.deepEqual(automationSummary(automations), {
+    scheduled: 1,
+    active: 1,
+    running: 1,
+    failures: 1,
+    nextRun: automations[0].next_run_label,
+  });
+  assert.deepEqual(
+    filterAutomations(automations, "running").map((automation) => automation.automation_id),
+    ["daily"],
+  );
+  assert.deepEqual(
+    filterAutomations(automations, "failures").map((automation) => automation.automation_id),
+    ["daily"],
+  );
 });

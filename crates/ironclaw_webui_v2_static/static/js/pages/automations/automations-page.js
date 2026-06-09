@@ -7,11 +7,25 @@ import { useAutomations } from "./hooks/useAutomations.js";
 export function AutomationsPage() {
   const t = useT();
   const [filter, setFilter] = React.useState("all");
+  const [selectedAutomationId, setSelectedAutomationId] = React.useState(null);
   const automationsState = useAutomations();
   const showErrorOnly =
     automationsState.error &&
     !automationsState.isLoading &&
     automationsState.automations.length === 0;
+
+  React.useEffect(() => {
+    if (!automationsState.automations.length) {
+      setSelectedAutomationId(null);
+      return;
+    }
+    const stillExists = automationsState.automations.some(
+      (automation) => automation.automation_id === selectedAutomationId
+    );
+    if (!stillExists) {
+      setSelectedAutomationId(automationsState.automations[0].automation_id);
+    }
+  }, [automationsState.automations, selectedAutomationId]);
 
   return html`
     <div className="flex h-full flex-col overflow-y-auto">
@@ -50,6 +64,8 @@ export function AutomationsPage() {
                         onFilterChange=${setFilter}
                         onRefresh=${automationsState.refetch}
                         isRefreshing=${automationsState.isRefreshing}
+                        selectedAutomationId=${selectedAutomationId}
+                        onSelectAutomation=${setSelectedAutomationId}
                       />
                     `}
               `}

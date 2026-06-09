@@ -984,6 +984,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                             Some(action.reasoning.clone())
                         },
                         signature: None,
+                        arguments_parse_error: None,
                     }],
                 ));
 
@@ -1846,6 +1847,7 @@ fn selections_to_tool_calls(selections: &[ToolSelection]) -> Vec<ToolCall> {
                 Some(s.reasoning.clone())
             },
             signature: None,
+            arguments_parse_error: None,
         })
         .collect()
 }

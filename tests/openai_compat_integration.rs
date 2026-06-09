@@ -99,6 +99,7 @@ impl LlmProvider for MockLlmProvider {
                     arguments: serde_json::json!({"test": true}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
                 input_tokens: 15,
                 output_tokens: 8,

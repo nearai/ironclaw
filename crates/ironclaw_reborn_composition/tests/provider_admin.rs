@@ -75,6 +75,29 @@ api_key_env = "OPENAI_API_KEY"
 }
 
 #[test]
+fn set_provider_nearai_uses_concrete_default_model() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let admin = admin_for_home(&reborn_home);
+
+    let outcome = admin
+        .set_provider("nearai", None)
+        .expect("set nearai provider");
+
+    assert_eq!(outcome.provider_id, "nearai");
+    assert_eq!(outcome.model, ironclaw_llm::DEFAULT_MODEL);
+    let config = std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
+    assert!(
+        config.contains(&format!("model = \"{}\"", ironclaw_llm::DEFAULT_MODEL)),
+        "config: {config}"
+    );
+    assert!(
+        !config.contains("model = \"auto\""),
+        "NEAR AI must not persist the non-routable auto alias: {config}"
+    );
+}
+
+#[test]
 fn provider_admin_json_omits_absolute_host_paths() {
     let temp = tempfile::tempdir().expect("tempdir");
     let admin = admin_for_home(&temp.path().join("reborn-home"));

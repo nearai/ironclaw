@@ -1,5 +1,6 @@
 // arch-exempt: large_file, needs Reborn composition helper extraction, plan #4469
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -45,8 +46,8 @@ use ironclaw_host_api::{
     EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, RuntimeHttpEgress,
     UserId, VirtualPath,
 };
-#[cfg(feature = "libsql")]
-use ironclaw_host_api::{MountAlias, MountGrant};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_api::{HostApiError, MountAlias, MountGrant, ResourceScope};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
     HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
@@ -99,7 +100,7 @@ use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::local_dev_mounts::{
-    ambient_workspace_mount_view, memory_mount_view, skill_context_mount_view,
+    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
     skill_management_mount_view, workspace_mount_view,
 };
 use crate::mcp::hosted_http_mcp_runtime;
@@ -151,6 +152,8 @@ type LocalDevWorkspaceFilesystems = (
 );
 
 const LOCAL_DEV_DEFAULT_SYSTEM_PROMPT_PATH: &str = "system/prompts/default-system.md";
+const LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MARKER: &str = ".legacy-skills-backfilled";
+const LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MAX_DEPTH: usize = 64;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
 
@@ -327,6 +330,7 @@ pub struct RebornServices {
     pub turn_coordinator: Option<Arc<dyn ironclaw_turns::TurnCoordinator>>,
     pub product_auth: Option<Arc<RebornProductAuthServices>>,
     pub readiness: RebornReadiness,
+    pub(crate) skill_management: Option<Arc<RebornLocalSkillManagementPort>>,
     pub(crate) local_runtime: Option<Arc<RebornLocalRuntimeServices>>,
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
@@ -497,6 +501,7 @@ impl RebornServices {
             turn_coordinator: None,
             product_auth: None,
             readiness: RebornReadiness::disabled(),
+            skill_management: None,
             local_runtime: None,
             #[cfg(feature = "root-llm-provider")]
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
@@ -626,6 +631,18 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         (false, None) => None,
     };
     validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
+    let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })?;
+    let backfill_root = root.clone();
+    let backfill_owner_user_id = owner_user_id.clone();
+    tokio::task::spawn_blocking(move || {
+        backfill_local_dev_legacy_user_skills(&backfill_root, &backfill_owner_user_id)
+    })
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev legacy skill backfill task failed: {error}"),
+    })??;
     let default_system_prompt_path = local_dev_default_system_prompt_path(&root);
     seed_default_system_prompt(&root, &default_system_prompt_path).map_err(|error| {
         RebornBuildError::InvalidConfig {
@@ -656,9 +673,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::clone(&filesystem),
         runtime_workspace_mounts.clone(),
     ));
-    let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
-        reason: error.to_string(),
-    })?;
     let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
@@ -886,10 +900,165 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         // the caller does not inject one; readiness tracks the assembled facade.
         product_auth: Some(product_auth),
         readiness: readiness_for(profile, true, true, true),
+        skill_management: Some(Arc::clone(&store_graph.local_runtime.skill_management)),
         local_runtime: Some(store_graph.local_runtime),
         #[cfg(feature = "root-llm-provider")]
         secret_store,
     })
+}
+
+fn backfill_local_dev_legacy_user_skills(
+    storage_root: &Path,
+    owner_user_id: &UserId,
+) -> Result<(), RebornBuildError> {
+    let legacy_root = storage_root.join("skills");
+    if !legacy_root.is_dir() {
+        return Ok(());
+    }
+
+    for tenant_id in ["default", "reborn-cli"] {
+        backfill_local_dev_legacy_user_skills_for_tenant(
+            &legacy_root,
+            storage_root,
+            tenant_id,
+            owner_user_id,
+        )?;
+    }
+    Ok(())
+}
+
+fn backfill_local_dev_legacy_user_skills_for_tenant(
+    legacy_root: &Path,
+    storage_root: &Path,
+    tenant_id: &str,
+    owner_user_id: &UserId,
+) -> Result<(), RebornBuildError> {
+    let scoped_root = storage_root
+        .join("tenants")
+        .join(tenant_id)
+        .join("users")
+        .join(owner_user_id.as_str())
+        .join("skills");
+    let marker = scoped_root.join(LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MARKER);
+    if marker.exists() {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&scoped_root).map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev scoped skill root could not be initialized: {error}"),
+    })?;
+
+    for entry in
+        std::fs::read_dir(legacy_root).map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!(
+                "local-dev legacy skills root '{}' could not be inspected: {error}",
+                legacy_root.display()
+            ),
+        })?
+    {
+        let entry = entry.map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!(
+                "local-dev legacy skills root '{}' could not be inspected: {error}",
+                legacy_root.display()
+            ),
+        })?;
+        let source = entry.path();
+        let destination = scoped_root.join(entry.file_name());
+        if destination.exists() {
+            continue;
+        }
+        copy_local_dev_legacy_skill_entry(&source, &destination)?;
+    }
+    std::fs::write(&marker, b"").map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!(
+            "local-dev legacy skill migration marker '{}' could not be written: {error}",
+            marker.display()
+        ),
+    })?;
+    Ok(())
+}
+
+fn copy_local_dev_legacy_skill_entry(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), RebornBuildError> {
+    let mut pending = VecDeque::from([(source.to_path_buf(), destination.to_path_buf(), 0usize)]);
+
+    while let Some((source, destination, depth)) = pending.pop_front() {
+        if depth > LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MAX_DEPTH {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "local-dev legacy skill entry '{}' exceeds max copy depth {}",
+                    source.display(),
+                    LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MAX_DEPTH
+                ),
+            });
+        }
+
+        let metadata = std::fs::symlink_metadata(&source).map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "local-dev legacy skill entry '{}' could not be inspected: {error}",
+                    source.display()
+                ),
+            }
+        })?;
+        if metadata.file_type().is_symlink() {
+            tracing::warn!(
+                path = %source.display(),
+                "Skipping symlinked local-dev legacy skill entry during backfill"
+            );
+            continue;
+        }
+        if metadata.is_dir() {
+            std::fs::create_dir_all(&destination).map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "local-dev scoped skill directory '{}' could not be initialized: {error}",
+                        destination.display()
+                    ),
+                }
+            })?;
+            for entry in
+                std::fs::read_dir(&source).map_err(|error| RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "local-dev legacy skill directory '{}' could not be inspected: {error}",
+                        source.display()
+                    ),
+                })?
+            {
+                let entry = entry.map_err(|error| RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "local-dev legacy skill directory '{}' could not be inspected: {error}",
+                        source.display()
+                    ),
+                })?;
+                pending.push_back((
+                    entry.path(),
+                    destination.join(entry.file_name()),
+                    depth.saturating_add(1),
+                ));
+            }
+            continue;
+        }
+
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "local-dev scoped skill directory '{}' could not be initialized: {error}",
+                    parent.display()
+                ),
+            })?;
+        }
+        std::fs::copy(&source, &destination).map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!(
+                "local-dev legacy skill file '{}' could not be migrated to '{}': {error}",
+                source.display(),
+                destination.display()
+            ),
+        })?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "libsql")]
@@ -1760,11 +1929,9 @@ fn build_workspace_filesystems(
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
-    let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+    let skill_filesystem = Arc::new(ScopedFilesystem::new(
         Arc::clone(&filesystem),
-        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?,
+        scoped_skill_context_mount_view,
     ));
     let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
         filesystem,
@@ -2022,7 +2189,7 @@ async fn build_production_shaped(
 ) -> Result<RebornServices, RebornBuildError> {
     let RebornBuildInput {
         profile,
-        owner_id: _,
+        owner_id,
         storage,
         production_trust_policy,
         runtime_policy,
@@ -2049,6 +2216,7 @@ async fn build_production_shaped(
         runtime_policy,
         turn_run_wake_notifier,
         runtime_process_binding,
+        owner_id,
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
@@ -2087,6 +2255,7 @@ async fn build_production_shaped(
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
+                owner_id,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
@@ -2110,6 +2279,7 @@ async fn build_production_shaped(
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
+                owner_id,
             };
             build_postgres_production(context, pool, url, secret_master_key).await
         }
@@ -2141,6 +2311,7 @@ struct RebornProductionBuildContext {
     product_auth_ports: Option<RebornProductAuthServicePorts>,
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
+    owner_id: String,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -2428,6 +2599,28 @@ where
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_skill_management_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
+    MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/skills")?,
+            VirtualPath::new(format!(
+                "/tenants/{}/users/{}/skills",
+                scope.tenant_id.as_str(),
+                scope.user_id.as_str()
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/system/skills")?,
+            VirtualPath::new("/system/skills")?,
+            MountPermissions::read_only(),
+        ),
+    ])
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn build_backend_production<F>(
     context: RebornProductionBuildContext,
     stores: ProductionStoreBundle<F>,
@@ -2443,8 +2636,18 @@ where
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        owner_id,
     } = context;
+    let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })?;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
+    let skill_management_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
+    let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
+        owner_user_id,
+        skill_management_filesystem,
+        Arc::new(production_skill_management_mount_view),
+    ));
     let trigger_create_hook = Arc::new(ScopedFilesystemTriggerCreatorPairingHook::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
@@ -2546,6 +2749,7 @@ where
         turn_coordinator: Some(turn_coordinator),
         readiness: readiness_for(profile, true, true, product_auth_ready),
         product_auth: Some(product_auth_services),
+        skill_management: Some(skill_management),
         local_runtime: None,
         #[cfg(feature = "root-llm-provider")]
         secret_store,
@@ -3581,7 +3785,7 @@ mod tests {
         assert_eq!(install_output["name"], "runtime-sentinel");
         assert!(
             storage_root
-                .join("skills/runtime-sentinel/SKILL.md")
+                .join("tenants/default/users/local-dev-test-user/skills/runtime-sentinel/SKILL.md")
                 .exists()
         );
 
@@ -3612,7 +3816,7 @@ mod tests {
         assert_eq!(remove_output["removed"], true);
         assert!(
             !storage_root
-                .join("skills/runtime-sentinel/SKILL.md")
+                .join("tenants/default/users/local-dev-test-user/skills/runtime-sentinel/SKILL.md")
                 .exists()
         );
     }
@@ -3642,7 +3846,11 @@ mod tests {
         .expect_err("workspace tool cannot write skill root");
 
         assert_eq!(failure, RuntimeFailureKind::Authorization);
-        assert!(!storage_root.join("skills/blocked/SKILL.md").exists());
+        assert!(
+            !storage_root
+                .join("tenants/default/users/local-dev-test-user/skills/blocked/SKILL.md")
+                .exists()
+        );
     }
 
     #[test]
@@ -3672,6 +3880,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn local_dev_legacy_skill_backfill_marker_preserves_deletions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let legacy_skill_dir = storage_root.join("skills/legacy-skill");
+        std::fs::create_dir_all(&legacy_skill_dir).expect("legacy skill dir");
+        std::fs::write(legacy_skill_dir.join("SKILL.md"), "legacy skill").expect("legacy skill");
+        let owner_user_id = UserId::new("owner").expect("owner");
+
+        backfill_local_dev_legacy_user_skills(&storage_root, &owner_user_id)
+            .expect("initial backfill");
+        let scoped_skill_dir = storage_root.join("tenants/default/users/owner/skills/legacy-skill");
+        let reborn_cli_skill_dir =
+            storage_root.join("tenants/reborn-cli/users/owner/skills/legacy-skill");
+        assert!(scoped_skill_dir.join("SKILL.md").exists());
+        assert!(reborn_cli_skill_dir.join("SKILL.md").exists());
+
+        std::fs::remove_dir_all(&scoped_skill_dir).expect("delete migrated skill");
+        backfill_local_dev_legacy_user_skills(&storage_root, &owner_user_id)
+            .expect("second backfill");
+        assert!(
+            !scoped_skill_dir.exists(),
+            "one-time legacy backfill must not resurrect user-deleted migrated skills"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_dev_legacy_skill_backfill_skips_symlinks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let legacy_root = storage_root.join("skills");
+        let target_dir = storage_root.join("target-skill");
+        std::fs::create_dir_all(&legacy_root).expect("legacy root");
+        std::fs::create_dir_all(&target_dir).expect("target dir");
+        std::os::unix::fs::symlink(&target_dir, legacy_root.join("linked-skill"))
+            .expect("legacy symlink");
+        let owner_user_id = UserId::new("owner").expect("owner");
+
+        backfill_local_dev_legacy_user_skills(&storage_root, &owner_user_id)
+            .expect("symlink should be skipped, not fail startup");
+        assert!(
+            !storage_root
+                .join("tenants/default/users/owner/skills/linked-skill")
+                .exists()
+        );
+        assert!(
+            storage_root
+                .join(format!(
+                    "tenants/default/users/owner/skills/{LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MARKER}"
+                ))
+                .exists(),
+            "migration should still be marked complete after skipping symlinks"
+        );
     }
 
     #[test]
@@ -3707,6 +3971,37 @@ mod tests {
         assert!(!registry.contains_handler(
             &ironclaw_host_api::CapabilityId::new(SKILL_ACTIVATE_CAPABILITY_ID).unwrap()
         ));
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[test]
+    fn production_skill_management_mounts_use_production_namespace() {
+        let scope = ResourceScope {
+            tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+            user_id: UserId::new("alice").expect("user"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+
+        let mounts = production_skill_management_mount_view(&scope).expect("mount view");
+        let skills_mount = mounts
+            .mounts
+            .iter()
+            .find(|mount| mount.alias.as_str() == "/skills")
+            .expect("skills mount");
+        assert_eq!(
+            skills_mount.target.as_str(),
+            "/tenants/tenant-alpha/users/alice/skills"
+        );
+        let system_mount = mounts
+            .mounts
+            .iter()
+            .find(|mount| mount.alias.as_str() == "/system/skills")
+            .expect("system skills mount");
+        assert_eq!(system_mount.target.as_str(), "/system/skills");
     }
 
     #[test]
@@ -3914,19 +4209,13 @@ mod tests {
     }
 
     fn skill_mounts() -> MountView {
-        MountView::new(vec![
-            MountGrant::new(
-                MountAlias::new("/skills").expect("valid mount alias"),
-                VirtualPath::new("/projects/skills").expect("valid virtual path"),
-                MountPermissions::read_write_list_delete(),
-            ),
-            MountGrant::new(
-                MountAlias::new("/system/skills").expect("valid mount alias"),
-                VirtualPath::new("/projects/system/skills").expect("valid virtual path"),
-                MountPermissions::read_only(),
-            ),
-        ])
-        .expect("valid mount view")
+        let scope = ironclaw_host_api::ResourceScope::local_default(
+            UserId::new("local-dev-test-user").expect("valid user id"),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .expect("valid resource scope");
+        crate::local_dev_mounts::scoped_skill_management_mount_view(&scope)
+            .expect("valid skill mounts")
     }
 
     fn workspace_mounts() -> MountView {

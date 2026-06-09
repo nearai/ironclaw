@@ -674,6 +674,11 @@ impl RebornRuntime {
         &self.services
     }
 
+    #[cfg(test)]
+    pub(crate) fn clear_local_runtime_for_test(&mut self) {
+        self.services.local_runtime = None;
+    }
+
     /// Operator boot config, when the runtime was assembled with one. The
     /// WebUI facade uses it to compose the LLM-config settings service.
     #[cfg(feature = "root-llm-provider")]
@@ -2327,12 +2332,11 @@ pub(crate) struct RebornLlmReloadParts {
 
 #[cfg(feature = "root-llm-provider")]
 async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, RebornRuntimeError> {
-    let model = llm.model().to_string();
     let session = ironclaw_llm::create_session_manager(llm.config.session.clone()).await;
     let raw = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
-    wrap_swappable_gateway(raw, Some(model), session)
+    wrap_swappable_gateway(raw, session)
 }
 
 /// Cold-boot gateway: no LLM configured yet. Wraps a placeholder provider (which
@@ -2344,7 +2348,7 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
     let raw: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(PlaceholderLlmProvider);
-    wrap_swappable_gateway(raw, None, session)
+    wrap_swappable_gateway(raw, session)
 }
 
 /// Wrap a raw provider in a [`SwappableLlmProvider`] + reload handle and build
@@ -2353,7 +2357,6 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
 #[cfg(feature = "root-llm-provider")]
 fn wrap_swappable_gateway(
     raw: Arc<dyn ironclaw_llm::LlmProvider>,
-    model: Option<String>,
     session: Arc<ironclaw_llm::SessionManager>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
@@ -2367,7 +2370,7 @@ fn wrap_swappable_gateway(
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
     })?;
-    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, model);
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
     let gateway = LlmProviderModelGateway::new(provider, policy.clone());
     Ok(LlmGatewayBundle {
         gateway: Arc::new(gateway),
@@ -2963,10 +2966,148 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "root-llm-provider")]
+    #[derive(Debug)]
+    struct RecordingLlmProvider {
+        active_model: StdMutex<String>,
+        requests: StdMutex<Vec<Option<String>>>,
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    impl RecordingLlmProvider {
+        fn new(active_model: &str) -> Self {
+            Self {
+                active_model: StdMutex::new(active_model.to_string()),
+                requests: StdMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[async_trait]
+    impl ironclaw_llm::LlmProvider for RecordingLlmProvider {
+        fn model_name(&self) -> &str {
+            "recording-provider"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, ironclaw_llm::LlmError> {
+            self.requests
+                .lock()
+                .expect("recording provider request lock poisoned")
+                .push(request.model);
+            Ok(ironclaw_llm::CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, ironclaw_llm::LlmError> {
+            self.requests
+                .lock()
+                .expect("recording provider request lock poisoned")
+                .push(request.model);
+            Ok(ironclaw_llm::ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        fn active_model_name(&self) -> String {
+            self.active_model
+                .lock()
+                .expect("recording provider active-model lock poisoned")
+                .clone()
+        }
+
+        fn set_model(&self, model: &str) -> Result<(), ironclaw_llm::LlmError> {
+            *self
+                .active_model
+                .lock()
+                .expect("recording provider active-model lock poisoned") = model.to_string();
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn swappable_gateway_uses_current_active_model_for_requests() {
+        let provider = Arc::new(RecordingLlmProvider::new("boot-model"));
+        let raw: Arc<dyn ironclaw_llm::LlmProvider> = provider.clone();
+        let session =
+            ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
+        let bundle = super::wrap_swappable_gateway(raw, session).expect("gateway bundle");
+
+        bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await
+            .expect("first request");
+        bundle
+            .reload
+            .reload_handle
+            .primary_provider()
+            .set_model("reloaded-model")
+            .expect("set active model");
+        bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await
+            .expect("second request");
+
+        let requests = provider
+            .requests
+            .lock()
+            .expect("recording provider request lock poisoned");
+        assert_eq!(
+            *requests,
+            vec![
+                Some("boot-model".to_string()),
+                Some("reloaded-model".to_string())
+            ],
+            "production gateway must not keep sending the model selected at boot"
+        );
+    }
+
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
         format!(
             "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
         )
+    }
+
+    fn user_skill_dir(
+        storage_root: &std::path::Path,
+        tenant_id: &str,
+        user_id: &str,
+        name: &str,
+    ) -> std::path::PathBuf {
+        storage_root
+            .join("tenants")
+            .join(tenant_id)
+            .join("users")
+            .join(user_id)
+            .join("skills")
+            .join(name)
     }
 
     fn skill_md_with_setup_marker(
@@ -3942,9 +4083,15 @@ mod tests {
             ),
         )
         .expect("write system skill");
-        std::fs::create_dir_all(storage_root.join("skills/local-helper")).expect("user skill dir");
+        let local_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-filesystem-skill-tenant",
+            "runtime-filesystem-skill-owner",
+            "local-helper",
+        );
+        std::fs::create_dir_all(&local_helper_dir).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/local-helper/SKILL.md"),
+            local_helper_dir.join("SKILL.md"),
             skill_md(
                 "local-helper",
                 "local helper description",
@@ -4026,13 +4173,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_runtime_backfills_legacy_owner_skill_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("skills/legacy-helper"))
+            .expect("legacy skill dir");
+        std::fs::write(
+            storage_root.join("skills/legacy-helper/SKILL.md"),
+            skill_md(
+                "legacy-helper",
+                "legacy helper description",
+                "LEGACY_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write legacy helper skill");
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-legacy-skill-owner", storage_root.clone())
+                .with_runtime_policy(local_dev_runtime_policy()),
+        );
+        let runtime = build_reborn_runtime(input).await.expect("runtime");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+
+        let result = runtime
+            .execute_skill_message(&conversation, "$legacy-helper")
+            .await
+            .expect("execute skill message");
+
+        assert_eq!(result.plan.activations().len(), 1);
+        assert_eq!(result.plan.activations()[0].name, "legacy-helper");
+        assert!(
+            storage_root
+                .join(
+                    "tenants/reborn-cli/users/runtime-legacy-skill-owner/skills/legacy-helper/SKILL.md"
+                )
+                .exists()
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
     async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/asset-helper/references"))
+        let asset_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-skill-exec-tenant",
+            "runtime-skill-exec-owner",
+            "asset-helper",
+        );
+        std::fs::create_dir_all(asset_helper_dir.join("references"))
             .expect("asset skill references dir");
         std::fs::write(
-            storage_root.join("skills/asset-helper/SKILL.md"),
+            asset_helper_dir.join("SKILL.md"),
             skill_md(
                 "asset-helper",
                 "asset helper description",
@@ -4041,7 +4235,7 @@ mod tests {
         )
         .expect("write asset helper skill");
         std::fs::write(
-            storage_root.join("skills/asset-helper/references/policy.md"),
+            asset_helper_dir.join("references/policy.md"),
             "asset helper policy",
         )
         .expect("write asset helper policy");
@@ -4143,9 +4337,15 @@ mod tests {
             ),
         )
         .expect("write system skill");
-        std::fs::create_dir_all(storage_root.join("skills/code-review")).expect("user skill dir");
+        let user_code_review_dir = user_skill_dir(
+            &storage_root,
+            "runtime-ambiguous-skill-tenant",
+            "runtime-ambiguous-skill-owner",
+            "code-review",
+        );
+        std::fs::create_dir_all(&user_code_review_dir).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/code-review/SKILL.md"),
+            user_code_review_dir.join("SKILL.md"),
             skill_md(
                 "code-review",
                 "user review description",
@@ -4200,10 +4400,16 @@ mod tests {
     async fn local_dev_runtime_suppresses_explicit_setup_skill_when_workspace_marker_exists() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/marker-helper")).expect("user skill dir");
+        let marker_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-setup-marker-tenant",
+            "runtime-setup-marker-owner",
+            "marker-helper",
+        );
+        std::fs::create_dir_all(&marker_helper_dir).expect("user skill dir");
         std::fs::create_dir_all(storage_root.join("workspace/markers")).expect("marker dir");
         std::fs::write(
-            storage_root.join("skills/marker-helper/SKILL.md"),
+            marker_helper_dir.join("SKILL.md"),
             skill_md_with_setup_marker(
                 "marker-helper",
                 "marker helper description",
@@ -4275,9 +4481,15 @@ mod tests {
     async fn local_dev_runtime_activates_setup_skill_when_workspace_marker_is_absent() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/marker-helper")).expect("user skill dir");
+        let marker_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-setup-marker-absent-tenant",
+            "runtime-setup-marker-absent-owner",
+            "marker-helper",
+        );
+        std::fs::create_dir_all(&marker_helper_dir).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/marker-helper/SKILL.md"),
+            marker_helper_dir.join("SKILL.md"),
             skill_md_with_setup_marker(
                 "marker-helper",
                 "marker helper description",
@@ -4387,9 +4599,15 @@ mod tests {
     async fn local_dev_runtime_skips_invalid_filesystem_skill_before_model_call() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/bad-helper")).expect("bad skill dir");
+        let bad_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-bad-skill-tenant",
+            "runtime-bad-skill-owner",
+            "bad-helper",
+        );
+        std::fs::create_dir_all(&bad_helper_dir).expect("bad skill dir");
         std::fs::write(
-            storage_root.join("skills/bad-helper/SKILL.md"),
+            bad_helper_dir.join("SKILL.md"),
             skill_md(
                 "different-name",
                 "bad helper description",
@@ -5508,9 +5726,15 @@ mod tests {
     async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/webui-helper")).expect("user skill dir");
+        let webui_helper_dir = user_skill_dir(
+            &storage_root,
+            "runtime-webui-skill-tenant",
+            "runtime-webui-skill-user",
+            "webui-helper",
+        );
+        std::fs::create_dir_all(&webui_helper_dir).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/webui-helper/SKILL.md"),
+            webui_helper_dir.join("SKILL.md"),
             skill_md(
                 "webui-helper",
                 "webui helper description",

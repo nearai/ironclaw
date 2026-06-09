@@ -112,7 +112,7 @@ impl TriggerPollerWorker {
                 }
             };
             match state {
-                TriggerActiveRunState::Terminal => {
+                TriggerActiveRunState::Terminal { status } => {
                     if self
                         .deps
                         .repository
@@ -121,6 +121,7 @@ impl TriggerPollerWorker {
                             trigger_id: record.trigger_id,
                             fire_slot,
                             run_id,
+                            status,
                         })
                         .await?
                         .is_some()

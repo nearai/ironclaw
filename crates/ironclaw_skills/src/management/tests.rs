@@ -423,7 +423,7 @@ async fn install_bundle_failure_cleans_up_partial_directory() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.kind(), SkillManagementErrorKind::FilesystemDenied);
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
 
     assert_missing(&inner, "/projects/skills/partial-helper/SKILL.md").await;
     assert_missing(
@@ -581,7 +581,7 @@ async fn install_cleanup_failure_is_reported() {
     .await
     .unwrap_err();
 
-    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
+    assert_eq!(error.kind(), SkillManagementErrorKind::FilesystemDenied);
     assert_file_contents(
         &inner,
         "/projects/skills/cleanup-helper/references/guide.md",
@@ -799,6 +799,95 @@ async fn remove_rejects_system_skill() {
     .unwrap_err();
 
     assert_eq!(error.kind(), SkillManagementErrorKind::NotFound);
+}
+
+#[tokio::test]
+async fn read_skill_content_rejects_invalid_or_missing_user_skill() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem, user_skill_mounts());
+
+    let invalid = read_skill_content(
+        &context,
+        SkillContentRequest {
+            name: "../not-a-skill",
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(invalid.kind(), SkillManagementErrorKind::InvalidInput);
+
+    let missing = read_skill_content(
+        &context,
+        SkillContentRequest {
+            name: "missing-skill",
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing.kind(), SkillManagementErrorKind::NotFound);
+}
+
+#[tokio::test]
+async fn update_skill_rejects_invalid_missing_oversized_and_name_change() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    write_file(
+        filesystem.as_ref(),
+        "/projects/skills/editable-skill/SKILL.md",
+        skill_md("editable-skill", "description", "ORIGINAL_PROMPT"),
+    )
+    .await;
+    let context = skill_management_context(filesystem.clone(), user_skill_mounts());
+
+    let invalid = update_skill(
+        &context,
+        SkillUpdateRequest {
+            name: "../not-a-skill",
+            content: &skill_md("editable-skill", "description", "UPDATED"),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(invalid.kind(), SkillManagementErrorKind::InvalidInput);
+
+    let missing = update_skill(
+        &context,
+        SkillUpdateRequest {
+            name: "missing-skill",
+            content: &skill_md("missing-skill", "description", "UPDATED"),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing.kind(), SkillManagementErrorKind::NotFound);
+
+    let oversized = "x".repeat(MAX_PROMPT_FILE_SIZE as usize + 1);
+    let too_large = update_skill(
+        &context,
+        SkillUpdateRequest {
+            name: "editable-skill",
+            content: &oversized,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(too_large.kind(), SkillManagementErrorKind::Resource);
+
+    let renamed = update_skill(
+        &context,
+        SkillUpdateRequest {
+            name: "editable-skill",
+            content: &skill_md("renamed-skill", "description", "UPDATED"),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(renamed.kind(), SkillManagementErrorKind::InvalidInput);
+    assert_file_contents(
+        filesystem.as_ref(),
+        "/projects/skills/editable-skill/SKILL.md",
+        skill_md("editable-skill", "description", "ORIGINAL_PROMPT").as_bytes(),
+    )
+    .await;
 }
 
 async fn write_file(root: &InMemoryBackend, path: &str, body: String) {
