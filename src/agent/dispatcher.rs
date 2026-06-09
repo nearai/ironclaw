@@ -47,16 +47,54 @@ fn resolve_settings_temperature(
         .map(|t| (t as f32).clamp(0.0, 2.0))
 }
 
+/// Apply the full iteration-1 temperature precedence rule:
+///
+/// 1. **Existing context value** wins — set by an upstream caller (e.g. a
+///    reasoning-model default) before the agentic loop started.
+/// 2. **Per-request metadata** — `metadata["temperature"]` from the inbound
+///    `IncomingMessage`. Populated by the Responses API handler when a
+///    caller passes a `temperature` field.
+/// 3. **Settings store fallback** — user/admin default via
+///    `resolve_settings_temperature`, clamped to `[0.0, 2.0]`.
+///
+/// Returns `Some(t)` when any source supplies a value, `None` when none do.
+///
+/// Centralizing all three sources here means the dispatcher's iteration-1
+/// gate has a single call site with all inputs visible — a future refactor
+/// that drops the metadata read must change this signature instead of
+/// silently deleting a branch inside the gate body.
+fn resolve_temperature_overrides(
+    current: Option<f32>,
+    metadata: &serde_json::Value,
+    settings_value: Option<&serde_json::Value>,
+) -> Option<f32> {
+    if current.is_some() {
+        return current;
+    }
+    if let Some(t) = metadata
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .map(|f| f as f32)
+    {
+        return Some(t);
+    }
+    resolve_settings_temperature(None, settings_value)
+}
+
 fn chat_job_context(
     message: &IncomingMessage,
     thread_id: Uuid,
     user_tz: chrono_tz::Tz,
+    skill_scope_owner_id: Option<&str>,
 ) -> JobContext {
     let mut job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
         .with_requester_id(&message.sender_id);
     job_ctx.conversation_id = Some(thread_id);
     job_ctx.user_timezone = user_tz.name().to_string();
     job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
+    if let Some(owner_id) = skill_scope_owner_id {
+        job_ctx.metadata["skill_scope_owner_id"] = serde_json::Value::String(owner_id.to_string());
+    }
     job_ctx
 }
 
@@ -256,7 +294,8 @@ impl Agent {
         }
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let mut job_ctx = chat_job_context(message, thread_id, user_tz);
+        let skill_scope_owner_id = self.config.multi_tenant.then(|| self.owner_id());
+        let mut job_ctx = chat_job_context(message, thread_id, user_tz, skill_scope_owner_id);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
 
         // Build system prompts once for this turn. Two variants: with tools
@@ -624,30 +663,48 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .into());
         }
 
-        // Apply per-user overrides from settings (first iteration only
-        // to avoid repeated DB lookups within the same agentic loop).
+        // Apply per-user overrides from settings on the first iteration
+        // only, to avoid repeated DB lookups within the same agentic loop.
         // Uses admin-fallback so admin-set defaults propagate to members
         // who haven't overridden the value themselves.
-        if iteration == 0
-            && let Some(store) = self.tenant.store()
-        {
+        //
+        // The loop in `run_agentic_loop` starts iterations at 1 (see
+        // `agentic_loop.rs`), so this gate must match that first value.
+        // Off-by-one here silently disables per-request temperature, the
+        // `temperature` setting, and the `selected_model` override.
+        if iteration == 1 {
+            // Resolve temperature precedence in one place so all three input
+            // sources (existing context value, per-request metadata, settings
+            // store) are visible at a single call site. See
+            // `resolve_temperature_overrides` for the precedence rule.
+            let settings_temperature = if let Some(store) = self.tenant.store() {
+                store
+                    .get_setting_with_admin_fallback("temperature")
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            if let Some(t) = resolve_temperature_overrides(
+                reason_ctx.temperature,
+                &self.message.metadata,
+                settings_temperature.as_ref(),
+            ) {
+                reason_ctx.temperature = Some(t);
+            }
+
             // Model override: "selected_model" — the same key the /model command
             // persists to via SettingsStore (per-user scoped via TenantScope).
-            if let Ok(Some(value)) = store
-                .get_setting_with_admin_fallback("selected_model")
-                .await
+            // Kept separate from temperature precedence — different override
+            // category, only a settings-level signal exists.
+            if let Some(store) = self.tenant.store()
+                && let Ok(Some(value)) = store
+                    .get_setting_with_admin_fallback("selected_model")
+                    .await
                 && let Some(model) = selected_model_override(&value)
             {
                 reason_ctx.model_override = Some(model);
-            }
-
-            // Temperature override from user or admin settings. Per-request
-            // values already on the context take precedence over settings.
-            if let Ok(setting) = store.get_setting_with_admin_fallback("temperature").await
-                && let Some(t) =
-                    resolve_settings_temperature(reason_ctx.temperature, setting.as_ref())
-            {
-                reason_ctx.temperature = Some(t);
             }
         }
 
@@ -1850,8 +1907,8 @@ mod tests {
 
     use super::{
         capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
-        persist_selected_auth_prompt, resolve_settings_temperature, restore_selected_auth_prompt,
-        selected_model_override,
+        persist_selected_auth_prompt, resolve_settings_temperature, resolve_temperature_overrides,
+        restore_selected_auth_prompt, selected_model_override,
     };
     use crate::agent::session::PendingAuthPrompt;
     use crate::generated_images::GeneratedImageSentinel;
@@ -1999,6 +2056,7 @@ mod tests {
                         arguments: serde_json::json!({}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     },
                     ToolCall {
                         id: ironclaw_llm::generate_tool_call_id(0, 1),
@@ -2006,6 +2064,7 @@ mod tests {
                         arguments: serde_json::json!({"target": "danger"}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     },
                 ],
                 input_tokens: 0,
@@ -2353,6 +2412,7 @@ mod tests {
                     arguments: serde_json::json!({"url": "https://example.com"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 },
                 ToolCall {
                     id: "call_3".to_string(),
@@ -2360,6 +2420,7 @@ mod tests {
                     arguments: serde_json::json!({"message": "done"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 },
             ],
             selected_auth_prompt: Some(crate::agent::session::PendingAuthPrompt::new(
@@ -2779,7 +2840,7 @@ mod tests {
         let thread_id = Uuid::new_v4();
         let message = IncomingMessage::new("web", "test-user", "/plan Ship it");
 
-        let job_ctx = super::chat_job_context(&message, thread_id, chrono_tz::UTC);
+        let job_ctx = super::chat_job_context(&message, thread_id, chrono_tz::UTC, None);
 
         assert_eq!(job_ctx.conversation_id, Some(thread_id));
         assert_eq!(job_ctx.user_timezone, "UTC");
@@ -2865,6 +2926,7 @@ mod tests {
                     arguments: serde_json::json!({"message": "hi"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "echo", "hi"),
@@ -2959,6 +3021,7 @@ mod tests {
                         arguments: serde_json::json!({}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     },
                     ToolCall {
                         id: "c2".to_string(),
@@ -2966,6 +3029,7 @@ mod tests {
                         arguments: serde_json::json!({}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     },
                 ],
             ),
@@ -3001,6 +3065,7 @@ mod tests {
                     arguments: serde_json::json!({}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
             ),
             ChatMessage::tool_result("c1", "echo", "done"),
@@ -3135,6 +3200,7 @@ mod tests {
                     arguments: serde_json::json!({"message": "looping"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
                 input_tokens: 0,
                 output_tokens: 5,
@@ -3279,6 +3345,113 @@ mod tests {
         );
     }
 
+    // -------------------------------------------------------------------
+    // resolve_temperature_overrides — full iteration-1 precedence rule
+    //
+    // These tests lock in the wiring `ChatDelegate::call_llm` depends on
+    // (PR #3641, serrrfirat's Medium-severity follow-up). The
+    // `resolve_settings_temperature_*` tests above only cover the
+    // settings-side helper in isolation — they would still pass if the
+    // dispatcher dropped the metadata read entirely. These tests cover
+    // the precedence contract at the seam the call site uses, so any
+    // future refactor that loses one of the three inputs has to change
+    // a signature instead of silently deleting a branch.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn temperature_overrides_existing_context_wins_over_metadata_and_settings() {
+        // Highest precedence: a value already on the reasoning context
+        // (e.g. set by an upstream caller before the agentic loop ran).
+        assert_eq!(
+            resolve_temperature_overrides(
+                Some(0.11),
+                &serde_json::json!({ "temperature": 0.42 }),
+                Some(&serde_json::json!(0.9)),
+            ),
+            Some(0.11),
+        );
+    }
+
+    #[test]
+    fn temperature_overrides_per_request_wins_over_settings_fallback() {
+        // The bug serrrfirat's review targets: per-request `temperature`
+        // from the Responses API arrives in `metadata["temperature"]` and
+        // must override the user/admin settings default. Without this
+        // ordering, API callers cannot set a per-call value.
+        assert_eq!(
+            resolve_temperature_overrides(
+                None,
+                &serde_json::json!({ "temperature": 0.42 }),
+                Some(&serde_json::json!(0.9)),
+            ),
+            Some(0.42),
+        );
+    }
+
+    #[test]
+    fn temperature_overrides_settings_used_when_no_per_request_value() {
+        assert_eq!(
+            resolve_temperature_overrides(
+                None,
+                &serde_json::json!({}),
+                Some(&serde_json::json!(0.9))
+            ),
+            Some(0.9),
+        );
+    }
+
+    #[test]
+    fn temperature_overrides_settings_clamped_when_used() {
+        // The settings-fallback path must still clamp out-of-range DB
+        // values to `[0.0, 2.0]`, mirroring `resolve_settings_temperature`.
+        assert_eq!(
+            resolve_temperature_overrides(
+                None,
+                &serde_json::json!({}),
+                Some(&serde_json::json!(9.0))
+            ),
+            Some(2.0),
+        );
+        assert_eq!(
+            resolve_temperature_overrides(
+                None,
+                &serde_json::json!({}),
+                Some(&serde_json::json!(-1.0)),
+            ),
+            Some(0.0),
+        );
+    }
+
+    #[test]
+    fn temperature_overrides_returns_none_when_no_source_supplies_value() {
+        assert_eq!(
+            resolve_temperature_overrides(None, &serde_json::json!({}), None),
+            None,
+        );
+        // A non-numeric metadata value falls through to settings (also None).
+        assert_eq!(
+            resolve_temperature_overrides(None, &serde_json::json!({ "temperature": "hot" }), None,),
+            None,
+        );
+    }
+
+    #[test]
+    fn temperature_overrides_per_request_not_clamped_at_this_layer() {
+        // Per-request values are accepted verbatim here; clamping for the
+        // metadata path is owned by `Reasoning::respond_with_tools`, which
+        // clamps the final value just before the provider call. Locking
+        // this in so a future "let's clamp everywhere" change is a
+        // deliberate decision, not an accident.
+        assert_eq!(
+            resolve_temperature_overrides(
+                None,
+                &serde_json::json!({ "temperature": 9.0 }),
+                Some(&serde_json::json!(0.5)),
+            ),
+            Some(9.0),
+        );
+    }
+
     #[test]
     fn selected_model_override_ignores_default_sentinel() {
         assert_eq!(selected_model_override(&serde_json::json!("default")), None);
@@ -3348,6 +3521,7 @@ mod tests {
                     arguments: serde_json::json!({}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
                 input_tokens: 0,
                 output_tokens: 5,

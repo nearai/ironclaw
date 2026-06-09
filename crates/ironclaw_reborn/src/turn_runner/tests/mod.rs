@@ -520,7 +520,7 @@ impl ironclaw_turns::run_profile::LoopCompactionPort for StubHost {
         &self,
         _request: ironclaw_turns::run_profile::LoopCompactionRequest,
     ) -> Result<
-        ironclaw_turns::run_profile::LoopCompactionResponse,
+        ironclaw_turns::run_profile::LoopCompactionOutcome,
         ironclaw_turns::run_profile::LoopCompactionError,
     > {
         unimplemented!("stub host: never called by mock driver")
@@ -686,6 +686,17 @@ fn assert_first_terminal_failure_matches_first_claim(port: &MockTransitionPort, 
     assert_eq!(runner_failure.run_id, run_id);
     assert_eq!(runner_failure.runner_id, claim.runner_id);
     assert_eq!(runner_failure.lease_token, claim.lease_token);
+}
+
+fn first_terminal_failure_category(port: &MockTransitionPort) -> String {
+    port.runner_failure_requests
+        .lock()
+        .expect("lock")
+        .first()
+        .expect("worker should record terminal failure")
+        .failure
+        .category()
+        .to_string()
 }
 
 fn setup_registry(driver: Arc<dyn AgentLoopDriver>) -> DriverRegistry {
@@ -1225,6 +1236,48 @@ async fn worker_records_terminal_failure_on_driver_error() {
 
     assert!(port.calls().contains(&TransitionCall::RecordRunnerFailure));
     assert_first_terminal_failure_matches_first_claim(&port, run_id);
+    assert_eq!(first_terminal_failure_category(&port), "driver_failed");
+}
+
+#[tokio::test]
+async fn worker_preserves_model_credit_exhaustion_failure_category() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::failing(
+        desc.clone(),
+        AgentLoopDriverError::Failed {
+            reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
+        },
+    ));
+    let registry = Arc::new(setup_registry(driver));
+    let claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(50),
+            scope_filter: None,
+        },
+        port.clone(),
+        make_applier(port.clone()),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    cancel.cancel();
+    handle.await.expect("worker task should complete");
+
+    assert_eq!(
+        first_terminal_failure_category(&port),
+        MODEL_CREDITS_EXHAUSTED_CATEGORY
+    );
 }
 
 #[tokio::test]
@@ -1544,4 +1597,18 @@ async fn worker_generates_stable_runner_id() {
     let id1 = worker.runner_id();
     let id2 = worker.runner_id();
     assert_eq!(id1, id2, "runner_id should be stable across calls");
+}
+
+#[test]
+fn sanitized_driver_failure_returns_credits_exhausted_for_known_category() {
+    let result = sanitized_driver_failure(MODEL_CREDITS_EXHAUSTED_CATEGORY);
+    let failure = result.expect("should return Some for credits exhausted category");
+    assert_eq!(failure.category(), MODEL_CREDITS_EXHAUSTED_CATEGORY);
+}
+
+#[test]
+fn sanitized_driver_failure_returns_driver_failed_for_unknown_category() {
+    let result = sanitized_driver_failure("some_unknown_driver_category");
+    let failure = result.expect("should return Some fallback for unknown category");
+    assert_eq!(failure.category(), "driver_failed");
 }

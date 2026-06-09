@@ -607,6 +607,7 @@ fn extract_choice_content(choice: &OpenAiChoice) -> (Option<String>, Vec<ToolCal
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 })
                 .collect()
         })
@@ -641,6 +642,7 @@ mod tests {
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let messages = vec![
             ChatMessage::user("Search"),

@@ -1,7 +1,10 @@
 use std::{fmt, sync::Arc};
 
 use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+use ironclaw_host_api::{
+    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SYSTEM_RESERVED_ID,
+    VirtualPath,
+};
 use ironclaw_secrets::{
     FilesystemSecretStore, SecretError, SecretMaterial, SecretStore, SecretsCrypto,
 };
@@ -79,9 +82,7 @@ pub async fn check_libsql_reborn_secret_store_health(
         },
         Err(RebornSecretStoreError::InvalidMasterKey) => RebornSecretStoreHealth {
             status: RebornSecretStoreHealthStatus::InvalidMasterKey,
-            reason: Some(
-                "operator master key is invalid or cannot decrypt existing secret rows".to_string(),
-            ),
+            reason: Some("operator master key is invalid".to_string()),
         },
         Err(_) => RebornSecretStoreHealth {
             status: RebornSecretStoreHealthStatus::Unavailable,
@@ -119,22 +120,38 @@ pub async fn build_libsql_reborn_secret_store(
     Ok(Arc::new(store))
 }
 
-/// Build the single-tenant `/secrets` mount the standalone Reborn binary uses
-/// when wiring a secret store directly. Mirrors
-/// `ironclaw_reborn_composition::default_singleton_mount_view` but is kept
-/// local so this crate does not depend on the composition crate.
+/// Build the `/secrets` mount the standalone Reborn binary uses when wiring a
+/// secret store directly. Mirrors the composition-layer tenant/user rewrite for
+/// this one alias but is kept local so this crate does not depend on the
+/// composition crate.
 fn reborn_singleton_secret_mount<F>(
     filesystem: Arc<F>,
 ) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::HostApiError>
 where
     F: RootFilesystem,
 {
-    let view = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/secrets")?,
-        VirtualPath::new("/secrets")?,
-        MountPermissions::read_write_list_delete(),
-    )])?;
-    Ok(Arc::new(ScopedFilesystem::with_fixed_view(
-        filesystem, view,
+    Ok(Arc::new(ScopedFilesystem::new(
+        filesystem,
+        reborn_secret_mount_view,
     )))
+}
+
+fn reborn_secret_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::HostApiError> {
+    let tenant_id = reborn_scope_path_segment(scope.tenant_id.as_str());
+    let user_id = reborn_scope_path_segment(scope.user_id.as_str());
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets")?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/users/{user_id}/secrets"))?,
+        MountPermissions::read_write_list_delete(),
+    )])
+}
+
+fn reborn_scope_path_segment(value: &str) -> &str {
+    if value == SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
+    }
 }

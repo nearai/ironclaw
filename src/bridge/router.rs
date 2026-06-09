@@ -1466,6 +1466,20 @@ fn parse_scope_uuid(scope: Option<&str>) -> Option<uuid::Uuid> {
     scope.and_then(|s| uuid::Uuid::parse_str(s).ok())
 }
 
+async fn resolve_v1_conversation_for_message(
+    db: &Arc<dyn crate::db::Database>,
+    message: &IncomingMessage,
+) -> Result<uuid::Uuid, crate::error::DatabaseError> {
+    if let Some(scope) = message.conversation_scope() {
+        return db
+            .get_or_create_scoped_conversation(&message.user_id, &message.channel, scope)
+            .await;
+    }
+
+    db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
+        .await
+}
+
 async fn reconcile_pending_gate_state(
     store: &Arc<dyn Store>,
     pending_gates: &crate::gate::store::PendingGateStore,
@@ -4769,32 +4783,23 @@ async fn handle_with_engine_inner(
     }
 
     // Dual-write to v1 database so the gateway history API shows messages.
-    // Use the thread-scoped conversation (from thread_id) when available,
-    // falling back to the default assistant conversation.
+    // Use the scoped conversation when available, falling back to the default
+    // assistant conversation. External channel scopes such as `wecom:group:*`
+    // are not UUIDs, so they are mapped to stable UUID conversation IDs while
+    // preserving the original scope in `conversations.thread_id`.
     if let Some(ref db) = state.db {
-        let v1_conv_id = if let Some(tid) = scope
-            && let Ok(uuid) = uuid::Uuid::parse_str(tid)
-        {
-            // Ensure the v1 conversation exists for this thread
-            let _ = db
-                .ensure_conversation(
-                    uuid,
-                    &message.channel,
-                    &message.user_id,
-                    Some(tid),
-                    Some(&message.channel),
-                )
-                .await;
-            Some(uuid)
-        } else {
-            db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
-                .await
-                .ok()
-        };
-        if let Some(cid) = v1_conv_id {
-            let _ = db
-                .add_conversation_message(cid, "user", effective_content)
-                .await;
+        match resolve_v1_conversation_for_message(db, message).await {
+            Ok(cid) => {
+                let _ = db
+                    .add_conversation_message(cid, "user", effective_content)
+                    .await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    message_id = %message.id,
+                    "failed to resolve v1 conversation for user message persist: {e}"
+                );
+            }
         }
     }
 
@@ -5207,18 +5212,16 @@ fn spawn_post_park_continuation(
             // Persist to v1 DB so the history API renders the final
             // assistant message.
             if let Some(ref db) = db {
-                let scope_uuid = message
-                    .conversation_scope()
-                    .and_then(|s| uuid::Uuid::parse_str(s).ok());
-                let v1_conv_id = if let Some(uuid) = scope_uuid {
-                    Some(uuid)
-                } else {
-                    db.get_or_create_assistant_conversation(&user_id, &channel_name)
-                        .await
-                        .ok()
-                };
-                if let Some(cid) = v1_conv_id {
-                    let _ = db.add_conversation_message(cid, "assistant", text).await;
+                match resolve_v1_conversation_for_message(db, &message).await {
+                    Ok(cid) => {
+                        let _ = db.add_conversation_message(cid, "assistant", text).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            "post-park continuation: failed to resolve v1 conversation for assistant response persist: {e}"
+                        );
+                    }
                 }
             }
         }
@@ -5462,22 +5465,19 @@ async fn await_thread_outcome(
     // shows it correctly for all outcomes that produce a response.
     let write_v1_response = |db: &Arc<dyn crate::db::Database>, text: &str| {
         let db = Arc::clone(db);
-        let scope = message.conversation_scope().map(String::from);
-        let user_id = message.user_id.clone();
-        let channel = message.channel.clone();
+        let message = message.clone();
         let text = text.to_string();
         async move {
-            let v1_conv_id = if let Some(tid) = scope
-                && let Ok(uuid) = uuid::Uuid::parse_str(&tid)
-            {
-                Some(uuid)
-            } else {
-                db.get_or_create_assistant_conversation(&user_id, &channel)
-                    .await
-                    .ok()
-            };
-            if let Some(cid) = v1_conv_id {
-                let _ = db.add_conversation_message(cid, "assistant", &text).await;
+            match resolve_v1_conversation_for_message(&db, &message).await {
+                Ok(cid) => {
+                    let _ = db.add_conversation_message(cid, "assistant", &text).await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        message_id = %message.id,
+                        "failed to resolve v1 conversation for assistant response persist: {e}"
+                    );
+                }
             }
         }
     };
@@ -6120,30 +6120,19 @@ async fn persist_v2_tool_calls(
         }
     };
 
-    // Resolve the v1 conversation ID
-    let v1_conv_id = if let Some(tid) = message.conversation_scope()
-        && let Ok(uuid) = uuid::Uuid::parse_str(tid)
-    {
-        Some(uuid)
-    } else {
-        match db
-            .get_or_create_assistant_conversation(&message.user_id, &message.channel)
-            .await
-        {
-            Ok(cid) => Some(cid),
-            Err(e) => {
-                tracing::warn!(
-                    thread_id = %thread_id,
-                    "failed to resolve v1 conversation for tool_calls persist: {e}"
-                );
-                return;
-            }
+    let cid = match resolve_v1_conversation_for_message(db, message).await {
+        Ok(cid) => cid,
+        Err(e) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                "failed to resolve v1 conversation for tool_calls persist: {e}"
+            );
+            return;
         }
     };
-    if let Some(cid) = v1_conv_id
-        && let Err(e) = db
-            .add_conversation_message(cid, "tool_calls", &content)
-            .await
+    if let Err(e) = db
+        .add_conversation_message(cid, "tool_calls", &content)
+        .await
     {
         tracing::warn!(thread_id = %thread_id, "failed to persist v2 tool_calls to v1 DB: {e}");
     }
@@ -10658,6 +10647,138 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router attachment persistence test");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn handle_with_engine_persists_non_uuid_channel_scopes_to_separate_v1_conversations() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let backend = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("scoped-history.db"))
+                .await
+                .expect("local libsql"),
+        );
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn crate::db::Database> = backend.clone();
+
+        let store = Arc::new(TestStore::new());
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: "done".to_string(),
+        });
+        let mut state = make_expected_test_state_with_llm(store, llm);
+        state.db = Some(Arc::clone(&db));
+
+        let dm_scope = "wecom:dm:ZhangSan";
+        let group_scope = "wecom:group:wr-t-7ZAAAM7uwzeRXYC2jrlq2JI6pxA";
+
+        let outcome = with_installed_engine_state(state, async move {
+            let (agent, _statuses) = make_test_agent_with_status_channel("wecom").await;
+
+            let dm_message =
+                IncomingMessage::new("wecom", "default", "hi").with_conversation_scope(dm_scope);
+            let dm_result = handle_with_engine_inner(&agent, &dm_message, &dm_message.content, 0)
+                .await
+                .expect("handle dm message");
+            assert!(matches!(dm_result, BridgeOutcome::Respond(_)));
+
+            let group_message =
+                IncomingMessage::new("wecom", "default", "@IronclawBot tell me a joke")
+                    .with_conversation_scope(group_scope);
+            let group_result =
+                handle_with_engine_inner(&agent, &group_message, &group_message.content, 0)
+                    .await
+                    .expect("handle group message");
+            assert!(matches!(group_result, BridgeOutcome::Respond(_)));
+
+            let conversations = db
+                .list_conversations_with_preview("default", "wecom", 10)
+                .await
+                .expect("list conversations");
+            assert_eq!(
+                conversations.len(),
+                2,
+                "private and group WeCom messages must not share one v1 history thread"
+            );
+
+            let dm_conv_id = crate::db::scoped_conversation_id("wecom", "default", dm_scope);
+            let group_conv_id = crate::db::scoped_conversation_id("wecom", "default", group_scope);
+            assert_ne!(
+                dm_conv_id, group_conv_id,
+                "different non-UUID channel scopes must map to different v1 conversations"
+            );
+
+            let dm_messages = db
+                .list_conversation_messages(dm_conv_id)
+                .await
+                .expect("list dm messages");
+            let group_messages = db
+                .list_conversation_messages(group_conv_id)
+                .await
+                .expect("list group messages");
+
+            assert!(
+                dm_messages
+                    .iter()
+                    .any(|msg| msg.role == "user" && msg.content == "hi"),
+                "DM conversation should contain the DM user message: {dm_messages:?}"
+            );
+            assert!(
+                !dm_messages
+                    .iter()
+                    .any(|msg| msg.content.contains("@IronclawBot")),
+                "DM conversation must not contain the group mention: {dm_messages:?}"
+            );
+            assert!(
+                group_messages
+                    .iter()
+                    .any(|msg| msg.role == "user" && msg.content.contains("@IronclawBot")),
+                "group conversation should contain the group user message: {group_messages:?}"
+            );
+            assert!(
+                !group_messages
+                    .iter()
+                    .any(|msg| msg.role == "user" && msg.content == "hi"),
+                "group conversation must not contain the DM message: {group_messages:?}"
+            );
+
+            let conn = backend.connect().await.expect("connect libsql");
+            let mut rows = conn
+                .query(
+                    "SELECT id, thread_id FROM conversations WHERE id IN (?1, ?2)",
+                    libsql::params![
+                        crate::db::scoped_conversation_id("wecom", "default", dm_scope).to_string(),
+                        crate::db::scoped_conversation_id("wecom", "default", group_scope)
+                            .to_string()
+                    ],
+                )
+                .await
+                .expect("query conversation scopes");
+            let mut stored_scopes = HashMap::new();
+            while let Some(row) = rows.next().await.expect("read conversation scope row") {
+                let id: String = row.get(0).expect("id");
+                let thread_id: Option<String> = row.get(1).expect("thread_id");
+                stored_scopes.insert(id, thread_id);
+            }
+            assert_eq!(
+                stored_scopes
+                    .get(&dm_conv_id.to_string())
+                    .and_then(|value| value.as_deref()),
+                Some(dm_scope)
+            );
+            assert_eq!(
+                stored_scopes
+                    .get(&group_conv_id.to_string())
+                    .and_then(|value| value.as_deref()),
+                Some(group_scope)
+            );
+
+            Ok::<(), crate::error::Error>(())
+        })
+        .await;
+
+        outcome.expect("scoped WeCom history should stay separated");
     }
 
     #[tokio::test]

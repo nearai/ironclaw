@@ -104,6 +104,10 @@ export async function apiFetch(path, options = {}) {
 
 // --- Threads ---
 
+export function fetchSession() {
+  return apiFetch(`${V2_BASE}/session`);
+}
+
 export function createThread({ clientActionId: clientId, requestedThreadId } = {}) {
   const body = { client_action_id: clientId || clientActionId() };
   if (requestedThreadId) body.requested_thread_id = requestedThreadId;
@@ -120,11 +124,21 @@ export function listThreads({ limit, cursor } = {}) {
   return apiFetch(url.pathname + url.search);
 }
 
+export function deleteThread({ threadId } = {}) {
+  if (!threadId) {
+    return Promise.reject(new Error("threadId is required"));
+  }
+  return apiFetch(`${V2_BASE}/threads/${encodeURIComponent(threadId)}`, {
+    method: "DELETE",
+  });
+}
+
 // --- Automations ---
 
-export function listAutomations({ limit } = {}) {
+export function listAutomations({ limit, runLimit } = {}) {
   const params = new URLSearchParams();
   if (limit != null) params.set("limit", String(limit));
+  if (runLimit != null) params.set("run_limit", String(runLimit));
   const query = params.toString();
   return apiFetch(`${V2_BASE}/automations${query ? `?${query}` : ""}`);
 }

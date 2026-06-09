@@ -1,4 +1,6 @@
 use std::collections::{HashMap, VecDeque};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use ironclaw_host_api::UserId;
@@ -16,6 +18,13 @@ pub struct AwaitedChildState {
     pub record: AwaitedChildSetRecord,
     pub terminal_status: Option<TurnStatus>,
     pub terminal_event: Option<AwaitedChildTerminalEvent>,
+    pub terminal_result_written: bool,
+    /// Serialized byte length of the terminal capability result payload written
+    /// by `SubagentCompletionObserver::write_terminal_result` via
+    /// `LoopCapabilityResultWriter::update_capability_result`. Zero until
+    /// `terminal_result_written` is set; carries the real child output size
+    /// (not the initial spawn placeholder) for downstream byte-cap accounting.
+    pub terminal_byte_len: u64,
     pub descendant_reservation_release_claimed: bool,
     pub descendant_reservation_released: bool,
     pub delivery_claimed: bool,
@@ -34,6 +43,10 @@ pub struct AwaitedChildTerminalEvent {
 #[derive(Default)]
 pub struct BoundedSubagentGateResolutionStore {
     inner: Mutex<GateResolutionInner>,
+    #[cfg(test)]
+    mark_child_delivered_calls: AtomicUsize,
+    #[cfg(test)]
+    fail_mark_child_delivered_on_call: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -50,6 +63,13 @@ struct GateResolutionInner {
 impl BoundedSubagentGateResolutionStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_mark_child_delivered_on_call(&self, call: usize) {
+        self.mark_child_delivered_calls.store(0, Ordering::SeqCst);
+        self.fail_mark_child_delivered_on_call
+            .store(call, Ordering::SeqCst);
     }
 
     pub fn record_child_terminal(
@@ -127,6 +147,9 @@ impl BoundedSubagentGateResolutionStore {
     ) -> Result<Vec<AwaitedChildState>, AgentLoopHostError> {
         let mut claimed = Vec::new();
         let mut inner = lock(&self.inner)?;
+        // Gate fanout is expected to stay small, so holding the lock while
+        // draining each queued terminal state avoids extra lock churn without
+        // making the scan itself a hotspot.
         while let DeliverableClaim::Claimed(state) =
             claim_deliverable_state_for_child(&mut inner, child_run_id)
         {
@@ -138,9 +161,134 @@ impl BoundedSubagentGateResolutionStore {
     pub fn mark_delivered(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
         if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            // Gate-wide completion marker retained for callers that have
+            // already completed every state under this gate. Per-child paths
+            // must use `mark_child_delivered` so shared gates keep retrying
+            // unfinished siblings.
             for state in states {
                 state.delivery_claimed = false;
                 state.delivered_to_parent = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record the serialized byte length of the terminal capability result
+    /// payload for a given child run. Called by
+    /// `SubagentCompletionObserver::write_terminal_result` immediately after
+    /// `update_capability_result` returns the real payload size.
+    ///
+    /// This stores the actual child output size on `AwaitedChildState` so that
+    /// the parent loop's byte-cap accounting can use the terminal payload size
+    /// rather than the initial spawn-placeholder size. The value is available
+    /// to the consumption path (WU-C durable settlement or in-memory drain)
+    /// via `state_for_gate` / `claim_all_terminal_states_for_child`.
+    pub fn record_terminal_byte_len(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+        byte_len: u64,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            for state in states
+                .iter_mut()
+                .filter(|state| state.record.child_run_id == child_run_id)
+            {
+                state.terminal_byte_len = byte_len;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn mark_terminal_result_written(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            // Shared gates are intentionally low-fanout, so a direct linear
+            // scan keeps this state transition simple and local.
+            for state in states
+                .iter_mut()
+                .filter(|state| state.record.child_run_id == child_run_id)
+            {
+                state.terminal_result_written = true;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn mark_child_delivered(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+    ) -> Result<bool, AgentLoopHostError> {
+        #[cfg(test)]
+        {
+            let call = self
+                .mark_child_delivered_calls
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
+            if self
+                .fail_mark_child_delivered_on_call
+                .load(Ordering::SeqCst)
+                == call
+            {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "injected mark_child_delivered failure",
+                ));
+            }
+        }
+
+        let mut inner = lock(&self.inner)?;
+        let Some(states) = inner.by_gate.get_mut(gate_ref) else {
+            return Ok(false);
+        };
+        // Shared gates are intentionally low-fanout, so a direct linear scan
+        // is acceptable here and keeps the delivery bookkeeping localized.
+        for state in states
+            .iter_mut()
+            .filter(|state| state.record.child_run_id == child_run_id)
+        {
+            state.delivery_claimed = false;
+            state.delivered_to_parent = true;
+        }
+        Ok(states.iter().all(|state| state.delivered_to_parent))
+    }
+
+    pub fn undo_mark_child_delivered(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        let should_requeue = if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            let mut requeue = false;
+            for state in states
+                .iter_mut()
+                .filter(|state| state.record.child_run_id == child_run_id)
+            {
+                // Only requeue if this child was already delivered and no
+                // concurrent terminal claim is still active; the claiming
+                // path will requeue itself when that claim is released.
+                if state.delivered_to_parent {
+                    state.delivered_to_parent = false;
+                    if state.terminal_status.is_some() && !state.delivery_claimed {
+                        requeue = true;
+                    }
+                }
+            }
+            requeue
+        } else {
+            false
+        };
+        if should_requeue {
+            let queue = inner.deliverable_by_child.entry(child_run_id).or_default();
+            if !queue.iter().any(|queued| queued == gate_ref) {
+                queue.push_front(gate_ref.clone());
             }
         }
         Ok(())
@@ -250,6 +398,22 @@ impl BoundedSubagentGateResolutionStore {
             .and_then(|states| states.first().cloned()))
     }
 
+    pub fn state_for_child(
+        &self,
+        child_run_id: TurnRunId,
+    ) -> Result<Option<AwaitedChildState>, AgentLoopHostError> {
+        let inner = lock(&self.inner)?;
+        let Some(gates) = inner.gates_by_child.get(&child_run_id) else {
+            return Ok(None);
+        };
+        Ok(gates
+            .iter()
+            .filter_map(|gate| inner.by_gate.get(gate))
+            .flat_map(|states| states.iter())
+            .find(|state| state.record.child_run_id == child_run_id)
+            .cloned())
+    }
+
     pub fn subagent_kind_for_child(
         &self,
         child_run_id: TurnRunId,
@@ -286,6 +450,13 @@ impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
     ) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
         let gate_ref = record.gate_ref.clone();
+        if inner.by_gate.get(&gate_ref).is_some_and(|states| {
+            states
+                .iter()
+                .any(|state| state.record.child_run_id == record.child_run_id)
+        }) {
+            return Ok(());
+        }
         if inner.total_states >= MAX_GATE_RECORDS {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::BudgetExceeded,
@@ -305,6 +476,8 @@ impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
                 record,
                 terminal_status: None,
                 terminal_event: None,
+                terminal_result_written: false,
+                terminal_byte_len: 0,
                 descendant_reservation_release_claimed: false,
                 descendant_reservation_released: false,
                 delivery_claimed: false,
@@ -534,6 +707,197 @@ mod tests {
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Invalid);
         assert!(error.safe_summary.contains("must be terminal"));
+    }
+
+    #[tokio::test]
+    async fn record_awaited_child_dedupes_same_gate_and_child() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = "gate:subagent-dedup";
+        store
+            .record_awaited_child(record(gate, child_run_id))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate, child_run_id))
+            .await
+            .unwrap();
+
+        assert_eq!(store.len().unwrap(), 1);
+        store
+            .record_child_terminal(child_run_id, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        let claimed = store
+            .claim_all_terminal_states_for_child(child_run_id)
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_result_written_is_state_scoped_under_shared_gate() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-result-written").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        store.mark_terminal_result_written(&gate, child_a).unwrap();
+
+        let inner = store.inner.lock();
+        let states = inner.by_gate.get(&gate).expect("gate states");
+        let state_a = states
+            .iter()
+            .find(|state| state.record.child_run_id == child_a)
+            .expect("child A state");
+        let state_b = states
+            .iter()
+            .find(|state| state.record.child_run_id == child_b)
+            .expect("child B state");
+        assert!(state_a.terminal_result_written);
+        assert!(!state_b.terminal_result_written);
+    }
+
+    #[tokio::test]
+    async fn record_terminal_byte_len_stores_value_on_matching_child() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-byte-len-happy").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_run_id))
+            .await
+            .unwrap();
+
+        store
+            .record_terminal_byte_len(&gate, child_run_id, 65_000)
+            .unwrap();
+
+        let inner = store.inner.lock();
+        let states = inner.by_gate.get(&gate).expect("gate states");
+        let state = states
+            .iter()
+            .find(|s| s.record.child_run_id == child_run_id)
+            .expect("child state");
+        assert_eq!(state.terminal_byte_len, 65_000);
+    }
+
+    #[tokio::test]
+    async fn record_terminal_byte_len_no_op_on_unknown_gate() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let bogus_gate = GateRef::new("gate:subagent-byte-len-unknown").unwrap();
+
+        // No record_awaited_child call — gate does not exist in the store.
+        let result = store.record_terminal_byte_len(&bogus_gate, child_run_id, 42);
+
+        assert!(result.is_ok(), "unknown gate must be a silent no-op");
+    }
+
+    #[tokio::test]
+    async fn mark_child_delivered_does_not_mark_shared_gate_siblings() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-child-delivered").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        assert!(!store.mark_child_delivered(&gate, child_a).unwrap());
+        {
+            let inner = store.inner.lock();
+            let states = inner.by_gate.get(&gate).expect("gate states");
+            let state_a = states
+                .iter()
+                .find(|state| state.record.child_run_id == child_a)
+                .expect("child A state");
+            let state_b = states
+                .iter()
+                .find(|state| state.record.child_run_id == child_b)
+                .expect("child B state");
+            assert!(state_a.delivered_to_parent);
+            assert!(!state_b.delivered_to_parent);
+        }
+        assert!(store.mark_child_delivered(&gate, child_b).unwrap());
+    }
+
+    #[tokio::test]
+    async fn undo_mark_child_delivered_requeues_child_without_removing_state() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-undo-delivered").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+        store
+            .record_child_terminal(child_a, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        store
+            .record_child_terminal(child_b, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        let claimed = store
+            .claim_next_terminal_state_for_child(child_a)
+            .unwrap()
+            .expect("child A claimed");
+        assert_eq!(claimed.record.child_run_id, child_a);
+        assert!(!store.mark_child_delivered(&gate, child_a).unwrap());
+
+        store.undo_mark_child_delivered(&gate, child_a).unwrap();
+
+        assert_eq!(store.len().unwrap(), 2);
+        let child_a_state = store
+            .state_for_child(child_a)
+            .unwrap()
+            .expect("child A remains");
+        assert!(!child_a_state.delivered_to_parent);
+        assert!(!child_a_state.delivery_claimed);
+        let retried = store
+            .claim_next_terminal_state_for_child(child_a)
+            .unwrap()
+            .expect("child A is retryable");
+        assert_eq!(retried.record.child_run_id, child_a);
+    }
+
+    #[tokio::test]
+    async fn mark_child_delivered_returns_false_for_partial_gate_and_true_when_all_delivered() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-child-delivered-bool").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        assert!(
+            !store.mark_child_delivered(&gate, child_a).unwrap(),
+            "first child delivery should leave the shared gate incomplete"
+        );
+        assert!(
+            store.mark_child_delivered(&gate, child_b).unwrap(),
+            "second child delivery should complete the shared gate"
+        );
     }
 
     #[tokio::test]
@@ -1108,6 +1472,45 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    }
+
+    #[tokio::test]
+    async fn record_awaited_child_allows_duplicate_replay_at_capacity() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let gate = "gate:subagent-duplicate-at-capacity";
+        let child = TurnRunId::new();
+
+        store
+            .record_awaited_child(record(gate, child))
+            .await
+            .unwrap();
+        for index in 1..MAX_GATE_RECORDS {
+            store
+                .record_awaited_child(record(
+                    &format!("gate:subagent-fill-{index}"),
+                    TurnRunId::new(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(store.len().unwrap(), MAX_GATE_RECORDS);
+        store
+            .record_awaited_child(record(gate, child))
+            .await
+            .unwrap();
+        assert_eq!(store.len().unwrap(), MAX_GATE_RECORDS);
+
+        let overflow = store
+            .record_awaited_child(record(
+                "gate:subagent-overflow-at-capacity",
+                TurnRunId::new(),
+            ))
+            .await;
+        assert!(matches!(
+            overflow,
+            Err(err) if err.kind == AgentLoopHostErrorKind::BudgetExceeded
+        ));
     }
 
     #[tokio::test]

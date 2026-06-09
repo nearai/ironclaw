@@ -247,7 +247,13 @@ where
         // [`ThreadScopeResolver`], so the two cannot drift. The run-state
         // read (for the actor) only runs when the base scope is
         // owner-scoped; an owner-less applier keeps its shared/system slot.
-        if thread_scope.owner_user_id.is_some() {
+        if request.scope.has_explicit_thread_owner() {
+            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve_for_turn(
+                &thread_scope,
+                request.scope,
+                None,
+            );
+        } else if thread_scope.owner_user_id.is_some() {
             let run_state = self
                 .turn_state_store
                 .get_run_state(GetRunStateRequest {
@@ -255,8 +261,9 @@ where
                     run_id: request.run_id,
                 })
                 .await?;
-            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve(
+            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve_for_turn(
                 &thread_scope,
+                request.scope,
                 run_state.actor.as_ref(),
             );
         }
@@ -524,10 +531,10 @@ fn message_content_matches_result_ref(
     };
     // Cheap metadata checks run before this helper. Keep the envelope parse so
     // forged or malformed transcript content cannot satisfy completion evidence.
-    let Ok(envelope) = serde_json::from_str::<ToolResultReferenceEnvelope>(content) else {
+    let Ok(envelope) = ToolResultReferenceEnvelope::from_json_str(content) else {
         return false;
     };
-    envelope.version == 1 && envelope.result_ref == result_ref.as_str()
+    envelope.result_ref == result_ref.as_str()
 }
 
 #[cfg(test)]

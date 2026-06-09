@@ -51,11 +51,12 @@ impl WebUiAuthenticatedCaller {
     }
 
     pub fn turn_scope(&self, thread_id: ThreadId) -> TurnScope {
-        TurnScope::new(
+        TurnScope::new_with_owner(
             self.tenant_id.clone(),
             self.agent_id.clone(),
             self.project_id.clone(),
             thread_id,
+            Some(self.user_id.clone()),
         )
     }
 }
@@ -107,6 +108,8 @@ pub struct WebUiListThreadsRequest {
 pub struct WebUiListAutomationsRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_limit: Option<u32>,
 }
 
 /// Browser body for WebUI extension-setup interaction.

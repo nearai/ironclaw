@@ -5,6 +5,11 @@ import {
   sendMessage,
   submitManualToken,
 } from "../../../lib/api.js";
+import {
+  listConnectableChannels,
+  looksLikeChannelConnectCommand,
+  resolveChannelConnectCommand,
+} from "../../../lib/channel-connect.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
@@ -19,6 +24,8 @@ import { useSSE } from "./useSSE.js";
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
+const UNSUPPORTED_MULTIMODAL_PAYLOAD_ERROR =
+  "webui_v2_multimodal_payload_unsupported";
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
@@ -46,6 +53,12 @@ function threadNeedsSidebarRefresh(threadId) {
   if (!Array.isArray(threads)) return true;
   const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
   return !thread?.title;
+}
+
+function unsupportedMultimodalPayloadError() {
+  const error = new Error("webchat v2 multimodal payload unsupported");
+  error.safeErrorCode = UNSUPPORTED_MULTIMODAL_PAYLOAD_ERROR;
+  return error;
 }
 
 function submitResponseResumedTurnGate(response) {
@@ -80,6 +93,21 @@ function parseOAuthCallbackStoragePayload(value) {
   }
 }
 
+async function resolveConnectAction(content) {
+  if (!looksLikeChannelConnectCommand(content)) return null;
+  try {
+    const channelsResponse = await queryClient.fetchQuery({
+      queryKey: ["connectable-channels"],
+      queryFn: listConnectableChannels,
+    });
+    const channels = channelsResponse?.channels || [];
+    return resolveChannelConnectCommand(content, channels);
+  } catch (err) {
+    console.error("Failed to resolve connectable channels:", err);
+    return null;
+  }
+}
+
 // v2 chat hook. Differences from the fork's v1 hook:
 // - No image / attachment plumbing — v2 SendMessage carries `content` only.
 // - No /api/chat/approval — approvals fold into gate/resolve in v2.
@@ -91,7 +119,14 @@ export function useChat(threadId) {
   const pendingSeqRef = React.useRef(1);
   const [cooldownUntil, setCooldownUntil] = React.useState(0);
   const [now, setNow] = React.useState(Date.now());
-  const [activeRun, setActiveRun] = React.useState(null);
+  const [activeRun, setActiveRunState] = React.useState(null);
+  const activeRunRef = React.useRef(activeRun);
+  const setActiveRun = React.useCallback((next) => {
+    const value = typeof next === "function" ? next(activeRunRef.current) : next;
+    activeRunRef.current = value;
+    setActiveRunState(value);
+  }, []);
+  const [channelConnectAction, setChannelConnectAction] = React.useState(null);
 
   const getPendingMessages = React.useCallback(
     () => pendingMessagesRef.current.get(threadId || "__new__") || [],
@@ -137,6 +172,7 @@ export function useChat(threadId) {
     setIsProcessing(false);
     setPendingGate(null);
     setActiveRun(null);
+    setChannelConnectAction(null);
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -208,6 +244,7 @@ export function useChat(threadId) {
     setIsProcessing,
     setPendingGate,
     setActiveRun,
+    activeRunRef,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, so the SSE stream only delivers `run_status`.
     // On terminal success, refetch the timeline so the assistant
@@ -228,10 +265,9 @@ export function useChat(threadId) {
   });
 
   // Accepts the fork's call shape `{ images, attachments, threadId,
-  // timezone }`. v2 SendMessage carries `content` only — images /
-  // attachments / timezone are silently dropped until the v2
-  // contract grows the matching fields. Composer UI still shows
-  // attachment chips; this is the TODO surface.
+  // timezone }`. v2 SendMessage carries `content` only; image and
+  // file payloads are rejected until the v2 contract grows typed
+  // multimodal fields.
   //
   // v2 send-message requires `thread_id` as a path parameter — the
   // facade refuses to implicitly create a missing thread. When the
@@ -241,7 +277,18 @@ export function useChat(threadId) {
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
     async (content, opts = {}) => {
-      const { threadId: targetThreadId } = opts;
+      const { threadId: targetThreadId, images = [], attachments = [] } = opts;
+      if (images.length > 0 || attachments.length > 0) {
+        throw unsupportedMultimodalPayloadError();
+      }
+
+      const connectable = await resolveConnectAction(content);
+      if (connectable) {
+        setChannelConnectAction(connectable);
+        return { channel_connect_action: connectable };
+      }
+      setChannelConnectAction(null);
+
       let sendThreadId = targetThreadId || threadId;
 
       if (!sendThreadId) {
@@ -294,6 +341,7 @@ export function useChat(threadId) {
             runId: response.run_id,
             threadId: response.thread_id || sendThreadId,
             status: response.status || null,
+            source: "local",
           });
         }
         const timelineMessageId = recordAcceptedMessageRef(
@@ -459,11 +507,10 @@ export function useChat(threadId) {
     async (reason) => {
       const runId = activeRun?.runId;
       if (!runId || !threadId) return;
-      try {
-        await cancelRunRequest({ threadId, runId, reason });
-      } finally {
-        setIsProcessing(false);
-      }
+      setPendingGate(null);
+      setIsProcessing(false);
+      setActiveRun(null);
+      await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId],
   );
@@ -503,6 +550,7 @@ export function useChat(threadId) {
     messages,
     isProcessing,
     pendingGate,
+    channelConnectAction,
     activeRun,
     sseStatus,
     historyLoading,
@@ -513,6 +561,7 @@ export function useChat(threadId) {
     submitAuthToken,
     cancelRun,
     loadMore,
+    dismissChannelConnectAction: () => setChannelConnectAction(null),
     // fork-shape compatibility — see comments above
     suggestions: [],
     setSuggestions: noop,

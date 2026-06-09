@@ -1655,6 +1655,7 @@ pub fn recover_tool_calls_from_content(
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 });
                 continue;
             }
@@ -1671,6 +1672,7 @@ pub fn recover_tool_calls_from_content(
                     arguments: serde_json::Value::Object(Default::default()),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 });
             }
         }
@@ -1712,6 +1714,7 @@ pub fn recover_tool_calls_from_content(
                         arguments,
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     });
                     remaining = &args_start[bracket_end + 1..];
                     continue;
@@ -1725,6 +1728,7 @@ pub fn recover_tool_calls_from_content(
                 arguments: serde_json::Value::Object(Default::default()),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             });
             remaining = after_name;
         }
@@ -1837,6 +1841,7 @@ pub fn recover_tool_calls_from_content(
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 });
             }
         }
@@ -1910,6 +1915,7 @@ fn recover_codex_text_tool_calls(
             arguments,
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         });
     }
 }
@@ -4289,6 +4295,7 @@ That's my plan."#;
                     arguments: serde_json::json!({}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
                 input_tokens: 5000,
                 output_tokens: 1024,

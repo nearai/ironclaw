@@ -36,7 +36,7 @@ Use targeted crate tests first. Add `ironclaw_architecture` when dependency edge
 - `docs/reborn/contracts/*.md` — Reborn source-of-truth contracts.
 - `crates/ironclaw_architecture` — mechanical dependency-boundary enforcement.
 
-Treat crate-local `AGENTS.md` as the first file to load when it exists. Current workspace crates without one include `ironclaw_engine`, `ironclaw_hooks`, `ironclaw_prompt_envelope`, `ironclaw_reborn_traces`, and `ironclaw_wasm_limiter`.
+Treat crate-local `AGENTS.md` as the first file to load when it exists. Current workspace crates without one include `ironclaw_hooks`, `ironclaw_prompt_envelope`, `ironclaw_reborn_traces`, and `ironclaw_wasm_limiter`.
 
 ## Dependency Mental Model
 
@@ -116,7 +116,7 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 | `ironclaw_agent_loop` | `ironclaw_agent_loop/AGENTS.md`, `ironclaw_agent_loop/CLAUDE.md` | Agent-loop framework state, planner/executor, strategy/family contracts, test support. | Product adapters, transport, concrete provider auth. |
 | `ironclaw_loop_support` | `ironclaw_loop_support/AGENTS.md`, `ironclaw_loop_support/CLAUDE.md` | Loop host support services: capability/input ports, allow sets, input queue, identity/skill context, cancellation. | Owning core loop strategy or runtime lane execution. |
 | `ironclaw_capabilities` | `ironclaw_capabilities/AGENTS.md`, `ironclaw_capabilities/CLAUDE.md` | Caller-facing `CapabilityHost` invoke/resume/spawn workflow, obligation seams, conformance helpers. | Process lifecycle APIs, direct concrete runtime dependencies. |
-| `ironclaw_engine` | `ironclaw_engine/CLAUDE.md`, `ironclaw_engine/MONTY.md`, `Cargo.toml` | Thread/capability/CodeAct engine: runtime manager, executor, gates, leases, memory retrieval, workspace mounts, traits/types. | Product transport, provider-specific auth, lower-layer host policy shortcuts. |
+| `ironclaw_engine` | `ironclaw_engine/AGENTS.md`, `ironclaw_engine/CLAUDE.md`, `ironclaw_engine/MONTY.md` | Thread/capability/CodeAct engine: runtime manager, executor, gates, leases, memory retrieval, workspace mounts, traits/types. | Product transport, provider-specific auth, lower-layer host policy shortcuts. |
 
 ### Product, adapters, Reborn binary
 
@@ -125,6 +125,8 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 | `ironclaw_reborn` | `ironclaw_reborn/AGENTS.md`, `ironclaw_reborn/CLAUDE.md` | Standalone Reborn composition/adapters: driver registry, home/profile/doctor support, runtime composition seams. | V1 root runtime imports unless explicitly bridged. |
 | `ironclaw_reborn_config` | `ironclaw_reborn_config/AGENTS.md`, `Cargo.toml`, `src/lib.rs` | Boot configuration contracts for standalone Reborn binary. | Runtime execution or product adapter behavior. |
 | `ironclaw_reborn_composition` | `ironclaw_reborn_composition/AGENTS.md`, `ironclaw_reborn_composition/CLAUDE.md` | Facade-shaped production composition root for Reborn. | Low-level policy internals that belong to service crates. |
+| `ironclaw_reborn_openai_compat` | `ironclaw_reborn_openai_compat/AGENTS.md`, `ironclaw_reborn_openai_compat/CLAUDE.md` | Reborn-native OpenAI-compatible API route descriptors, Chat/Responses DTOs, sanitized error envelope, and fail-closed route fragment. | V1 gateway handlers, direct LLM proxying, listener binding, ProductWorkflow internals/direct runtime wiring. |
+| `ironclaw_reborn_openai_compat_storage` | `ironclaw_reborn_openai_compat_storage/AGENTS.md`, `ironclaw_reborn_openai_compat_storage/CLAUDE.md` | Durable storage adapters for Reborn OpenAI-compatible public refs and idempotency mappings. | HTTP route handlers, ProductWorkflow orchestration, v1 gateway handlers, direct LLM proxying. |
 | `ironclaw_first_party_extensions` | `ironclaw_first_party_extensions/AGENTS.md`, `Cargo.toml` | Concrete first-party userland extension implementations and deterministic tool behavior behind scoped handles. | Host runtime composition, loop-facing ports, ambient runtime authority, dispatcher/network/secrets handles. |
 | `ironclaw_first_party_extension_ports` | `ironclaw_first_party_extension_ports/AGENTS.md`, `Cargo.toml` | Loop-facing adapters for first-party extensions: skill activation/context/execution ports over loop-support and turn-run contracts. | Concrete tool behavior, host runtime composition, product workflow, raw host authority. |
 | `ironclaw_reborn_cli` | `ironclaw_reborn_cli/AGENTS.md` | Standalone Reborn CLI, command files, CLI context, shell completions, doctor/home/profile commands. | V1 runtime imports, root `ironclaw` deps, side effects in pure commands. |

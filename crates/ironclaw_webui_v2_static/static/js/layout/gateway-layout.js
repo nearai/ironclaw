@@ -1,9 +1,12 @@
-import { Outlet } from "react-router";
+import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
 import { useInterfaceTheme } from "../design-system/theme.js";
 import { useGatewayStatus } from "../hooks/useGatewayStatus.js";
+import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders.js";
+import { shouldRouteToOnboarding } from "../lib/onboarding-gate.js";
 import { useSidebar } from "../hooks/useSidebar.js";
 import { html } from "../lib/html.js";
 import { useT } from "../lib/i18n.js";
+import { toast } from "../lib/toast.js";
 import { useThreads } from "../pages/chat/hooks/useThreads.js";
 import { Sidebar } from "../components/sidebar.js";
 import { PageHeader } from "../components/page-header.js";
@@ -12,7 +15,7 @@ import { ToastViewport } from "../components/toast-viewport.js";
 import { React } from "../lib/html.js";
 import { cn } from "../utils/cn.js";
 
-export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
+export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onSignOut }) {
   const t = useT();
   const { theme, toggleTheme } = useInterfaceTheme();
   const statusQuery = useGatewayStatus(token);
@@ -21,6 +24,34 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
     onNewChat: () => threadsState.setActiveThreadId(null),
   });
   const status = statusQuery.data;
+
+  // First-run gate: with no LLM provider configured yet, route to the welcome
+  // screen so the user picks one before hitting a dead chat. Settings stays
+  // reachable so they can configure there too; /welcome itself is exempt to
+  // avoid a redirect loop. Defaults are not treated as "configured" — the gate
+  // keys off the honest `hasActiveProvider` (a persisted selection).
+  const location = useLocation();
+  const navigate = useNavigate();
+  const llmProviders = useLlmProviders({
+    settings: {},
+    gatewayStatus: status,
+    enabled: isAdmin,
+  });
+  // Onboarding is admin-only; non-admins never see the first-run gate.
+  // Even for an admin, skip onboarding when the providers query errored —
+  // under multi-user / SSO auth the operator LLM-config route is gated
+  // (404), the provider is configured operator-side at boot, and `/welcome`
+  // can't reach the gated config UI, so a failed query must not trap an
+  // admin SSO user on `/welcome`.
+  const needsOnboarding =
+    isAdmin &&
+    shouldRouteToOnboarding({
+      isLoading: llmProviders.isLoading,
+      hasActiveProvider: llmProviders.hasActiveProvider,
+      isError: llmProviders.isError,
+    });
+  const onboardingExempt =
+    location.pathname === "/welcome" || location.pathname.startsWith("/settings");
 
   const [paletteOpen, setPaletteOpen] = React.useState(false);
   React.useEffect(() => {
@@ -33,9 +64,25 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
-  // v2 has no DELETE thread endpoint, so the sidebar renders no
-  // delete affordance (SidebarThreads conditionally renders the
-  // trash button on `onDelete`).
+
+  const handleDeleteThread = React.useCallback(
+    async (threadId) => {
+      const wasActive = threadsState.activeThreadId === threadId;
+      try {
+        await threadsState.deleteThread(threadId);
+        if (wasActive) {
+          navigate("/chat", { replace: true });
+        }
+      } catch (error) {
+        console.error("Failed to delete thread:", error);
+        toast(error?.message || "Unable to delete thread", { tone: "error" });
+      }
+    },
+    [navigate, threadsState]
+  );
+  if (needsOnboarding && !onboardingExempt) {
+    return html`<${Navigate} to="/welcome" replace />`;
+  }
 
   return html`
     <div className="flex h-[100dvh] overflow-hidden bg-[var(--v2-canvas)]">
@@ -63,6 +110,7 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
           onClose=${sidebar.close}
           onNewChat=${sidebar.newChat}
           onSelectThread=${sidebar.selectThread}
+          onDeleteThread=${handleDeleteThread}
         />
       </div>
 
@@ -89,6 +137,7 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
               gatewayStatus: status,
               gatewayStatusQuery: statusQuery,
               currentUser: profile,
+              isChecking,
               isAdmin,
               threadsState,
             }}

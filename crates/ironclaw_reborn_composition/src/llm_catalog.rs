@@ -213,6 +213,32 @@ pub fn resolve_against_registry(
         .map_err(|source| RebornLlmCatalogError::EnvResolution { source })
 }
 
+/// Overlay an operator-stored API-key value onto a resolved `LlmConfig`.
+///
+/// The catalog/selection only ever carry an `api_key_env` *name* — values are
+/// rejected as inline secrets. When the operator pastes a key through the
+/// webui2 settings surface it is stored in the scoped secret store and applied
+/// here, after catalog/env resolution, so a stored value takes precedence over
+/// whatever `api_key_env` resolved to. Both the startup resolution and the live
+/// reload path call this so the two never drift.
+///
+/// Custom providers that rely on a stored key must be written into the overlay
+/// with `api_key_required = false`, otherwise resolution fails closed on the
+/// missing env var before this injection runs.
+pub(crate) fn apply_stored_api_key(
+    config: &mut ironclaw_llm::LlmConfig,
+    key: secrecy::SecretString,
+) {
+    if let Some(provider) = config.provider.as_mut() {
+        provider.api_key = Some(key);
+    } else if config.backend == "nearai" {
+        config.nearai.api_key = Some(key);
+    }
+    // Dedicated codex/gemini/bedrock backends authenticate via OAuth/session or
+    // AWS credential chains rather than a pasted key; surfacing those in the UI
+    // is a follow-up, so they are intentionally left untouched here.
+}
+
 fn validate_selection(
     selection: &LlmSlotSelection,
     provider: &ProviderDefinition,
@@ -820,6 +846,66 @@ mod tests {
         assert!(
             rendered.contains("providers.json[7]"),
             "error must identify catalog index: {rendered}"
+        );
+    }
+
+    #[test]
+    fn apply_stored_api_key_overrides_registry_provider() {
+        use secrecy::ExposeSecret as _;
+
+        let registry = ProviderRegistry::new(vec![provider_no_key_required("alpha")]);
+        let selection = LlmSlotSelection {
+            provider_id: Some("alpha".to_string()),
+            ..Default::default()
+        };
+        let mut config = resolve_against_registry(&selection, &registry).expect("resolve");
+        assert!(
+            config
+                .provider
+                .as_ref()
+                .expect("provider")
+                .api_key
+                .is_none()
+        );
+
+        apply_stored_api_key(&mut config, secrecy::SecretString::from("sk-stored"));
+
+        let stored = config
+            .provider
+            .as_ref()
+            .expect("provider")
+            .api_key
+            .as_ref()
+            .expect("api key");
+        assert_eq!(stored.expose_secret(), "sk-stored");
+    }
+
+    #[test]
+    fn apply_stored_api_key_targets_nearai_dedicated_config() {
+        use secrecy::ExposeSecret as _;
+
+        let registry = ProviderRegistry::new(vec![provider_with_protocol(
+            "nearai",
+            ProviderProtocol::NearAi,
+        )]);
+        let selection = LlmSlotSelection {
+            provider_id: Some("nearai".to_string()),
+            model: Some("nearai/test-model".to_string()),
+            ..Default::default()
+        };
+        let mut config = resolve_against_registry(&selection, &registry).expect("resolve");
+        assert!(config.provider.is_none());
+
+        apply_stored_api_key(&mut config, secrecy::SecretString::from("sk-nearai"));
+
+        assert_eq!(
+            config
+                .nearai
+                .api_key
+                .as_ref()
+                .expect("nearai key")
+                .expose_secret(),
+            "sk-nearai"
         );
     }
 

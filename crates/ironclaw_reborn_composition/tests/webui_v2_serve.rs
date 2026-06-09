@@ -21,14 +21,18 @@ use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     LifecyclePackageRef, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
     PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
@@ -43,6 +47,17 @@ const TENANT: &str = "tenant-alpha";
 const USER: &str = "user-alpha";
 const VALID_TOKEN: &str = "valid-bearer-token";
 
+fn service_unavailable_error(retryable: bool) -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable,
+        field: None,
+        validation_code: None,
+    }
+}
+
 // ─── stubs ────────────────────────────────────────────────────────────
 
 /// `WebuiAuthenticator` accepting only [`VALID_TOKEN`].
@@ -55,6 +70,214 @@ impl WebuiAuthenticator for OnlyValidToken {
             Some(UserId::new(USER).expect("user id"))
         } else {
             None
+        }
+    }
+
+    fn allows_operator_webui_config(&self) -> bool {
+        true
+    }
+}
+
+struct MultiUserToken;
+
+#[async_trait]
+impl WebuiAuthenticator for MultiUserToken {
+    async fn authenticate(&self, token: &str) -> Option<UserId> {
+        if token == VALID_TOKEN {
+            Some(UserId::new(USER).expect("user id"))
+        } else {
+            None
+        }
+    }
+}
+
+#[tokio::test]
+async fn health_route_is_public_for_platform_probes() {
+    let bundle = RebornWebuiBundle {
+        api: Arc::new(StubServices::default()),
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![],
+    );
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/health")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024).await.expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("health json");
+    assert_eq!(json["status"], "healthy");
+    assert_eq!(json["channel"], "reborn");
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_personal_binding_pairing_mount_tests {
+    use super::*;
+    use ironclaw_product_adapters::AdapterInstallationId;
+    use ironclaw_reborn_composition::slack_serve::SlackUserId;
+    use ironclaw_reborn_composition::{
+        IssuedSlackPersonalBindingPairingChallenge, RebornUserIdentityBinding,
+        RebornUserIdentityBindingError, RebornUserIdentityBindingStore, SlackInstallationSelector,
+        SlackPersonalBindingInstallation, SlackPersonalBindingPairingChallenge,
+        SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
+        SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
+        SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingRouteConfig,
+        SlackPersonalBindingPairingService, SlackPersonalUserBindingService,
+        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
+    };
+
+    #[tokio::test]
+    async fn pairing_route_mounted_when_config_provided() {
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let pairing = SlackPersonalBindingPairingService::new(
+            SlackPersonalUserBindingService::new(
+                [SlackPersonalBindingInstallation {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    installation_id: installation("install-a"),
+                    selector: SlackInstallationSelector::app_team("A-app", "T-team"),
+                }],
+                binding_store.clone(),
+            ),
+            Arc::new(StaticChallengeStore),
+            Arc::new(NoopNotifier),
+        );
+        let bundle = RebornWebuiBundle {
+            api: Arc::new(StubServices::default()),
+            product_auth: None,
+            readiness: RebornReadiness::disabled(),
+        };
+        let config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            Arc::new(OnlyValidToken),
+            vec![HeaderValue::from_static("http://localhost:1234")],
+        )
+        .with_slack_personal_binding_pairing(SlackPersonalBindingPairingRouteConfig::new(pairing));
+        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"channel":"slack","code":"abc12345"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
+                    .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"channel":"slack","code":"abc12345"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(authenticated.status(), StatusCode::OK);
+        assert_eq!(binding_store.bound_user_ids(), vec![USER.to_string()]);
+    }
+
+    fn installation(value: &str) -> AdapterInstallationId {
+        AdapterInstallationId::new(value).expect("installation")
+    }
+
+    #[derive(Default)]
+    struct RecordingBindingStore {
+        bindings: Mutex<Vec<RebornUserIdentityBinding>>,
+    }
+
+    impl RecordingBindingStore {
+        fn bound_user_ids(&self) -> Vec<String> {
+            self.bindings
+                .lock()
+                .expect("bindings lock should not be poisoned")
+                .iter()
+                .map(|binding| binding.user_id.to_string())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl RebornUserIdentityBindingStore for RecordingBindingStore {
+        async fn bind_user_identity(
+            &self,
+            binding: RebornUserIdentityBinding,
+        ) -> Result<(), RebornUserIdentityBindingError> {
+            self.bindings
+                .lock()
+                .expect("bindings lock should not be poisoned")
+                .push(binding);
+            Ok(())
+        }
+    }
+
+    struct StaticChallengeStore;
+
+    #[async_trait]
+    impl SlackPersonalBindingPairingChallengeStore for StaticChallengeStore {
+        async fn issue_challenge(
+            &self,
+            challenge: SlackPersonalBindingPairingChallenge,
+        ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            Ok(IssuedSlackPersonalBindingPairingChallenge {
+                code: SlackPersonalBindingPairingCode::new("ABC12345").expect("code"),
+                challenge,
+            })
+        }
+
+        async fn get_challenge(
+            &self,
+            code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            if code.as_str() != "ABC12345" {
+                return Err(SlackPersonalBindingPairingError::ChallengeNotFound);
+            }
+            Ok(SlackPersonalBindingPairingChallenge {
+                installation_id: installation("install-a"),
+                slack_user_id: SlackUserId::new("U123"),
+            })
+        }
+
+        async fn consume_challenge(
+            &self,
+            code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            self.get_challenge(code).await
+        }
+    }
+
+    struct NoopNotifier;
+
+    #[async_trait]
+    impl SlackPersonalBindingPairingNotifier for NoopNotifier {
+        async fn send_pairing_challenge(
+            &self,
+            _notification: SlackPersonalBindingPairingNotification,
+        ) -> Result<(), SlackPersonalBindingPairingError> {
+            Ok(())
         }
     }
 }
@@ -114,6 +337,17 @@ impl RebornServicesApi for StubServices {
             resolved_run_profile_id: RunProfileId::default_profile().as_str().to_string(),
             resolved_run_profile_version: RunProfileVersion::new(1).as_u64(),
             event_cursor: EventCursor(1),
+        })
+    }
+
+    async fn delete_thread(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
+        Ok(RebornDeleteThreadResponse {
+            thread_id: ThreadId::new(request.thread_id).expect("thread id"),
+            deleted: true,
         })
     }
 
@@ -220,6 +454,28 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn get_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Ok(RebornOutboundPreferencesResponse::default())
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(service_unavailable_error(false))
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        Err(service_unavailable_error(false))
+    }
+
     async fn list_extensions(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -227,6 +483,55 @@ impl RebornServicesApi for StubServices {
         Ok(RebornExtensionListResponse {
             extensions: Vec::new(),
         })
+    }
+
+    async fn list_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn search_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn install_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn read_skill_content(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn update_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn remove_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(unused_services_error())
     }
 
     async fn list_extension_registry(
@@ -318,6 +623,26 @@ fn build_app() -> (axum::Router, Arc<StubServices>) {
     (app, services)
 }
 
+fn build_app_with_authenticator(
+    authenticator: Arc<dyn WebuiAuthenticator>,
+) -> (axum::Router, Arc<StubServices>) {
+    let services = Arc::new(StubServices::default());
+    let bundle = RebornWebuiBundle {
+        api: services.clone(),
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        authenticator,
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    (app, services)
+}
+
 async fn read_body_string(response: axum::response::Response) -> String {
     let bytes = to_bytes(response.into_body(), 64 * 1024)
         .await
@@ -363,6 +688,52 @@ async fn bearer_happy_path_dispatches_to_facade_with_host_tenant() {
         Some(PROJECT),
         "auth middleware must stamp trusted default project_id onto the caller",
     );
+}
+
+#[tokio::test]
+async fn session_endpoint_reports_operator_capability_for_operator_authenticator() {
+    let (app, _services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&read_body_string(response).await).expect("session json");
+    assert_eq!(body["tenant_id"], TENANT);
+    assert_eq!(body["user_id"], USER);
+    assert_eq!(body["capabilities"]["operator_webui_config"], true);
+}
+
+#[tokio::test]
+async fn session_endpoint_reports_no_operator_capability_for_multi_user_authenticator() {
+    let (app, _services) = build_app_with_authenticator(Arc::new(MultiUserToken));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&read_body_string(response).await).expect("session json");
+    assert_eq!(body["tenant_id"], TENANT);
+    assert_eq!(body["user_id"], USER);
+    assert_eq!(body["capabilities"]["operator_webui_config"], false);
 }
 
 #[tokio::test]
@@ -997,6 +1368,32 @@ async fn list_threads_returns_facade_response_with_empty_default() {
 }
 
 #[tokio::test]
+async fn delete_thread_route_returns_facade_ack() {
+    let (app, _services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/threads/thread-x")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    assert!(
+        body.contains("\"thread_id\":\"thread-x\""),
+        "delete_thread body should carry the deleted thread id, got: {body}",
+    );
+    assert!(
+        body.contains("\"deleted\":true"),
+        "delete_thread body should acknowledge deletion, got: {body}",
+    );
+}
+
+#[tokio::test]
 async fn setup_extension_returns_lifecycle_projection_via_facade() {
     let (app, _services) = build_app();
     let response = app
@@ -1147,6 +1544,41 @@ async fn every_webui_v2_descriptor_is_mounted_on_composed_app() {
             route_id = descriptor.route_id().as_str(),
             method = method,
             uri = uri,
+        );
+    }
+}
+
+#[tokio::test]
+async fn llm_config_routes_are_not_mounted_for_multi_user_authenticator() {
+    let (app, _services) = build_app_with_authenticator(Arc::new(MultiUserToken));
+
+    for (method, uri) in [
+        (Method::GET, "/api/webchat/v2/llm/providers"),
+        (Method::POST, "/api/webchat/v2/llm/providers"),
+        (Method::POST, "/api/webchat/v2/llm/providers/openai/delete"),
+        (Method::POST, "/api/webchat/v2/llm/active"),
+        (Method::POST, "/api/webchat/v2/llm/test-connection"),
+        (Method::POST, "/api/webchat/v2/llm/list-models"),
+        (Method::POST, "/api/webchat/v2/llm/nearai/login"),
+        (Method::POST, "/api/webchat/v2/llm/nearai/wallet"),
+        (Method::POST, "/api/webchat/v2/llm/codex/login"),
+    ] {
+        let mut builder = Request::builder()
+            .method(method.clone())
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"));
+        if method == Method::POST {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::empty()).expect("request"))
+            .await
+            .expect("oneshot must complete");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{method} {uri} must not be mounted for non-operator auth"
         );
     }
 }
@@ -1388,6 +1820,94 @@ async fn static_css_asset_returns_text_css_content_type() {
         .map(|v| v.to_str().unwrap().to_string())
         .unwrap_or_default();
     assert!(ct.starts_with("text/css"), "got content-type `{ct}`");
+}
+
+#[tokio::test]
+async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
+    // Content-shape regression guard for the i18n loader fixes (PR
+    // #4493 review): the single `setLang` transition must (1) discard a
+    // slow pack load whose promise resolves after a newer language was
+    // requested, and (2) drop the in-flight `pending[lang]` entry once it
+    // settles so a transient import failure does not cache a permanent
+    // miss. It also locks the follow-up cleanup that removed the
+    // `version` counter in favor of committing the loaded pack to state.
+    // There is no JS test harness in this workspace (see the route-shape
+    // note below), so this locks the source shape; a behavioral provider
+    // test driving `setLang('es')` through an unloaded pack belongs in
+    // the deferred JS/e2e scaffold.
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/lib/i18n.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("const activeLangRef = React.useRef(lang);"),
+        "i18n provider must track the latest requested language in a ref",
+    );
+    assert!(
+        body.contains("activeLangRef.current = next;"),
+        "setLang must stamp the requested language before awaiting the pack",
+    );
+    assert!(
+        body.contains("if (!loaded || activeLangRef.current !== next) return;"),
+        "a resolved pack load must only commit when the pack is available and still the latest request",
+    );
+    assert_eq!(
+        body.matches("delete pending[lang];").count(),
+        2,
+        "ensurePack must clear pending[lang] on BOTH the success and failure paths so a transient import failure can be retried",
+    );
+    assert!(
+        !body.contains("setVersion"),
+        "the version counter must stay removed: async loads re-render by committing the pack to state",
+    );
+}
+
+#[tokio::test]
+async fn static_typing_dot_animation_respects_reduced_motion() {
+    // Content-shape regression guard for the typing-indicator animation
+    // contract (PR #4493 review): `.v2-typing-dot` is the single
+    // intentional animation exception, so it must animate by default and
+    // be suppressed under `prefers-reduced-motion: reduce`. A behavioral
+    // check that the dot computes to `animation: none` via the emulated
+    // media query needs a browser (`getComputedStyle`), which this
+    // workspace's Rust/oneshot harness cannot drive; that belongs in the
+    // deferred e2e scaffold.
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/styles/app.css")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("animation: v2-typing-bounce"),
+        "typing dots must animate by default",
+    );
+    assert!(
+        body.contains("@media (prefers-reduced-motion: reduce)"),
+        "stylesheet must carry a reduced-motion opt-out block",
+    );
+    assert!(
+        body.contains(".v2-typing-dot { animation: none"),
+        "the typing dot must be suppressed under prefers-reduced-motion: reduce",
+    );
 }
 
 #[tokio::test]

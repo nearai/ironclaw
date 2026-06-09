@@ -41,6 +41,7 @@ webui-v2-beta = [
     "ironclaw_webui_v2/webui-v2-beta",
     "dep:ironclaw_webui_v2_static",
     "ironclaw_webui_v2_static/webui-v2-beta",
+    "dep:ironclaw_reborn_identity",
     "ironclaw_reborn/webui-user-store",
     "libsql",
     "dep:axum",
@@ -55,6 +56,7 @@ slack-v2-host-beta = [
     "webui-v2-beta",
     "dep:ironclaw_slack_v2_adapter",
     "dep:ironclaw_wasm_product_adapters",
+    "dep:ironclaw_product_workflow_storage",
 ]
 libsql = [
     "dep:libsql",
@@ -94,6 +96,7 @@ ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
+ironclaw_hooks = { path = "../ironclaw_hooks" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
@@ -104,8 +107,10 @@ ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_product_workflow_storage = { path = "../ironclaw_product_workflow_storage", optional = true }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
+ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity", optional = true }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extension_ports" }
 ironclaw_resources = { path = "../ironclaw_resources" }
@@ -131,11 +136,14 @@ axum = { version = "0.8", optional = true }
 tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", optional = true, features = ["cors", "set-header", "limit", "catch-panic"] }
 lru = { version = "0.16", optional = true }
+fs4 = "0.6"
 rand = "0.8"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }

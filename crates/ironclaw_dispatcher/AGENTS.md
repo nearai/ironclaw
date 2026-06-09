@@ -11,7 +11,9 @@
 
 ## What This Crate Owns
 
-- Neutral runtime dispatch port that routes already-authorized capability requests to adapters.
+- The neutral runtime dispatch port that routes already-authorized capability requests to runtime lanes. Currently:
+- `RuntimeDispatcher` and the `RuntimeAdapter` trait (all runtime lanes register through it — no direct WASM/Script/MCP deps), with `RuntimeAdapterRequest` / `RuntimeAdapterResult`.
+- The re-exported `ironclaw_host_api` dispatch contracts: `CapabilityDispatcher`, `CapabilityDispatchRequest`, `CapabilityDispatchResult`, `DispatchError`, `RuntimeDispatchErrorKind` (runtime errors redacted to stable kinds at the public surface).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

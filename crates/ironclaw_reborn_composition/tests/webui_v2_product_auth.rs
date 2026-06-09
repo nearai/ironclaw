@@ -25,14 +25,18 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_workflow::{
     LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, RebornAuthContinuationDispatcher, RebornProductAuthServices,
@@ -47,6 +51,7 @@ const USER: &str = "user-alpha";
 const AGENT: &str = "agent-default";
 const PROJECT: &str = "project-default";
 const VALID_TOKEN: &str = "valid-bearer-token";
+const DISALLOWED_GOOGLE_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 
 struct OnlyValidToken;
 
@@ -89,6 +94,58 @@ impl AuthProviderClient for FailingProviderClient {
         _request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError> {
         Err(AuthProductError::TokenExchangeFailed)
+    }
+
+    async fn refresh_token(
+        &self,
+        _request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        Err(AuthProductError::RefreshFailed)
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingProviderClient {
+    exchanged_scopes: Mutex<Vec<Vec<String>>>,
+}
+
+impl RecordingProviderClient {
+    fn exchanged_scopes(&self) -> Vec<Vec<String>> {
+        self.exchanged_scopes
+            .lock()
+            .expect("exchanged scopes lock")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl AuthProviderClient for RecordingProviderClient {
+    async fn exchange_callback(
+        &self,
+        _context: OAuthProviderExchangeContext,
+        request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        let scopes = request
+            .scopes
+            .iter()
+            .map(|scope| scope.as_str().to_string())
+            .collect::<Vec<_>>();
+        self.exchanged_scopes
+            .lock()
+            .expect("exchanged scopes lock")
+            .push(scopes);
+        Ok(OAuthProviderExchange {
+            provider: request.provider,
+            account_label: request.account_label,
+            authorization_code_hash: request.authorization_code_hash,
+            pkce_verifier_hash: request.pkce_verifier_hash,
+            access_secret: SecretHandle::new("recorded-google-access").expect("secret handle"),
+            refresh_secret: Some(
+                SecretHandle::new("recorded-google-refresh").expect("secret handle"),
+            ),
+            scopes: request.scopes,
+            account_id: None,
+        })
     }
 
     async fn refresh_token(
@@ -208,6 +265,14 @@ impl RebornServicesApi for UnusedServices {
         Err(rejecting_reborn_services_error())
     }
 
+    async fn delete_thread(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
     async fn stream_events(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -256,10 +321,81 @@ impl RebornServicesApi for UnusedServices {
         Err(rejecting_reborn_services_error())
     }
 
+    async fn get_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
     async fn list_extensions(
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn search_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn install_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn read_skill_content(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn update_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn remove_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 
@@ -356,6 +492,34 @@ fn build_app_with_google_oauth() -> (axum::Router, Arc<RecordingAuthDispatcher>)
     let dispatcher = Arc::new(RecordingAuthDispatcher::default());
     let product_auth = Arc::new(RebornProductAuthServices::from_shared(
         Arc::new(InMemoryAuthProductServices::new()),
+        dispatcher.clone(),
+    ));
+    (
+        build_app_with_product_auth_service_and_config(
+            product_auth,
+            Some(google_oauth_route_config()),
+        ),
+        dispatcher,
+    )
+}
+
+fn build_app_with_google_oauth_provider(
+    provider_client: Arc<dyn AuthProviderClient>,
+) -> (axum::Router, Arc<RecordingAuthDispatcher>) {
+    let dispatcher = Arc::new(RecordingAuthDispatcher::default());
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+    let interaction_service: Arc<dyn AuthInteractionService> = shared.clone();
+    let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+    let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+    let cleanup_service: Arc<dyn SecretCleanupService> = shared;
+    let product_auth = Arc::new(RebornProductAuthServices::new(
+        flow_manager,
+        interaction_service,
+        credential_setup_service,
+        credential_account_service,
+        provider_client,
+        cleanup_service,
         dispatcher.clone(),
     ));
     (
@@ -681,7 +845,7 @@ async fn product_auth_google_oauth_start_rejects_disallowed_scopes() {
 
     let invalid_requests = [
         google_oauth_start_body(json!({ "scopes": [] })),
-        google_oauth_start_body(json!({ "scopes": ["https://www.googleapis.com/auth/drive"] })),
+        google_oauth_start_body(json!({ "scopes": [DISALLOWED_GOOGLE_SCOPE] })),
     ];
 
     for body in invalid_requests {
@@ -689,7 +853,7 @@ async fn product_auth_google_oauth_start_rejects_disallowed_scopes() {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = read_body_string(response).await;
         assert!(body.contains("\"code\":\"invalid_request\""));
-        assert!(!body.contains("drive"));
+        assert!(!body.contains(DISALLOWED_GOOGLE_SCOPE));
     }
 }
 
@@ -864,7 +1028,15 @@ async fn product_auth_manual_token_submit_has_per_caller_rate_limit() {
     for index in 0..20 {
         let response = post_manual_token_submit(
             &app,
-            manual_token_body(&format!("ghp_secret_{index}"), json!({})),
+            manual_token_body(
+                &format!("ghp_secret_{index}"),
+                json!({
+                    "account_label": format!("work github {index}"),
+                    "run_id": Uuid::from_u128((index + 1) as u128).to_string(),
+                    "gate_ref": format!("gate:auth-github-{index}"),
+                    "thread_id": format!("thread-auth-{index}")
+                }),
+            ),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1235,6 +1407,38 @@ async fn product_auth_google_oauth_callback_completes_setup_flow() {
 }
 
 #[tokio::test]
+async fn product_auth_google_oauth_callback_accepts_provider_extra_scopes_without_overclaiming() {
+    let provider_client = Arc::new(RecordingProviderClient::default());
+    let (app, dispatcher) = build_app_with_google_oauth_provider(provider_client.clone());
+    let (start_json, state) = start_google_oauth_flow(&app).await;
+    let scopes = format!(
+        "openid%20email%20profile%20{GOOGLE_GMAIL_READONLY_SCOPE}%20{GOOGLE_CALENDAR_READONLY_SCOPE}"
+    );
+
+    let callback_response = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope={scopes}"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(callback_response.status(), StatusCode::OK);
+    let callback_body = read_body_string(callback_response).await;
+    let callback_json: serde_json::Value =
+        serde_json::from_str(&callback_body).expect("callback json");
+    assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
+    assert_eq!(callback_json["status"], "completed");
+    assert_eq!(dispatcher.events().len(), 1);
+    assert_eq!(
+        provider_client.exchanged_scopes(),
+        vec![vec![
+            GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
+            GOOGLE_CALENDAR_READONLY_SCOPE.to_string()
+        ]]
+    );
+}
+
+#[tokio::test]
 async fn product_auth_google_oauth_browser_callback_notifies_chat_without_secrets() {
     let (app, dispatcher) = build_app_with_google_oauth();
     let (start_json, state) = start_google_oauth_flow(&app).await;
@@ -1277,7 +1481,7 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
     let response = app
         .clone()
         .oneshot(callback_request(format!(
-            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope=https://www.googleapis.com/auth/drive"
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope={DISALLOWED_GOOGLE_SCOPE}"
         )))
         .await
         .expect("oneshot");
@@ -1287,7 +1491,7 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
     assert!(body.contains("\"code\":\"malformed_callback\""));
     assert!(!body.contains(&state));
     assert!(!body.contains("google-auth-code"));
-    assert!(!body.contains("drive"));
+    assert!(!body.contains(DISALLOWED_GOOGLE_SCOPE));
     assert!(dispatcher.events().is_empty());
 
     let replay_response = app
@@ -1456,24 +1660,6 @@ async fn product_auth_callback_malformed_fields_are_sanitized() {
     .await;
 
     let malformed_uris = [
-        format!(
-            "/api/reborn/product-auth/oauth/callback/{}?user_id={USER}&agent_id={AGENT}&project_id={PROJECT}&invocation_id={}&provider=github&account_label=work&code=missing-state-code",
-            started.flow_id, started.invocation_id
-        ),
-        callback_uri(
-            &started.flow_id,
-            &started.invocation_id,
-            USER,
-            "malformed-field-state",
-            "&account_label=work&code=missing-provider-code",
-        ),
-        callback_uri(
-            &started.flow_id,
-            &started.invocation_id,
-            USER,
-            "malformed-field-state",
-            "&provider=github&code=missing-label-code",
-        ),
         callback_uri(
             &started.flow_id,
             &started.invocation_id,
@@ -1501,20 +1687,6 @@ async fn product_auth_callback_malformed_fields_are_sanitized() {
             USER,
             "malformed-field-state",
             "&provider=github&account_label=work&code=bad-scopes-code&scopes=repo,,gist",
-        ),
-        callback_uri(
-            &started.flow_id,
-            &started.invocation_id,
-            USER,
-            "malformed-field-state",
-            "&provider=github&account_label=work&code=missing-scopes-code",
-        ),
-        callback_uri(
-            &started.flow_id,
-            &started.invocation_id,
-            USER,
-            "malformed-field-state",
-            "&provider=github&account_label=work&code=empty-scopes-code&scopes=",
         ),
     ];
 

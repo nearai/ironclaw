@@ -333,6 +333,21 @@ async fn libsql_db_at(path: impl AsRef<std::path::Path>) -> Arc<libsql::Database
     )
 }
 
+#[cfg(feature = "libsql")]
+async fn libsql_trigger_record_count(db: &libsql::Database) -> i64 {
+    let conn = db.connect().expect("connect libsql db");
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM trigger_records", ())
+        .await
+        .expect("trigger table exists");
+    let row = rows
+        .next()
+        .await
+        .expect("read trigger table count row")
+        .expect("trigger table count row");
+    row.get(0).expect("trigger count")
+}
+
 #[cfg(feature = "postgres")]
 async fn postgres_pool_or_skip() -> Option<(
     testcontainers_modules::testcontainers::ContainerAsync<
@@ -1034,6 +1049,9 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
         .as_str()
         .expect("created trigger id")
         .to_string();
+
+    let local_dev_db = libsql_db_at(dir.path().join("reborn-local-dev.db")).await;
+    assert_eq!(libsql_trigger_record_count(&local_dev_db).await, 1);
 
     let listed = invoke_trigger_management(
         runtime,

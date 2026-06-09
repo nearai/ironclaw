@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_loop_support::{
     HostIdentityContextSource, HostManagedModelGateway, HostSkillContextSource,
-    ThreadBackedLoopModelPort,
+    ThreadBackedLoopModelPort, ThreadContextWindowCache,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::{
@@ -26,6 +26,7 @@ where
     pub(super) instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
     pub(super) capabilities: Option<Arc<dyn LoopCapabilityPort>>,
     pub(super) prompt_authority: LoopPromptBundleAuthority,
+    pub(super) context_window_cache: Option<Arc<ThreadContextWindowCache>>,
 }
 
 #[async_trait]
@@ -58,6 +59,9 @@ where
         if let Some(capabilities) = self.capabilities.as_ref() {
             model_port = model_port.with_capability_port(Arc::clone(capabilities));
         }
+        if let Some(cache) = self.context_window_cache.as_ref() {
+            model_port = model_port.with_context_window_cache(Arc::clone(cache));
+        }
         model_port
             .stream_model(request.request)
             .await
@@ -67,14 +71,19 @@ where
 
 fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
     let diagnostic_ref = error.diagnostic_ref;
+    let reason_kind = error.reason_kind;
     let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
         Ok(error) => error,
         Err(_) => LoopModelGatewayError {
             kind: error.kind,
             safe_summary: LoopSafeSummary::model_gateway_failed(),
+            reason_kind: None,
             diagnostic_ref: None,
         },
     };
+    if let Some(reason_kind) = reason_kind {
+        converted = converted.with_reason_kind(reason_kind);
+    }
     if let Some(diagnostic_ref) = diagnostic_ref {
         converted = converted.with_diagnostic_ref(diagnostic_ref);
     }

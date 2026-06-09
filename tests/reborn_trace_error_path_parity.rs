@@ -14,7 +14,7 @@ use reborn_support::{
 };
 
 /// Exercises read_file with a missing `path` parameter, proving malformed real
-/// built-in tool input is persisted as a recoverable Reborn run failure.
+/// built-in tool input is persisted as a terminal Reborn run failure.
 #[tokio::test]
 async fn reborn_trace_error_path_parity() {
     let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
@@ -41,9 +41,9 @@ async fn reborn_trace_error_path_parity() {
         .await
         .expect("submit text");
     let state = harness
-        .wait_for_status(submitted.run_id, TurnStatus::RecoveryRequired)
+        .wait_for_status(submitted.run_id, TurnStatus::Failed)
         .await
-        .expect("recovery-required run");
+        .expect("failed run");
     assert_eq!(
         state.failure.expect("failure category").category(),
         "driver_protocol_violation"
@@ -103,9 +103,9 @@ async fn reborn_trace_unadvertised_capability_is_rejected() {
         .await
         .expect("submit text");
     let state = harness
-        .wait_for_status(submitted.run_id, TurnStatus::RecoveryRequired)
+        .wait_for_status(submitted.run_id, TurnStatus::Failed)
         .await
-        .expect("recovery-required run");
+        .expect("failed run");
     assert_eq!(
         state.failure.expect("failure category").category(),
         "driver_unavailable"

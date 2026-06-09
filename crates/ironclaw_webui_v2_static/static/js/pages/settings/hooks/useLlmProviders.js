@@ -1,41 +1,64 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  deleteLlmProvider,
   fetchLlmProviders,
-  importSettings,
   listLlmProviderModels,
+  setActiveLlm,
   testLlmProviderConnection,
-  updateSetting,
+  upsertLlmProvider,
 } from "../lib/settings-api.js";
 import {
-  API_KEY_UNCHANGED,
   isProviderConfigured,
-  parseBuiltinOverrides,
-  parseCustomProviders,
   providerDefaultModel,
   providerMissingReason,
 } from "../lib/llm-providers.js";
 
-export function useLlmProviders({ settings, gatewayStatus }) {
+// The v2 `/llm/providers` snapshot is the single source of truth: a unified
+// provider list (built-in + operator-defined) already annotated with the active
+// selection, `builtin`, and `api_key_set`. Overrides are no longer a separate
+// client-side merge — the backend resolves them — so `builtinOverrides` is kept
+// as an empty object purely for the shared helper signatures.
+export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = true }) {
   const queryClient = useQueryClient();
   const providersQuery = useQuery({
     queryKey: ["llm-providers"],
     queryFn: fetchLlmProviders,
+    enabled,
     staleTime: 60_000,
   });
 
-  const builtinProviders = Array.isArray(providersQuery.data) ? providersQuery.data : [];
-  const customProviders = parseCustomProviders(settings.llm_custom_providers);
-  const builtinOverrides = parseBuiltinOverrides(settings.llm_builtin_overrides);
-  const activeProviderId = settings.llm_backend || gatewayStatus?.llm_backend || "nearai";
-  const selectedModel = settings.selected_model || gatewayStatus?.llm_model || "";
-  const providers = [...builtinProviders, ...customProviders].sort((a, b) => {
+  const snapshot = enabled
+    ? providersQuery.data || { providers: [], active: null }
+    : { providers: [], active: null };
+  // If the providers query failed (e.g. 404 when the route is gated under
+  // multi-user / SSO auth, or a transient 5xx / offline), we can't conclude
+  // "no LLM configured" — the provider may be set operator-side at boot — so
+  // callers must not treat the failure as a reason to onboard.
+  const isError = enabled && providersQuery.isError;
+  const builtinOverrides = {};
+  // Map the wire view onto the field names the components/helpers expect.
+  const allProviders = (snapshot.providers || []).map((provider) => ({
+    ...provider,
+    name: provider.description,
+    has_api_key: provider.api_key_set === true,
+  }));
+  // Whether the backend has a usable active provider. Prefer the persisted
+  // operator snapshot, but also honor runtime/env-configured LLMs surfaced by
+  // gateway status so first-run onboarding does not mask an already-live model.
+  const hasActiveProvider = Boolean(snapshot.active?.provider_id || gatewayStatus?.llm_backend);
+  const activeProviderId =
+    snapshot.active?.provider_id || gatewayStatus?.llm_backend || "nearai";
+  const selectedModel = snapshot.active?.model || gatewayStatus?.llm_model || "";
+  const builtinProviders = allProviders.filter((provider) => provider.builtin);
+  const customProviders = allProviders.filter((provider) => !provider.builtin);
+  const providers = [...allProviders].sort((a, b) => {
     if (a.id === activeProviderId) return -1;
     if (b.id === activeProviderId) return 1;
     return (a.name || a.id).localeCompare(b.name || b.id);
   });
 
-  const refreshSettings = () => {
-    queryClient.invalidateQueries({ queryKey: ["settings-export"] });
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
   };
 
   const setActiveMutation = useMutation({
@@ -46,86 +69,47 @@ export function useLlmProviders({ settings, gatewayStatus }) {
       }
       const model = providerDefaultModel(provider, builtinOverrides);
       if (!model) throw new Error("model");
-      await importSettings({ settings: { llm_backend: provider.id, selected_model: model } });
+      await setActiveLlm({ provider_id: provider.id, model });
       return provider;
     },
-    onSuccess: refreshSettings,
+    onSuccess: refresh,
   });
 
-  const saveCustomMutation = useMutation({
-    mutationFn: async ({ form, apiKey, editingProvider }) => {
-      const next = [...customProviders];
-      const entry = {
-        ...(editingProvider || {}),
-        id: form.id.trim(),
-        name: form.name.trim(),
-        adapter: form.adapter,
-        base_url: form.baseUrl.trim(),
+  // Both custom and built-in saves go through one upsert endpoint. A built-in
+  // "override" is just an overlay entry that shadows the compiled-in provider
+  // by id; the backend resolves later entries last.
+  const saveProviderMutation = useMutation({
+    mutationFn: async ({ provider, form, apiKey, editingProvider }) => {
+      const isBuiltin = Boolean(provider?.builtin);
+      const id = (isBuiltin ? provider.id : form.id.trim()).trim();
+      const payload = {
+        id,
+        name: isBuiltin ? provider.name || provider.id : form.name.trim(),
+        adapter: isBuiltin ? provider.adapter : form.adapter,
+        base_url: form.baseUrl.trim() || provider?.base_url || "",
         default_model: form.model.trim() || undefined,
-        builtin: false,
       };
+      // Only send a key when a new value was typed; otherwise leave the stored
+      // one untouched (omitting the field is "unchanged" on the backend).
       if (apiKey.trim()) {
-        entry.api_key = apiKey.trim();
-      } else if (editingProvider?.api_key === API_KEY_UNCHANGED) {
-        entry.api_key = API_KEY_UNCHANGED;
-      } else {
-        delete entry.api_key;
+        payload.api_key = apiKey.trim();
       }
-
-      if (editingProvider) {
-        const idx = next.findIndex((provider) => provider.id === editingProvider.id);
-        if (idx >= 0) next[idx] = entry;
-      } else {
-        next.push(entry);
+      if ((editingProvider || provider)?.id === activeProviderId && payload.default_model) {
+        payload.set_active = true;
+        payload.model = payload.default_model;
       }
-
-      await updateSetting("llm_custom_providers", next);
-      if (editingProvider?.id === activeProviderId) {
-        if (entry.default_model) {
-          await updateSetting("selected_model", entry.default_model);
-        } else {
-          await updateSetting("selected_model", null);
-        }
-      }
-      return entry;
+      await upsertLlmProvider(payload);
+      return payload;
     },
-    onSuccess: refreshSettings,
-  });
-
-  const saveBuiltinMutation = useMutation({
-    mutationFn: async ({ provider, form, apiKey }) => {
-      const next = { ...builtinOverrides };
-      const previous = next[provider.id] || {};
-      const override = {};
-      if (apiKey.trim()) {
-        override.api_key = apiKey.trim();
-      } else if (previous.api_key === API_KEY_UNCHANGED) {
-        override.api_key = API_KEY_UNCHANGED;
-      }
-      if (form.model.trim()) override.model = form.model.trim();
-      if (form.baseUrl.trim()) override.base_url = form.baseUrl.trim();
-      next[provider.id] = override;
-
-      await updateSetting("llm_builtin_overrides", next);
-      if (provider.id === activeProviderId) {
-        if (override.model) {
-          await updateSetting("selected_model", override.model);
-        } else {
-          await updateSetting("selected_model", null);
-        }
-      }
-      return provider;
-    },
-    onSuccess: refreshSettings,
+    onSuccess: refresh,
   });
 
   const deleteCustomMutation = useMutation({
     mutationFn: async (provider) => {
-      const next = customProviders.filter((item) => item.id !== provider.id);
-      await updateSetting("llm_custom_providers", next);
+      await deleteLlmProvider(provider.id);
       return provider;
     },
-    onSuccess: refreshSettings,
+    onSuccess: refresh,
   });
 
   return {
@@ -135,18 +119,19 @@ export function useLlmProviders({ settings, gatewayStatus }) {
     builtinOverrides,
     activeProviderId,
     selectedModel,
+    hasActiveProvider,
+    isError,
     isLoading: providersQuery.isLoading,
     error: providersQuery.error,
     setActiveProvider: (provider) => setActiveMutation.mutateAsync(provider),
-    saveCustomProvider: (payload) => saveCustomMutation.mutateAsync(payload),
-    saveBuiltinProvider: (payload) => saveBuiltinMutation.mutateAsync(payload),
+    saveCustomProvider: (payload) => saveProviderMutation.mutateAsync(payload),
+    saveBuiltinProvider: (payload) => saveProviderMutation.mutateAsync(payload),
     deleteCustomProvider: (provider) => deleteCustomMutation.mutateAsync(provider),
     testConnection: testLlmProviderConnection,
     listModels: listLlmProviderModels,
     isBusy:
       setActiveMutation.isPending ||
-      saveCustomMutation.isPending ||
-      saveBuiltinMutation.isPending ||
+      saveProviderMutation.isPending ||
       deleteCustomMutation.isPending,
   };
 }

@@ -8,7 +8,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -21,26 +21,46 @@ use ironclaw_outbound::{
     RunNotificationOrigin, SourceRouteContext, ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
-    AuthPromptView, ExternalActorRef, ExternalConversationRef, FinalReplyView, GatePromptView,
-    OutboundDeliverySink, ProductAdapter, ProductInboundAck, ProductInboundEnvelope,
-    ProductOutboundPayload, ProtocolHttpEgress,
+    DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
+    EgressRequest, EgressResponse, ExternalActorRef, ExternalConversationRef, FinalReplyView,
+    GatePromptView, OutboundDeliverySink, ProductAdapter, ProductAdapterError, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundPayload, ProductTriggerReason,
+    ProtocolHttpEgress, ProtocolHttpEgressError,
 };
 use ironclaw_product_workflow::{
-    ConversationBindingService, ProductConversationRouteKind, ProductOutboundDeliveryRequest,
-    ProductOutboundTargetResolver, ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
+    ConversationBindingService, ProductOutboundDeliveryRequest, ProductOutboundTargetResolver,
+    ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
     VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
-    route_kind_for_inbound_payload,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_turns::{
-    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnScope,
-    TurnStatus,
+    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
+    TurnScope, TurnStatus,
 };
 use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
+
+use crate::AuthChallengeProvider;
+use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
 
 const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const SLACK_RUN_POLL_JITTER_BUCKETS: u32 = 5;
+const SLACK_API_HOST: &str = "slack.com";
+const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
+const SLACK_WORKING_MESSAGE: &str = "Ironclaw is thinking...";
+const SLACK_AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlockedActionableMarker {
+    status: TurnStatus,
+    gate_ref: Option<String>,
+}
+
+struct SlackActionableNotification {
+    event_kind: RunNotificationEventKind,
+    payload: ProductOutboundPayload,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlackFinalReplyDeliverySettings {
@@ -68,6 +88,7 @@ pub struct SlackFinalReplyDeliveryServices {
     pub adapter: Arc<dyn ProductAdapter>,
     pub egress: Arc<dyn ProtocolHttpEgress>,
     pub delivery_sink: Arc<dyn OutboundDeliverySink>,
+    pub auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
 }
 
 pub struct SlackFinalReplyDeliveryObserver {
@@ -97,86 +118,184 @@ impl SlackFinalReplyDeliveryObserver {
         envelope: ProductInboundEnvelope,
         ack: ProductInboundAck,
     ) -> Result<(), SlackFinalReplyDeliveryError> {
+        if is_accepted_auth_denial(&envelope, &ack) {
+            post_slack_message(
+                self.services.egress.as_ref(),
+                envelope.external_conversation_ref(),
+                SLACK_AUTH_CANCELED_MESSAGE,
+            )
+            .await?;
+            return Ok(());
+        }
+        if !should_deliver_after_ack(&envelope, &ack) {
+            return Ok(());
+        }
         let Some(run_id) = submitted_run_id(&ack) else {
             return Ok(());
         };
-        let route_kind = route_kind_for_inbound_payload(envelope.payload());
         let binding = self
             .services
             .binding_service
             .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
             .await?;
-        let scope = turn_scope_from_binding(&binding)?;
-        let actor = TurnActor::new(binding.user_id.clone());
-        let thread_scope = thread_scope_from_binding(&binding, route_kind)?;
-        let actionable_state = self.wait_for_actionable(&scope, run_id).await?;
-        let (event_kind, payload) = match actionable_state.status {
+        let actor = TurnActor::new(binding.actor_user_id.clone());
+        let thread_scope = thread_scope_from_binding(&binding)?;
+        let scope = turn_scope_from_thread_scope(&binding, &thread_scope)?;
+        let mut delivered_blocked_marker = None;
+        let mut working_message = None;
+        let mut messages_to_delete_after_final = Vec::new();
+        loop {
+            let actionable_state = self
+                .wait_for_actionable(
+                    &scope,
+                    run_id,
+                    delivered_blocked_marker.as_ref(),
+                    &envelope,
+                    &mut working_message,
+                )
+                .await?;
+            if matches!(
+                actionable_state.status,
+                TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
+            ) {
+                self.delete_slack_message_if_present(working_message.take())
+                    .await;
+            }
+            let Some(notification) = self
+                .notification_for_actionable_state(
+                    &envelope,
+                    &binding,
+                    &thread_scope,
+                    &scope,
+                    run_id,
+                    &actionable_state,
+                )
+                .await?
+            else {
+                return Ok(());
+            };
+            let next_blocked_marker = blocked_actionable_marker(&actionable_state);
+            let event_kind = notification.event_kind;
+            let posted_messages = self
+                .deliver_run_notification(
+                    &envelope,
+                    &scope,
+                    &actor,
+                    run_id,
+                    &actionable_state,
+                    notification,
+                )
+                .await?;
+
+            let Some(marker) = next_blocked_marker else {
+                self.delete_slack_message_if_present(working_message.take())
+                    .await;
+                for message in messages_to_delete_after_final {
+                    self.delete_slack_message(message).await;
+                }
+                return Ok(());
+            };
+            if event_kind == RunNotificationEventKind::AuthRequired {
+                messages_to_delete_after_final.extend(posted_messages);
+            }
+            delivered_blocked_marker = Some(marker);
+        }
+    }
+
+    async fn notification_for_actionable_state(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        binding: &ResolvedBinding,
+        thread_scope: &ThreadScope,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        state: &TurnRunState,
+    ) -> Result<Option<SlackActionableNotification>, SlackFinalReplyDeliveryError> {
+        let notification = match state.status {
             TurnStatus::Completed => {
                 let Some(text) = self
-                    .read_latest_assistant_text(&thread_scope, &binding, run_id)
+                    .read_latest_assistant_text(thread_scope, binding, run_id)
                     .await?
                 else {
                     tracing::warn!(
                         %run_id,
-                        ?route_kind,
                         "completed Slack run has no finalized assistant message; skipping final reply delivery"
                     );
-                    return Ok(());
+                    return Ok(None);
                 };
-                (
-                    RunNotificationEventKind::FinalReplyReady,
-                    ProductOutboundPayload::FinalReply(FinalReplyView {
+                SlackActionableNotification {
+                    event_kind: RunNotificationEventKind::FinalReplyReady,
+                    payload: ProductOutboundPayload::FinalReply(FinalReplyView {
                         turn_run_id: run_id,
                         text,
                         generated_at: Utc::now(),
                     }),
-                )
+                }
             }
             TurnStatus::BlockedApproval => {
-                let Some(gate_ref) = actionable_state.gate_ref.as_ref() else {
+                let Some(gate_ref) = state.gate_ref.as_ref() else {
                     tracing::warn!(
                         %run_id,
                         "Slack run is blocked on approval without a gate ref; skipping approval prompt delivery"
                     );
-                    return Ok(());
+                    return Ok(None);
                 };
-                (
-                    RunNotificationEventKind::ApprovalNeeded,
-                    ProductOutboundPayload::GatePrompt(GatePromptView {
+                SlackActionableNotification {
+                    event_kind: RunNotificationEventKind::ApprovalNeeded,
+                    payload: ProductOutboundPayload::GatePrompt(GatePromptView {
                         turn_run_id: run_id,
                         gate_ref: gate_ref.as_str().to_string(),
                         headline: "Approval needed".to_string(),
-                        body: "A step in the workflow requires your approval to proceed."
+                        body: "A step in the workflow requires your approval to resume."
                             .to_string(),
                     }),
-                )
+                }
             }
             TurnStatus::BlockedAuth => {
-                let Some(gate_ref) = actionable_state.gate_ref.as_ref() else {
+                let Some(gate_ref) = state.gate_ref.as_ref() else {
                     tracing::warn!(
                         %run_id,
                         "Slack run is blocked on auth without a gate ref; skipping auth prompt delivery"
                     );
-                    return Ok(());
+                    return Ok(None);
                 };
-                (
-                    RunNotificationEventKind::AuthRequired,
-                    ProductOutboundPayload::AuthPrompt(AuthPromptView {
-                        turn_run_id: run_id,
-                        auth_request_ref: gate_ref.as_str().to_string(),
-                        headline: "Authentication required".to_string(),
-                        body: "Use WebUI setup to connect the missing account.".to_string(),
-                        challenge_kind: None,
-                        provider: None,
-                        account_label: None,
-                        authorization_url: None,
-                        expires_at: None,
-                    }),
-                )
+                let view = slack_auth_prompt_view(
+                    envelope,
+                    auth_prompt_view_for_blocked_auth(
+                        &binding.actor_user_id,
+                        scope,
+                        run_id,
+                        gate_ref.as_str(),
+                        "Authenticate to continue this run.".to_string(),
+                        &state.credential_requirements,
+                        self.services.auth_challenges.as_deref(),
+                    )
+                    .await?,
+                );
+                SlackActionableNotification {
+                    event_kind: RunNotificationEventKind::AuthRequired,
+                    payload: ProductOutboundPayload::AuthPrompt(view),
+                }
             }
-            _ => return Ok(()),
+            _ => return Ok(None),
         };
-        let reply_target = actionable_state.reply_target_binding_ref.clone();
+        Ok(Some(notification))
+    }
+
+    async fn deliver_run_notification(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        scope: &TurnScope,
+        actor: &TurnActor,
+        run_id: TurnRunId,
+        state: &TurnRunState,
+        notification: SlackActionableNotification,
+    ) -> Result<Vec<PostedSlackMessage>, SlackFinalReplyDeliveryError> {
+        let SlackActionableNotification {
+            event_kind,
+            payload,
+        } = notification;
+        let reply_target = state.reply_target_binding_ref.clone();
         let target_authority = ObservedSlackReplyTargetAuthority {
             scope: scope.clone(),
             actor: actor.clone(),
@@ -190,7 +309,7 @@ impl SlackFinalReplyDeliveryObserver {
             &projection_access_policy,
             &target_authority,
         );
-        let projection_id = format!("slack-final-reply:{run_id}");
+        let projection_id = slack_run_notification_projection_id(run_id, event_kind);
         let projection_ref = ProjectionUpdateRef::new(projection_id.clone())
             .map_err(|reason| SlackFinalReplyDeliveryError::InvalidProjectionRef { reason })?;
         let delivery = ironclaw_outbound::PrepareCommunicationDeliveryRequest {
@@ -211,6 +330,7 @@ impl SlackFinalReplyDeliveryObserver {
             projection_ref,
             attempted_at: Utc::now(),
         };
+        let tracked_egress = TrackingSlackPostEgress::new(self.services.egress.clone());
         let _outcome = prepare_and_render_product_outbound(
             &outbound_policy,
             self.services.communication_preferences.as_ref(),
@@ -223,19 +343,22 @@ impl SlackFinalReplyDeliveryObserver {
                         reason: error.to_string(),
                     })?,
                 adapter: self.services.adapter.as_ref(),
-                egress: self.services.egress.as_ref(),
+                egress: &tracked_egress,
                 delivery_sink: self.services.delivery_sink.as_ref(),
             },
         )
         .await?;
-        Ok(())
+        Ok(tracked_egress.take_posted_messages())
     }
 
     async fn wait_for_actionable(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-    ) -> Result<ironclaw_turns::TurnRunState, SlackFinalReplyDeliveryError> {
+        delivered_blocked_marker: Option<&BlockedActionableMarker>,
+        envelope: &ProductInboundEnvelope,
+        working_message: &mut Option<PostedSlackMessage>,
+    ) -> Result<TurnRunState, SlackFinalReplyDeliveryError> {
         let start = Instant::now();
         let mut poll_interval = self.settings.poll_interval;
         loop {
@@ -247,16 +370,19 @@ impl SlackFinalReplyDeliveryObserver {
                     run_id,
                 })
                 .await?;
-            if state.status.is_terminal()
-                || matches!(
-                    state.status,
-                    TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
-                )
+            if state.status.is_terminal() {
+                return Ok(state);
+            }
+            if let Some(marker) = blocked_actionable_marker(&state)
+                && Some(&marker) != delivered_blocked_marker
             {
                 return Ok(state);
             }
             if start.elapsed() >= self.settings.max_wait {
                 return Err(SlackFinalReplyDeliveryError::RunWaitTimedOut { run_id });
+            }
+            if working_message.is_none() && blocked_actionable_marker(&state).is_none() {
+                *working_message = self.post_slack_working_message(envelope).await;
             }
             tokio::time::sleep(jittered_poll_interval(poll_interval, &run_id)).await;
             poll_interval = poll_interval
@@ -282,6 +408,287 @@ impl SlackFinalReplyDeliveryObserver {
             .await?
             .and_then(|message| message.content))
     }
+
+    async fn post_slack_working_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+    ) -> Option<PostedSlackMessage> {
+        match post_slack_message(
+            self.services.egress.as_ref(),
+            envelope.external_conversation_ref(),
+            SLACK_WORKING_MESSAGE,
+        )
+        .await
+        {
+            Ok(message) => Some(message),
+            Err(error) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::slack_delivery",
+                    error = %error,
+                    "failed to post Slack working indicator"
+                );
+                None
+            }
+        }
+    }
+
+    async fn delete_slack_message_if_present(&self, message: Option<PostedSlackMessage>) {
+        if let Some(message) = message {
+            self.delete_slack_message(message).await;
+        }
+    }
+
+    async fn delete_slack_message(&self, message: PostedSlackMessage) {
+        if let Err(error) = delete_slack_message(self.services.egress.as_ref(), &message).await {
+            tracing::warn!(
+                target = "ironclaw::reborn::slack_delivery",
+                error = %error,
+                "failed to delete Slack prompt/status message"
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostedSlackMessage {
+    channel: String,
+    ts: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatPostMessageRequest<'a> {
+    channel: &'a str,
+    text: &'a str,
+    mrkdwn: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_ts: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatDeleteRequest<'a> {
+    channel: &'a str,
+    ts: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackMessageResponse {
+    ok: bool,
+    channel: Option<String>,
+    ts: Option<String>,
+    error: Option<String>,
+}
+
+struct TrackingSlackPostEgress {
+    inner: Arc<dyn ProtocolHttpEgress>,
+    posted_messages: Arc<Mutex<Vec<PostedSlackMessage>>>,
+}
+
+impl TrackingSlackPostEgress {
+    fn new(inner: Arc<dyn ProtocolHttpEgress>) -> Self {
+        Self {
+            inner,
+            posted_messages: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn take_posted_messages(&self) -> Vec<PostedSlackMessage> {
+        std::mem::take(
+            &mut *self
+                .posted_messages
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+}
+
+#[async_trait]
+impl ProtocolHttpEgress for TrackingSlackPostEgress {
+    async fn send(
+        &self,
+        request: EgressRequest,
+    ) -> Result<EgressResponse, ProtocolHttpEgressError> {
+        let captures_posted_message = request.path().as_str() == "/api/chat.postMessage";
+        let response = self.inner.send(request).await?;
+        if captures_posted_message
+            && let Some(message) = posted_slack_message_from_response(response.body())
+        {
+            self.posted_messages
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(message);
+        }
+        Ok(response)
+    }
+}
+
+async fn post_slack_message(
+    egress: &dyn ProtocolHttpEgress,
+    conversation: &ExternalConversationRef,
+    text: &str,
+) -> Result<PostedSlackMessage, SlackFinalReplyDeliveryError> {
+    let body = ChatPostMessageRequest {
+        channel: conversation.conversation_id(),
+        text,
+        mrkdwn: false,
+        thread_ts: conversation.topic_id(),
+    };
+    let response = egress
+        .send(slack_web_api_request(
+            "/api/chat.postMessage",
+            serde_json::to_vec(&body).map_err(|error| {
+                SlackFinalReplyDeliveryError::SlackWebApi {
+                    reason: error.to_string(),
+                }
+            })?,
+        )?)
+        .await
+        .map_err(|error| SlackFinalReplyDeliveryError::SlackWebApi {
+            reason: error.to_string(),
+        })?;
+    if !(200..300).contains(&response.status()) {
+        return Err(SlackFinalReplyDeliveryError::SlackWebApi {
+            reason: format!("Slack chat.postMessage returned HTTP {}", response.status()),
+        });
+    }
+    let parsed: SlackMessageResponse =
+        serde_json::from_slice(response.body()).map_err(|error| {
+            SlackFinalReplyDeliveryError::SlackWebApi {
+                reason: format!("Slack chat.postMessage response was not JSON: {error}"),
+            }
+        })?;
+    if !parsed.ok {
+        return Err(SlackFinalReplyDeliveryError::SlackWebApi {
+            reason: format!(
+                "Slack chat.postMessage failed: {}",
+                parsed.error.unwrap_or_else(|| "unknown_error".to_string())
+            ),
+        });
+    }
+    let Some(channel) = parsed.channel else {
+        return Err(SlackFinalReplyDeliveryError::SlackWebApi {
+            reason: "Slack chat.postMessage response missing channel".to_string(),
+        });
+    };
+    let Some(ts) = parsed.ts else {
+        return Err(SlackFinalReplyDeliveryError::SlackWebApi {
+            reason: "Slack chat.postMessage response missing ts".to_string(),
+        });
+    };
+    Ok(PostedSlackMessage { channel, ts })
+}
+
+async fn delete_slack_message(
+    egress: &dyn ProtocolHttpEgress,
+    message: &PostedSlackMessage,
+) -> Result<(), SlackFinalReplyDeliveryError> {
+    let body = ChatDeleteRequest {
+        channel: &message.channel,
+        ts: &message.ts,
+    };
+    let response = egress
+        .send(slack_web_api_request(
+            "/api/chat.delete",
+            serde_json::to_vec(&body).map_err(|error| {
+                SlackFinalReplyDeliveryError::SlackWebApi {
+                    reason: error.to_string(),
+                }
+            })?,
+        )?)
+        .await
+        .map_err(|error| SlackFinalReplyDeliveryError::SlackWebApi {
+            reason: error.to_string(),
+        })?;
+    if !(200..300).contains(&response.status()) {
+        return Err(SlackFinalReplyDeliveryError::SlackWebApi {
+            reason: format!("Slack chat.delete returned HTTP {}", response.status()),
+        });
+    }
+    let parsed: SlackMessageResponse =
+        serde_json::from_slice(response.body()).map_err(|error| {
+            SlackFinalReplyDeliveryError::SlackWebApi {
+                reason: format!("Slack chat.delete response was not JSON: {error}"),
+            }
+        })?;
+    if !parsed.ok {
+        return Err(SlackFinalReplyDeliveryError::SlackWebApi {
+            reason: format!(
+                "Slack chat.delete failed: {}",
+                parsed.error.unwrap_or_else(|| "unknown_error".to_string())
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn slack_web_api_request(
+    path: &'static str,
+    body: Vec<u8>,
+) -> Result<EgressRequest, ProductAdapterError> {
+    Ok(EgressRequest::new(
+        DeclaredEgressHost::new(SLACK_API_HOST)?,
+        EgressMethod::post(),
+        EgressPath::new(path)?,
+    )
+    .with_header(EgressHeader::new("content-type", "application/json")?)
+    .with_body(body)
+    .with_credential_handle(Some(EgressCredentialHandle::new(SLACK_BOT_TOKEN_HANDLE)?)))
+}
+
+fn posted_slack_message_from_response(body: &[u8]) -> Option<PostedSlackMessage> {
+    let parsed: SlackMessageResponse = serde_json::from_slice(body).ok()?;
+    if !parsed.ok {
+        return None;
+    }
+    Some(PostedSlackMessage {
+        channel: parsed.channel?,
+        ts: parsed.ts?,
+    })
+}
+
+fn blocked_actionable_marker(state: &TurnRunState) -> Option<BlockedActionableMarker> {
+    match state.status {
+        TurnStatus::BlockedApproval | TurnStatus::BlockedAuth => Some(BlockedActionableMarker {
+            status: state.status,
+            gate_ref: state
+                .gate_ref
+                .as_ref()
+                .map(|gate| gate.as_str().to_string()),
+        }),
+        _ => None,
+    }
+}
+
+fn slack_run_notification_projection_id(
+    run_id: TurnRunId,
+    event_kind: RunNotificationEventKind,
+) -> String {
+    let suffix = match event_kind {
+        RunNotificationEventKind::FinalReplyReady => "final",
+        RunNotificationEventKind::ProgressUpdate => "progress",
+        RunNotificationEventKind::ApprovalNeeded => "approval",
+        RunNotificationEventKind::AuthRequired => "auth",
+        RunNotificationEventKind::RunBlocked => "blocked",
+        RunNotificationEventKind::DeliveryStatus => "delivery-status",
+    };
+    format!("slack-run-notification:{suffix}:{run_id}")
+}
+
+fn slack_auth_prompt_view(
+    envelope: &ProductInboundEnvelope,
+    mut view: ironclaw_product_adapters::AuthPromptView,
+) -> ironclaw_product_adapters::AuthPromptView {
+    if !slack_auth_setup_link_is_private(envelope) {
+        view.authorization_url = None;
+    }
+    view
+}
+
+fn slack_auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
+    matches!(
+        envelope.payload(),
+        ProductInboundPayload::UserMessage(payload)
+            if payload.trigger == ProductTriggerReason::DirectChat
+    )
 }
 
 fn jittered_poll_interval(base: Duration, run_id: &TurnRunId) -> Duration {
@@ -324,6 +731,10 @@ enum SlackFinalReplyDeliveryError {
     Thread(#[from] ironclaw_threads::SessionThreadError),
     #[error("outbound delivery failed: {0}")]
     Outbound(#[from] ironclaw_product_workflow::ProductOutboundDeliveryError),
+    #[error("adapter failed: {0}")]
+    Adapter(#[from] ProductAdapterError),
+    #[error("Slack Web API helper failed: {reason}")]
+    SlackWebApi { reason: String },
     #[error("outbound policy failed: {0}")]
     OutboundPolicy(#[from] OutboundError),
     #[error("run {run_id} did not finish before Slack delivery timeout")]
@@ -397,38 +808,150 @@ fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
     }
 }
 
-fn turn_scope_from_binding(binding: &ResolvedBinding) -> Result<TurnScope, ProductWorkflowError> {
+fn should_deliver_after_ack(envelope: &ProductInboundEnvelope, ack: &ProductInboundAck) -> bool {
+    if submitted_run_id(ack).is_none() {
+        return false;
+    }
+    !matches!(
+        envelope.payload(),
+        ProductInboundPayload::AuthResolution(payload)
+            if matches!(
+                &payload.result,
+                ironclaw_product_adapters::AuthResolutionResult::Denied
+            )
+    ) && !matches!(
+        envelope.payload(),
+        ProductInboundPayload::ApprovalResolution(payload)
+            if payload.decision == ironclaw_product_adapters::ApprovalDecision::Deny
+    ) && !matches!(
+        envelope.payload(),
+        ProductInboundPayload::ScopedApprovalResolution(payload)
+            if payload.decision == ironclaw_product_adapters::ApprovalDecision::Deny
+    )
+}
+
+fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInboundAck) -> bool {
+    submitted_run_id(ack).is_some()
+        && matches!(
+            envelope.payload(),
+            ProductInboundPayload::AuthResolution(payload)
+                if matches!(
+                    &payload.result,
+                    ironclaw_product_adapters::AuthResolutionResult::Denied
+                )
+        )
+}
+
+fn turn_scope_from_thread_scope(
+    binding: &ResolvedBinding,
+    thread_scope: &ThreadScope,
+) -> Result<TurnScope, ProductWorkflowError> {
     let Some(agent_id) = binding.agent_id.clone() else {
         return Err(ProductWorkflowError::BindingResolutionFailed {
             reason: "resolved binding missing agent_id required for turn scope".to_string(),
         });
     };
-    Ok(TurnScope::new(
+    Ok(TurnScope::new_with_owner(
         binding.tenant_id.clone(),
         Some(agent_id),
         binding.project_id.clone(),
         binding.thread_id.clone(),
+        thread_scope.owner_user_id.clone(),
     ))
 }
 
 fn thread_scope_from_binding(
     binding: &ResolvedBinding,
-    route_kind: ProductConversationRouteKind,
 ) -> Result<ThreadScope, ProductWorkflowError> {
     let Some(agent_id) = binding.agent_id.clone() else {
         return Err(ProductWorkflowError::BindingResolutionFailed {
             reason: "resolved binding missing agent_id required for thread scope".to_string(),
         });
     };
-    let owner_user_id = match route_kind {
-        ProductConversationRouteKind::Direct => Some(binding.user_id.clone()),
-        ProductConversationRouteKind::Shared => None,
-    };
     Ok(ThreadScope {
         tenant_id: binding.tenant_id.clone(),
         agent_id,
         project_id: binding.project_id.clone(),
-        owner_user_id,
+        owner_user_id: binding.subject_user_id.clone(),
         mission_id: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_product_adapters::{
+        AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
+        ExternalEventId, ParsedProductInbound, ProtocolAuthEvidence, TrustedInboundContext,
+    };
+    use ironclaw_turns::AcceptedMessageRef;
+
+    fn accepted_ack() -> ProductInboundAck {
+        ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:test-message")
+                .expect("accepted message ref"),
+            submitted_run_id: TurnRunId::new(),
+        }
+    }
+
+    fn envelope(payload: ProductInboundPayload) -> ProductInboundEnvelope {
+        let adapter_id =
+            ironclaw_product_adapters::ProductAdapterId::new("slack_v2").expect("adapter");
+        let installation_id = AdapterInstallationId::new("install_alpha").expect("installation");
+        let evidence = ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Slack-Signature".to_string(),
+            },
+            installation_id.as_str(),
+        );
+        let context = TrustedInboundContext::from_verified_evidence(
+            adapter_id,
+            installation_id,
+            Utc::now(),
+            &evidence,
+        )
+        .expect("trusted context");
+        let parsed = ParsedProductInbound::new(
+            ExternalEventId::new("evt:test").expect("event"),
+            ExternalActorRef::new("slack_user", "U123", None::<String>).expect("actor"),
+            ExternalConversationRef::new(Some("T123"), "D123", None, None).expect("conversation"),
+            payload,
+        )
+        .expect("parsed inbound");
+        ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
+    }
+
+    #[test]
+    fn auth_denial_ack_does_not_enter_slack_delivery_loop() {
+        let payload = ProductInboundPayload::AuthResolution(
+            ironclaw_product_adapters::AuthResolutionPayload::new(
+                "gate:auth-test",
+                ironclaw_product_adapters::AuthResolutionResult::Denied,
+            )
+            .expect("auth resolution"),
+        );
+
+        assert!(!should_deliver_after_ack(
+            &envelope(payload),
+            &accepted_ack()
+        ));
+    }
+
+    #[test]
+    fn auth_completion_ack_still_enters_slack_delivery_loop() {
+        let payload = ProductInboundPayload::AuthResolution(
+            ironclaw_product_adapters::AuthResolutionPayload::new(
+                "gate:auth-test",
+                ironclaw_product_adapters::AuthResolutionResult::CallbackCompleted {
+                    callback_ref: ironclaw_auth::AuthFlowId::new().to_string(),
+                },
+            )
+            .expect("auth resolution"),
+        );
+
+        assert!(should_deliver_after_ack(
+            &envelope(payload),
+            &accepted_ack()
+        ));
+    }
 }

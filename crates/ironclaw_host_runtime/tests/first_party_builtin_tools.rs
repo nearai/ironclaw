@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     io::Write,
     net::{IpAddr, Ipv4Addr},
     path::Path,
@@ -29,13 +29,15 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
-    TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
+    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
+    TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook,
+    VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
+    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
+    builtin_first_party_package,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -48,7 +50,9 @@ use ironclaw_network::{
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
-    InMemoryTriggerRepository, MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerRepository,
+    ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
+    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -240,7 +244,7 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
         .get("properties")
         .and_then(Value::as_object)
         .expect("spawn_subagent schema properties");
-    assert!(properties.contains_key("flavor_id"));
+    assert!(properties.contains_key("subagent_type"));
     assert!(properties.contains_key("task"));
     assert!(properties.contains_key("handoff"));
     assert!(!properties.contains_key("mode"));
@@ -313,6 +317,117 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(records[0].creator_user_id, context.resource_scope.user_id);
     assert_eq!(records[0].agent_id, context.resource_scope.agent_id);
     assert_eq!(records[0].project_id, context.resource_scope.project_id);
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_runs_create_hook_after_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let hook = Arc::new(PersistedRecordTriggerCreateHook::new(repository.clone()));
+    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Hooked trigger",
+            "prompt": "Pair trigger creator",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let hooked_records = hook.records();
+    assert_eq!(hooked_records.len(), 1);
+    assert_eq!(hooked_records[0].name, "Hooked trigger");
+    assert_eq!(hooked_records[0].prompt, "Pair trigger creator");
+    assert_eq!(
+        hooked_records[0].creator_user_id,
+        context.resource_scope.user_id
+    );
+    assert_eq!(hooked_records[0].agent_id, context.resource_scope.agent_id);
+    assert_eq!(
+        hooked_records[0].project_id,
+        context.resource_scope.project_id
+    );
+
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].trigger_id, hooked_records[0].trigger_id);
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_maps_create_hook_error_to_backend_and_rolls_back_record() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository_and_create_hook(
+        repository.clone(),
+        Arc::new(FailingTriggerCreateHook),
+    );
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Hook failure",
+            "prompt": "Do not persist this trigger",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_surfaces_rollback_error_when_cleanup_fails() {
+    let repository = Arc::new(RemoveFailingTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository_and_create_hook(
+        repository.clone(),
+        Arc::new(FailingTriggerCreateHook),
+    );
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Rollback failure",
+            "prompt": "Surface the rollback failure as the user-visible cause",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+    assert_eq!(
+        failure.safe_summary().as_deref(),
+        Some("trigger create rollback failed after hook error")
+    );
+    assert_eq!(repository.remove_attempts(), 1);
+    assert_eq!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -838,6 +953,272 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
 }
 
 #[tokio::test]
+async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Historical trigger",
+            "prompt": "Create history rows",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let record = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap()
+        .pop()
+        .expect("persisted trigger");
+    let first_fire_slot = record.next_run_at;
+    let first_run_id = TurnRunId::new();
+    repository
+        .claim_due_fire(ClaimDueFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: first_fire_slot,
+            now: first_fire_slot,
+        })
+        .await
+        .unwrap();
+    repository
+        .mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: first_fire_slot,
+            run_id: first_run_id,
+            submitted_at: first_fire_slot + chrono::Duration::seconds(1),
+            next_run_at: first_fire_slot + chrono::Duration::minutes(1),
+        })
+        .await
+        .unwrap();
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: first_fire_slot,
+            run_id: first_run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .unwrap();
+
+    let second_fire_slot = first_fire_slot + chrono::Duration::minutes(1);
+    let second_run_id = TurnRunId::new();
+    repository
+        .claim_due_fire(ClaimDueFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: second_fire_slot,
+            now: second_fire_slot,
+        })
+        .await
+        .unwrap();
+    repository
+        .mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: second_fire_slot,
+            run_id: second_run_id,
+            submitted_at: second_fire_slot + chrono::Duration::seconds(1),
+            next_run_at: second_fire_slot + chrono::Duration::minutes(1),
+        })
+        .await
+        .unwrap();
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: second_fire_slot,
+            run_id: second_run_id,
+            status: TriggerRunHistoryStatus::Error,
+        })
+        .await
+        .unwrap();
+
+    let third_fire_slot = second_fire_slot + chrono::Duration::minutes(1);
+    let third_run_id = TurnRunId::new();
+    repository
+        .claim_due_fire(ClaimDueFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot: third_fire_slot,
+            now: third_fire_slot,
+        })
+        .await
+        .unwrap();
+    repository
+        .mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: record.tenant_id,
+            trigger_id: record.trigger_id,
+            fire_slot: third_fire_slot,
+            run_id: third_run_id,
+            submitted_at: third_fire_slot + chrono::Duration::seconds(1),
+            next_run_at: third_fire_slot + chrono::Duration::minutes(1),
+        })
+        .await
+        .unwrap();
+
+    let listed = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({ "run_limit": 3 }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    let runs = listed["triggers"][0]["recent_runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[0]["run_id"], json!(third_run_id.to_string()));
+    assert_eq!(runs[0]["status"], json!("running"));
+    assert_eq!(runs[0]["completed_at"], Value::Null);
+    assert_eq!(runs[1]["run_id"], json!(second_run_id.to_string()));
+    assert_eq!(runs[1]["status"], json!("error"));
+    assert_ne!(runs[1]["completed_at"], Value::Null);
+    assert_eq!(runs[2]["run_id"], json!(first_run_id.to_string()));
+    assert_eq!(runs[2]["status"], json!("ok"));
+    assert_ne!(runs[2]["completed_at"], Value::Null);
+    assert_eq!(
+        runs[0]["thread_id"].as_str().unwrap().len(),
+        64,
+        "trigger route thread ids are deterministic hex identifiers"
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_list_with_zero_run_limit_returns_empty_recent_runs() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Zero run limit trigger",
+            "prompt": "Create history rows",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let record = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap()
+        .pop()
+        .expect("persisted trigger");
+    seed_completed_trigger_runs(&repository, &record, 1).await;
+
+    let listed = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({ "run_limit": 0 }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(listed["triggers"][0]["recent_runs"], json!([]));
+}
+
+#[tokio::test]
+async fn builtin_trigger_list_clamps_oversized_run_limit_to_max() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Oversized run limit trigger",
+            "prompt": "Create many history rows",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let record = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap()
+        .pop()
+        .expect("persisted trigger");
+    seed_completed_trigger_runs(&repository, &record, 101).await;
+
+    let listed = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({ "run_limit": 200 }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        listed["triggers"][0]["recent_runs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        100
+    );
+}
+
+async fn seed_completed_trigger_runs(
+    repository: &InMemoryTriggerRepository,
+    record: &TriggerRecord,
+    count: usize,
+) {
+    for index in 0..count {
+        let fire_slot = record.next_run_at + chrono::Duration::minutes(index as i64);
+        let run_id = TurnRunId::new();
+        repository
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: record.tenant_id.clone(),
+                trigger_id: record.trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .unwrap();
+        repository
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: record.tenant_id.clone(),
+                trigger_id: record.trigger_id,
+                fire_slot,
+                run_id,
+                submitted_at: fire_slot + chrono::Duration::seconds(1),
+                next_run_at: fire_slot + chrono::Duration::minutes(1),
+            })
+            .await
+            .unwrap();
+        repository
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: record.tenant_id.clone(),
+                trigger_id: record.trigger_id,
+                fire_slot,
+                run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn builtin_trigger_remove_rejects_invalid_trigger_id() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository);
@@ -865,6 +1246,31 @@ async fn builtin_trigger_list_rejects_non_integer_limit() {
         &runtime,
         TRIGGER_LIST_CAPABILITY_ID,
         json!({ "limit": "many" }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_list_rejects_non_integer_run_limit() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_LIST_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({ "run_limit": "many" }),
         context.clone(),
     )
     .await
@@ -942,6 +1348,32 @@ async fn builtin_trigger_management_maps_repository_errors_to_backend() {
     .await
     .unwrap_err();
     assert_eq!(remove_error, RuntimeFailureKind::Backend);
+}
+
+#[tokio::test]
+async fn builtin_trigger_list_maps_batch_run_history_repository_error_to_backend() {
+    let repository = Arc::new(BatchRunHistoryFailingTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository);
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Batch history failure",
+            "prompt": "Create trigger before listing history",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let error = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Backend);
 }
 
 #[tokio::test]
@@ -1304,7 +1736,7 @@ async fn memory_write_rejects_traversal_paths() {
 #[tokio::test]
 async fn memory_write_rejects_non_string_target() {
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
-    for target in [json!(null), json!(42), json!(true)] {
+    for target in [json!(42), json!(true)] {
         let failure = invoke_with_context(
             &runtime,
             MEMORY_WRITE_CAPABILITY_ID,
@@ -1321,6 +1753,33 @@ async fn memory_write_rejects_non_string_target() {
         .unwrap_err();
         assert_eq!(failure, RuntimeFailureKind::InvalidInput);
     }
+}
+
+#[tokio::test]
+async fn memory_write_treats_null_target_as_omitted() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let output = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": null,
+            "content": "null target should use the default daily log"
+        }),
+        execution_context_with_mounts(
+            [MEMORY_WRITE_CAPABILITY_ID],
+            memory_mounts(MountPermissions::read_write_list_delete()),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(output["status"], json!("written"));
+    assert_eq!(output["append"], json!(true));
+    assert!(
+        output["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("daily/") && path.ends_with(".md")),
+        "null target should default to today's daily log, got {output:?}"
+    );
 }
 
 #[tokio::test]
@@ -1946,10 +2405,154 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
     assert_eq!(request.method, NetworkMethod::Post);
     assert_eq!(request.url, "https://api.example.test/v1/items");
     assert_eq!(request.body, br#"{"ok":true}"#);
-    assert_eq!(request.response_body_limit, Some(10 * 1024 * 1024));
+    assert_eq!(request.response_body_limit, Some(4096));
     assert_eq!(request.save_body_to, None);
     assert_eq!(request.timeout_ms, Some(2500));
     assert!(request.credential_injections.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_requires_tool_call_http_egress_for_inline_output() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(b"ok".to_vec()));
+    let runtime = runtime_with_strict_http_egress_only(Arc::clone(&egress));
+
+    let failure = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items"
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(failure, RuntimeFailureKind::Network);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_preserves_exact_body_cap_for_text_responses() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![b'a'; 4096]));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let body_text = output["body_text"].as_str().expect("text response");
+    assert_eq!(body_text.len(), 4096);
+    assert_eq!(output.get("body_truncated"), None);
+    assert!(output.get("body_base64").is_none());
+    assert!(serialized_json_len(&output) <= 6_000);
+}
+
+#[tokio::test]
+async fn builtin_http_truncates_one_byte_over_text_responses_with_a_hint() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![b'a'; 4097]));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let body_text = output["body_text"].as_str().expect("text response");
+    assert_eq!(body_text.len(), 4096);
+    assert_eq!(output["body_truncated"], json!(true));
+    assert_eq!(output["truncation"]["body"], json!(true));
+    assert_eq!(output["truncation"]["headers"], json!(false));
+    assert_eq!(output["truncation"]["bytes_returned"], json!(4096));
+    assert_eq!(
+        output["truncation"]["reason"],
+        json!("model_visible_budget")
+    );
+    assert!(
+        output["body_truncation_hint"]
+            .as_str()
+            .expect("hint")
+            .contains("builtin.http.save")
+    );
+    assert!(output.get("body_base64").is_none());
+    assert!(serialized_json_len(&output) <= 6_000);
+}
+
+#[tokio::test]
+async fn builtin_http_default_large_response_result_stays_under_documented_cap() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![
+        b'a';
+        1024 * 1024
+    ]));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/large-page"
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let body_text = output["body_text"].as_str().expect("text response");
+    assert_eq!(body_text.len(), 48 * 1024);
+    assert_eq!(output["body_truncated"], json!(true));
+    assert!(
+        output["body_truncation_hint"]
+            .as_str()
+            .expect("hint")
+            .contains("builtin.http.save")
+    );
+    assert!(serialized_json_len(&output) <= 50 * 1024);
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].response_body_limit, Some(48 * 1024));
+}
+
+#[tokio::test]
+async fn builtin_http_truncates_escaped_text_to_serialized_body_budget() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        "\n".repeat(4096).into_bytes(),
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/escaped",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let body_text = output["body_text"].as_str().expect("text response");
+    let serialized_body = serde_json::to_string(body_text).unwrap();
+    assert!(serialized_body.len().saturating_sub(2) <= 4096);
+    assert_eq!(body_text.len(), 2048);
+    assert_eq!(output["body_bytes_returned"], json!(2048));
+    assert_eq!(output["body_truncated"], json!(true));
+    assert_eq!(output["truncation"]["bytes_returned"], json!(2048));
 }
 
 #[tokio::test]
@@ -2000,6 +2603,7 @@ async fn builtin_http_save_passes_save_to_and_returns_saved_body_metadata() {
 
     let requests = egress.requests();
     assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].response_body_limit, Some(10 * 1024 * 1024));
     let save_target = requests[0]
         .save_body_to
         .as_ref()
@@ -2018,6 +2622,491 @@ async fn builtin_http_save_passes_save_to_and_returns_saved_body_metadata() {
         VirtualPath::new("/projects/workspace/response.json").unwrap()
     );
     assert!(grant.permissions.write);
+}
+
+#[tokio::test]
+async fn builtin_http_save_rejects_response_body_limit_above_save_ceiling_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/response.json",
+            "response_body_limit": 10 * 1024 * 1024 + 1
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_save_returns_saved_body_for_large_responses_without_inline_body() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(vec![b'a'; 12 * 1024])
+            .with_saved_body("/workspace/large-response.json", 12 * 1024),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/large-response.json",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        output["saved_body"],
+        json!({
+            "path": "/workspace/large-response.json",
+            "bytes_written": 12 * 1024
+        })
+    );
+    assert!(output.get("body_text").is_none());
+    assert!(output.get("body_base64").is_none());
+    assert!(serialized_json_len(&output) <= 2_000);
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].response_body_limit, Some(4096));
+}
+
+#[tokio::test]
+async fn builtin_http_save_succeeds_with_strict_host_egress_only() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(vec![b'a'; 12 * 1024])
+            .with_saved_body("/workspace/strict-only-save.json", 12 * 1024),
+    );
+    let runtime = runtime_with_strict_http_egress_only(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/strict-only-save.json",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        output["saved_body"],
+        json!({
+            "path": "/workspace/strict-only-save.json",
+            "bytes_written": 12 * 1024
+        })
+    );
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].response_body_limit, Some(4096));
+}
+
+#[tokio::test]
+async fn builtin_http_save_uses_strict_host_egress_when_tool_call_port_exists() {
+    let strict_egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(vec![b'a'; 12 * 1024])
+            .with_saved_body("/workspace/strict-save.json", 12 * 1024),
+    );
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
+    .with_runtime_http_egress(Arc::clone(&strict_egress))
+    .with_tool_call_http_egress(Arc::new(PanickingToolCallHttpEgress))
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing();
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/strict-save.json",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        output["saved_body"],
+        json!({
+            "path": "/workspace/strict-save.json",
+            "bytes_written": 12 * 1024
+        })
+    );
+    let requests = strict_egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].response_body_limit, Some(4096));
+}
+
+#[tokio::test]
+async fn builtin_http_does_not_inline_huge_binary_payloads() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 8 * 1024]));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let body_base64 = output["body_base64"].as_str().expect("binary response");
+    assert_eq!(output["body_truncated"], json!(true));
+    assert!(body_base64.len() <= 4096);
+    assert_eq!(output["body_bytes_returned"], json!(3072));
+    assert_eq!(output["truncation"]["body"], json!(true));
+    assert_eq!(output["truncation"]["bytes_returned"], json!(3072));
+    assert!(
+        output["body_truncation_hint"]
+            .as_str()
+            .expect("hint")
+            .contains("builtin.http.save")
+    );
+    assert!(output.get("body_text").is_none());
+    assert!(serialized_json_len(&output) <= 6_000);
+}
+
+#[tokio::test]
+async fn builtin_http_truncates_tiny_binary_responses_without_panicking() {
+    for response_body_limit in 1..=3 {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 8]));
+        let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+        let output = invoke_with_context(
+            &runtime,
+            HTTP_CAPABILITY_ID,
+            json!({
+                "url": "https://api.example.test/v1/items",
+                "response_body_limit": response_body_limit
+            }),
+            execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output["body_base64"], json!(""));
+        assert_eq!(output["body_truncated"], json!(true));
+        assert_eq!(output["body_bytes_returned"], json!(0));
+        assert_eq!(output["truncation"]["body"], json!(true));
+        assert_eq!(output["truncation"]["bytes_returned"], json!(0));
+        assert!(serialized_json_len(&output) <= 2 * 1024 + response_body_limit as usize);
+    }
+}
+
+#[tokio::test]
+async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
+    let headers = (0..4)
+        .map(|index| (format!("x-large-{index}"), "h".repeat(512)))
+        .collect::<Vec<_>>();
+    let egress =
+        Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 4 * 1024]).with_headers(headers));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let body_base64 = output["body_base64"].as_str().expect("binary response");
+    assert_eq!(output["body_truncated"], json!(true));
+    assert!(!body_base64.is_empty());
+    assert!(body_base64.len() < 4096);
+    assert_eq!(body_base64.len() % 4, 0);
+    assert_eq!(output["truncation"]["body"], json!(true));
+    assert!(serialized_json_len(&output) <= 6_000);
+}
+
+#[tokio::test]
+async fn builtin_http_final_budget_trims_headers_when_body_cannot_absorb_overage() {
+    let headers = (0..32)
+        .map(|index| (format!("x-large-{index}"), "h".repeat(1024)))
+        .collect::<Vec<_>>();
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(Vec::new()).with_headers(headers));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 1
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["headers_truncated"], json!(true));
+    assert_eq!(output["truncation"]["headers"], json!(true));
+    assert!(serialized_json_len(&output) <= 2 * 1024 + 1);
+}
+
+#[tokio::test]
+async fn builtin_http_save_final_budget_trims_headers_without_inlining_body() {
+    let headers = (0..32)
+        .map(|index| (format!("x-large-{index}"), "h".repeat(1024)))
+        .collect::<Vec<_>>();
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(vec![b'a'; 12 * 1024])
+            .with_saved_body("/workspace/header-heavy-save.json", 12 * 1024)
+            .with_headers(headers),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/header-heavy-save.json",
+            "response_body_limit": 1
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert!(output.get("body_text").is_none());
+    assert!(output.get("body_base64").is_none());
+    assert_eq!(output["headers_truncated"], json!(true));
+    assert_eq!(output["truncation"]["headers"], json!(true));
+    assert!(serialized_json_len(&output) <= 2 * 1024 + 1);
+}
+
+#[tokio::test]
+async fn builtin_http_truncates_overlong_response_headers_to_model_visible_budget() {
+    let mut headers = vec![(format!("x-{}", "n".repeat(200)), "\n".repeat(2 * 1024))];
+    for index in 0..40 {
+        headers.push((format!("x-extra-{index}"), "ok".to_string()));
+    }
+    let egress =
+        Arc::new(RecordingRuntimeHttpEgress::with_body(b"ok".to_vec()).with_headers(headers));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let headers = output["headers"].as_array().expect("headers array");
+    assert!(headers.len() <= 32);
+    assert_eq!(output["headers_truncated"], json!(true));
+    assert_eq!(output["truncation"]["headers"], json!(true));
+    assert_eq!(output["truncation"]["body"], json!(false));
+    assert_eq!(headers[0]["name"].as_str().unwrap().len(), 128);
+    let header_value = headers[0]["value"].as_str().unwrap();
+    assert_eq!(header_value.len(), 512);
+    assert!(
+        serde_json::to_string(header_value)
+            .unwrap()
+            .len()
+            .saturating_sub(2)
+            <= 1024
+    );
+    assert_eq!(headers[0]["truncated"], json!(true));
+    assert!(serialized_json_len(&output["headers"]) <= 8 * 1024);
+}
+
+#[tokio::test]
+async fn builtin_http_reports_body_and_header_truncation_together() {
+    let mut headers = vec![(format!("x-{}", "n".repeat(200)), "\n".repeat(2 * 1024))];
+    for index in 0..40 {
+        headers.push((format!("x-extra-{index}"), "ok".to_string()));
+    }
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(vec![b'a'; 1024 * 1024]).with_headers(headers),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/large-page"
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["headers_truncated"], json!(true));
+    assert_eq!(output["body_truncated"], json!(true));
+    assert_eq!(output["truncation"]["headers"], json!(true));
+    assert_eq!(output["truncation"]["body"], json!(true));
+    assert!(
+        output["truncation"]["bytes_returned"]
+            .as_u64()
+            .expect("bytes returned")
+            < 48 * 1024
+    );
+    assert!(output["headers"][0]["truncated"].as_bool().unwrap());
+    assert!(serialized_json_len(&output) <= 50 * 1024);
+}
+
+#[tokio::test]
+async fn builtin_http_keeps_sensitive_material_out_of_sanitized_output() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_status_and_body(200, b"sanitized response body".to_vec())
+            .with_headers(vec![
+                (
+                    "content-type".to_string(),
+                    "text/plain; charset=utf-8".to_string(),
+                ),
+                ("x-request-id".to_string(), "sanitized-request".to_string()),
+            ])
+            .with_redaction_applied(true),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "headers": {
+                "authorization": "Bearer sk-provider-secret",
+                "x-debug-token": "RAW_SECRET"
+            },
+            "body": {
+                "token": "RAW_SECRET"
+            },
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["redaction_applied"], json!(true));
+    assert_eq!(output["headers"][0]["name"], json!("content-type"));
+    assert_eq!(output["headers"][1]["value"], json!("sanitized-request"));
+
+    let serialized = serde_json::to_string(&output).unwrap();
+    assert!(!serialized.contains("sk-provider-secret"));
+    assert!(!serialized.contains("RAW_SECRET"));
+    assert!(serialized.contains("sanitized response body"));
+}
+
+#[tokio::test]
+async fn builtin_http_does_not_report_redaction_as_truncation() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(b"sanitized".to_vec())
+            .with_redaction_applied(true)
+            .with_response_bytes(1024),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["redaction_applied"], json!(true));
+    assert_eq!(output["body_text"], json!("sanitized"));
+    assert!(output.get("body_truncated").is_none());
+    assert!(output.get("body_bytes_returned").is_none());
+    assert!(output.get("truncation").is_none());
 }
 
 #[tokio::test]
@@ -3552,6 +4641,10 @@ async fn builtin_http_rejects_ambiguous_body_zero_timeout_and_zero_response_limi
             "url": "https://api.example.test/v1/items",
             "response_body_limit": 0
         }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 256 * 1024 + 1
+        }),
     ] {
         let error = invoke_with_context(&runtime, HTTP_CAPABILITY_ID, input, context.clone())
             .await
@@ -3587,7 +4680,7 @@ async fn builtin_http_rejects_request_bodies_over_network_egress_cap() {
 }
 
 #[tokio::test]
-async fn builtin_http_accounts_request_bytes_when_output_is_too_large() {
+async fn builtin_http_accounts_request_bytes_when_large_output_is_truncated() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![
         b'\\';
         8 * 1024 * 1024
@@ -3595,21 +4688,24 @@ async fn builtin_http_accounts_request_bytes_when_output_is_too_large() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = runtime_with_http_egress_and_governor(Arc::clone(&egress), Arc::clone(&governor));
 
-    let error = invoke_with_context(
+    let output = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
         json!({
             "method": "post",
             "url": "https://api.example.test/v1/items",
             "body": "paid",
-            "response_body_limit": 10 * 1024 * 1024
+            "response_body_limit": 256 * 1024
         }),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error, RuntimeFailureKind::OutputTooLarge);
+    let body_text = output["body_text"].as_str().expect("text response");
+    assert_eq!(body_text.len(), 128 * 1024);
+    assert_eq!(output["body_bytes_returned"], json!(128 * 1024));
+    assert_eq!(output["body_truncated"], json!(true));
     let tenant_account = ResourceAccount::tenant(TenantId::new(LOCAL_DEFAULT_TENANT_ID).unwrap());
     assert_eq!(governor.usage_for(&tenant_account).network_egress_bytes, 4);
 }
@@ -3839,6 +4935,50 @@ async fn builtin_http_exercises_real_policy_private_ip_rejection() {
 
     assert_eq!(error, RuntimeFailureKind::PolicyDenied);
     assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_uses_tool_call_port_for_model_visible_partial_response() {
+    let transport = RecordingTransport::err(NetworkHttpError::ResponseBodyLimit {
+        limit: 4,
+        request_bytes: 0,
+        response_bytes: 5,
+        partial_response: Some(NetworkHttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            body: b"abcd".to_vec(),
+            usage: NetworkUsage {
+                request_bytes: 0,
+                response_bytes: 5,
+                resolved_ip: None,
+            },
+        }),
+    });
+    let requests = transport.requests.clone();
+    let network = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+    );
+    let runtime = runtime_with_host_http_egress(network);
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["status"], json!(200));
+    assert_eq!(output["body_text"], json!("abcd"));
+    assert_eq!(output["body_truncated"], json!(true));
+    assert_eq!(output["truncation"]["body"], json!(true));
+    assert_eq!(output["response_bytes"], json!(5));
+    assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -5131,6 +6271,28 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
     }
 }
 
+async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
+    runtime: &R,
+    capability: &str,
+    input: Value,
+    context: ExecutionContext,
+) -> RuntimeCapabilityFailure {
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            capability_id(capability),
+            ResourceEstimate::default(),
+            input,
+            trust_decision(),
+        ))
+        .await
+        .unwrap();
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => failure,
+        other => panic!("unexpected capability outcome: {other:?}"),
+    }
+}
+
 fn runtime() -> impl HostRuntime {
     runtime_with_filesystem(LocalFilesystem::new())
 }
@@ -5162,6 +6324,32 @@ fn runtime_with_trigger_repository(repository: Arc<dyn TriggerRepository>) -> im
         local_dev_policy(),
         repository,
     )
+}
+
+fn runtime_with_trigger_repository_and_create_hook(
+    trigger_repository: Arc<dyn TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+) -> impl HostRuntime {
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers_with_trigger_create_hook(
+            trigger_repository,
+            trigger_create_hook,
+        )
+        .unwrap(),
+    ))
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
+    .with_runtime_policy(local_dev_policy())
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
 }
 
 #[cfg(feature = "test-support")]
@@ -5213,6 +6401,53 @@ where
     .host_runtime_for_local_testing()
 }
 
+struct PersistedRecordTriggerCreateHook {
+    repository: Arc<InMemoryTriggerRepository>,
+    records: std::sync::Mutex<Vec<TriggerRecord>>,
+}
+
+impl PersistedRecordTriggerCreateHook {
+    fn new(repository: Arc<InMemoryTriggerRepository>) -> Self {
+        Self {
+            repository,
+            records: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn records(&self) -> Vec<TriggerRecord> {
+        self.records.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TriggerCreateHook for PersistedRecordTriggerCreateHook {
+    async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+        let persisted = self
+            .repository
+            .get_trigger(record.tenant_id.clone(), record.trigger_id)
+            .await
+            .expect("trigger lookup succeeds");
+        assert_eq!(
+            persisted.as_ref().map(|record| record.trigger_id),
+            Some(record.trigger_id)
+        );
+        self.records.lock().unwrap().push(record.clone());
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct FailingTriggerCreateHook;
+
+#[async_trait]
+impl TriggerCreateHook for FailingTriggerCreateHook {
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "hook unavailable".to_string(),
+        })
+    }
+}
+
 #[derive(Debug)]
 #[cfg(feature = "test-support")]
 struct FixedTriggerClock(DateTime<Utc>);
@@ -5226,9 +6461,298 @@ impl TriggerManagementClock for FixedTriggerClock {
 
 struct FailingTriggerRepository;
 
+#[derive(Default)]
+struct RemoveFailingTriggerRepository {
+    inner: InMemoryTriggerRepository,
+    remove_attempts: std::sync::Mutex<usize>,
+}
+
+#[derive(Default)]
+struct BatchRunHistoryFailingTriggerRepository {
+    inner: InMemoryTriggerRepository,
+}
+
+impl RemoveFailingTriggerRepository {
+    fn remove_attempts(&self) -> usize {
+        *self.remove_attempts.lock().unwrap()
+    }
+}
+
 fn trigger_backend_error() -> ironclaw_triggers::TriggerError {
     ironclaw_triggers::TriggerError::Backend {
         reason: "test backend failure".to_string(),
+    }
+}
+
+#[async_trait]
+impl TriggerRepository for RemoveFailingTriggerRepository {
+    async fn upsert_trigger(
+        &self,
+        record: ironclaw_triggers::TriggerRecord,
+    ) -> Result<(), ironclaw_triggers::TriggerError> {
+        self.inner.upsert_trigger(record).await
+    }
+
+    async fn get_trigger(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.get_trigger(tenant_id, trigger_id).await
+    }
+
+    async fn list_triggers(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_triggers(tenant_id).await
+    }
+
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner
+            .list_scoped_triggers(tenant_id, creator_user_id, agent_id, project_id, limit)
+            .await
+    }
+
+    async fn remove_trigger(
+        &self,
+        _tenant_id: TenantId,
+        _trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        *self.remove_attempts.lock().unwrap() += 1;
+        Err(trigger_backend_error())
+    }
+
+    async fn remove_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner
+            .remove_scoped_trigger(tenant_id, creator_user_id, agent_id, project_id, trigger_id)
+            .await
+    }
+
+    async fn list_due_triggers(
+        &self,
+        now: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_due_triggers(now, limit).await
+    }
+
+    async fn list_active_triggers(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_active_triggers(limit).await
+    }
+
+    async fn list_active_triggers_after(
+        &self,
+        after: Option<ironclaw_triggers::ActiveTriggerScanCursor>,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_active_triggers_after(after, limit).await
+    }
+
+    async fn claim_due_fire(
+        &self,
+        request: ironclaw_triggers::ClaimDueFireRequest,
+    ) -> Result<ironclaw_triggers::ClaimDueFireOutcome, ironclaw_triggers::TriggerError> {
+        self.inner.claim_due_fire(request).await
+    }
+
+    async fn mark_fire_accepted(
+        &self,
+        request: ironclaw_triggers::FireAcceptedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_accepted(request).await
+    }
+
+    async fn mark_fire_replayed(
+        &self,
+        request: ironclaw_triggers::FireReplayedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_replayed(request).await
+    }
+
+    async fn mark_fire_retryable_failed(
+        &self,
+        request: ironclaw_triggers::FireRetryableFailedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_retryable_failed(request).await
+    }
+
+    async fn mark_fire_permanently_failed(
+        &self,
+        request: ironclaw_triggers::FirePermanentFailedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_permanently_failed(request).await
+    }
+
+    async fn mark_fire_terminally_failed(
+        &self,
+        request: ironclaw_triggers::FireTerminalFailedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_terminally_failed(request).await
+    }
+
+    async fn clear_active_fire(
+        &self,
+        request: ironclaw_triggers::ClearActiveFireRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.clear_active_fire(request).await
+    }
+}
+
+#[async_trait]
+impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
+    async fn upsert_trigger(
+        &self,
+        record: ironclaw_triggers::TriggerRecord,
+    ) -> Result<(), ironclaw_triggers::TriggerError> {
+        self.inner.upsert_trigger(record).await
+    }
+
+    async fn get_trigger(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.get_trigger(tenant_id, trigger_id).await
+    }
+
+    async fn list_triggers(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_triggers(tenant_id).await
+    }
+
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner
+            .list_scoped_triggers(tenant_id, creator_user_id, agent_id, project_id, limit)
+            .await
+    }
+
+    async fn remove_trigger(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.remove_trigger(tenant_id, trigger_id).await
+    }
+
+    async fn remove_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner
+            .remove_scoped_trigger(tenant_id, creator_user_id, agent_id, project_id, trigger_id)
+            .await
+    }
+
+    async fn list_due_triggers(
+        &self,
+        now: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_due_triggers(now, limit).await
+    }
+
+    async fn list_active_triggers(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_active_triggers(limit).await
+    }
+
+    async fn list_active_triggers_after(
+        &self,
+        after: Option<ironclaw_triggers::ActiveTriggerScanCursor>,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_active_triggers_after(after, limit).await
+    }
+
+    async fn claim_due_fire(
+        &self,
+        request: ironclaw_triggers::ClaimDueFireRequest,
+    ) -> Result<ironclaw_triggers::ClaimDueFireOutcome, ironclaw_triggers::TriggerError> {
+        self.inner.claim_due_fire(request).await
+    }
+
+    async fn mark_fire_accepted(
+        &self,
+        request: ironclaw_triggers::FireAcceptedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_accepted(request).await
+    }
+
+    async fn mark_fire_replayed(
+        &self,
+        request: ironclaw_triggers::FireReplayedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_replayed(request).await
+    }
+
+    async fn mark_fire_retryable_failed(
+        &self,
+        request: ironclaw_triggers::FireRetryableFailedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_retryable_failed(request).await
+    }
+
+    async fn mark_fire_permanently_failed(
+        &self,
+        request: ironclaw_triggers::FirePermanentFailedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_permanently_failed(request).await
+    }
+
+    async fn mark_fire_terminally_failed(
+        &self,
+        request: ironclaw_triggers::FireTerminalFailedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_terminally_failed(request).await
+    }
+
+    async fn clear_active_fire(
+        &self,
+        request: ironclaw_triggers::ClearActiveFireRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.clear_active_fire(request).await
+    }
+
+    async fn list_trigger_run_history_batch(
+        &self,
+        _tenant_id: TenantId,
+        _trigger_ids: &[ironclaw_triggers::TriggerId],
+        _limit: usize,
+    ) -> Result<HashMap<ironclaw_triggers::TriggerId, Vec<TriggerRunRecord>>, TriggerError> {
+        Err(trigger_backend_error())
     }
 }
 
@@ -5514,7 +7038,7 @@ fn hosted_dev_policy() -> EffectiveRuntimePolicy {
 
 fn runtime_with_http_egress<T>(egress: Arc<T>) -> impl HostRuntime
 where
-    T: RuntimeHttpEgress + 'static,
+    T: RuntimeHttpEgress + ToolCallHttpEgress + 'static,
 {
     runtime_with_http_egress_and_governor(egress, Arc::new(InMemoryResourceGovernor::new()))
 }
@@ -5524,7 +7048,7 @@ fn runtime_with_http_egress_and_policy<T>(
     policy: EffectiveRuntimePolicy,
 ) -> impl HostRuntime
 where
-    T: RuntimeHttpEgress + 'static,
+    T: RuntimeHttpEgress + ToolCallHttpEgress + 'static,
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
@@ -5537,7 +7061,7 @@ where
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
-    .with_runtime_http_egress(egress)
+    .with_first_party_http_egress(egress)
     .with_trust_policy(Arc::new(trust_policy()))
     .with_runtime_policy(policy)
     .host_runtime_for_local_testing()
@@ -5548,12 +7072,32 @@ fn runtime_with_http_egress_and_governor<T>(
     governor: Arc<InMemoryResourceGovernor>,
 ) -> impl HostRuntime
 where
-    T: RuntimeHttpEgress + 'static,
+    T: RuntimeHttpEgress + ToolCallHttpEgress + 'static,
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
         Arc::new(LocalFilesystem::new()),
         governor,
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
+    .with_first_party_http_egress(egress)
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
+fn runtime_with_strict_http_egress_only<T>(egress: Arc<T>) -> impl HostRuntime
+where
+    T: RuntimeHttpEgress + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
@@ -5797,6 +7341,9 @@ struct RecordingRuntimeHttpEgress {
     saved_body: Option<RuntimeHttpSavedBody>,
     error: Option<RuntimeHttpEgressError>,
     responses: Option<BTreeMap<String, (u16, Vec<u8>)>>,
+    headers: Option<Vec<(String, String)>>,
+    redaction_applied: bool,
+    response_bytes_override: Option<u64>,
 }
 
 impl RecordingRuntimeHttpEgress {
@@ -5808,6 +7355,9 @@ impl RecordingRuntimeHttpEgress {
             saved_body: None,
             error: None,
             responses: None,
+            headers: None,
+            redaction_applied: false,
+            response_bytes_override: None,
         }
     }
 
@@ -5819,6 +7369,9 @@ impl RecordingRuntimeHttpEgress {
             saved_body: None,
             error: None,
             responses: None,
+            headers: None,
+            redaction_applied: false,
+            response_bytes_override: None,
         }
     }
 
@@ -5830,6 +7383,9 @@ impl RecordingRuntimeHttpEgress {
             saved_body: None,
             error: Some(error),
             responses: None,
+            headers: None,
+            redaction_applied: false,
+            response_bytes_override: None,
         }
     }
 
@@ -5841,6 +7397,21 @@ impl RecordingRuntimeHttpEgress {
         self
     }
 
+    fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.headers = Some(headers);
+        self
+    }
+
+    fn with_redaction_applied(mut self, redaction_applied: bool) -> Self {
+        self.redaction_applied = redaction_applied;
+        self
+    }
+
+    fn with_response_bytes(mut self, response_bytes: u64) -> Self {
+        self.response_bytes_override = Some(response_bytes);
+        self
+    }
+
     fn with_url_bodies(responses: BTreeMap<String, (u16, Vec<u8>)>) -> Self {
         Self {
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -5849,6 +7420,9 @@ impl RecordingRuntimeHttpEgress {
             saved_body: None,
             error: None,
             responses: Some(responses),
+            headers: None,
+            redaction_applied: false,
+            response_bytes_override: None,
         }
     }
 
@@ -5879,14 +7453,30 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             });
         Ok(RuntimeHttpEgressResponse {
             status,
-            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            headers: self.headers.clone().unwrap_or_else(|| {
+                vec![("content-type".to_string(), "application/json".to_string())]
+            }),
             body: body.clone(),
             saved_body: self.saved_body.clone(),
             request_bytes: request.body.len() as u64,
-            response_bytes: body.len() as u64,
-            redaction_applied: false,
+            response_bytes: self.response_bytes_override.unwrap_or(body.len() as u64),
+            redaction_applied: self.redaction_applied,
         })
     }
+}
+
+#[async_trait::async_trait]
+impl ToolCallHttpEgress for RecordingRuntimeHttpEgress {
+    async fn execute_for_model_visible_output(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.execute(request).await
+    }
+}
+
+fn serialized_json_len(value: &Value) -> usize {
+    serde_json::to_vec(value).unwrap().len()
 }
 
 #[derive(Debug, Clone)]
@@ -5919,6 +7509,16 @@ impl RuntimeHttpEgress for SleepingRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
+impl ToolCallHttpEgress for SleepingRuntimeHttpEgress {
+    async fn execute_for_model_visible_output(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.execute(request).await
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PanickingRuntimeHttpEgress;
 
@@ -5932,6 +7532,29 @@ impl RuntimeHttpEgress for PanickingRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
+impl ToolCallHttpEgress for PanickingRuntimeHttpEgress {
+    async fn execute_for_model_visible_output(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.execute(request).await
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PanickingToolCallHttpEgress;
+
+#[async_trait::async_trait]
+impl ToolCallHttpEgress for PanickingToolCallHttpEgress {
+    async fn execute_for_model_visible_output(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        panic!("tool-call HTTP egress must not be used")
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RecordingTransport {
     response: Result<NetworkHttpResponse, NetworkHttpError>,
@@ -5942,6 +7565,13 @@ impl RecordingTransport {
     fn ok(response: NetworkHttpResponse) -> Self {
         Self {
             response: Ok(response),
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn err(error: NetworkHttpError) -> Self {
+        Self {
+            response: Err(error),
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }

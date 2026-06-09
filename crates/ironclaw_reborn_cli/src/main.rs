@@ -3,6 +3,7 @@ mod commands;
 mod context;
 mod dto;
 mod render;
+mod file_write;
 mod runtime;
 
 fn main() -> anyhow::Result<()> {

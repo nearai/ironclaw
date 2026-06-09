@@ -452,6 +452,7 @@ mod tests {
         tool_exec_count: AtomicUsize,
         tool_exec_outcome: Mutex<Option<LoopOutcome>>,
         iterations_seen: Mutex<Vec<usize>>,
+        call_llm_iterations: Mutex<Vec<usize>>,
         early_exit: Mutex<Option<(usize, LoopOutcome)>>,
         nudge_count: AtomicUsize,
         /// When true, execute_tool_calls sets last_tool_batch_all_failed = true.
@@ -466,6 +467,7 @@ mod tests {
                 tool_exec_count: AtomicUsize::new(0),
                 tool_exec_outcome: Mutex::new(None),
                 iterations_seen: Mutex::new(Vec::new()),
+                call_llm_iterations: Mutex::new(Vec::new()),
                 early_exit: Mutex::new(None),
                 nudge_count: AtomicUsize::new(0),
                 simulate_all_failed: false,
@@ -510,8 +512,9 @@ mod tests {
             &self,
             _reasoning: &Reasoning,
             _reason_ctx: &mut ReasoningContext,
-            _iteration: usize,
+            iteration: usize,
         ) -> Result<ironclaw_llm::RespondOutput, crate::error::Error> {
+            self.call_llm_iterations.lock().await.push(iteration);
             let mut responses = self.llm_responses.lock().await;
             if responses.is_empty() {
                 panic!("MockDelegate: no more LLM responses queued");
@@ -556,6 +559,42 @@ mod tests {
     // --- Tests ---
 
     #[tokio::test]
+    async fn first_call_llm_iteration_is_one() {
+        // Regression: ChatDelegate::call_llm gates per-request overrides
+        // (Responses API `temperature`, settings `temperature`, `selected_model`
+        // from `/model`) on the first iteration. The gate's expected value must
+        // match what this loop produces on its first call_llm invocation. An
+        // off-by-one here silently disables every override and was shipped once
+        // already (gate was `iteration == 0` while the loop starts at 1).
+        let tool_call = ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        };
+        let delegate = MockDelegate::new(vec![
+            tool_calls_output(vec![tool_call]),
+            text_output("done"),
+        ]);
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let config = AgenticLoopConfig::default();
+
+        run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
+            .await
+            .unwrap();
+
+        let iterations = delegate.call_llm_iterations.lock().await;
+        assert_eq!(
+            iterations.first().copied(),
+            Some(1),
+            "first call_llm iteration must be 1 — see dispatcher.rs override gate"
+        );
+    }
+
+    #[tokio::test]
     async fn test_text_response_returns_immediately() {
         let delegate = MockDelegate::new(vec![text_output("Hello, world!")]);
         let reasoning = stub_reasoning();
@@ -583,6 +622,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let delegate = MockDelegate::new(vec![
             tool_calls_output(vec![tool_call]),
@@ -875,6 +915,7 @@ mod tests {
             arguments: serde_json::json!({}), // empty — truncated
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let truncated_output = RespondOutput {
             result: RespondResult::ToolCalls {
@@ -929,6 +970,7 @@ mod tests {
                     arguments: serde_json::json!({}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
                 content: None,
                 reasoning: None,
@@ -975,6 +1017,7 @@ mod tests {
             arguments: serde_json::json!({"msg": "hi"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let fp = DuplicateToolCallTracker::fingerprint(&calls);
         // Tool succeeded — count stays at 0
@@ -991,6 +1034,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let fp = DuplicateToolCallTracker::fingerprint(&calls);
         assert_eq!(tracker.record_with_fingerprint(fp, true), 1);
@@ -1007,6 +1051,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let fp = DuplicateToolCallTracker::fingerprint(&calls);
         assert_eq!(tracker.record_with_fingerprint(fp, true), 1);
@@ -1026,6 +1071,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://a.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let calls_b = vec![ToolCall {
             id: "c1".into(),
@@ -1033,6 +1079,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://b.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let fp_a = DuplicateToolCallTracker::fingerprint(&calls_a);
         let fp_b = DuplicateToolCallTracker::fingerprint(&calls_b);
@@ -1051,6 +1098,7 @@ mod tests {
             arguments: serde_json::json!({"a": 1, "b": 2}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let calls_b = vec![ToolCall {
             id: "c1".into(),
@@ -1058,6 +1106,7 @@ mod tests {
             arguments: serde_json::json!({"b": 2, "a": 1}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         assert_eq!(
             DuplicateToolCallTracker::fingerprint(&calls_a),
@@ -1075,6 +1124,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://broken.example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         // 3 identical failing tool calls, then text response
         let mut delegate = MockDelegate::new(vec![
@@ -1124,6 +1174,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://broken.example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         // 5 identical failing tool calls, then text response
         let mut delegate = MockDelegate::new(vec![
@@ -1162,6 +1213,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://broken.example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         // 2 failing calls, then a text continuation, then 2 more of the same failing calls
         // The text response in the middle should reset the streak, so we never hit 3.

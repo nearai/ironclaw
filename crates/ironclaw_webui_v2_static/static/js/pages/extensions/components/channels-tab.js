@@ -1,5 +1,7 @@
 import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
+import { SlackChannelPicker } from "../../../components/slack-channel-picker.js";
+import { SlackPairingSection } from "../../../components/slack-pairing-section.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 import { PairingSection } from "./pairing-section.js";
 
@@ -7,9 +9,73 @@ function packageId(item) {
   return item.package_ref?.id || "";
 }
 
+export function isSlackChannelEnabled(enabledChannels) {
+  return ["slack", "slack_v2", "slack-v2"].some((channel) =>
+    enabledChannels.includes(channel)
+  );
+}
+
+export function slackBuiltinStatus(slackEnabled, connectAction) {
+  if (slackEnabled) {
+    return { label: "on", tone: "success" };
+  }
+  if (connectAction?.strategy === "admin_managed_channels") {
+    return { label: "manage", tone: "info" };
+  }
+  return connectAction
+    ? { label: "connect", tone: "info" }
+    : { label: "off", tone: "muted" };
+}
+
+export function isSlackAdminManagedAction(connectAction) {
+  return connectAction?.channel === "slack" && connectAction.strategy === "admin_managed_channels";
+}
+
+export function isSlackInboundProofCodeAction(connectAction) {
+  return connectAction?.channel === "slack" && connectAction.strategy === "inbound_proof_code";
+}
+
+export function findSlackConnectAction(connectableChannels) {
+  return findSlackConnectActions(connectableChannels)[0] || null;
+}
+
+export function findSlackConnectActions(connectableChannels) {
+  const channels = connectableChannels || [];
+  const actions = [
+    channels.find(isSlackAdminManagedAction),
+    channels.find(isSlackInboundProofCodeAction),
+  ].filter(Boolean);
+  if (actions.length > 0) return actions;
+  const fallback = channels.find((channel) => channel.channel === "slack");
+  return fallback ? [fallback] : [];
+}
+
+export function SlackBuiltInConnectAction({
+  slackConnectAction,
+  slackConnectActions,
+}) {
+  const actions =
+    slackConnectActions || (slackConnectAction ? [slackConnectAction] : []);
+  const sections = actions
+    .map((action) => {
+      if (isSlackAdminManagedAction(action)) {
+        return html`<${SlackChannelPicker} action=${action.action} />`;
+      }
+      if (isSlackInboundProofCodeAction(action)) {
+        return html`<${SlackPairingSection} action=${action.action} />`;
+      }
+      return null;
+    })
+    .filter(Boolean);
+  return sections.length > 0
+    ? html`<div className="space-y-3">${sections}</div>`
+    : null;
+}
+
 export function ChannelsTab({
   status,
   channels,
+  connectableChannels,
   channelRegistry,
   onActivate,
   onConfigure,
@@ -18,6 +84,10 @@ export function ChannelsTab({
   isBusy,
 }) {
   const enabledChannels = status.enabled_channels || [];
+  const slackEnabled = isSlackChannelEnabled(enabledChannels);
+  const slackConnectActions = findSlackConnectActions(connectableChannels);
+  const slackConnectAction = slackConnectActions[0] || null;
+  const slackStatus = slackBuiltinStatus(slackEnabled, slackConnectAction);
 
   return html`
     <div className="space-y-5">
@@ -42,6 +112,16 @@ export function ChannelsTab({
           enabled=${enabledChannels.includes("http")}
           detail="ENABLE_HTTP=true"
         />
+        <${BuiltinRow}
+          name="Slack"
+          description="Tenant app channel for DMs and app mentions"
+          enabled=${slackEnabled}
+          statusLabel=${slackStatus.label}
+          statusTone=${slackStatus.tone}
+          detail="Tenant Slack app install"
+        >
+          <${SlackBuiltInConnectAction} slackConnectActions=${slackConnectActions} />
+        <//>
         <${BuiltinRow}
           name="CLI"
           description="Terminal interface with TUI or simple REPL"
@@ -110,25 +190,36 @@ export function ChannelsTab({
   `;
 }
 
-function BuiltinRow({ name, description, enabled, detail }) {
+function BuiltinRow({
+  name,
+  description,
+  enabled,
+  detail,
+  children,
+  statusLabel = enabled ? "on" : "off",
+  statusTone = enabled ? "success" : "muted",
+}) {
   return html`
     <div
-      className="flex items-start justify-between gap-4 border-t border-white/[0.06] py-4 first:border-0 first:pt-0"
+      className="border-t border-white/[0.06] py-4 first:border-0 first:pt-0"
     >
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-iron-200">${name}</span>
-          <${StatusPill}
-            tone=${enabled ? "success" : "muted"}
-            label=${enabled ? "on" : "off"}
-          />
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-iron-200">${name}</span>
+            <${StatusPill}
+              tone=${statusTone}
+              label=${statusLabel}
+            />
+          </div>
+          <div className="mt-1 text-xs text-iron-300">${description}</div>
+          ${detail &&
+          html`<div className="mt-1 font-mono text-[11px] text-iron-700">
+            ${detail}
+          </div>`}
         </div>
-        <div className="mt-1 text-xs text-iron-300">${description}</div>
-        ${detail &&
-        html`<div className="mt-1 font-mono text-[11px] text-iron-700">
-          ${detail}
-        </div>`}
       </div>
+      ${children}
     </div>
   `;
 }

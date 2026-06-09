@@ -11,7 +11,7 @@ pub struct TextOnlyLoopHostConfig {
 impl Default for TextOnlyLoopHostConfig {
     fn default() -> Self {
         Self {
-            max_messages: 16,
+            max_messages: 128,
             require_model_route_snapshot: false,
         }
     }

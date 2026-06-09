@@ -83,6 +83,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_reborn_config` | `ironclaw_reborn_config` | Reborn boot-config boundary: typed configuration, profiles, and validation consumed before services start. |
 | `ironclaw_reborn_cli` | `ironclaw_reborn_cli` | Reborn-first CLI surface (command modules, completion, shell entry points). Calls into composition; does not own host policy. |
 | `ironclaw_reborn_webui_ingress` | `ironclaw_reborn_webui_ingress` | Host-owned listener binding, authenticator implementations, and serve loop for the Reborn WebChat v2 HTTP gateway. |
+| `ironclaw_reborn_openai_compat_storage` | `ironclaw_reborn_openai_compat_storage` | Durable filesystem-backed storage adapters for Reborn OpenAI-compatible public refs and idempotency mappings. |
 | `ironclaw_llm` | `ironclaw_llm` | LLM provider routing and abstraction used by Reborn product surfaces and the agent loop. |
 | `ironclaw_agent_loop` | `ironclaw_agent_loop` | Agent-loop framework state, planner/executor, strategy/family contracts, and test support. |
 | `ironclaw_loop_support` | `ironclaw_loop_support` | Adapts durable Reborn support boundaries into the narrow agent-loop host port. It should not own provider clients or runtime dispatchers. |

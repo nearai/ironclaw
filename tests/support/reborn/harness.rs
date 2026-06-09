@@ -140,7 +140,6 @@ pub type HarnessWaitConfig = WaitConfig;
 
 const TEST_CAPABILITY_ID: &str = "test.echo";
 const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
-const SPAWN_SUBAGENT_TOOL_NAME: &str = "spawn_subagent";
 const SUBAGENT_ALLOWED_TEST_TOOL_NAME: &str = "test_read_file";
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -804,11 +803,12 @@ impl RebornBinaryE2EHarness {
             &binding,
             route_kind_for_trigger(initial_trigger),
         )?;
-        let turn_scope = TurnScope::new(
+        let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
+            binding.subject_user_id.clone(),
         );
         let thread_harness = if let Some(storage) = shared_storage.as_ref() {
             RebornThreadHarness::filesystem_shared_backend(
@@ -890,6 +890,8 @@ impl RebornBinaryE2EHarness {
             model_policy_guard: None,
             model_budget_accountant: None,
             safety_context: None,
+            hook_dispatcher_builder_factory: None,
+            hook_security_audit_sink: None,
             turn_event_sink: None,
         })?;
         let binding_service: Arc<dyn ConversationBindingService> =
@@ -1033,13 +1035,14 @@ impl RebornBinaryE2EHarness {
             .resolve_binding(binding_request)
             .await?;
         let thread_scope = thread_scope_from_binding_with_route_kind(&binding, route_kind)?;
-        let turn_scope = TurnScope::new(
+        let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
+            binding.subject_user_id.clone(),
         );
-        let actor = TurnActor::new(binding.user_id.clone());
+        let actor = TurnActor::new(binding.actor_user_id.clone());
         let ack = self.workflow.accept_inbound(envelope).await?;
         let run_id = match &ack {
             ProductInboundAck::Accepted {
@@ -1090,7 +1093,7 @@ impl RebornBinaryE2EHarness {
     ) -> HarnessResult<()> {
         self.resume_with_gate_as(
             self.turn_scope.clone(),
-            TurnActor::new(self.binding.user_id.clone()),
+            TurnActor::new(self.binding.actor_user_id.clone()),
             run_id,
             gate_ref,
             format!("resume-{run_id}"),
@@ -1128,7 +1131,7 @@ impl RebornBinaryE2EHarness {
     pub async fn cancel_blocked_turn(&self, run_id: TurnRunId) -> HarnessResult<()> {
         self.cancel_run_as(
             self.turn_scope.clone(),
-            TurnActor::new(self.binding.user_id.clone()),
+            TurnActor::new(self.binding.actor_user_id.clone()),
             run_id,
             format!("cancel-{run_id}"),
         )
@@ -1657,19 +1660,22 @@ impl HostRuntimeCapabilityHarness {
         network_policy: NetworkPolicy,
     ) -> HarnessResult<Self> {
         let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            br#"{"accepted":true}"#.to_vec(),
+        ));
         let runtime = local_dev_host_runtime_with_http_egress(
             storage_root.clone(),
-            Arc::new(RecordingRuntimeHttpEgress::with_body(
-                br#"{"accepted":true}"#.to_vec(),
-            )),
+            Arc::clone(&runtime_http_egress),
         )?;
-        Self::core_builtin_tools_from_runtime(
+        let mut harness = Self::core_builtin_tools_from_runtime(
             root,
             workspace_root,
             runtime,
             network_policy,
             UserId::new("reborn-e2e-core-builtins-user")?,
-        )
+        )?;
+        harness.http_egress = Some(runtime_http_egress);
+        Ok(harness)
     }
 
     async fn core_builtin_tools_with_live_http_egress(
@@ -1980,7 +1986,7 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
-    .with_runtime_http_egress(egress)
+    .with_first_party_http_egress(egress)
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
@@ -2410,6 +2416,16 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
     }
 }
 
+#[async_trait]
+impl ironclaw_host_runtime::ToolCallHttpEgress for RecordingRuntimeHttpEgress {
+    async fn execute_for_model_visible_output(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        RuntimeHttpEgress::execute(self, request).await
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RecordingNetworkHttpEgress {
     default_body: Vec<u8>,
@@ -2468,15 +2484,15 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError> {
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
         let capability_id = write.capability_id.clone();
         let output = write.output.clone();
-        let result_ref = self.inner.write_capability_result(write).await?;
+        let (result_ref, byte_len) = self.inner.write_capability_result(write).await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
             capability_id,
             output,
         });
-        Ok(result_ref)
+        Ok((result_ref, byte_len))
     }
 
     async fn update_capability_result(
@@ -2484,8 +2500,9 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
         output: serde_json::Value,
-    ) -> Result<(), AgentLoopHostError> {
-        self.inner
+    ) -> Result<u64, AgentLoopHostError> {
+        let byte_len = self
+            .inner
             .update_capability_result(run_context, result_ref, output.clone())
             .await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
@@ -2497,7 +2514,7 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
             })?,
             output,
         });
-        Ok(())
+        Ok(byte_len)
     }
 }
 
@@ -2608,6 +2625,10 @@ impl RecordingTestCapabilityPort {
         Self::new(CapabilityMode::ApprovalThenEcho, true, false)
     }
 
+    pub fn approval_then_allowed_tool_with_spawn_subagent() -> Self {
+        Self::new(CapabilityMode::ApprovalThenEcho, true, true)
+    }
+
     pub fn spawn_auth_then_approval_then_echo_with_spawn_subagent() -> Self {
         Self::new(CapabilityMode::SpawnAuthThenApprovalThenEcho, true, false)
     }
@@ -2673,7 +2694,9 @@ impl RecordingTestCapabilityPort {
             result_ref: ironclaw_turns::LoopResultRef::new(format!("result:test-echo-{ordinal}"))
                 .expect("valid result ref"),
             safe_summary: "echo: hi".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len: 0,
         })
     }
 }
@@ -2681,7 +2704,7 @@ impl RecordingTestCapabilityPort {
 #[async_trait]
 impl LoopCapabilityPort for RecordingTestCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-        let mut definitions = vec![ProviderToolDefinition {
+        let definitions = vec![ProviderToolDefinition {
             capability_id: self.primary_capability_id(),
             name: self.primary_tool_name().to_string(),
             description: "Echo a test payload".to_string(),
@@ -2692,23 +2715,6 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 }
             }),
         }];
-        if self.expose_spawn_subagent {
-            definitions.push(ProviderToolDefinition {
-                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-                    .expect("valid capability id"),
-                name: SPAWN_SUBAGENT_TOOL_NAME.to_string(),
-                description: "Spawn a subagent child run".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "flavor_id": {"type": "string"},
-                        "task": {"type": "string"},
-                        "handoff": {"type": "string"}
-                    },
-                    "required": ["flavor_id", "task"]
-                }),
-            });
-        }
         Ok(definitions)
     }
 
@@ -2716,11 +2722,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         &self,
         call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        let capability_id = if self.expose_spawn_subagent && call.name == SPAWN_SUBAGENT_TOOL_NAME {
-            CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id")
-        } else {
-            self.primary_capability_id()
-        };
+        let capability_id = self.primary_capability_id();
         Ok(CapabilityCallCandidate {
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
@@ -2746,7 +2748,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         &self,
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut descriptors = vec![CapabilityDescriptorView {
+        let descriptors = vec![CapabilityDescriptorView {
             capability_id: self.primary_capability_id(),
             provider: Some(ExtensionId::new("test").expect("valid provider")),
             runtime: RuntimeKind::FirstParty,
@@ -2755,18 +2757,6 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: json!({"type": "object"}),
         }];
-        if self.expose_spawn_subagent {
-            descriptors.push(CapabilityDescriptorView {
-                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-                    .expect("valid capability id"),
-                provider: Some(ExtensionId::new("test").expect("valid provider")),
-                runtime: RuntimeKind::FirstParty,
-                safe_name: SPAWN_SUBAGENT_TOOL_NAME.to_string(),
-                safe_description: "Spawn a subagent child run".to_string(),
-                concurrency_hint: ConcurrencyHint::Exclusive,
-                parameters_schema: json!({"type": "object"}),
-            });
-        }
         Ok(VisibleCapabilitySurface {
             version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
@@ -2933,7 +2923,7 @@ fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessResult<ThreadS
 
 fn thread_scope_from_binding_with_route_kind(
     binding: &ResolvedBinding,
-    route_kind: ProductConversationRouteKind,
+    _route_kind: ProductConversationRouteKind,
 ) -> HarnessResult<ThreadScope> {
     Ok(ThreadScope {
         tenant_id: binding.tenant_id.clone(),
@@ -2942,10 +2932,7 @@ fn thread_scope_from_binding_with_route_kind(
             .clone()
             .ok_or("resolved binding missing agent id")?,
         project_id: binding.project_id.clone(),
-        owner_user_id: match route_kind {
-            ProductConversationRouteKind::Direct => Some(binding.user_id.clone()),
-            ProductConversationRouteKind::Shared => None,
-        },
+        owner_user_id: binding.subject_user_id.clone(),
         mission_id: None,
     })
 }
@@ -2975,9 +2962,13 @@ fn scoped_turns_fs<F>(
 where
     F: RootFilesystem,
 {
+    let owner_user_id = binding
+        .subject_user_id
+        .as_ref()
+        .unwrap_or(&binding.actor_user_id);
     let target = format!(
         "/engine/tenants/{}/users/{}/turns",
-        binding.tenant_id, binding.user_id
+        binding.tenant_id, owner_user_id
     );
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("valid turns alias"),

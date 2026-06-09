@@ -18,10 +18,11 @@ use super::{
     RebornProfile, ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore,
     RunStateStore, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
     RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore,
-    SharedSecretStore, TenantSandboxProcessPort, TrustPolicy, TurnRunTransitionPort,
-    TurnRunWakeNotifier, TurnStateStore, WasmError, WasmRuntimeAdapter,
+    SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
+    TurnRunTransitionPort, TurnRunWakeNotifier, TurnStateStore, WasmError, WasmRuntimeAdapter,
     WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
     build_reborn_event_stores, production_wiring_report, set_runtime_http_egress,
+    set_tool_call_http_egress,
 };
 use crate::LocalHostProcessPort;
 use crate::RuntimeHttpBodyStore;
@@ -56,6 +57,7 @@ where
             capability_leases,
             event_sink,
             audit_sink,
+            security_audit_sink,
             secret_store,
             credential_account_store,
             credential_session_store,
@@ -64,6 +66,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress,
+            tool_call_http_egress,
             process_port,
             managed_process_port,
             tenant_sandbox_process_port,
@@ -97,6 +100,7 @@ where
             capability_leases,
             event_sink,
             audit_sink,
+            security_audit_sink,
             secret_store,
             credential_account_store,
             credential_session_store,
@@ -105,6 +109,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress,
+            tool_call_http_egress,
             process_port,
             managed_process_port,
             tenant_sandbox_process_port,
@@ -159,6 +164,7 @@ where
             capability_leases,
             event_sink,
             audit_sink,
+            security_audit_sink,
             secret_store,
             credential_account_store,
             credential_session_store,
@@ -167,6 +173,7 @@ where
             secret_injection_store,
             process_lifecycle_store: _,
             runtime_http_egress,
+            tool_call_http_egress,
             process_port,
             managed_process_port,
             tenant_sandbox_process_port,
@@ -210,6 +217,7 @@ where
             capability_leases,
             event_sink,
             audit_sink,
+            security_audit_sink,
             secret_store,
             credential_account_store,
             credential_session_store,
@@ -218,6 +226,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress,
+            tool_call_http_egress,
             process_port,
             managed_process_port,
             tenant_sandbox_process_port,
@@ -511,6 +520,16 @@ where
         self
     }
 
+    /// Wire in a [`SecurityAuditSink`] so security-boundary decisions inside
+    /// the built-in obligation handler are recorded instead of dropped.
+    pub fn with_security_audit_sink<T>(mut self, sink: Arc<T>) -> Self
+    where
+        T: SecurityAuditSink + 'static,
+    {
+        self.security_audit_sink = Some(sink);
+        self
+    }
+
     pub fn with_durable_audit_log<T>(mut self, audit_log: Arc<T>) -> Self
     where
         T: DurableAuditLog + 'static,
@@ -618,6 +637,13 @@ where
             .with_credential_session_store(broker)
     }
 
+    /// Attaches strict runtime HTTP egress only.
+    ///
+    /// This port keeps generic [`RuntimeHttpEgress`] response-limit semantics:
+    /// response body limit overruns remain errors. First-party `builtin.http`
+    /// inline output also needs [`crate::ToolCallHttpEgress`]; use
+    /// [`Self::with_first_party_http_egress`] when one service should satisfy
+    /// both ports.
     pub fn with_runtime_http_egress<T>(mut self, runtime_http_egress: Arc<T>) -> Self
     where
         T: RuntimeHttpEgress + 'static,
@@ -626,6 +652,35 @@ where
         self.component_types.runtime_http_egress_verified = false;
         let runtime_http_egress: Arc<dyn RuntimeHttpEgress> = runtime_http_egress;
         set_runtime_http_egress(&self.runtime_http_egress, runtime_http_egress);
+        self
+    }
+
+    /// Attaches one HTTP service to both the strict runtime and model-visible
+    /// first-party tool-call egress ports.
+    ///
+    /// This is the intended test/local composition helper for `builtin.http`:
+    /// strict callers still use [`RuntimeHttpEgress`], while inline tool output
+    /// goes through [`crate::ToolCallHttpEgress`] for sanitized partial response
+    /// handling.
+    pub fn with_first_party_http_egress<T>(self, http_egress: Arc<T>) -> Self
+    where
+        T: RuntimeHttpEgress + crate::ToolCallHttpEgress + 'static,
+    {
+        self.with_runtime_http_egress(Arc::clone(&http_egress))
+            .with_tool_call_http_egress(http_egress)
+    }
+
+    /// Attaches model-visible HTTP egress for first-party tool calls.
+    ///
+    /// Use this when the tool-call path intentionally differs from the strict
+    /// runtime HTTP path, such as tests that assert `builtin.http.save` does not
+    /// route through model-visible output handling.
+    pub fn with_tool_call_http_egress<T>(self, tool_call_http_egress: Arc<T>) -> Self
+    where
+        T: crate::ToolCallHttpEgress + 'static,
+    {
+        let tool_call_http_egress: Arc<dyn crate::ToolCallHttpEgress> = tool_call_http_egress;
+        set_tool_call_http_egress(&self.tool_call_http_egress, tool_call_http_egress);
         self
     }
 
@@ -692,8 +747,10 @@ where
         >());
         self.component_types.runtime_http_egress_verified = runtime_http_egress
             .is_production_wired_with(&self.network_policy_store, &self.secret_injection_store);
+        let tool_call_http_egress: Arc<dyn crate::ToolCallHttpEgress> = runtime_http_egress.clone();
         let runtime_http_egress: Arc<dyn RuntimeHttpEgress> = runtime_http_egress;
         set_runtime_http_egress(&self.runtime_http_egress, runtime_http_egress);
+        set_tool_call_http_egress(&self.tool_call_http_egress, tool_call_http_egress);
         self
     }
 
@@ -881,9 +938,18 @@ where
                 descriptor.runtime == RuntimeKind::Wasm
                     && !descriptor.runtime_credentials.is_empty()
             });
-            let provider = Arc::new(SharedHostWasmRuntimeCredentials::new(
-                (*self.registry).clone(),
-            ));
+            let mut provider = SharedHostWasmRuntimeCredentials::new((*self.registry).clone());
+            if let (Some(secret_store), Some(account_resolver)) = (
+                self.secret_store.clone(),
+                self.runtime_credential_account_resolver.clone(),
+            ) {
+                provider = provider.with_product_auth_restaging(
+                    secret_store,
+                    Arc::clone(&self.secret_injection_store),
+                    account_resolver,
+                );
+            }
+            let provider = Arc::new(provider);
             self = self
                 .with_manifest_wasm_runtime_credentials(provider, has_current_manifest_credentials);
         }

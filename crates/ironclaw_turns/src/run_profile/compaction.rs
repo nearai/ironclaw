@@ -9,6 +9,10 @@ use super::{host::LoopSafeSummary, system_inference::SystemInferenceTaskId};
 #[serde(rename_all = "snake_case")]
 pub enum CompactionInitiator {
     Auto,
+    /// Proactive compaction triggered when a single capability result exceeds
+    /// the byte-cap policy threshold. Fires from the PostCapabilityStage
+    /// before the oversized result is appended to the context window.
+    CapabilityResultOverflow,
     Overflow,
     SubagentScoped,
 }
@@ -102,6 +106,16 @@ pub struct LoopCompactionResponse {
     pub compression_ratio_ppm: u32,
 }
 
+/// Outcome returned by host-managed compaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopCompactionOutcome {
+    /// Compaction produced a durable summary artifact.
+    Compacted(LoopCompactionResponse),
+    /// Compaction deferred after producing a safe summary for the caller.
+    Deferred { safe_summary: LoopSafeSummary },
+}
+
 /// Failure classes returned by host-managed compaction.
 #[derive(Debug, Clone, Error, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -131,5 +145,5 @@ pub trait LoopCompactionPort: Send + Sync {
     async fn compact_loop_context(
         &self,
         request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError>;
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError>;
 }

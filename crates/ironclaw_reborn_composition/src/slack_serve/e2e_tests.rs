@@ -26,12 +26,14 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
-    ApprovalInteractionService, DefaultInboundTurnService, DefaultProductWorkflow,
-    InMemoryIdempotencyLedger, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    PendingApprovalInteractionView, ProductActorUserResolver, ProductConversationBindingService,
-    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    StaticProductActorUserResolver, StaticProductInstallationResolver,
+    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
+    DefaultInboundTurnService, DefaultProductWorkflow, InMemoryIdempotencyLedger,
+    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, PendingApprovalInteractionView, ProductActorUserResolver,
+    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
+    ProductWorkflowError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, StaticProductActorUserResolver,
+    StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
     SLACK_USER_ACTOR_KIND, SlackV2Adapter, SlackV2AdapterConfig,
@@ -58,8 +60,13 @@ use crate::slack_delivery::{
     SlackFinalReplyDeliverySettings,
 };
 use crate::{
-    RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
+    AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError,
+    SlackUserIdentityActorResolver,
 };
+
+#[path = "e2e_auth_challenge.rs"]
+mod e2e_auth_challenge;
+use e2e_auth_challenge::FakeAuthChallengeProvider;
 
 const TENANT: &str = "tenant:slack";
 const AGENT: &str = "agent:slack";
@@ -74,12 +81,15 @@ const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
 const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
 const SECRET: &str = "topsecret";
 const GATE: &str = "gate:approve-slack";
+const AUTH_GATE: &str = "gate:auth-slack";
 
 struct Harness {
     mount: PublicRouteMount,
     state: SlackEventsRouteState,
     egress: RecordingEgress,
+    coordinator: Arc<RecordingTurnCoordinator>,
     approvals: Arc<RecordingApprovalInteractionService>,
+    auths: Arc<RecordingAuthInteractionService>,
 }
 
 type HmacSha256 = Hmac<sha2::Sha256>;
@@ -159,6 +169,18 @@ impl Harness {
         self.egress
             .requests()
             .into_iter()
+            .filter(|request| request.path().as_str() == "/api/chat.postMessage")
+            .map(|request| {
+                serde_json::from_slice(request.body()).expect("Slack JSON body") // safety: Slack adapter emits JSON request bodies in this test.
+            })
+            .collect()
+    }
+
+    fn slack_deletes(&self) -> Vec<serde_json::Value> {
+        self.egress
+            .requests()
+            .into_iter()
+            .filter(|request| request.path().as_str() == "/api/chat.delete")
             .map(|request| {
                 serde_json::from_slice(request.body()).expect("Slack JSON body") // safety: Slack adapter emits JSON request bodies in this test.
             })
@@ -173,6 +195,15 @@ async fn build_harness(mode: TurnMode) -> Harness {
 async fn build_harness_with_actor_user_resolver(
     mode: TurnMode,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+) -> Harness {
+    build_harness_with_actor_user_resolver_and_auth_challenges(mode, actor_user_resolver, None)
+        .await
+}
+
+async fn build_harness_with_actor_user_resolver_and_auth_challenges(
+    mode: TurnMode,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
 ) -> Harness {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
@@ -196,6 +227,7 @@ async fn build_harness_with_actor_user_resolver(
             ProjectId::new(PROJECT).expect("project"), // safety: static test project id is valid.
         ),
     )
+    .with_default_subject_user_id(UserId::new(USER).expect("user")) // safety: static test user id is valid.
     .with_actor_user_resolver(actor_user_resolver, actor_pairings);
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(adapter_id, installation_id.clone()),
@@ -209,6 +241,7 @@ async fn build_harness_with_actor_user_resolver(
         coordinator.clone(),
         threads.clone(),
     ));
+    let auths = Arc::new(RecordingAuthInteractionService::new(coordinator.clone()));
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding.clone(),
@@ -221,7 +254,8 @@ async fn build_harness_with_actor_user_resolver(
             Arc::new(InMemoryIdempotencyLedger::new()),
             Arc::new(binding.clone()),
         )
-        .with_approval_interaction_service(approvals.clone()),
+        .with_approval_interaction_service(approvals.clone())
+        .with_auth_interaction_service(auths.clone()),
     );
 
     let runner = Arc::new(NativeProductAdapterRunner::with_config(
@@ -248,12 +282,13 @@ async fn build_harness_with_actor_user_resolver(
         SlackFinalReplyDeliveryServices {
             binding_service: Arc::new(binding),
             thread_service: Arc::new(threads),
-            turn_coordinator: Arc::new(coordinator),
+            turn_coordinator: Arc::new(coordinator.clone()),
             outbound_store,
             communication_preferences: preferences,
             adapter,
             egress: Arc::new(egress.clone()),
             delivery_sink: Arc::new(sink),
+            auth_challenges,
         },
         SlackFinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
@@ -278,7 +313,9 @@ async fn build_harness_with_actor_user_resolver(
         mount,
         state,
         egress,
+        coordinator: Arc::new(coordinator),
         approvals,
+        auths,
     }
 }
 
@@ -404,6 +441,163 @@ async fn slack_dm_delivers_approval_prompt_after_immediate_ack() {
             .as_str()
             .is_some_and(|text| text.contains("approve` or `deny"))
     );
+    assert!(harness.slack_deletes().is_empty());
+}
+
+#[tokio::test]
+async fn slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack() {
+    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
+    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
+    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
+        TurnMode::BlockAuth,
+        static_personal_actor_user_resolver(),
+        Some(auth_challenges),
+    )
+    .await;
+
+    let response = harness
+        .post_event(dm_message("Ev-auth", "needs auth"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], CHANNEL);
+    let text = messages[0]["text"].as_str().expect("Slack message text");
+    assert!(text.contains("Authentication required"));
+    assert!(text.contains("Setup link: https://provider.example/oauth"));
+    assert!(harness.slack_deletes().is_empty());
+    auth_provider.assert_single_call();
+}
+
+#[tokio::test]
+async fn slack_channel_auth_prompt_omits_setup_link_after_immediate_ack() {
+    let auth_challenges: Arc<dyn AuthChallengeProvider> =
+        Arc::new(FakeAuthChallengeProvider::default());
+    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
+        TurnMode::BlockAuth,
+        static_personal_actor_user_resolver(),
+        Some(auth_challenges),
+    )
+    .await;
+
+    let response = harness
+        .post_event(app_mention_message("Ev-auth-channel", "needs auth"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], "C123");
+    assert_eq!(messages[0]["thread_ts"], "1710000000.000008");
+    let text = messages[0]["text"].as_str().expect("Slack message text");
+    assert!(text.contains("Authentication required"));
+    assert!(!text.contains("Setup link:"));
+    assert!(!text.contains("https://provider.example/oauth"));
+    assert!(harness.slack_deletes().is_empty());
+}
+
+#[tokio::test]
+async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
+    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
+    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
+    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
+        TurnMode::BlockAuth,
+        static_personal_actor_user_resolver(),
+        Some(auth_challenges),
+    )
+    .await;
+
+    let response = harness
+        .post_event(dm_message("Ev-auth", "needs auth"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if harness.slack_messages().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], CHANNEL);
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Authentication required"))
+    );
+
+    harness
+        .coordinator
+        .resume_blocked_run_to_running()
+        .await
+        .expect("resume auth-blocked run");
+    for _ in 0..80 {
+        if harness.slack_messages().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["channel"], CHANNEL);
+    assert_eq!(messages[1]["text"], "Ironclaw is thinking...");
+
+    harness
+        .coordinator
+        .complete_active_run("authenticated and finished")
+        .await
+        .expect("complete resumed auth run");
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[2]["channel"], CHANNEL);
+    assert_eq!(messages[2]["text"], "authenticated and finished");
+    let deletes = harness.slack_deletes();
+    assert_eq!(deletes.len(), 2);
+    assert_eq!(deletes[0]["channel"], CHANNEL);
+    assert_eq!(deletes[1]["channel"], CHANNEL);
+    auth_provider.assert_single_call();
+}
+
+#[tokio::test]
+async fn slack_dm_posts_working_indicator_and_deletes_it_after_final_reply() {
+    let harness = build_harness(TurnMode::Running).await;
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if harness.slack_messages().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], CHANNEL);
+    assert_eq!(messages[0]["text"], "Ironclaw is thinking...");
+
+    harness
+        .coordinator
+        .complete_active_run("done thinking")
+        .await
+        .expect("complete running turn");
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["channel"], CHANNEL);
+    assert_eq!(messages[1]["text"], "done thinking");
+    let deletes = harness.slack_deletes();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(deletes[0]["channel"], CHANNEL);
 }
 
 #[tokio::test]
@@ -437,10 +631,82 @@ async fn slack_approval_reply_resumes_and_delivers_final_reply() {
     assert_eq!(approvals[0].gate_ref.as_str(), GATE);
 }
 
+#[tokio::test]
+async fn slack_thread_auth_deny_with_bot_mention_cancels_auth_gate_without_agent_turn() {
+    let harness = build_harness(TurnMode::BlockAuth).await;
+
+    let first = harness
+        .post_event(app_mention_message("Ev-auth-cancel-start", "needs auth"))
+        .await;
+    assert_eq!(first.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+    assert_eq!(harness.slack_messages().len(), 1); // safety: Slack E2E delivery assertion.
+
+    let second = harness
+        .post_event(thread_message_event(
+            "Ev-auth-cancel",
+            "<@UBOT> auth deny gate:auth-slack",
+            "1710000000.000009",
+        ))
+        .await;
+
+    assert_eq!(second.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+
+    let auths = harness.auths.requests();
+    assert_eq!(auths.len(), 1); // safety: Slack E2E auth routing assertion.
+    assert_eq!(auths[0].decision, AuthInteractionDecision::Deny); // safety: length asserted above.
+    assert_eq!(auths[0].gate_ref.as_str(), AUTH_GATE); // safety: length asserted above.
+    let submitted_turn_count = harness.coordinator.submitted_turn_count();
+    assert_eq!(submitted_turn_count, 1); // safety: Slack E2E turn routing assertion.
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2); // safety: Slack E2E delivery assertion.
+    assert_eq!(messages[1]["channel"], "C123");
+    assert_eq!(messages[1]["thread_ts"], "1710000000.000009");
+    assert_eq!(messages[1]["text"], "Authentication canceled.");
+}
+
+#[tokio::test]
+async fn slack_dm_thread_auth_deny_cancels_base_dm_auth_gate_without_agent_turn() {
+    let harness = build_harness(TurnMode::BlockAuth).await;
+
+    let first = harness
+        .post_event(dm_message("Ev-auth", "needs auth"))
+        .await;
+    assert_eq!(first.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+    assert_eq!(harness.slack_messages().len(), 1); // safety: Slack E2E delivery assertion.
+
+    let second = harness
+        .post_event(thread_message_event(
+            "Ev-dm-auth-cancel",
+            "`auth deny gate:auth-slack`",
+            "1710000001.123456",
+        ))
+        .await;
+
+    assert_eq!(second.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+
+    let auths = harness.auths.requests();
+    assert_eq!(auths.len(), 1); // safety: Slack E2E auth routing assertion.
+    assert_eq!(auths[0].decision, AuthInteractionDecision::Deny); // safety: length asserted above.
+    assert_eq!(auths[0].gate_ref.as_str(), AUTH_GATE); // safety: length asserted above.
+    let submitted_turn_count = harness.coordinator.submitted_turn_count();
+    assert_eq!(submitted_turn_count, 1); // safety: Slack E2E turn routing assertion.
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2); // safety: Slack E2E delivery assertion.
+    assert_eq!(messages[1]["channel"], CHANNEL);
+    assert_eq!(messages[1]["thread_ts"], "1710000001.123456");
+    assert_eq!(messages[1]["text"], "Authentication canceled.");
+}
+
 #[derive(Debug, Clone)]
 enum TurnMode {
     Complete { assistant_text: String },
+    Running,
     BlockApproval,
+    BlockAuth,
 }
 
 #[derive(Clone)]
@@ -452,7 +718,9 @@ struct RecordingTurnCoordinator {
 
 struct RecordingTurnState {
     runs: std::collections::HashMap<TurnRunId, TurnRunState>,
+    active_run_id: Option<TurnRunId>,
     blocked_run_id: Option<TurnRunId>,
+    submitted_turn_count: usize,
 }
 
 impl RecordingTurnCoordinator {
@@ -460,7 +728,9 @@ impl RecordingTurnCoordinator {
         Self {
             state: Arc::new(Mutex::new(RecordingTurnState {
                 runs: std::collections::HashMap::new(),
+                active_run_id: None,
                 blocked_run_id: None,
+                submitted_turn_count: 0,
             })),
             threads,
             mode,
@@ -472,6 +742,42 @@ impl RecordingTurnCoordinator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .blocked_run_id
+    }
+
+    fn active_run_id(&self) -> Option<TurnRunId> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_run_id
+    }
+
+    fn submitted_turn_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .submitted_turn_count
+    }
+
+    async fn cancel_blocked_run(&self) -> Result<TurnRunId, ProductWorkflowError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let run_id =
+            state
+                .blocked_run_id
+                .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                    reason: "missing blocked run".into(),
+                })?;
+        let run = state.runs.get_mut(&run_id).ok_or_else(|| {
+            ProductWorkflowError::TurnResumeRejected {
+                reason: "missing blocked run state".into(),
+            }
+        })?;
+        run.status = TurnStatus::Cancelled;
+        run.gate_ref = None;
+        state.blocked_run_id = None;
+        Ok(run_id)
     }
 
     async fn complete_run(
@@ -486,6 +792,21 @@ impl RecordingTurnCoordinator {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (reply_target_binding_ref, accepted_message_ref) = state
+            .runs
+            .get(&run_id)
+            .map(|run| {
+                (
+                    run.reply_target_binding_ref.clone(),
+                    run.accepted_message_ref.clone(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    ReplyTargetBindingRef::new("slack:reply-target").expect("reply target"), // safety: static test reply target is valid.
+                    AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref"), // safety: static test accepted ref is valid.
+                )
+            });
         state.runs.insert(
             run_id,
             turn_state(
@@ -494,11 +815,69 @@ impl RecordingTurnCoordinator {
                 run_id,
                 TurnStatus::Completed,
                 None,
-                ReplyTargetBindingRef::new("slack:reply-target").expect("reply target"), // safety: static test reply target is valid.
-                AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref"), // safety: static test accepted ref is valid.
+                reply_target_binding_ref,
+                accepted_message_ref,
             ),
         );
         Ok(())
+    }
+
+    async fn resume_blocked_run_to_running(&self) -> Result<(), ProductWorkflowError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let run_id =
+            state
+                .blocked_run_id
+                .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                    reason: "missing blocked run".into(),
+                })?;
+        let run = state.runs.get_mut(&run_id).ok_or_else(|| {
+            ProductWorkflowError::TurnResumeRejected {
+                reason: "missing blocked run state".into(),
+            }
+        })?;
+        run.status = TurnStatus::Running;
+        run.gate_ref = None;
+        state.active_run_id = Some(run_id);
+        state.blocked_run_id = None;
+        Ok(())
+    }
+
+    async fn complete_active_run(&self, text: &str) -> Result<(), ProductWorkflowError> {
+        let run_id =
+            self.active_run_id()
+                .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                    reason: "missing active run".into(),
+                })?;
+        self.complete_existing_run(run_id, text).await
+    }
+
+    async fn complete_existing_run(
+        &self,
+        run_id: TurnRunId,
+        text: &str,
+    ) -> Result<(), ProductWorkflowError> {
+        let (scope, actor) = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let run = state.runs.get(&run_id).ok_or_else(|| {
+                ProductWorkflowError::TurnResumeRejected {
+                    reason: "missing run state".into(),
+                }
+            })?;
+            let actor =
+                run.actor
+                    .clone()
+                    .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                        reason: "missing run actor".into(),
+                    })?;
+            (run.scope.clone(), actor)
+        };
+        self.complete_run(scope, actor, run_id, text).await
     }
 }
 
@@ -527,12 +906,18 @@ impl TurnCoordinator for RecordingTurnCoordinator {
                 })?;
                 TurnStatus::Completed
             }
+            TurnMode::Running => TurnStatus::Running,
             TurnMode::BlockApproval => TurnStatus::BlockedApproval,
+            TurnMode::BlockAuth => TurnStatus::BlockedAuth,
         };
-        let gate_ref = if status == TurnStatus::BlockedApproval {
-            Some(GateRef::new(GATE).expect("gate ref")) // safety: static test gate ref is valid
-        } else {
-            None
+        let gate_ref = match status {
+            TurnStatus::BlockedApproval => {
+                Some(GateRef::new(GATE).expect("gate ref")) // safety: static test gate ref is valid.
+            }
+            TurnStatus::BlockedAuth => {
+                Some(GateRef::new(AUTH_GATE).expect("auth gate ref")) // safety: static test gate ref is valid.
+            }
+            _ => None,
         };
         let response = SubmitTurnResponse::Accepted {
             turn_id: TurnId::new(),
@@ -557,7 +942,12 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if status == TurnStatus::BlockedApproval {
+        state.submitted_turn_count += 1;
+        state.active_run_id = Some(run_id);
+        if matches!(
+            status,
+            TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
+        ) {
             state.blocked_run_id = Some(run_id);
         }
         state.runs.insert(run_id, run_state);
@@ -744,6 +1134,69 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
     }
 }
 
+struct RecordingAuthInteractionService {
+    coordinator: RecordingTurnCoordinator,
+    requests: Mutex<Vec<ResolveAuthInteractionRequest>>,
+}
+
+impl RecordingAuthInteractionService {
+    fn new(coordinator: RecordingTurnCoordinator) -> Self {
+        Self {
+            coordinator,
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<ResolveAuthInteractionRequest> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait]
+impl AuthInteractionService for RecordingAuthInteractionService {
+    async fn list_pending(
+        &self,
+        _request: ListPendingAuthInteractionsRequest,
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+        Ok(ListPendingAuthInteractionsResponse {
+            auth_interactions: Vec::new(),
+        })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveAuthInteractionRequest,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request.clone());
+        let run_id = self.coordinator.cancel_blocked_run().await?;
+        Ok(match request.decision {
+            AuthInteractionDecision::Deny => {
+                ResolveAuthInteractionResponse::Canceled(CancelRunResponse {
+                    run_id,
+                    status: TurnStatus::Cancelled,
+                    event_cursor: EventCursor::default(),
+                    already_terminal: false,
+                    actor: None,
+                })
+            }
+            AuthInteractionDecision::CredentialProvided { .. }
+            | AuthInteractionDecision::CallbackCompleted { .. } => {
+                ResolveAuthInteractionResponse::Resumed(ResumeTurnResponse {
+                    run_id,
+                    status: TurnStatus::Queued,
+                    event_cursor: EventCursor::default(),
+                })
+            }
+        })
+    }
+}
+
 #[derive(Clone, Default)]
 struct RecordingEgress {
     requests: Arc<Mutex<Vec<EgressRequest>>>,
@@ -764,12 +1217,60 @@ impl ProtocolHttpEgress for RecordingEgress {
         &self,
         request: EgressRequest,
     ) -> Result<EgressResponse, ProtocolHttpEgressError> {
+        let response = slack_response_for_request(&request);
         self.requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request);
-        Ok(EgressResponse::new(200, br#"{"ok":true}"#.to_vec()))
+        Ok(response)
     }
+}
+
+fn slack_response_for_request(request: &EgressRequest) -> EgressResponse {
+    if request.path().as_str().starts_with("/api/chat.") {
+        let has_json_content_type = request
+            .headers()
+            .iter()
+            .any(|header| header.name() == "content-type" && header.value() == "application/json");
+        if !has_json_content_type {
+            return EgressResponse::new(
+                200,
+                br#"{"ok":false,"error":"missing_post_type"}"#.to_vec(),
+            );
+        }
+    }
+    if request.path().as_str() == "/api/chat.postMessage" {
+        let body: serde_json::Value = match serde_json::from_slice(request.body()) {
+            Ok(body) => body,
+            Err(_) => {
+                return EgressResponse::new(
+                    200,
+                    br#"{"ok":false,"error":"invalid_json"}"#.to_vec(),
+                );
+            }
+        };
+        let channel = body["channel"].as_str().unwrap_or("DTEST");
+        let ts_seed = stable_slack_test_ts(request.body());
+        return EgressResponse::new(
+            200,
+            serde_json::json!({
+                "ok": true,
+                "channel": channel,
+                "ts": ts_seed,
+            })
+            .to_string()
+            .into_bytes(),
+        );
+    }
+    EgressResponse::new(200, br#"{"ok":true}"#.to_vec())
+}
+
+fn stable_slack_test_ts(body: &[u8]) -> String {
+    let mut hash = 0_u64;
+    for byte in body {
+        hash = hash.wrapping_mul(31).wrapping_add(u64::from(*byte));
+    }
+    format!("1710000001.{:06}", hash % 1_000_000)
 }
 
 #[derive(Default)]
@@ -822,6 +1323,32 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         ("Ev-approve", "approve") => DM_APPROVE,
         ("Ev-forged", "hello") => DM_FORGED,
         ("Ev-identity", "hello") => DM_IDENTITY,
+        ("Ev-auth", "needs auth") => DM_AUTH,
+        ("Ev-working", "think") => DM_WORKING,
+        _ => panic!("unknown fixture"),
+    }
+}
+
+fn app_mention_message(event_id: &'static str, text: &'static str) -> &'static str {
+    match (event_id, text) {
+        ("Ev-auth-channel", "needs auth") => APP_MENTION_AUTH,
+        ("Ev-auth-cancel-start", "needs auth") => APP_MENTION_AUTH_CANCEL_START,
+        _ => panic!("unknown fixture"),
+    }
+}
+
+fn thread_message_event(
+    event_id: &'static str,
+    text: &'static str,
+    thread_ts: &'static str,
+) -> &'static str {
+    match (event_id, text, thread_ts) {
+        ("Ev-auth-cancel", "<@UBOT> auth deny gate:auth-slack", "1710000000.000009") => {
+            THREAD_AUTH_CANCEL_WITH_MENTION
+        }
+        ("Ev-dm-auth-cancel", "`auth deny gate:auth-slack`", "1710000001.123456") => {
+            DM_THREAD_AUTH_CANCEL
+        }
         _ => panic!("unknown fixture"),
     }
 }
@@ -883,3 +1410,51 @@ const DM_IDENTITY: &str = r#"{
 	  "event_id":"Ev-identity",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"hello","ts":"1710000000.000006"}
 	}"#;
+
+const DM_AUTH: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-auth",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs auth","ts":"1710000000.000007"}
+	}"#;
+
+const DM_WORKING: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-working",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"think","ts":"1710000000.000009"}
+	}"#;
+
+const APP_MENTION_AUTH: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-auth-channel",
+  "event":{"type":"app_mention","user":"U123","channel":"C123","text":"<@UBOT> needs auth","ts":"1710000000.000008"}
+}"#;
+
+const APP_MENTION_AUTH_CANCEL_START: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-auth-cancel-start",
+  "event":{"type":"app_mention","user":"U123","channel":"C123","text":"<@UBOT> needs auth","ts":"1710000000.000009"}
+}"#;
+
+const THREAD_AUTH_CANCEL_WITH_MENTION: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-auth-cancel",
+  "event":{"type":"message","user":"U123","channel":"C123","text":"<@UBOT> auth deny gate:auth-slack","ts":"1710000000.000010","thread_ts":"1710000000.000009"}
+}"#;
+
+const DM_THREAD_AUTH_CANCEL: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-dm-auth-cancel",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"`auth deny gate:auth-slack`","ts":"1710000001.123457","thread_ts":"1710000001.123456"}
+}"#;

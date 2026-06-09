@@ -22,12 +22,14 @@ mod capability_info;
 mod capability_port;
 mod capability_surface_filter;
 mod compaction_task;
+mod context_window_cache;
 mod filesystem_checkpoint_state;
 mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
 mod model_capability_view;
+mod prompt_context_budget;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
@@ -60,8 +62,11 @@ pub use capability_surface_filter::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
 };
 pub use compaction_task::{
-    HostManagedLoopCompactionPort, default_host_managed_loop_compaction_port,
+    ACTIVE_TASK_COMPACTION_PROMPT_ID, DEFAULT_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
+    active_task_compaction_prompt_id, default_compaction_prompt_id,
+    default_host_managed_loop_compaction_port, host_managed_loop_compaction_port_with_prompt_id,
 };
+pub use context_window_cache::ThreadContextWindowCache;
 pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
 pub use identity_context::{
@@ -73,14 +78,15 @@ pub use identity_context::{
 };
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
+pub use ironclaw_turns::run_profile::PromptContextTokenBudget;
 pub use skill_bundle_context_source::SkillBundleContextSource;
 pub use skill_bundle_source::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
     SkillBundleSourceError, SkillFilePath, SkillSourceKind, sort_skill_bundle_descriptors,
 };
 pub use skill_context::{
-    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    build_skill_run_snapshot,
+    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextCandidatePayload,
+    HostSkillContextSource, build_skill_run_snapshot,
 };
 pub use subagent_prompt_port::{
     DEFAULT_SUBAGENT_GOAL_MAX_BYTES, SubagentLoopPromptPort, SubagentPromptComposer,
@@ -92,12 +98,19 @@ pub use subagent_spawn_port::{
     AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, DEFAULT_SUBAGENT_MAX_DEPTH,
     DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN, DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS,
     InMemorySubagentGateResolutionStore, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
-    SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition, SubagentDefinitionResolver,
-    SubagentGateResolutionStore, SubagentGoalRecord, SubagentKindId, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
-    SubagentThreadMetadata,
+    SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition,
+    SubagentDefinitionResolver, SubagentGateResolutionStore, SubagentGoalRecord, SubagentKindId,
+    SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
+    SubagentThreadKind, SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub const COMPACTION_SYSTEM_PROMPT: &str =
+    include_str!("../prompts/compaction_summarizer_fresh.md");
+pub const ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT: &str = concat!(
+    include_str!("../prompts/compaction_summarizer_fresh.md"),
+    "\n\n",
+    include_str!("../prompts/active_task_compaction_append.md"),
+);
 pub const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/failure_explanation.md");
 pub use token_estimator::{
@@ -119,21 +132,22 @@ use ironclaw_turns::{
     LoopMessageRef, TurnId, TurnRunId,
     run_profile::ModelProfileId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
-        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-        LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor,
-        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
-        LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
-        LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
-        sort_instruction_snippets_for_prompt,
+        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
+        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
+        CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
+        InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
+        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage,
+        LoopContextPort, LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter,
+        LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
+        LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRunContext,
+        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
+        PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
+
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
 const LOOP_SYSTEM_ROLE: &str = "system";
 
@@ -188,6 +202,8 @@ where
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     identity_budget: IdentityBudget,
+    prompt_context_budget: PromptContextTokenBudget,
+    context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     identity_candidates: Arc<IdentityCandidateCache>,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
 }
@@ -253,6 +269,8 @@ where
             skill_context_source: None,
             identity_context_source: None,
             identity_budget: IdentityBudget::default(),
+            prompt_context_budget: PromptContextTokenBudget::default(),
+            context_window_cache: None,
             identity_candidates: Arc::new(IdentityCandidateCache::new()),
             milestone_sink: None,
         }
@@ -273,6 +291,16 @@ where
 
     pub fn with_identity_budget(mut self, budget: IdentityBudget) -> Self {
         self.identity_budget = budget;
+        self
+    }
+
+    pub fn with_prompt_context_token_budget(mut self, budget: PromptContextTokenBudget) -> Self {
+        self.prompt_context_budget = budget;
+        self
+    }
+
+    pub fn with_context_window_cache(mut self, cache: Arc<ThreadContextWindowCache>) -> Self {
+        self.context_window_cache = Some(cache);
         self
     }
 
@@ -312,6 +340,11 @@ where
             })
             .await
             .map_err(context_read_error)?;
+        if let Some(cache) = self.context_window_cache.as_ref() {
+            cache
+                .store(self.thread_scope.clone(), max_messages, context.clone())
+                .await;
+        }
 
         let instruction_snippets = match self.skill_context_source.as_deref() {
             Some(source) => {
@@ -347,13 +380,23 @@ where
             None => Vec::new(),
         };
 
+        let compaction_message_index = context
+            .messages
+            .iter()
+            .filter_map(context_message_to_compaction_metadata)
+            .collect();
+        let messages = prompt_context_budget::select_prompt_context_messages(
+            context.messages,
+            self.prompt_context_budget,
+        );
+
         Ok(LoopContextBundle {
             identity_messages,
-            messages: context
-                .messages
+            messages: messages
                 .into_iter()
                 .filter_map(context_message_to_loop_message)
                 .collect(),
+            compaction_message_index,
             instruction_snippets,
             memory_snippets: Vec::new(),
         })
@@ -633,6 +676,27 @@ where
                     "tool result reference summary is not safe",
                 )
             })?;
+        let model_observation = request
+            .model_observation
+            .and_then(|observation| match observation.validate() {
+                Ok(()) => match serde_json::to_value(observation) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        tracing::warn!(
+                            reason = %error,
+                            "dropping unserializable model-visible tool observation and preserving safe summary"
+                        );
+                        None
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        reason = %error,
+                        "dropping invalid model-visible tool observation and preserving safe summary"
+                    );
+                    None
+                }
+            });
         let record = self
             .thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
@@ -641,6 +705,7 @@ where
                 turn_run_id: self.run_context.run_id.to_string(),
                 result_ref: request.result_ref.as_str().to_string(),
                 safe_summary,
+                model_observation,
                 provider_call: request
                     .provider_call
                     .map(provider_call_reference_to_envelope),
@@ -815,6 +880,8 @@ where
     gateway: Arc<G>,
     capabilities: Option<Arc<dyn LoopCapabilityPort>>,
     max_messages: usize,
+    prompt_context_budget: PromptContextTokenBudget,
+    context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     prompt_authority: LoopPromptBundleAuthority,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
@@ -841,6 +908,8 @@ where
             gateway,
             capabilities: None,
             max_messages,
+            prompt_context_budget: PromptContextTokenBudget::default(),
+            context_window_cache: None,
             prompt_authority: LoopPromptBundleAuthority::shared(),
             milestone_sink: None,
             skill_context_source: None,
@@ -864,6 +933,8 @@ where
             gateway,
             capabilities: None,
             max_messages,
+            prompt_context_budget: PromptContextTokenBudget::default(),
+            context_window_cache: None,
             prompt_authority: LoopPromptBundleAuthority::shared(),
             milestone_sink: Some(milestone_sink),
             skill_context_source: None,
@@ -882,6 +953,16 @@ where
         prompt_authority: LoopPromptBundleAuthority,
     ) -> Self {
         self.prompt_authority = prompt_authority;
+        self
+    }
+
+    pub fn with_prompt_context_token_budget(mut self, budget: PromptContextTokenBudget) -> Self {
+        self.prompt_context_budget = budget;
+        self
+    }
+
+    pub fn with_context_window_cache(mut self, cache: Arc<ThreadContextWindowCache>) -> Self {
+        self.context_window_cache = Some(cache);
         self
     }
 
@@ -1065,19 +1146,15 @@ where
         &self,
         requested_messages: Vec<LoopModelMessage>,
     ) -> Result<Vec<HostManagedModelMessage>, AgentLoopHostError> {
-        let context = self
-            .thread_service
-            .load_context_window(LoadContextWindowRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: self.run_context.thread_id.clone(),
-                max_messages: self.max_messages,
-            })
-            .await
-            .map_err(context_read_error)?;
+        let context = self.load_model_context_window().await?;
 
         if requested_messages.is_empty() {
-            let mut messages = Vec::with_capacity(context.messages.len());
-            for message in context.messages {
+            let context_messages = prompt_context_budget::select_prompt_context_messages(
+                context.messages,
+                self.prompt_context_budget,
+            );
+            let mut messages = Vec::with_capacity(context_messages.len());
+            for (message, _) in context_messages {
                 let Some(content_ref) = message_ref_from_context(&message) else {
                     continue;
                 };
@@ -1248,6 +1325,31 @@ where
             });
         }
         Ok(resolved)
+    }
+
+    async fn load_model_context_window(
+        &self,
+    ) -> Result<ironclaw_threads::ContextWindow, AgentLoopHostError> {
+        if let Some(cache) = self.context_window_cache.as_ref()
+            && let Some(context) = cache
+                .take_matching(
+                    &self.thread_scope,
+                    &self.run_context.thread_id,
+                    self.max_messages,
+                )
+                .await
+        {
+            return Ok(context);
+        }
+
+        self.thread_service
+            .load_context_window(LoadContextWindowRequest {
+                scope: self.thread_scope.clone(),
+                thread_id: self.run_context.thread_id.clone(),
+                max_messages: self.max_messages,
+            })
+            .await
+            .map_err(context_read_error)
     }
 
     async fn instruction_snippet_messages_by_ref(
@@ -1464,6 +1566,7 @@ pub enum HostManagedModelErrorKind {
 pub struct HostManagedModelError {
     pub kind: HostManagedModelErrorKind,
     pub safe_summary: String,
+    pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
 }
 
 impl HostManagedModelError {
@@ -1471,6 +1574,7 @@ impl HostManagedModelError {
         Self {
             kind,
             safe_summary: safe_model_summary(kind).to_string(),
+            reason_kind: None,
         }
     }
 
@@ -1478,7 +1582,13 @@ impl HostManagedModelError {
         Self {
             kind,
             safe_summary: safe_summary.into(),
+            reason_kind: None,
         }
+    }
+
+    pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
+        self.reason_kind = Some(reason_kind);
+        self
     }
 }
 
@@ -1498,10 +1608,18 @@ fn validate_thread_scope_for_run(
     // The thread store keys threads by `owner_user_id` (via the MountView in
     // `ThreadScope::to_resource_scope`), but that axis is absent from the
     // on-disk thread path, so a wrong owner silently reads an empty subtree
-    // and surfaces as `UnknownThread`. When the run carries an authenticated
-    // actor and the thread scope declares an owner, require them to agree so
-    // the divergence fails loud here rather than at the storage read.
-    if let (Some(thread_owner), Some(actor)) =
+    // and surfaces as `UnknownThread`. Explicit-owner runs intentionally allow
+    // actor/subject divergence for shared conversation routes, but the explicit
+    // owner must still match the resolved thread owner. Legacy actor-fallback
+    // runs continue to require owner=actor.
+    if run_context.scope.has_explicit_thread_owner() {
+        if run_context.scope.explicit_owner_user_id() != thread_scope.owner_user_id.as_ref() {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "thread scope owner does not match the explicit loop run subject",
+            ));
+        }
+    } else if let (Some(thread_owner), Some(actor)) =
         (thread_scope.owner_user_id.as_ref(), run_context.actor())
         && thread_owner != &actor.user_id
     {
@@ -1571,9 +1689,22 @@ fn history_summaries_by_ref(summaries: Vec<SummaryArtifact>) -> HashMap<String, 
         .collect()
 }
 
-fn context_message_to_loop_message(message: ContextMessage) -> Option<LoopContextMessage> {
+fn context_message_to_compaction_metadata(
+    message: &ContextMessage,
+) -> Option<LoopContextCompactionMetadata> {
+    message_ref_from_context(message)?;
+    Some(LoopContextCompactionMetadata {
+        sequence: message.sequence,
+        kind: compaction_kind_for_message(message.kind),
+        estimated_tokens: estimate_tokens_from_chars(&message.content).as_u64(),
+    })
+}
+
+fn context_message_to_loop_message(
+    selected: prompt_context_budget::SelectedPromptContextMessage,
+) -> Option<LoopContextMessage> {
+    let (message, estimated_tokens) = selected;
     let message_ref = message_ref_from_context(&message)?;
-    let estimated_tokens = estimate_tokens_from_chars(&message.content).as_u64();
     let compaction = Some(LoopContextCompactionMetadata {
         sequence: message.sequence,
         kind: compaction_kind_for_message(message.kind),
@@ -1687,8 +1818,8 @@ fn tool_result_content_for_context_message(
     if message.kind != MessageKind::ToolResultReference {
         return Ok(None);
     }
-    let envelope: ToolResultReferenceEnvelope =
-        serde_json::from_str(&message.content).map_err(|error| {
+    let envelope =
+        ToolResultReferenceEnvelope::from_json_str(&message.content).map_err(|error| {
             raw_agent_loop_host_error(
                 "model_context",
                 "decode_tool_result_reference",
@@ -1754,7 +1885,11 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     } else {
         safe_model_summary(error.kind).to_string()
     };
-    AgentLoopHostError::new(model_error_kind(error.kind), safe_summary)
+    let mut host_error = AgentLoopHostError::new(model_error_kind(error.kind), safe_summary);
+    if let Some(reason_kind) = error.reason_kind {
+        host_error = host_error.with_reason_kind(reason_kind);
+    }
+    host_error
 }
 
 fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {

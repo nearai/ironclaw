@@ -56,22 +56,22 @@ async fn reborn_project_scope_isolation_parity() {
         .await
         .expect("project B harness");
 
-    project_a.start();
-    project_b.start();
-
     let alpha = project_a
         .submit_text_for(ROOM, "alice", EVENT, "project alpha turn")
         .await
         .expect("submit project A turn");
+    project_a.start();
     project_a
         .wait_for_submitted_status(&alpha, TurnStatus::Completed)
         .await
         .expect("project A completed");
+    project_a.shutdown().await;
 
     let beta = project_b
         .submit_text_for(ROOM, "alice", EVENT, "project beta turn")
         .await
         .expect("submit project B turn with same external event id");
+    project_b.start();
     project_b
         .wait_for_submitted_status(&beta, TurnStatus::Completed)
         .await
@@ -108,7 +108,6 @@ async fn reborn_project_scope_isolation_parity() {
 
     project_a.assert_model_exhausted();
     project_b.assert_model_exhausted();
-    project_a.shutdown().await;
     project_b.shutdown().await;
 }
 

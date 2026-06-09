@@ -34,8 +34,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+use crate::AuthChallengeView;
+
 mod cursor_validation;
 mod display_preview;
+mod display_preview_runtime;
 mod failure_explanation;
 mod live_progress_stream;
 mod runtime_stream;
@@ -252,6 +255,8 @@ struct FakeAuthChallengeProvider {
     expected_gate_ref: String,
 }
 
+struct FailingAuthChallengeProvider;
+
 #[async_trait]
 impl AuthChallengeProvider for FakeAuthChallengeProvider {
     async fn challenge_for_gate(
@@ -278,6 +283,20 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
             ),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
         }))
+    }
+}
+
+#[async_trait]
+impl AuthChallengeProvider for FailingAuthChallengeProvider {
+    async fn challenge_for_gate(
+        &self,
+        _scope: &TurnScope,
+        _owner_user_id: &UserId,
+        _run_id: TurnRunId,
+        _gate_ref: &str,
+        _credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+    ) -> Result<Option<AuthChallengeView>, ironclaw_auth::AuthProductError> {
+        Err(ironclaw_auth::AuthProductError::BackendUnavailable)
     }
 }
 

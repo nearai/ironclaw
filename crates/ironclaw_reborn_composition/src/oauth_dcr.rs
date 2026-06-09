@@ -27,6 +27,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
+use crate::AuthChallengeView;
 use crate::oauth_dcr_protocol::{
     AuthorizationServerMetadata, DcrRegistrationRequest, DcrRegistrationResponse,
     ProtectedResourceMetadata, StoredDcrClientMaterial, authorization_server_metadata_url,
@@ -38,7 +39,6 @@ use crate::oauth_provider_client::{
     HostOAuthProviderSpec, OAuthClientMaterial, OAuthClientMaterialSource, authorize_oauth_egress,
     oauth_endpoint_host, oauth_network_policy,
 };
-use crate::projection::AuthChallengeView;
 
 const DCR_RESPONSE_BODY_LIMIT: u64 = 32 * 1024;
 const DCR_TIMEOUT_MS: u32 = 30_000;

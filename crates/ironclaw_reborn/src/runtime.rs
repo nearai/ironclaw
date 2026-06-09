@@ -2,15 +2,16 @@
 
 use std::{error::Error, fmt, marker::PhantomData, sync::Arc};
 
+use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
     DecoratingLoopCapabilityPortFactory, HostIdentityContextSource, HostInputQueue,
     HostManagedModelGateway, HostSkillContextSource, LoopCapabilityPortDecorator,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationReadiness,
-    RunCancellationFactory, SpawnSubagentInputCodec, SubagentDefinitionResolver,
-    SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
+    RunCancellationFactory, SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec,
+    SubagentDefinitionResolver, SubagentPromptComposer, SubagentPromptMaterialSource,
+    SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
     verify_product_live_cancellation_probe,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -31,7 +32,9 @@ use ironclaw_turns::{
 use crate::{
     app_loop_family::build_loop_family_registry,
     driver_registry::{DriverRegistry, DriverRegistryError},
-    loop_driver_host::{RebornLoopDriverHostFactory, TextOnlyLoopHostConfig},
+    loop_driver_host::{
+        HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
+    },
     loop_exit_applier::{LoopExitApplier, ThreadCheckpointLoopExitEvidencePort},
     model_routes::ModelRouteResolver,
     planned_driver_factory::{
@@ -41,7 +44,7 @@ use crate::{
     },
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver,
-        completion_observer::SubagentCompletionObserver,
+        completion_observer::SubagentCompletionObserver, flavors,
         gate_resolution::BoundedSubagentGateResolutionStore, goal_store::SubagentGoalStore,
         prompt_material::GateBackedSubagentPromptMaterialSource,
     },
@@ -95,7 +98,12 @@ where
     pub model_policy_guard: Option<Arc<dyn LoopModelPolicyGuard>>,
     pub model_budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
     pub safety_context: Option<InstructionSafetyContext>,
+    pub hook_security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     pub turn_event_sink: Option<Arc<dyn TurnEventSink>>,
+    /// Per-run hook dispatcher builder factory. `None` (the default) leaves
+    /// the hook framework dormant: no dispatcher is composed and the runtime
+    /// behaves exactly as it did before hooks existed.
+    pub hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
 }
 
 pub trait RuntimeSubagentGoalStore:
@@ -411,6 +419,7 @@ where
             result_writer: Arc::clone(&parts.capability_result_writer),
         },
         parts.subagent_spawn_limits,
+        flavors::builtin_flavor_catalog(),
     )?);
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(
         DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
@@ -456,6 +465,12 @@ where
     if let Some(accountant) = parts.model_budget_accountant {
         host_factory = host_factory.with_model_budget_accountant(accountant);
     }
+    if let Some(factory) = parts.hook_dispatcher_builder_factory {
+        host_factory = host_factory.with_hook_dispatcher_builder_factory(move || factory());
+    }
+    if let Some(sink) = parts.hook_security_audit_sink {
+        host_factory = host_factory.with_hook_security_audit_sink(sink);
+    }
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
     let host_factory = Arc::new(host_factory);
 
@@ -490,20 +505,28 @@ struct SubagentSpawnCapabilityDecorator {
     spawn_deps: Arc<SubagentSpawnDeps>,
     spawn_id: CapabilityId,
     spawn_limits: SubagentSpawnLimits,
+    /// Schema precomputed once at construction time so `decorate()` does not
+    /// rebuild it on every loop run.
+    parameters_schema: Arc<serde_json::Value>,
 }
 
 impl SubagentSpawnCapabilityDecorator {
     fn new(
         spawn_deps: SubagentSpawnDeps,
         spawn_limits: SubagentSpawnLimits,
+        flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
     ) -> Result<Self, DefaultPlannedRuntimeBuildError> {
         let spawn_id =
             CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
                 .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+        let parameters_schema = Arc::new(
+            ironclaw_loop_support::build_spawn_subagent_parameters_schema(&flavor_catalog),
+        );
         Ok(Self {
             spawn_deps: Arc::new(spawn_deps),
             spawn_id,
             spawn_limits,
+            parameters_schema,
         })
     }
 }
@@ -514,12 +537,17 @@ impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
     ) -> Arc<dyn LoopCapabilityPort> {
-        Arc::new(SubagentSpawnCapabilityPort::new(
+        // Arc::clone is a cheap ref-count bump — avoids deep-cloning the JSON
+        // schema tree on every decorate() call (the schema is rendered to a
+        // serde_json::Value only at the single render site in
+        // spawn_tool_definition / spawn_descriptor when the model requests it).
+        Arc::new(SubagentSpawnCapabilityPort::new_with_schema(
             inner,
             run_context.clone(),
             self.spawn_id.clone(),
             self.spawn_limits,
             Arc::clone(&self.spawn_deps),
+            Arc::clone(&self.parameters_schema),
         ))
     }
 }
@@ -750,5 +778,42 @@ mod tests {
             self.decorate_calls.fetch_add(1, Ordering::SeqCst);
             inner
         }
+    }
+
+    // ── Gap 3: decorator non-empty catalog → schema enum present ─────────────
+
+    #[test]
+    fn builtin_flavor_catalog_threads_enum_into_schema() {
+        // Verifies that `builtin_flavor_catalog()` — the source-of-truth
+        // function the decorator wires into `SubagentSpawnCapabilityPort` — is
+        // non-empty AND that the resulting `build_spawn_subagent_parameters_schema`
+        // output includes an `enum` key containing all four expected flavor IDs
+        // in registry order.
+        //
+        // This indirectly proves the threading: if the decorator passes a
+        // non-empty catalog, the produced schema will have a satisfiable enum
+        // constraint. The companion empty-catalog test (gap 1, loop_support)
+        // confirms the absent-enum guard on the other side.
+        use ironclaw_loop_support::build_spawn_subagent_parameters_schema;
+
+        let catalog = crate::subagent::flavors::builtin_flavor_catalog();
+
+        assert!(
+            !catalog.is_empty(),
+            "builtin_flavor_catalog must be non-empty"
+        );
+        assert_eq!(catalog.len(), 4, "expected exactly 4 builtin flavors");
+
+        let schema = build_spawn_subagent_parameters_schema(&catalog);
+
+        let enum_vals = schema["properties"]["subagent_type"]["enum"]
+            .as_array()
+            .expect("schema must have an 'enum' key when catalog is non-empty");
+
+        assert_eq!(enum_vals.len(), 4);
+        assert_eq!(enum_vals[0], serde_json::json!("general"));
+        assert_eq!(enum_vals[1], serde_json::json!("explorer"));
+        assert_eq!(enum_vals[2], serde_json::json!("coder"));
+        assert_eq!(enum_vals[3], serde_json::json!("planner"));
     }
 }

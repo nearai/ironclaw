@@ -1163,6 +1163,45 @@ async fn libsql_append_and_tail_assigns_monotonic_seqno() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_head_seq_returns_none_for_empty_path() {
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/empty-head").unwrap();
+    let head = filesystem.head_seq(&log, SeqNo::ZERO).await.unwrap();
+    assert_eq!(head, None);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_head_seq_returns_max_seq_after_appends() {
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/head-log").unwrap();
+    let s1 = filesystem.append(&log, b"a".to_vec()).await.unwrap();
+    let s2 = filesystem.append(&log, b"b".to_vec()).await.unwrap();
+    let s3 = filesystem.append(&log, b"c".to_vec()).await.unwrap();
+    assert!(s1 < s2 && s2 < s3);
+
+    let head = filesystem.head_seq(&log, SeqNo::ZERO).await.unwrap();
+    assert_eq!(head, Some(s3));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_head_seq_returns_none_when_from_exceeds_all_seqs() {
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/head-exhausted").unwrap();
+    filesystem.append(&log, b"a".to_vec()).await.unwrap();
+    let last = filesystem.append(&log, b"b".to_vec()).await.unwrap();
+
+    let head = filesystem.head_seq(&log, last).await.unwrap();
+    assert_eq!(head, None);
+
+    let beyond = SeqNo::from_backend(last.get() + 100);
+    let head = filesystem.head_seq(&log, beyond).await.unwrap();
+    assert_eq!(head, None);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_append_distinct_paths_share_global_seq_but_are_isolated_on_tail() {
     // Each path's tail returns only its own records, even though the
     // underlying `INTEGER PRIMARY KEY AUTOINCREMENT` assigns global seqs.
@@ -1227,8 +1266,9 @@ async fn libsql_root() -> TestLibSqlRootFilesystem {
 mod postgres_tests {
     use super::*;
     use ironclaw_filesystem::{
-        Capability, CasExpectation, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
-        IndexSpec, IndexValue, Page, PostgresRootFilesystem, RecordKind, SeqNo,
+        Capability, CasExpectation, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey,
+        IndexKind, IndexName, IndexSpec, IndexValue, Page, PostgresRootFilesystem, RecordKind,
+        SeqNo,
     };
     use ironclaw_host_api::VirtualPath;
 
@@ -1842,6 +1882,48 @@ mod postgres_tests {
 
         // tail-from-last returns nothing.
         assert!(fs.tail(&log, s3).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn postgres_head_seq_returns_none_for_empty_path() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let log = VirtualPath::new(format!("{prefix}/head_empty")).unwrap();
+        let head = fs.head_seq(&log, SeqNo::ZERO).await.unwrap();
+        assert_eq!(head, None);
+    }
+
+    #[tokio::test]
+    async fn postgres_head_seq_returns_max_seq_after_appends() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let log = VirtualPath::new(format!("{prefix}/head_log")).unwrap();
+        let s1 = fs.append(&log, b"a".to_vec()).await.unwrap();
+        let s2 = fs.append(&log, b"b".to_vec()).await.unwrap();
+        let s3 = fs.append(&log, b"c".to_vec()).await.unwrap();
+        assert!(s1 < s2 && s2 < s3);
+
+        let head = fs.head_seq(&log, SeqNo::ZERO).await.unwrap();
+        assert_eq!(head, Some(s3));
+    }
+
+    #[tokio::test]
+    async fn postgres_head_seq_returns_none_when_from_exceeds_all_seqs() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let log = VirtualPath::new(format!("{prefix}/head_exhausted")).unwrap();
+        fs.append(&log, b"a".to_vec()).await.unwrap();
+        let last = fs.append(&log, b"b".to_vec()).await.unwrap();
+
+        let head = fs.head_seq(&log, last).await.unwrap();
+        assert_eq!(head, None);
+
+        let beyond = SeqNo::from_backend(last.get() + 100);
+        let head = fs.head_seq(&log, beyond).await.unwrap();
+        assert_eq!(head, None);
     }
 
     #[tokio::test]

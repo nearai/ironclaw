@@ -1,5 +1,10 @@
 use std::collections::BTreeMap;
 
+use ironclaw_host_api::CapabilityId;
+use ironclaw_turns::run_profile::CompactionInitiator;
+
+use super::CapabilityCallSignature;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContextStrategyState {}
 
@@ -15,8 +20,26 @@ pub struct ModelStrategyState {
 pub struct CompactionStrategyState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compacted_through_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_deferred: Option<DeferredCompactionWatermark>,
     #[serde(default)]
     pub force_compact_on_next_iteration: bool,
+    /// Initiator to emit on the NEXT iteration's `CompactionStarted` event
+    /// when `force_compact_on_next_iteration` causes the compactor to run.
+    /// Set by `PostCapabilityStage` when its policy trips; consumed
+    /// (.take()) by `PromptCompactionStep` so the event has the
+    /// proximate-cause initiator (e.g. `CapabilityResultOverflow`)
+    /// instead of falling back to `Auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_compact_initiator: Option<CompactionInitiator>,
+}
+
+/// Records the deferred cut point and prompt snapshot fingerprint for a
+/// compaction attempt that should not be retried against the same prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeferredCompactionWatermark {
+    pub through_seq: u64,
+    pub prompt_fingerprint: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -47,6 +70,34 @@ impl CompactionPromptSnapshot {
             keep
         });
         self.observed_prompt_tokens = self.observed_prompt_tokens.saturating_sub(removed_tokens);
+    }
+
+    pub fn fingerprint(&self) -> u64 {
+        let mut fingerprint = 0xcbf2_9ce4_8422_2325_u64;
+        fingerprint = mix_fingerprint(fingerprint, self.observed_prompt_tokens);
+        fingerprint = mix_fingerprint(fingerprint, self.message_index.len() as u64);
+        for entry in &self.message_index {
+            fingerprint = mix_fingerprint(fingerprint, entry.sequence);
+            fingerprint = mix_fingerprint(fingerprint, indexed_message_kind_code(entry.kind));
+            fingerprint = mix_fingerprint(fingerprint, entry.estimated_tokens);
+        }
+        fingerprint
+    }
+}
+
+fn mix_fingerprint(current: u64, value: u64) -> u64 {
+    current
+        .wrapping_mul(0x0000_0100_0000_01b3)
+        .wrapping_add(value)
+}
+
+fn indexed_message_kind_code(kind: IndexedMessageKind) -> u64 {
+    match kind {
+        IndexedMessageKind::User => 1,
+        IndexedMessageKind::Assistant => 2,
+        IndexedMessageKind::System => 3,
+        IndexedMessageKind::Summary => 4,
+        IndexedMessageKind::Other => 5,
     }
 }
 
@@ -122,6 +173,40 @@ mod tests {
 
         assert_eq!(snapshot.message_index, vec![entry(2, 20), entry(3, 30)]);
         assert_eq!(snapshot.observed_prompt_tokens, 50);
+    }
+
+    #[test]
+    fn fingerprint_is_stable_for_empty_and_identical_snapshots() {
+        let empty = CompactionPromptSnapshot::default();
+        assert_ne!(empty.fingerprint(), 0);
+        assert_eq!(
+            empty.fingerprint(),
+            CompactionPromptSnapshot::default().fingerprint()
+        );
+
+        let first = CompactionPromptSnapshot::from_message_index(vec![entry(1, 10), entry(2, 20)]);
+        let second = CompactionPromptSnapshot::from_message_index(vec![entry(1, 10), entry(2, 20)]);
+
+        assert_eq!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_changes_when_order_or_entries_change() {
+        let baseline =
+            CompactionPromptSnapshot::from_message_index(vec![entry(1, 10), entry(2, 20)]);
+        let reordered =
+            CompactionPromptSnapshot::from_message_index(vec![entry(2, 20), entry(1, 10)]);
+        let added = CompactionPromptSnapshot::from_message_index(vec![
+            entry(1, 10),
+            entry(2, 20),
+            entry(3, 30),
+        ]);
+        let changed_tokens =
+            CompactionPromptSnapshot::from_message_index(vec![entry(1, 10), entry(2, 21)]);
+
+        assert_ne!(baseline.fingerprint(), reordered.fingerprint());
+        assert_ne!(baseline.fingerprint(), added.fingerprint());
+        assert_ne!(baseline.fingerprint(), changed_tokens.fingerprint());
     }
 }
 
@@ -250,18 +335,91 @@ pub enum ReplyAdmissionRejectionReason {
 pub struct StopStrategyState {
     /// Number of completed turns the StopConditionStrategy has observed.
     pub turns_completed: u32,
-    /// Count of `terminate: true` hints seen in the most recent capability batch.
-    /// Reset to 0 at the start of each batch.
-    pub terminate_hints_in_last_batch: u32,
-    /// Total number of results in the most recent capability batch (denominator
-    /// for "all results said terminate").
-    pub last_batch_total: u32,
     /// Consecutive turns where a model reply was rejected before transcript
     /// finalization.
     #[serde(default)]
     pub trailing_rejected_replies: u32,
+    /// Consecutive completed capability-batch turns whose typed result
+    /// progress reported no new evidence/state.
+    #[serde(default)]
+    pub trailing_no_progress_results: u32,
+    /// Pending or rendered repeated-call warning that must be shown to the
+    /// model before repeated calls can terminalize as no-progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeated_call_warning: Option<RepeatedCallWarningState>,
+}
+
+impl StopStrategyState {
+    pub fn mark_repeated_call_warning_rendered(&mut self) {
+        if let Some(warning) = self.repeated_call_warning.as_mut()
+            && warning.phase == RepeatedCallWarningPhase::PendingRender
+        {
+            warning.phase = RepeatedCallWarningPhase::Rendered;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RepeatedCallWarningState {
+    pub signature: CapabilityCallSignature,
+    pub phase: RepeatedCallWarningPhase,
+}
+
+impl RepeatedCallWarningState {
+    pub fn pending_render(signature: CapabilityCallSignature) -> Self {
+        Self {
+            signature,
+            phase: RepeatedCallWarningPhase::PendingRender,
+        }
+    }
+
+    pub fn rendered(signature: CapabilityCallSignature) -> Self {
+        Self {
+            signature,
+            phase: RepeatedCallWarningPhase::Rendered,
+        }
+    }
+
+    pub fn terminal_ready(signature: CapabilityCallSignature) -> Self {
+        Self {
+            signature,
+            phase: RepeatedCallWarningPhase::TerminalReady,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepeatedCallWarningPhase {
+    PendingRender,
+    Rendered,
+    TerminalReady,
 }
 
 /// Persistent state owned by `GateHandlingStrategy`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GateStrategyState {}
+
+/// Per-turn pipeline-directive state for `PostCapabilityStage`.
+///
+/// Unlike sibling `<Domain>StrategyState` types, this slot belongs to a
+/// pipeline stage (not a strategy) and tracks two distinct lifecycles:
+///
+/// - `pending_capability_bytes` is **per-turn**: filled by
+///   `push_completed_result` during a capability batch, cleared at the
+///   end of every `PostCapabilityStage::process` call (BUG-N1 fix).
+/// - `skip_model_this_iteration` is a **one-shot directive**: set by
+///   `PostCapabilityStage` when its policy trips, then consumed by the
+///   NEXT iteration's `PromptStage` which clears the flag and emits
+///   `PromptStep::SkipModel` to short-circuit the model call.
+///
+/// The distinct naming (`StageState` vs `StrategyState`) marks the
+/// category difference: stages own transient one-shot directives;
+/// strategies own resumable accounting.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PostCapabilityStageState {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_capability_bytes: BTreeMap<CapabilityId, u64>,
+    #[serde(default)]
+    pub skip_model_this_iteration: bool,
+}

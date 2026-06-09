@@ -4,7 +4,7 @@ use crate::context::RebornCliContext;
 use crate::dto::{ConfigEntry, ConfigGetDto, ConfigListDto, ConfigValue};
 use crate::render::{self, OutputMode};
 
-mod init;
+pub(crate) mod init;
 
 #[derive(Debug, Args)]
 pub(crate) struct ConfigCommand {

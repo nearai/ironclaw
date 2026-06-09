@@ -10,10 +10,12 @@
 
 use std::{fmt, sync::Arc};
 
+use async_trait::async_trait;
 use ironclaw_events::AuditSink;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    MountView, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress,
+    MountView, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
     runtime_policy::{
         DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode,
     },
@@ -32,6 +34,7 @@ use crate::{ExecutionPlan, RuntimeProcessPort};
 pub struct InvocationServices {
     pub filesystem: Arc<dyn RootFilesystem>,
     pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    pub tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
     pub process: Arc<dyn RuntimeProcessPort>,
     pub secret_store: Option<Arc<dyn SecretStore>>,
     pub audit_sink: Option<Arc<dyn AuditSink>>,
@@ -46,6 +49,10 @@ impl fmt::Debug for InvocationServices {
             .field(
                 "runtime_http_egress",
                 &self.runtime_http_egress.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "tool_call_http_egress",
+                &self.tool_call_http_egress.as_ref().map(|_| "[REDACTED]"),
             )
             .field("process", &"[REDACTED]")
             .field(
@@ -62,6 +69,21 @@ impl fmt::Debug for InvocationServices {
             )
             .finish()
     }
+}
+
+/// HTTP egress port for host-owned tool calls that need bounded
+/// model-visible output shaping.
+///
+/// This port is intentionally host-runtime-local. Shared runtime HTTP callers
+/// use [`RuntimeHttpEgress`] and keep strict response-limit behavior; first-party
+/// tool handlers can use this narrower port when they need sanitized partial
+/// output for model context.
+#[async_trait]
+pub trait ToolCallHttpEgress: Send + Sync {
+    async fn execute_for_model_visible_output(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>;
 }
 
 /// Inputs used to bind an approved execution plan to concrete host services.
@@ -118,6 +140,7 @@ impl InvocationServicesError {
 pub struct LocalInvocationServicesResolver {
     filesystem: Arc<dyn RootFilesystem>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
     process: Arc<dyn RuntimeProcessPort>,
     tenant_sandbox_process: Option<Arc<dyn RuntimeProcessPort>>,
     secret_store: Option<Arc<dyn SecretStore>>,
@@ -134,11 +157,20 @@ impl LocalInvocationServicesResolver {
         Self {
             filesystem,
             runtime_http_egress,
+            tool_call_http_egress: None,
             process,
             tenant_sandbox_process: None,
             secret_store,
             audit_sink: None,
         }
+    }
+
+    pub fn with_tool_call_http_egress(
+        mut self,
+        tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
+    ) -> Self {
+        self.tool_call_http_egress = tool_call_http_egress;
+        self
     }
 
     pub fn with_tenant_sandbox_process_port(
@@ -224,6 +256,10 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
             runtime_http_egress: plan
                 .requires_network
                 .then(|| self.runtime_http_egress.clone())
+                .flatten(),
+            tool_call_http_egress: plan
+                .requires_network
+                .then(|| self.tool_call_http_egress.clone())
                 .flatten(),
             process,
             secret_store: if plan.requires_secret {

@@ -124,6 +124,38 @@ mod tests {
     }
 
     #[test]
+    fn chat_connect_action_assets_render_slack_pairing_and_extensions_channel_picker() {
+        let chat = asset_text("js/pages/chat/chat.js");
+        assert!(chat.contains("ChannelConnectCard"));
+        assert!(chat.contains("channelConnectAction"));
+        assert!(chat.contains("dismissChannelConnectAction"));
+
+        let card = asset_text("js/pages/chat/components/channel-connect-card.js");
+        assert!(card.contains("SlackPairingSection"));
+        assert!(card.contains("isSlackStrategy(connectAction, \"inbound_proof_code\")"));
+        assert!(card.contains("action=${connectAction.action}"));
+
+        let picker = asset_text("js/components/slack-channel-picker.js");
+        assert!(picker.contains("listSlackAllowedChannels"));
+        assert!(picker.contains("saveSlackAllowedChannels(channels)"));
+
+        let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
+        assert!(channels_tab.contains("slackBuiltinStatus"));
+        assert!(channels_tab.contains("admin_managed_channels"));
+        assert!(channels_tab.contains("inbound_proof_code"));
+        assert!(channels_tab.contains("SlackChannelPicker"));
+        assert!(channels_tab.contains("SlackPairingSection"));
+        assert!(channels_tab.contains("findSlackConnectActions"));
+        assert!(channels_tab.contains("slackConnectActions"));
+        assert!(channels_tab.contains("action=${action.action}"));
+
+        let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
+        assert!(regression.contains("channel connect requests return an action"));
+        assert!(regression.contains("without submitting a prompt"));
+        assert!(regression.contains("unmatched channel connect requests submit the prompt"));
+    }
+
+    #[test]
     fn automations_panel_assets_are_embedded() {
         let app = asset_text("js/app/app.js");
         assert!(app.contains("AutomationsPage"));
@@ -145,6 +177,57 @@ mod tests {
         assert!(presenter.contains("source?.type === \"schedule\""));
         assert!(presenter.contains("Custom schedule"));
         assert!(!presenter.contains("Webhook"));
+    }
+
+    #[test]
+    fn auth_session_assets_use_server_capabilities_for_admin_status() {
+        let api = asset_text("js/lib/api.js");
+        assert!(api.contains("fetchSession"));
+        assert!(api.contains("/session"));
+
+        let auth = asset_text("js/app/auth.js");
+        assert!(auth.contains("fetchSession()"));
+        assert!(auth.contains("operator_webui_config"));
+        assert!(auth.contains("err?.status === 401 || err?.status === 403"));
+        assert!(auth.contains("Your session expired. Please sign in again."));
+        assert!(auth.contains("setIsSessionChecking(Boolean(nextToken))"));
+        assert!(auth.contains("setIsSessionChecking(true);"));
+        assert!(auth.contains("isAdmin: Boolean(session?.capabilities?.operator_webui_config)"));
+        assert!(!auth.contains("isAdmin: false"));
+
+        let sidebar_nav = asset_text("js/components/sidebar-nav.js");
+        assert!(sidebar_nav.contains("isAdmin = false"));
+        assert!(sidebar_nav.contains("[\"users\", \"inference\"].includes(subRoute.id)"));
+
+        let settings_page = asset_text("js/pages/settings/settings-page.js");
+        assert!(settings_page.contains("isAdmin = false"));
+        assert!(settings_page.contains("const defaultTabIsVisible = tabContentHas(defaultTab)"));
+        assert!(settings_page.contains("const redirectTab = defaultTabIsVisible"));
+        assert!(settings_page.contains("isOperatorTab(tab)"));
+
+        let settings_tabs = asset_text("js/pages/settings/components/settings-tabs.js");
+        assert!(settings_tabs.contains("isAdmin = false"));
+        assert!(!settings_tabs.contains("isAdmin = true"));
+        assert!(settings_tabs.contains("tab.id !== \"inference\""));
+
+        let layout = asset_text("js/layout/gateway-layout.js");
+        assert!(layout.contains("enabled: isAdmin"));
+        assert!(layout.contains("const needsOnboarding ="));
+        assert!(layout.contains("isAdmin &&"));
+        assert!(layout.contains("shouldRouteToOnboarding({"));
+
+        let app = asset_text("js/app/app.js");
+        assert!(app.contains("isChecking=${auth.isChecking}"));
+
+        let providers = asset_text("js/pages/settings/hooks/useLlmProviders.js");
+        assert!(providers.contains("const hasActiveProvider = Boolean("));
+        assert!(!providers.contains("!enabled || Boolean"));
+
+        let onboarding = asset_text("js/pages/onboarding/onboarding-page.js");
+        assert!(onboarding.contains("isChecking = false"));
+        assert!(onboarding.contains("if (isChecking) return null;"));
+        assert!(onboarding.contains("if (!isAdmin)"));
+        assert!(onboarding.contains("OperatorOnboardingPage"));
     }
 
     #[test]

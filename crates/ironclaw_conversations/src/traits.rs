@@ -23,12 +23,14 @@ pub trait ConversationBindingService: Send + Sync {
     /// The trusted scope must come from host configuration, not adapter input.
     /// Implementations that persist bindings should persist these values on
     /// first bind so later configuration changes do not silently reinterpret
-    /// the existing external conversation route.
+    /// the existing external conversation route. `trusted_owner_user_id`, when
+    /// present, is the explicit thread owner for that first-bound route.
     async fn resolve_or_create_binding_with_trusted_scope(
         &self,
         request: ResolveConversationRequest,
         trusted_agent_id: Option<ironclaw_host_api::AgentId>,
         trusted_project_id: Option<ironclaw_host_api::ProjectId>,
+        trusted_owner_user_id: Option<ironclaw_host_api::UserId>,
     ) -> Result<ConversationBindingResolution, InboundTurnError>;
 
     /// Look up an existing binding without creating or widening binding state.

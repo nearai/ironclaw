@@ -15,6 +15,7 @@ mod loop_exit;
 mod mapping;
 mod model;
 mod pipeline;
+mod post_capability;
 mod prompt;
 mod reply_admission;
 mod turn_stop;
@@ -24,9 +25,10 @@ use budget::{BudgetInput, BudgetStage, BudgetStep};
 use capabilities::{CapabilityInput, CapabilityStage};
 use capability_helpers::{
     CapabilitySurfaceIndex, append_capability_error_ref, append_capability_result_ref,
-    append_capability_safe_summary_ref, apply_capability_filter,
+    append_capability_safe_summary_ref, apply_capability_filter, capability_call_signature,
     capability_invocation_from_candidate, capability_is_visible, capability_summary,
-    gate_tool_result_summary, push_call_signature_once, push_completed_result,
+    gate_tool_result_summary, model_visible_capability_failure_observation,
+    push_call_signature_once, push_completed_result,
 };
 #[cfg(test)]
 use capability_helpers::{sanitize_result_ref_suffix, synthetic_provider_error_result_ref};
@@ -48,6 +50,7 @@ use mapping::{
 };
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};
+use post_capability::PostCapabilityStage;
 use prompt::{PromptInput, PromptStage, PromptStep};
 use reply_admission::{ReplyAdmissionInput, ReplyAdmissionStage, ReplyAdmissionStep};
 use turn_stop::{StopInput, StopObservationInput, StopObservationStep, StopStage, StopStep};
@@ -56,8 +59,8 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopCancelledReasonKind, LoopDiagnosticRef, LoopExit,
     run_profile::{
-        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, LoopInputAckToken,
-        LoopSafeSummary,
+        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind,
+        AgentLoopHostErrorReasonKind, LoopInputAckToken, LoopSafeSummary,
     },
 };
 
@@ -98,6 +101,7 @@ pub enum AgentLoopExecutorError {
         stage: HostStage,
         kind: AgentLoopHostErrorKind,
         safe_summary: LoopSafeSummary,
+        reason_kind: Option<AgentLoopHostErrorReasonKind>,
         diagnostic_ref: Option<LoopDiagnosticRef>,
     },
     #[error("planner returned a contract violation: {detail}")]

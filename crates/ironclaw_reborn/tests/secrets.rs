@@ -64,7 +64,7 @@ async fn reborn_secret_store_backend_unavailable_error_does_not_format_backend_d
 }
 
 #[tokio::test]
-async fn reborn_secret_store_fails_closed_when_existing_rows_use_another_master_key() {
+async fn reborn_secret_store_fails_closed_on_consume_when_existing_rows_use_another_master_key() {
     let dir = tempfile::tempdir().unwrap().keep();
     let db_path = dir.join("reborn-secrets.db");
     let database = Arc::new(libsql::Builder::new_local(&db_path).build().await.unwrap());
@@ -80,8 +80,8 @@ async fn reborn_secret_store_fails_closed_when_existing_rows_use_another_master_
     let handle = ironclaw_host_api::SecretHandle::new("openai_key").unwrap();
     store
         .put(
-            scope,
-            handle,
+            scope.clone(),
+            handle.clone(),
             SecretMaterial::from("sk-live-existing-secret"),
         )
         .await
@@ -91,16 +91,18 @@ async fn reborn_secret_store_fails_closed_when_existing_rows_use_another_master_
     let wrong_key = Some(SecretMaterial::from(
         "abcdef0123456789abcdef0123456789".to_string(),
     ));
-    let error = match build_libsql_reborn_secret_store(RebornLibSqlSecretStoreConfig {
+    let reopened = build_libsql_reborn_secret_store(RebornLibSqlSecretStoreConfig {
         database: Arc::clone(&database),
         master_key: wrong_key.clone(),
     })
     .await
-    {
-        Ok(_) => panic!("secret store must fail closed when existing rows cannot decrypt"),
-        Err(error) => error,
-    };
-    assert!(matches!(error, RebornSecretStoreError::InvalidMasterKey));
+    .unwrap();
+    let lease = reopened.lease_once(&scope, &handle).await.unwrap();
+    let error = reopened.consume(&scope, lease.id).await.unwrap_err();
+    assert!(matches!(
+        error,
+        SecretStoreError::StoreUnavailable { .. } | SecretStoreError::BackendMisconfigured { .. }
+    ));
     assert!(!format!("{error:?}").contains("sk-live-existing-secret"));
 
     let health = check_libsql_reborn_secret_store_health(RebornLibSqlSecretStoreConfig {
@@ -108,10 +110,7 @@ async fn reborn_secret_store_fails_closed_when_existing_rows_use_another_master_
         master_key: wrong_key,
     })
     .await;
-    assert_eq!(
-        health.status,
-        RebornSecretStoreHealthStatus::InvalidMasterKey
-    );
+    assert_eq!(health.status, RebornSecretStoreHealthStatus::Ready);
     assert!(!format!("{health:?}").contains("sk-live-existing-secret"));
 }
 

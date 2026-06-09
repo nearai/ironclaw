@@ -126,6 +126,7 @@ fn package_from_spec(spec: &GsuitePackageSpec) -> Result<ExtensionPackage, Exten
                 service: spec.service.to_string(),
             },
             host_apis: Vec::new(),
+            hooks: Vec::new(),
             capabilities,
         },
         VirtualPath::new(format!("/system/extensions/{}", spec.extension_id))?,

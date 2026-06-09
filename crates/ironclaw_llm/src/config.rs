@@ -144,7 +144,10 @@ impl RegistryProviderConfig {
 /// Configuration for OpenAI Codex (ChatGPT subscription OAuth).
 #[derive(Debug, Clone)]
 pub struct OpenAiCodexConfig {
-    /// Model to use (default: "gpt-5.3-codex").
+    /// Model to use (default: "gpt-5.5"). Must be a model the ChatGPT account
+    /// is entitled to: codex-only slugs like `gpt-5.3-codex` work with an
+    /// API-key Codex account but the subscription backend rejects them with
+    /// HTTP 400, and this provider is subscription-only.
     pub model: String,
     /// OAuth authorization server (default: "https://auth.openai.com").
     pub auth_endpoint: String,
@@ -161,7 +164,7 @@ pub struct OpenAiCodexConfig {
 impl Default for OpenAiCodexConfig {
     fn default() -> Self {
         Self {
-            model: "gpt-5.3-codex".to_string(),
+            model: "gpt-5.5".to_string(),
             auth_endpoint: "https://auth.openai.com".to_string(),
             api_base_url: "https://chatgpt.com/backend-api/codex".to_string(),
             client_id: "app_EMoamEEZ73f0CkXaXp7hrann".to_string(),
@@ -390,7 +393,7 @@ impl LlmConfig {
                 .openai_codex
                 .as_ref()
                 .map(|cfg| cfg.model.clone())
-                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
+                .unwrap_or_else(|| "gpt-5.5".to_string()),
             _ => self
                 .provider
                 .as_ref()

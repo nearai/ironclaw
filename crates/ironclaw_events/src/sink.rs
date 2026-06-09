@@ -70,6 +70,50 @@ pub trait DurableEventLog: Send + Sync {
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<EventReplay<RuntimeEvent>, EventError>;
+
+    /// Snapshot the stream's current head cursor (the cursor of the most
+    /// recently appended record at the instant of the call), considering the
+    /// whole `(tenant, user, agent)` stream regardless of deeper-scope
+    /// filtering.
+    ///
+    /// `after` is a known-valid resume cursor for the caller (typically the
+    /// subscription's `start_cursor`); implementations must treat it as the
+    /// floor of the probe so the call never trips the earliest-retained
+    /// `ReplayGap` guard for a still-valid resume position. The returned head
+    /// is `>= after`. A cursor strictly beyond the current head is a foreign /
+    /// future cursor and must be rejected with [`EventError::ReplayGap`] —
+    /// mirroring the `read_after_cursor` contract.
+    ///
+    /// # Atomicity contract (REQUIRED — no default impl)
+    ///
+    /// The head must be read **atomically at the instant of the call** from a
+    /// single authoritative tail observation (a tail counter, the stream's
+    /// `next_cursor`, or the backend's last-assigned sequence number). It must
+    /// NOT be derived by draining the stream page-by-page until an empty read:
+    /// a record appended concurrently *during* such a drain would fold into the
+    /// observed head and be mis-classified as replay. Each backend knows how to
+    /// read its own tail cheaply, so this is a required operation rather than a
+    /// default-implemented unbounded scan hidden behind a method whose docs
+    /// promise atomicity.
+    ///
+    /// # Why this exists (PR #3931, Hole 1)
+    ///
+    /// Event-triggered subscriptions must distinguish *replay* (records that
+    /// existed in the gap from `start_cursor` to head-at-startup, which may
+    /// have already fired their side effects on a prior run) from *live*
+    /// records (appended after the subscription started). The previous
+    /// implementation treated "the first poll that returns no entries" as the
+    /// replay/live boundary, which races: a live record appended before the
+    /// first empty poll — or while a continuous backlog drains past the true
+    /// head — was mis-marked as replay and could be wrongly deduped/skipped.
+    /// Snapshotting the head **once, atomically, at subscription start** fixes
+    /// the boundary: `cursor <= startup_head` is replay, everything else is
+    /// live.
+    async fn head_cursor(
+        &self,
+        stream: &EventStreamKey,
+        after: EventCursor,
+    ) -> Result<EventCursor, EventError>;
 }
 
 /// Durable control-plane audit log with explicit-error append and scoped

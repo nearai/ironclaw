@@ -768,7 +768,12 @@ mod auth_enforcement {
             .route("/api/skills", get(authed_handler))
             .route("/api/skills/search", post(authed_handler))
             .route("/api/skills/install", post(authed_handler))
-            .route("/api/skills/{name}", delete(authed_handler))
+            .route(
+                "/api/skills/{name}",
+                get(authed_handler)
+                    .put(authed_handler)
+                    .delete(authed_handler),
+            )
             // Logs
             .route("/api/logs/events", get(authed_handler))
             .route("/api/logs/level", get(authed_handler).put(authed_handler))
@@ -837,7 +842,42 @@ mod auth_enforcement {
         assert_requires_auth(&app, Method::GET, "/api/skills").await;
         assert_requires_auth(&app, Method::POST, "/api/skills/search").await;
         assert_requires_auth(&app, Method::POST, "/api/skills/install").await;
+        assert_requires_auth(&app, Method::GET, "/api/skills/test-skill").await;
+        assert_requires_auth(&app, Method::PUT, "/api/skills/test-skill").await;
         assert_requires_auth(&app, Method::DELETE, "/api/skills/test-skill").await;
+    }
+
+    #[tokio::test]
+    async fn test_skills_management_handlers_accept_authenticated_users() {
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "admin-tok".to_string(),
+            UserIdentity {
+                user_id: "alice".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            },
+        );
+        tokens.insert(
+            "member-tok".to_string(),
+            UserIdentity {
+                user_id: "bob".to_string(),
+                role: "regular".to_string(),
+                workspace_read_scopes: Vec::new(),
+            },
+        );
+        let app = auth_test_router(MultiAuthState::multi(tokens));
+
+        assert_passes_with_token(&app, Method::POST, "/api/skills/install", "member-tok").await;
+        assert_passes_with_token(&app, Method::GET, "/api/skills/test-skill", "member-tok").await;
+        assert_passes_with_token(&app, Method::PUT, "/api/skills/test-skill", "member-tok").await;
+        assert_passes_with_token(&app, Method::DELETE, "/api/skills/test-skill", "member-tok")
+            .await;
+
+        assert_passes_with_token(&app, Method::POST, "/api/skills/install", "admin-tok").await;
+        assert_passes_with_token(&app, Method::GET, "/api/skills/test-skill", "admin-tok").await;
+        assert_passes_with_token(&app, Method::PUT, "/api/skills/test-skill", "admin-tok").await;
+        assert_passes_with_token(&app, Method::DELETE, "/api/skills/test-skill", "admin-tok").await;
     }
 
     #[tokio::test]

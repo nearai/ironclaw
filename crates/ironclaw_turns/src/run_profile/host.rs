@@ -20,6 +20,7 @@ use crate::{
 use super::{
     compaction::{CompactionInitiator, LoopCompactionPort},
     instruction_bundle::InstructionBundleFingerprint,
+    model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation},
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
     snapshot::ResolvedRunProfile,
     system_inference::SystemInferenceTaskId,
@@ -650,11 +651,27 @@ impl AgentLoopHostErrorKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLoopHostErrorReasonKind {
+    ModelCreditsExhausted,
+}
+
+impl AgentLoopHostErrorReasonKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelCreditsExhausted => "model_credits_exhausted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 #[error("agent loop host {kind:?}: {safe_summary}")]
 pub struct AgentLoopHostError {
     pub kind: AgentLoopHostErrorKind,
     pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -663,8 +680,14 @@ impl AgentLoopHostError {
         Self {
             kind,
             safe_summary: safe_summary.into(),
+            reason_kind: None,
             diagnostic_ref: None,
         }
+    }
+
+    pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
+        self.reason_kind = Some(reason_kind);
+        self
     }
 
     pub fn with_diagnostic_ref(mut self, diagnostic_ref: LoopDiagnosticRef) -> Self {
@@ -696,6 +719,7 @@ pub const LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES: usize = 256 * 1024;
 pub struct LoopContextBundle {
     pub identity_messages: Vec<LoopContextMessage>,
     pub messages: Vec<LoopContextMessage>,
+    pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     pub instruction_snippets: Vec<LoopContextSnippet>,
     pub memory_snippets: Vec<LoopContextSnippet>,
 }
@@ -1393,11 +1417,22 @@ pub enum CapabilityOutcome {
         gate_ref: LoopGateRef,
         result_ref: LoopResultRef,
         safe_summary: String,
+        /// Size in bytes of the payload staged at `result_ref` time
+        /// (i.e. the serialized capability output, not the size of this struct).
+        /// Propagated from LoopCapabilityResultWriter::write_capability_result.
+        /// Used by ByteCapStrategy to evaluate per-capability byte caps.
+        #[serde(default)]
+        byte_len: u64,
     },
     SpawnedChildRun {
         child_run_id: TurnRunId,
         result_ref: LoopResultRef,
         safe_summary: String,
+        /// Size in bytes of the payload staged at `result_ref` time
+        /// (i.e. the serialized capability output, not the size of this struct).
+        /// Same semantics as AwaitDependentRun.byte_len.
+        #[serde(default)]
+        byte_len: u64,
     },
     Denied(CapabilityDenied),
     Failed(CapabilityFailure),
@@ -1420,11 +1455,36 @@ impl CapabilityOutcome {
 pub struct CapabilityResultMessage {
     pub result_ref: LoopResultRef,
     pub safe_summary: String,
+    /// Typed host signal describing whether this result advanced the loop's
+    /// evidence/state. This lets the loop distinguish deterministic
+    /// no-change outcomes from productive calls without inferring progress
+    /// from prose summaries or token counts.
+    #[serde(default)]
+    pub progress: CapabilityProgress,
     /// Host hint that this completed capability result should end the loop
     /// naturally after the current batch. Defaults to false for compatibility
     /// with older hosts.
     #[serde(default)]
     pub terminate_hint: bool,
+    /// Serialized output size in bytes — pure metadata, no PII.
+    #[serde(default)]
+    pub byte_len: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityProgress {
+    /// Older hosts, or hosts that cannot classify progress yet.
+    #[default]
+    Unknown,
+    /// The capability produced new evidence or changed host/runtime state.
+    #[serde(alias = "complete")]
+    MadeProgress,
+    /// The capability ran successfully but observed the same state/evidence as
+    /// before.
+    NoChange,
+    /// The capability reached a deterministic non-suspending blocker.
+    Blocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1504,6 +1564,8 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
 pub struct CapabilityFailure {
     pub error_kind: CapabilityFailureKind,
     pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<CapabilityFailureDetail>,
 }
 
 #[non_exhaustive]
@@ -1692,6 +1754,8 @@ pub struct AppendCapabilityResultRef {
     pub safe_summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_call: Option<ProviderToolCallReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelVisibleToolObservation>,
 }
 
 #[async_trait]

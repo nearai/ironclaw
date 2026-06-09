@@ -7,8 +7,10 @@
 
 mod echo;
 mod http;
+mod http_output;
 mod json;
 mod memory;
+mod model_visible_output;
 mod schemas;
 mod shell;
 mod skill_management;
@@ -59,6 +61,7 @@ pub use time::TIME_CAPABILITY_ID;
 pub use trigger_management::TriggerManagementClock;
 pub use trigger_management::{
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    TriggerCreateHook,
 };
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
@@ -166,6 +169,10 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                 capabilities.extend(trigger_management::manifests()?);
                 capabilities
             },
+            // The built-in first-party package declares no manifest hooks;
+            // first-party builtin hooks are installed by the composition
+            // loader directly, not via this manifest surface.
+            hooks: Vec::new(),
         },
         VirtualPath::new("/system/extensions/builtin")?,
     )
@@ -193,6 +200,21 @@ pub fn builtin_first_party_handlers(
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_base_registry()?;
     trigger_management::insert_handlers(&mut registry, trigger_repository)?;
+    Ok(registry)
+}
+
+/// Create handlers for all built-in first-party capabilities using an
+/// explicitly composed trigger repository and trigger-create lifecycle hook.
+pub fn builtin_first_party_handlers_with_trigger_create_hook(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_base_registry()?;
+    trigger_management::insert_handlers_with_create_hook(
+        &mut registry,
+        trigger_repository,
+        trigger_create_hook,
+    )?;
     Ok(registry)
 }
 
@@ -462,21 +484,8 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
     object.retain(|key, value| {
         !(declared.contains(key.as_str())
             && !required.contains(key)
-            && (value.as_str() == Some("null") || value.is_null())
-            && !preserve_optional_null_sentinel(
-                request.capability_id.as_str(),
-                key.as_str(),
-                value,
-            ))
+            && (value.as_str() == Some("null") || value.is_null()))
     });
-}
-
-fn preserve_optional_null_sentinel(
-    capability_id: &str,
-    key: &str,
-    value: &serde_json::Value,
-) -> bool {
-    capability_id == MEMORY_WRITE_CAPABILITY_ID && key == "target" && value.is_null()
 }
 
 fn resource_profile() -> Option<ResourceProfile> {

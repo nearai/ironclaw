@@ -4620,7 +4620,7 @@ async fn host_runtime_services_denies_wasm_http_when_shared_egress_has_no_policy
 #[tokio::test]
 async fn host_runtime_services_wasm_input_encode_releases_prepared_reservation() {
     let services = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services.rs"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services/runtime_adapters.rs"),
     )
     .unwrap();
     let reservation_index = services

@@ -4,17 +4,18 @@ use ironclaw_turns::{
     LoopExit,
     run_profile::{
         CapabilitySurfaceVersion, CompactionInitiator, LoopCompactionError, LoopCompactionMode,
-        LoopCompactionRequest, LoopContextCompactionKind, LoopContextCompactionMetadata,
-        LoopModelCapabilityView, LoopModelMessage, LoopProgressEvent, LoopSafeSummary,
-        SystemInferenceTaskId, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopCompactionOutcome, LoopCompactionRequest, LoopContextCompactionKind,
+        LoopContextCompactionMetadata, LoopModelCapabilityView, LoopModelMessage,
+        LoopProgressEvent, LoopSafeSummary, SystemInferenceTaskId, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 use std::time::Duration;
 use tracing::debug;
 
 use crate::state::{
-    CheckpointKind, CompactionPromptSnapshot, IndexedMessageKind, LoopExecutionState,
-    MessageIndexEntry,
+    CheckpointKind, CompactionPromptSnapshot, DeferredCompactionWatermark, IndexedMessageKind,
+    LoopExecutionState, MessageIndexEntry,
 };
 use crate::strategies::CompactionDecision;
 
@@ -44,17 +45,33 @@ pub(super) struct PromptOutput {
     pub(super) surface: VisibleCapabilitySurface,
     pub(super) messages: Vec<ironclaw_turns::run_profile::LoopModelMessage>,
     pub(super) capability_view: LoopModelCapabilityView,
+    pub(super) rendered_repeated_call_warning: bool,
 }
 
 pub(super) enum PromptStep {
     Prepared(Box<PromptOutput>),
     Exit(LoopExit),
+    /// Compaction-only turn: PromptCompactionStep ran (forced by the
+    /// `skip_model_this_iteration` flag), no prompt was assembled, no
+    /// model call this iteration. canonical.rs bypasses ModelStage +
+    /// CapabilityStage + PostCapabilityStage and routes directly to
+    /// StopStage.observe().
+    ///
+    /// Carries `pending_input_ack` alongside the state so canonical.rs can
+    /// ack inbound user input BEFORE stop.observe runs, mirroring the
+    /// Prepared path. PromptCompactionStep::run only acks internally on
+    /// Compacted; the Skipped branch (reachable when force_compact is
+    /// true but message_index is empty) returns without acking — without
+    /// this field the ack would silently drop.
+    // Boxed to avoid a large_enum_variant warning.
+    SkipModel(Box<LoopExecutionState>, PendingInputAck),
 }
 
 pub(super) struct BuiltPromptBundle {
     messages: Vec<LoopModelMessage>,
     compaction_message_index: Vec<LoopContextCompactionMetadata>,
     rendered_reply_admission_control: bool,
+    rendered_repeated_call_warning: bool,
 }
 
 impl BuiltPromptBundle {
@@ -135,6 +152,10 @@ impl FinalPromptBundle {
     fn rendered_reply_admission_control(&self) -> bool {
         self.bundle.rendered_reply_admission_control
     }
+
+    fn rendered_repeated_call_warning(&self) -> bool {
+        self.bundle.rendered_repeated_call_warning
+    }
 }
 
 #[async_trait]
@@ -163,6 +184,36 @@ impl<'a> PromptPlanningPipeline<'a> {
         let surface_filter = self.ctx.planner.capability().filter(&self.state).await;
         if let Some(exit) = self.cancel_boundary().await? {
             return Ok(PromptStep::Exit(exit));
+        }
+
+        // PostCapabilityStage set skip_model_this_iteration after a byte-cap
+        // trip on the prior turn. Compact here and short-circuit before
+        // building the prompt bundle — no surface filter, no prompt assembly,
+        // no model call this iteration. PromptStep::SkipModel signals
+        // canonical.rs to route past Model/Capability/PostCapability straight
+        // to stop.observe().
+        if self.state.post_capability_state.skip_model_this_iteration {
+            self.state.post_capability_state.skip_model_this_iteration = false;
+            let compaction = PromptCompactionStep::new(self.ctx, &mut self.pending_input_ack)
+                .run(self.state)
+                .await?;
+            let state = match compaction {
+                PromptCompactionOutcome::Exited(exit) => return Ok(PromptStep::Exit(exit)),
+                PromptCompactionOutcome::Skipped(mut state) => {
+                    // Compaction couldn't actually run (e.g. empty message_index) — clear
+                    // both the force flag AND the initiator so a later unrelated
+                    // compaction (Auto-triggered) doesn't .take() a stale
+                    // CapabilityResultOverflow initiator and misattribute telemetry.
+                    state.compaction_state.force_compact_on_next_iteration = false;
+                    state.compaction_state.force_compact_initiator = None;
+                    state
+                }
+                PromptCompactionOutcome::Compacted(state) => state,
+            };
+            return Ok(PromptStep::SkipModel(
+                Box::new(state),
+                self.pending_input_ack,
+            ));
         }
 
         let surface = self.visible_surface(surface_filter).await?;
@@ -216,6 +267,7 @@ impl<'a> PromptPlanningPipeline<'a> {
         if final_bundle.rendered_reply_admission_control() {
             self.state.reply_admission_state.pending_rejection_rendered = true;
         }
+        let rendered_repeated_call_warning = final_bundle.rendered_repeated_call_warning();
 
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
             state: self.state,
@@ -223,6 +275,7 @@ impl<'a> PromptPlanningPipeline<'a> {
             surface,
             messages: final_bundle.into_messages(),
             capability_view,
+            rendered_repeated_call_warning,
         })))
     }
 
@@ -315,13 +368,15 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         };
 
         let task_id = SystemInferenceTaskId::new();
+        let initiator = state
+            .compaction_state
+            .force_compact_initiator
+            .take()
+            .unwrap_or(CompactionInitiator::Auto);
         CheckpointStage
             .emit_progress(
                 self.ctx,
-                LoopProgressEvent::CompactionStarted {
-                    task_id,
-                    initiator: CompactionInitiator::Auto,
-                },
+                LoopProgressEvent::CompactionStarted { task_id, initiator },
             )
             .await;
         state = match CheckpointStage
@@ -350,7 +405,36 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         )
         .await;
         let response = match compaction_result {
-            CompactionCallOutcome::Completed(Ok(response)) => response,
+            CompactionCallOutcome::Completed(Ok(LoopCompactionOutcome::Compacted(response))) => {
+                response
+            }
+            CompactionCallOutcome::Completed(Ok(LoopCompactionOutcome::Deferred {
+                safe_summary,
+            })) => {
+                tracing::debug!(
+                    %safe_summary,
+                    "agent loop compaction deferred; continuing with the existing prompt"
+                );
+                state.compaction_state.force_compact_on_next_iteration = false;
+                state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+                    through_seq: drop_through_seq,
+                    prompt_fingerprint: state.compaction_prompt.fingerprint(),
+                });
+                state = match CheckpointStage
+                    .cancel_if_requested_after_pending_input_ack(
+                        self.ctx,
+                        state,
+                        self.pending_input_ack,
+                    )
+                    .await?
+                {
+                    CancelCheck::Continue(state) => *state,
+                    CancelCheck::Exit(exit) => {
+                        return Ok(PromptCompactionOutcome::Exited(exit));
+                    }
+                };
+                return Ok(PromptCompactionOutcome::Skipped(state));
+            }
             CompactionCallOutcome::Completed(Err(LoopCompactionError::Cancelled))
             | CompactionCallOutcome::Cancelled => {
                 return compaction_cancelled_exit(self.ctx, state, self.pending_input_ack).await;
@@ -391,6 +475,7 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         };
 
         state.compaction_state.last_compacted_through_seq = Some(drop_through_seq);
+        state.compaction_state.last_deferred = None;
         state.compaction_state.force_compact_on_next_iteration = false;
         state
             .compaction_prompt
@@ -413,7 +498,7 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
 }
 
 enum CompactionCallOutcome {
-    Completed(Result<ironclaw_turns::run_profile::LoopCompactionResponse, LoopCompactionError>),
+    Completed(Result<LoopCompactionOutcome, ironclaw_turns::run_profile::LoopCompactionError>),
     TimedOut,
     Cancelled,
 }
@@ -424,12 +509,7 @@ async fn await_compaction_with_cancellation<F>(
     call: F,
 ) -> CompactionCallOutcome
 where
-    F: std::future::Future<
-            Output = Result<
-                ironclaw_turns::run_profile::LoopCompactionResponse,
-                LoopCompactionError,
-            >,
-        >,
+    F: std::future::Future<Output = Result<LoopCompactionOutcome, LoopCompactionError>>,
 {
     let call = call;
     tokio::pin!(call);
@@ -501,6 +581,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
     context_request.capability_view = Some(capability_view);
     let prompt_mode = context_request.mode;
     let rendered_reply_admission_control = context_plan.emitted_admission_control;
+    let rendered_repeated_call_warning = context_plan.emitted_repeated_call_warning;
     let prompt_bundle = ctx
         .host
         .build_prompt_bundle(context_request)
@@ -530,6 +611,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
         messages: prompt_bundle.messages,
         compaction_message_index: prompt_bundle.compaction_message_index,
         rendered_reply_admission_control,
+        rendered_repeated_call_warning,
     })
 }
 

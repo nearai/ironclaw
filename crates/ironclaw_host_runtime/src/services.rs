@@ -22,6 +22,7 @@ use ironclaw_dispatcher::{
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
+    SecurityAuditSink,
 };
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime, SharedExtensionRegistry};
 #[cfg(feature = "libsql")]
@@ -80,14 +81,16 @@ use crate::obligations::{
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
-    InvocationServicesResolutionRequest, InvocationServicesResolver, LocalHostProcessPort,
-    LocalInvocationServicesResolver, PlannerError, ProcessObligationLifecycleStore,
-    RuntimeBackendHealth, RuntimeProcessPort, TenantSandboxProcessPort, TurnRunExecutor,
-    TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
+    HostRuntimeHttpEgressPort, InvocationServicesResolutionRequest, InvocationServicesResolver,
+    LocalHostProcessPort, LocalInvocationServicesResolver, PlannerError,
+    ProcessObligationLifecycleStore, RuntimeBackendHealth, RuntimeProcessPort,
+    RuntimeSecretMaterialStager, RuntimeSecretStageError, TenantSandboxProcessPort,
+    ToolCallHttpEgress, TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
 };
 use process_executor::{HostProcessExecutor, RuntimeDispatchProcessExecutor};
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
+type SharedToolCallHttpEgress = Arc<Mutex<Option<Arc<dyn ToolCallHttpEgress>>>>;
 
 mod builder;
 mod production_services;
@@ -136,6 +139,7 @@ where
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     secret_store: Option<Arc<dyn SecretStore>>,
     credential_account_store: Arc<dyn CredentialAccountStore>,
     credential_session_store: Arc<dyn CredentialSessionStore>,
@@ -144,6 +148,7 @@ where
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
+    tool_call_http_egress: SharedToolCallHttpEgress,
     process_port: Arc<dyn RuntimeProcessPort>,
     managed_process_port: bool,
     tenant_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
@@ -175,11 +180,9 @@ pub struct ProductAuthProviderRuntimePorts {
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
 }
 
-/// Alias for [`ironclaw_host_api::CredentialStageError`].
-///
-/// The shared type lives in `ironclaw_host_api` so that per-extension staging
-/// traits can use it without a dependency on `ironclaw_host_runtime`.
-pub type ProductAuthCredentialStageError = ironclaw_host_api::CredentialStageError;
+/// Alias for [`RuntimeSecretStageError`], which re-exports
+/// [`ironclaw_host_api::CredentialStageError`].
+pub type ProductAuthCredentialStageError = RuntimeSecretStageError;
 
 impl ProductAuthProviderRuntimePorts {
     fn new(
@@ -306,6 +309,7 @@ where
             capability_leases: None,
             event_sink: None,
             audit_sink: None,
+            security_audit_sink: None,
             secret_store: None,
             credential_account_store,
             credential_session_store,
@@ -314,6 +318,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress: Arc::new(Mutex::new(None)),
+            tool_call_http_egress: Arc::new(Mutex::new(None)),
             process_port: Arc::new(LocalHostProcessPort::new()),
             managed_process_port: true,
             tenant_sandbox_process_port: None,
@@ -380,7 +385,8 @@ where
             runtime_http_egress(&self.runtime_http_egress),
             Arc::clone(&self.process_port),
             self.secret_store.clone(),
-        );
+        )
+        .with_tool_call_http_egress(tool_call_http_egress(&self.tool_call_http_egress));
         if let Some(audit_sink) = &self.audit_sink {
             invocation_services_resolver =
                 invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));
@@ -440,14 +446,39 @@ where
         Arc::clone(&self.registry)
     }
 
+    /// Returns the canonical host-runtime HTTP egress port when configured.
+    pub fn runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>> {
+        runtime_http_egress(&self.runtime_http_egress)
+    }
+
+    /// Returns the canonical host-runtime obligation handler.
+    pub fn obligation_handler(&self) -> Arc<dyn CapabilityObligationHandler> {
+        Arc::new(self.builtin_obligation_handler())
+    }
+
+    /// Returns the canonical host-runtime one-shot secret material stager.
+    pub fn runtime_secret_material_stager(&self) -> RuntimeSecretMaterialStager {
+        RuntimeSecretMaterialStager::new(Arc::clone(&self.secret_injection_store))
+    }
+
+    /// Returns a host-mediated HTTP egress port that owns network-obligation
+    /// authorization and one-shot host-held credential staging.
+    pub fn host_runtime_http_egress_port(&self) -> Option<HostRuntimeHttpEgressPort> {
+        Some(HostRuntimeHttpEgressPort::new(
+            self.runtime_http_egress()?,
+            self.obligation_handler(),
+            self.runtime_secret_material_stager(),
+        ))
+    }
+
     /// Returns the canonical host-runtime egress/obligation ports for
     /// product-auth provider adapters.
     pub fn product_auth_provider_runtime_ports(&self) -> Option<ProductAuthProviderRuntimePorts> {
-        let runtime_http_egress = runtime_http_egress(&self.runtime_http_egress)?;
+        let runtime_http_egress = self.runtime_http_egress()?;
         let secret_store = self.secret_store.clone()?;
         Some(ProductAuthProviderRuntimePorts::new(
             runtime_http_egress,
-            Arc::new(self.builtin_obligation_handler()),
+            self.obligation_handler(),
             secret_store,
             Arc::clone(&self.secret_injection_store),
         ))
@@ -528,15 +559,13 @@ where
         .with_process_cancellation_registry(self.process_services.cancellation_registry())
         .with_runtime_health(runtime_health);
 
+        if let Some(run_state) = &self.run_state {
+            runtime = runtime.with_run_state(Arc::clone(run_state));
+        }
         if let Some(run_state_approval_store) = &self.run_state_approval_store {
             runtime = runtime.with_run_state_approval_store(Arc::clone(run_state_approval_store));
-        } else {
-            if let Some(run_state) = &self.run_state {
-                runtime = runtime.with_run_state(Arc::clone(run_state));
-            }
-            if let Some(approval_requests) = &self.approval_requests {
-                runtime = runtime.with_approval_requests(Arc::clone(approval_requests));
-            }
+        } else if let Some(approval_requests) = &self.approval_requests {
+            runtime = runtime.with_approval_requests(Arc::clone(approval_requests));
         }
         if let Some(capability_leases) = &self.capability_leases {
             runtime = runtime.with_capability_leases(Arc::clone(capability_leases));
@@ -553,6 +582,9 @@ where
 
         if let Some(audit_sink) = &self.audit_sink {
             handler = handler.with_audit_sink_dyn(Arc::clone(audit_sink));
+        }
+        if let Some(security_audit_sink) = &self.security_audit_sink {
+            handler = handler.with_security_audit_sink(Arc::clone(security_audit_sink));
         }
         if let Some(secret_store) = &self.secret_store {
             handler = handler.with_secret_store_dyn(Arc::clone(secret_store));
@@ -672,7 +704,28 @@ fn set_runtime_http_egress(
     }
 }
 
+fn set_tool_call_http_egress(
+    slot: &SharedToolCallHttpEgress,
+    tool_call_http_egress: Arc<dyn ToolCallHttpEgress>,
+) {
+    match slot.lock() {
+        Ok(mut guard) => {
+            *guard = Some(tool_call_http_egress);
+        }
+        Err(poisoned) => {
+            *poisoned.into_inner() = Some(tool_call_http_egress);
+        }
+    }
+}
+
 fn runtime_http_egress(slot: &SharedRuntimeHttpEgress) -> Option<Arc<dyn RuntimeHttpEgress>> {
+    match slot.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+fn tool_call_http_egress(slot: &SharedToolCallHttpEgress) -> Option<Arc<dyn ToolCallHttpEgress>> {
     match slot.lock() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),

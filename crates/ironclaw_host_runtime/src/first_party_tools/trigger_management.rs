@@ -9,7 +9,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_triggers::{
     TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerRunRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -24,7 +24,9 @@ use super::{
     first_party_capability_manifest, input_error, resource_profile,
 };
 
-const TRIGGER_LIST_LIMIT: usize = 100;
+const TRIGGER_LIST_MAX_LIMIT: usize = 100;
+const TRIGGER_RUN_HISTORY_DEFAULT_LIMIT: usize = 25;
+const TRIGGER_RUN_HISTORY_MAX_LIMIT: usize = 100;
 
 pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
@@ -60,10 +62,19 @@ pub(super) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
 ) -> Result<(), HostApiError> {
+    insert_handlers_with_create_hook(registry, repository, Arc::new(NoopTriggerCreateHook))
+}
+
+pub(super) fn insert_handlers_with_create_hook(
+    registry: &mut FirstPartyCapabilityRegistry,
+    repository: Arc<dyn TriggerRepository>,
+    create_hook: Arc<dyn TriggerCreateHook>,
+) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
         Arc::new(TriggerManagementToolHandler {
             repository,
+            create_hook,
             clock: Arc::new(SystemTriggerManagementClock),
         }),
     )
@@ -77,7 +88,11 @@ pub(super) fn insert_handlers_with_clock(
 ) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
-        Arc::new(TriggerManagementToolHandler { repository, clock }),
+        Arc::new(TriggerManagementToolHandler {
+            repository,
+            create_hook: Arc::new(NoopTriggerCreateHook),
+            clock,
+        }),
     )
 }
 
@@ -108,6 +123,21 @@ trait TriggerManagementClock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
 
+#[async_trait]
+pub trait TriggerCreateHook: Send + Sync {
+    async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
+}
+
+#[derive(Debug)]
+struct NoopTriggerCreateHook;
+
+#[async_trait]
+impl TriggerCreateHook for NoopTriggerCreateHook {
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct SystemTriggerManagementClock;
 
@@ -119,6 +149,7 @@ impl TriggerManagementClock for SystemTriggerManagementClock {
 
 struct TriggerManagementToolHandler {
     repository: Arc<dyn TriggerRepository>,
+    create_hook: Arc<dyn TriggerCreateHook>,
     clock: Arc<dyn TriggerManagementClock>,
 }
 
@@ -134,6 +165,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
             TRIGGER_CREATE_CAPABILITY_ID => {
                 create_trigger(
                     &*self.repository,
+                    &*self.create_hook,
                     &request.scope,
                     request.input,
                     self.clock.now(),
@@ -175,10 +207,12 @@ struct TriggerRemoveInput {
 #[derive(Deserialize)]
 struct TriggerListInput {
     limit: Option<usize>,
+    run_limit: Option<usize>,
 }
 
 async fn create_trigger(
     repository: &dyn TriggerRepository,
+    create_hook: &dyn TriggerCreateHook,
     scope: &ResourceScope,
     input: Value,
     now: DateTime<Utc>,
@@ -211,8 +245,21 @@ async fn create_trigger(
         .upsert_trigger(record.clone())
         .await
         .map_err(|error| trigger_repository_error("upsert_trigger", error))?;
+    if let Err(error) = create_hook.after_trigger_persisted(&record).await {
+        let hook_error = trigger_create_hook_error("after_trigger_persisted", error);
+        if let Err(remove_error) = repository
+            .remove_trigger(record.tenant_id.clone(), record.trigger_id)
+            .await
+        {
+            return Err(trigger_create_rollback_error(
+                "remove_trigger",
+                remove_error,
+            ));
+        }
+        return Err(hook_error);
+    }
     Ok(json!({
-        "trigger": trigger_output(&record),
+        "trigger": trigger_output(&record, &[]),
     }))
 }
 
@@ -224,8 +271,12 @@ async fn list_triggers(
     let input: TriggerListInput = serde_json::from_value(input).map_err(|_| input_error())?;
     let limit = input
         .limit
-        .unwrap_or(TRIGGER_LIST_LIMIT)
-        .min(TRIGGER_LIST_LIMIT);
+        .unwrap_or(TRIGGER_LIST_MAX_LIMIT)
+        .min(TRIGGER_LIST_MAX_LIMIT);
+    let run_limit = input
+        .run_limit
+        .unwrap_or(TRIGGER_RUN_HISTORY_DEFAULT_LIMIT)
+        .min(TRIGGER_RUN_HISTORY_MAX_LIMIT);
     let records = repository
         .list_scoped_triggers(
             scope.tenant_id.clone(),
@@ -235,11 +286,25 @@ async fn list_triggers(
             limit,
         )
         .await
-        .map_err(|error| trigger_repository_error("list_scoped_triggers", error))?
-        .into_iter()
-        .map(|record| trigger_output(&record))
+        .map_err(|error| trigger_repository_error("list_scoped_triggers", error))?;
+    let trigger_ids = records
+        .iter()
+        .map(|record| record.trigger_id)
         .collect::<Vec<_>>();
-    Ok(json!({ "triggers": records }))
+    let mut runs_by_trigger = repository
+        .list_trigger_run_history_batch(scope.tenant_id.clone(), &trigger_ids, run_limit)
+        .await
+        .map_err(|error| trigger_repository_error("list_trigger_run_history_batch", error))?;
+    let output = records
+        .into_iter()
+        .map(|record| {
+            let runs = runs_by_trigger
+                .remove(&record.trigger_id)
+                .unwrap_or_default();
+            trigger_output(&record, &runs)
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "triggers": output }))
 }
 
 async fn remove_trigger(
@@ -265,7 +330,7 @@ async fn remove_trigger(
     }))
 }
 
-fn trigger_output(record: &TriggerRecord) -> Value {
+fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> Value {
     json!({
         "trigger_id": record.trigger_id.to_string(),
         "agent_id": record.agent_id.as_ref().map(|id| id.as_str()),
@@ -278,8 +343,20 @@ fn trigger_output(record: &TriggerRecord) -> Value {
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
         "last_status": record.last_status,
+        "recent_runs": recent_runs.iter().map(trigger_run_output).collect::<Vec<_>>(),
         "is_active": record.has_active_fire(),
         "created_at": record.created_at,
+    })
+}
+
+fn trigger_run_output(run: &TriggerRunRecord) -> Value {
+    json!({
+        "fire_slot": run.fire_slot,
+        "run_id": run.run_id.as_ref().map(ToString::to_string),
+        "thread_id": run.thread_id.as_str(),
+        "status": run.status,
+        "submitted_at": run.submitted_at,
+        "completed_at": run.completed_at,
     })
 }
 
@@ -320,6 +397,36 @@ fn trigger_repository_error(
         "trigger management capability repository operation failed"
     );
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+}
+
+fn trigger_create_hook_error(
+    hook_operation: &'static str,
+    error: TriggerError,
+) -> FirstPartyCapabilityError {
+    tracing::debug!(
+        runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::Backend,
+        hook_operation,
+        trigger_error_kind = trigger_error_kind(&error),
+        "trigger management capability create hook failed"
+    );
+    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+}
+
+fn trigger_create_rollback_error(
+    repository_operation: &'static str,
+    error: TriggerError,
+) -> FirstPartyCapabilityError {
+    tracing::warn!(
+        runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::Backend,
+        repository_operation,
+        trigger_error_kind = trigger_error_kind(&error),
+        error_kind = "trigger_create_rollback_failed",
+        "trigger management capability create hook rollback failed"
+    );
+    FirstPartyCapabilityError::with_safe_summary(
+        RuntimeDispatchErrorKind::Backend,
+        "trigger create rollback failed after hook error",
+    )
 }
 
 fn trigger_error_kind(error: &TriggerError) -> &'static str {

@@ -462,6 +462,7 @@ async fn capability_cancelled_returns_cancelled_exit_without_retry() {
                 ironclaw_turns::run_profile::CapabilityFailure {
                     error_kind: CapabilityFailureKind::Cancelled,
                     safe_summary: "capability cancelled".to_string(),
+                    detail: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -591,7 +592,9 @@ async fn cancellation_after_capability_batch_preserves_completed_result() {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
                 safe_summary: "completed before cancellation".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
+                byte_len: 0,
             })],
             stopped_on_suspension: false,
         }])

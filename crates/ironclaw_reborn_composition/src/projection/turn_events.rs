@@ -6,9 +6,8 @@ use std::{
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use ironclaw_product_adapters::{
-    AuthPromptChallengeKind, AuthPromptView, GatePromptView, ProductAdapterError,
-    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
-    ProductWorkflowRejectionKind, RedactedString,
+    GatePromptView, ProductAdapterError, ProductOutboundPayload, ProductProjectionItem,
+    ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_turns::{
     GetRunStateRequest, SanitizedFailure, TurnCoordinator, TurnError, TurnEventKind,
@@ -23,7 +22,10 @@ use ironclaw_turns::{
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
-use crate::projection::AuthChallengeProvider;
+use ironclaw_reborn::failure_categories::MODEL_CREDITS_EXHAUSTED_CATEGORY;
+
+use crate::AuthChallengeProvider;
+use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
 const FAILURE_EXPLANATION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -331,49 +333,19 @@ async fn blocked_prompt_payload(
     let gate_ref_str = gate_ref.as_str().to_string();
     match event.status {
         TurnStatus::BlockedAuth => {
-            // Enrich the prompt with auth-flow metadata when the provider is
-            // available. Missing = backward-compatible (fields omitted as None).
-            let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
-            let challenge = match auth_challenges {
-                Some(provider) => provider
-                    .challenge_for_gate(
-                        &event.scope,
-                        owner_user_id,
-                        event.run_id,
-                        &gate_ref_str,
-                        &state.credential_requirements,
-                    )
-                    .await
-                    .map_err(|error| {
-                        tracing::debug!(
-                            %error,
-                            run_id = %event.run_id,
-                            "auth challenge lookup failed during WebUI projection"
-                        );
-                        ProductAdapterError::WorkflowTransient {
-                            reason: RedactedString::new("auth challenge lookup failed"),
-                        }
-                    })?,
-                None => None,
-            };
-            let base_view = AuthPromptView {
-                turn_run_id: event.run_id,
-                auth_request_ref: gate_ref_str,
-                headline: "Authentication required".to_string(),
-                body: event
+            let view = auth_prompt_view_for_blocked_auth(
+                event.owner_user_id.as_ref().unwrap_or(caller_user_id),
+                &event.scope,
+                event.run_id,
+                &gate_ref_str,
+                event
                     .sanitized_reason
                     .clone()
                     .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
-                challenge_kind: None,
-                provider: None,
-                account_label: None,
-                authorization_url: None,
-                expires_at: None,
-            };
-            let view = match challenge {
-                Some(c) => c.enrich(base_view),
-                None => auth_prompt_from_credential_requirement(base_view, &state),
-            };
+                &state.credential_requirements,
+                auth_challenges,
+            )
+            .await?;
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
         TurnStatus::BlockedApproval => {
@@ -395,20 +367,6 @@ async fn blocked_prompt_payload(
         | TurnStatus::Cancelled
         | TurnStatus::Failed => Ok(None),
     }
-}
-
-fn auth_prompt_from_credential_requirement(
-    mut view: AuthPromptView,
-    state: &ironclaw_turns::TurnRunState,
-) -> AuthPromptView {
-    let [requirement] = state.credential_requirements.as_slice() else {
-        return view;
-    };
-    let provider = requirement.provider.as_str().to_string();
-    view.challenge_kind = Some(AuthPromptChallengeKind::ManualToken);
-    view.provider = Some(provider.clone());
-    view.account_label = Some(provider);
-    view
 }
 
 fn gate_prompt(
@@ -542,6 +500,9 @@ async fn failure_summary_for_turn_event(
     category: &str,
     fallback_summary: String,
 ) -> String {
+    if category == MODEL_CREDITS_EXHAUSTED_CATEGORY {
+        return fallback_summary;
+    }
     failure_explainer
         .explain_failure(FailureExplanationInput {
             failure_category: category.to_string(),
@@ -576,6 +537,9 @@ fn failure_summary_for_category(category: &str) -> &'static str {
         "host_creation_failed" => "The run failed while preparing the runtime host.",
         "route_snapshot_persistence_failed" => {
             "The run failed while saving the selected model route."
+        }
+        MODEL_CREDITS_EXHAUSTED_CATEGORY => {
+            "The AI provider account is out of credits. Add credits or switch providers and try again."
         }
         "heartbeat_failed" => "The run failed after the runner heartbeat could not be recorded.",
         "exit_application_failed" => "The run failed while recording its final result.",

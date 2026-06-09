@@ -1,10 +1,4 @@
-use ironclaw_turns::{GateRef, ReplyTargetBindingRef, SourceBindingRef};
-
-use super::{AuthInteractionRejectionKind, auth_rejected};
-use crate::binding_ref::{
-    DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref, bounded_source_binding_ref,
-};
-use crate::error::ProductWorkflowError;
+use ironclaw_turns::GateRef;
 
 const AUTH_GATE_REF: &str = "gate:auth";
 const AUTH_GATE_PREFIX: &str = "gate:auth-";
@@ -15,28 +9,6 @@ pub fn is_auth_gate_ref(gate_ref: &GateRef) -> bool {
     value == AUTH_GATE_REF
         || value.starts_with(AUTH_GATE_PREFIX)
         || value.starts_with(HOOK_AUTH_GATE_PREFIX)
-}
-
-pub(crate) fn auth_source_binding_ref(
-    binding_id: &str,
-) -> Result<SourceBindingRef, ProductWorkflowError> {
-    bounded_source_binding_ref(
-        "auth-interaction-src",
-        binding_id,
-        DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-    )
-    .map_err(|_| auth_rejected(AuthInteractionRejectionKind::InvalidBindingRef))
-}
-
-pub(crate) fn auth_reply_binding_ref(
-    binding_id: &str,
-) -> Result<ReplyTargetBindingRef, ProductWorkflowError> {
-    bounded_reply_target_binding_ref(
-        "auth-interaction-reply",
-        binding_id,
-        DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-    )
-    .map_err(|_| auth_rejected(AuthInteractionRejectionKind::InvalidBindingRef))
 }
 
 #[cfg(test)]

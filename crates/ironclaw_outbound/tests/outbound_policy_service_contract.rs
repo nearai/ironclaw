@@ -397,6 +397,63 @@ async fn communication_delivery_triggered_default_target_validates_preference_ta
 }
 
 #[tokio::test]
+async fn communication_delivery_triggered_shared_agent_scope_validates_shared_preference_target() {
+    let store = InMemoryOutboundStateStore::default();
+    let access_policy = FakeThreadProjectionAccessPolicy::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    let service = OutboundPolicyService::new(&store, &access_policy, &validator);
+    let scope = ownerless_agent_scope("thread-1");
+    let request = run_notification_request_with_scope(
+        scope.clone(),
+        RunNotificationEventKind::FinalReplyReady,
+        RunNotificationOrigin::Triggered {
+            trigger: trigger_context(),
+        },
+    );
+    validator.allow(reply_ref("reply:shared-default"));
+    store
+        .put_communication_preference(preference_record(
+            Some("reply:personal-default"),
+            Some("reply:personal-progress"),
+            None,
+            None,
+        ))
+        .await
+        .expect("seed personal preference");
+    store
+        .put_communication_preference(shared_agent_preference_record(
+            Some("reply:shared-default"),
+            Some("reply:shared-progress"),
+            None,
+            None,
+        ))
+        .await
+        .expect("seed shared-agent preference");
+
+    let decision = service
+        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .await
+        .expect("shared-agent triggered default resolves and prepares")
+        .expect("shared-agent triggered default has a delivery target");
+
+    let OutboundDeliveryDecision::Authorized { attempt, target } = decision else {
+        panic!("expected authorized delivery");
+    };
+    assert_eq!(target.target(), &reply_ref("reply:shared-default"));
+    assert_eq!(attempt.candidate.target, reply_ref("reply:shared-default"));
+    assert_eq!(attempt.candidate.kind, OutboundPushKind::FinalReply);
+    assert_eq!(validator.calls(), 1);
+    assert_eq!(
+        store
+            .list_delivery_attempts(scope)
+            .await
+            .expect("list delivery attempts")
+            .as_slice(),
+        std::slice::from_ref(&attempt)
+    );
+}
+
+#[tokio::test]
 async fn communication_delivery_lowers_progress_update_to_progress_push_kind() {
     let store = InMemoryOutboundStateStore::default();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
@@ -870,17 +927,17 @@ struct BackendErrorPreferenceRepository;
 
 #[async_trait]
 impl CommunicationPreferenceRepository for BackendErrorPreferenceRepository {
-    async fn put_communication_preference(
-        &self,
-        _record: CommunicationPreferenceRecord,
-    ) -> Result<(), OutboundError> {
-        Ok(())
-    }
-
     async fn load_communication_preference(
         &self,
         _key: CommunicationPreferenceKey,
-    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn write_communication_preference(
+        &self,
+        _request: WriteCommunicationPreferenceRequest,
+    ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
         Err(OutboundError::Backend)
     }
 }
@@ -1136,8 +1193,10 @@ fn preference_record(
     auth_prompt_target: Option<&str>,
 ) -> CommunicationPreferenceRecord {
     CommunicationPreferenceRecord {
-        tenant_id: TenantId::new("tenant-a").expect("valid tenant"),
-        user_id: UserId::new("user-a").expect("valid user"),
+        scope: DeliveryDefaultScope::personal(
+            TenantId::new("tenant-a").expect("valid tenant"),
+            UserId::new("user-a").expect("valid user"),
+        ),
         final_reply_target: final_reply_target.map(reply_ref),
         progress_target: progress_target.map(reply_ref),
         approval_prompt_target: approval_prompt_target.map(reply_ref),
@@ -1145,6 +1204,28 @@ fn preference_record(
         default_modality: Some(CommunicationModality::Text),
         updated_at: now(),
         updated_by: UserId::new("user-a").expect("valid user"),
+    }
+}
+
+fn shared_agent_preference_record(
+    final_reply_target: Option<&str>,
+    progress_target: Option<&str>,
+    approval_prompt_target: Option<&str>,
+    auth_prompt_target: Option<&str>,
+) -> CommunicationPreferenceRecord {
+    CommunicationPreferenceRecord {
+        scope: DeliveryDefaultScope::shared_agent(
+            TenantId::new("tenant-a").expect("valid tenant"),
+            AgentId::new("agent-a").expect("valid agent"),
+            Some(ProjectId::new("project-a").expect("valid project")),
+        ),
+        final_reply_target: final_reply_target.map(reply_ref),
+        progress_target: progress_target.map(reply_ref),
+        approval_prompt_target: approval_prompt_target.map(reply_ref),
+        auth_prompt_target: auth_prompt_target.map(reply_ref),
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin").expect("valid updater"),
     }
 }
 
@@ -1162,11 +1243,22 @@ fn subscription_id(value: &str) -> ProjectionSubscriptionId {
 }
 
 fn turn_scope(thread: &str) -> TurnScope {
-    TurnScope::new(
+    TurnScope::new_with_owner(
         TenantId::new("tenant-a").expect("valid tenant"),
         Some(AgentId::new("agent-a").expect("valid agent")),
         Some(ProjectId::new("project-a").expect("valid project")),
         thread_id(thread),
+        Some(UserId::new("user-a").expect("valid user")),
+    )
+}
+
+fn ownerless_agent_scope(thread: &str) -> TurnScope {
+    TurnScope::new_with_owner(
+        TenantId::new("tenant-a").expect("valid tenant"),
+        Some(AgentId::new("agent-a").expect("valid agent")),
+        Some(ProjectId::new("project-a").expect("valid project")),
+        thread_id(thread),
+        None,
     )
 }
 

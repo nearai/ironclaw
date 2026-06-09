@@ -35,6 +35,10 @@ function useChatEventsSourceForTest() {
 function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
   let messages = [];
   let pendingGate = null;
+  let isProcessing = false;
+  let activeRun = null;
+  const activeRunRef = { current: null };
+  const completedRuns = [];
   const context = {
     Date,
     React: {
@@ -56,13 +60,20 @@ function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
     setMessages: (updater) => {
       messages = typeof updater === "function" ? updater(messages) : updater;
     },
-    setIsProcessing: () => {},
+    setIsProcessing: (updater) => {
+      isProcessing =
+        typeof updater === "function" ? updater(isProcessing) : updater;
+    },
     setPendingGate: (updater) => {
       pendingGate =
         typeof updater === "function" ? updater(pendingGate) : updater;
     },
-    setActiveRun: () => {},
-    onRunCompleted: () => {},
+    setActiveRun: (updater) => {
+      activeRun = typeof updater === "function" ? updater(activeRun) : updater;
+      activeRunRef.current = activeRun;
+    },
+    activeRunRef,
+    onRunCompleted: (runId) => completedRuns.push(runId),
   });
 
   return {
@@ -72,6 +83,19 @@ function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
     },
     get pendingGate() {
       return pendingGate;
+    },
+    get isProcessing() {
+      return isProcessing;
+    },
+    get activeRun() {
+      return activeRun;
+    },
+    setCurrentActiveRun(run) {
+      activeRun = run;
+      activeRunRef.current = run;
+    },
+    get completedRuns() {
+      return completedRuns;
     },
   };
 }
@@ -252,4 +276,160 @@ test("useChatEvents: cleared non-auth gates are not restored by later projection
   });
 
   assert.equal(harness.pendingGate, null);
+});
+
+test("useChatEvents: stale terminal run status does not clear newer run", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-2", status: "running" } },
+          { run_status: { run_id: "run-1", status: "cancelled" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "running",
+  });
+});
+
+test("useChatEvents: stale terminal status before newer projection does not clear newer run", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.setCurrentActiveRun({
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "queued",
+    source: "local",
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "cancelled" } }],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "queued",
+    source: "local",
+  });
+});
+
+test("useChatEvents: stale running status before newer projection does not replace newer run", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.setCurrentActiveRun({
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "queued",
+    source: "local",
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "queued",
+    source: "local",
+  });
+});
+
+test("useChatEvents: stale failed run status does not append error", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-2", status: "running" } },
+          { run_status: { run_id: "run-1", status: "failed" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(harness.messages, []);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "running",
+  });
+});
+
+test("useChatEvents: stale completed run status does not refetch timeline", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-2", status: "running" } },
+          { run_status: { run_id: "run-1", status: "completed" } },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.completedRuns, []);
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "running",
+  });
 });

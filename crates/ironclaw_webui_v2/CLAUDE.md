@@ -50,15 +50,18 @@ browser-reachable.
 
 | Route ID | Method | Pattern | Streaming | Effect path |
 |---|---|---|---|---|
+| `webui.v2.get_session` | GET | `/api/webchat/v2/session` | None | `ProjectionOnly` |
 | `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | None | `ProductWorkflow` |
 | `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
+| `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | None | `ProductWorkflow` |
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | None | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | SSE | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | WebSocket | `ProjectionOnly` |
 | `webui.v2.cancel_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel` | None | `TurnCoordinator` |
 | `webui.v2.resolve_gate` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve` | None | `TurnCoordinator` |
-| `webui.v2.list_automations` | GET | `/api/webchat/v2/automations` (optional `?limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.list_automations` | GET | `/api/webchat/v2/automations` (optional `?limit=N&run_limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.list_connectable_channels` | GET | `/api/webchat/v2/channels/connectable` | None | `ProjectionOnly` |
 | `webui.v2.list_extensions` | GET | `/api/webchat/v2/extensions` | None | `ProjectionOnly` |
 | `webui.v2.list_extension_registry` | GET | `/api/webchat/v2/extensions/registry` | None | `ProjectionOnly` |
 | `webui.v2.install_extension` | POST | `/api/webchat/v2/extensions/install` | None | `ProductWorkflow` |
@@ -66,11 +69,22 @@ browser-reachable.
 | `webui.v2.remove_extension` | POST | `/api/webchat/v2/extensions/{package_id}/remove` | None | `ProductWorkflow` |
 | `webui.v2.get_extension_setup` | GET | `/api/webchat/v2/extensions/{package_id}/setup` | None | `ProjectionOnly` |
 | `webui.v2.setup_extension` | POST | `/api/webchat/v2/extensions/{package_id}/setup` | None | `ProductWorkflow` |
+| `webui.v2.get_llm_config` | GET | `/api/webchat/v2/llm/providers` | None | `ProjectionOnly` |
+| `webui.v2.upsert_llm_provider` | POST | `/api/webchat/v2/llm/providers` | None | `ProductWorkflow` |
+| `webui.v2.delete_llm_provider` | POST | `/api/webchat/v2/llm/providers/{provider_id}/delete` | None | `ProductWorkflow` |
+| `webui.v2.set_active_llm` | POST | `/api/webchat/v2/llm/active` | None | `ProductWorkflow` |
+| `webui.v2.test_llm_connection` | POST | `/api/webchat/v2/llm/test-connection` | None | `ProductWorkflow` |
+| `webui.v2.list_llm_models` | POST | `/api/webchat/v2/llm/list-models` | None | `ProductWorkflow` |
 
 All routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
 constructing the `WebUiAuthenticatedCaller` and injecting it as an
 axum `Extension` before the handler runs.
+
+The LLM configuration routes are operator-wide. Host composition must only
+mount them for authenticators that represent a single trusted operator; multi-
+user session/OIDC authenticators should leave those routes unmounted until an
+admin role boundary exists in `WebUiAuthenticatedCaller`.
 
 ### List-threads
 
@@ -90,6 +104,15 @@ not implement enumeration surface a retryable
 silently returning an empty list. The contract is locked by
 `list_threads_unimplemented_backend_returns_service_unavailable` in
 `crates/ironclaw_product_workflow/tests/reborn_services_contract.rs`.
+
+### Delete-thread
+
+`delete_thread` removes a caller-owned thread and transcript via
+`SessionThreadService::delete_thread`. The facade constructs the same
+owner-bound `(tenant, agent, project, owner_user_id)` scope used by timeline,
+stream, cancel, and gate-resolution probes. Missing and cross-owner thread ids
+both surface as `404 not_found` so callers cannot use deletion attempts as an
+existence oracle.
 
 ### Stream-events (WebSocket)
 

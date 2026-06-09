@@ -622,7 +622,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&calls[0].body).expect("body json");
         assert_eq!(body["channel"], "C123");
         assert_eq!(body["text"], "hello Slack");
-        assert_eq!(body["mrkdwn"], false);
+        assert_eq!(body["mrkdwn"], true);
         assert_eq!(body["thread_ts"], "1710000000.000001");
         assert!(matches!(
             sink.statuses().as_slice(),

@@ -17,6 +17,7 @@
 // Keep the unused lint local to these crate-private strategy contracts.
 #![allow(dead_code, unused_imports)]
 
+mod active_task_compaction;
 pub(crate) mod batch;
 mod budget;
 mod capability;
@@ -30,12 +31,16 @@ pub(crate) mod recovery;
 mod reply_admission;
 mod stop;
 
+pub(crate) use active_task_compaction::ActiveTaskPreservingCompactionStrategy;
 pub(crate) use batch::{
     BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary, DefaultBatchPolicyStrategy,
 };
 pub(crate) use budget::{BudgetStrategy, DefaultBudgetStrategy};
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};
-pub(crate) use compaction::{CompactionDecision, CompactionStrategy, DefaultCompactionStrategy};
+pub(crate) use compaction::{
+    ByteCapStrategy, CompactionDecision, CompactionForceStrategy, CompactionStrategy,
+    DefaultCompactionStrategy,
+};
 pub(crate) use context::{ContextPlan, ContextStrategy, DefaultContextStrategy};
 pub(crate) use drain::{DefaultInputDrainStrategy, InputDrainStrategy};
 pub(crate) use gate::{
@@ -51,8 +56,8 @@ pub(crate) use reply_admission::{
     DefaultReplyAdmissionStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy,
 };
 pub(crate) use stop::{
-    DefaultStopConditionStrategy, StopConditionStrategy, StopKind, StopOutcome, TurnEndKind,
-    TurnSummary,
+    CapabilityBatchTurnSummary, DefaultStopConditionStrategy, StopConditionStrategy, StopKind,
+    StopOutcome, TurnEndKind, TurnSummary,
 };
 
 #[cfg(test)]
