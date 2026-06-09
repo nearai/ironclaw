@@ -21,20 +21,23 @@ use ironclaw_product_workflow::{
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionDecision, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
-    AutomationProductFacade, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
-    ProductWorkflowError, RebornAutomationInfo, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornGetRunStateRequest, RebornOutboundDeliveryModality,
+    AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
+    OutboundPreferencesProductFacade, ProductAgentBoundCaller, ProductWorkflowError,
+    RebornAutomationInfo, RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornGetRunStateRequest,
+    RebornOperatorSetupRequest, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
@@ -43,11 +46,12 @@ use ironclaw_product_workflow::{
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    StaticConnectableChannelsProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
+    StaticConnectableChannelsProductFacade, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -69,6 +73,7 @@ use ironclaw_turns::{
     SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
     TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
+use secrecy::SecretString;
 use serde_json::json;
 use tokio::sync::{Notify, oneshot};
 
@@ -5184,6 +5189,140 @@ fn setup_services_with_requirements(
     .with_lifecycle_product_facade(Arc::new(
         RecordingLifecycleFacade::with_credential_requirements(requirements),
     ))
+}
+
+#[derive(Default)]
+struct SetupRecordingLlmConfigService {
+    snapshot_calls: Mutex<usize>,
+    upsert_provider_calls: Mutex<usize>,
+    set_active_calls: Mutex<usize>,
+}
+
+impl SetupRecordingLlmConfigService {
+    fn snapshot_count(&self) -> usize {
+        *self.snapshot_calls.lock().expect("lock")
+    }
+
+    fn upsert_provider_count(&self) -> usize {
+        *self.upsert_provider_calls.lock().expect("lock")
+    }
+
+    fn set_active_count(&self) -> usize {
+        *self.set_active_calls.lock().expect("lock")
+    }
+
+    fn empty_snapshot() -> LlmConfigSnapshot {
+        LlmConfigSnapshot {
+            providers: Vec::new(),
+            active: None,
+        }
+    }
+}
+
+#[async_trait]
+impl LlmConfigService for SetupRecordingLlmConfigService {
+    async fn snapshot(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        *self.snapshot_calls.lock().expect("lock") += 1;
+        Ok(Self::empty_snapshot())
+    }
+
+    async fn upsert_provider(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        *self.upsert_provider_calls.lock().expect("lock") += 1;
+        Ok(Self::empty_snapshot())
+    }
+
+    async fn delete_provider(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _provider_id: String,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        panic!("delete_provider is not used by operator setup tests")
+    }
+
+    async fn set_active(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        *self.set_active_calls.lock().expect("lock") += 1;
+        Ok(Self::empty_snapshot())
+    }
+
+    async fn test_connection(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, LlmConfigServiceError> {
+        panic!("test_connection is not used by operator setup tests")
+    }
+
+    async fn list_models(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, LlmConfigServiceError> {
+        panic!("list_models is not used by operator setup tests")
+    }
+
+    async fn start_nearai_login(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
+        panic!("start_nearai_login is not used by operator setup tests")
+    }
+
+    async fn complete_nearai_wallet_login(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
+        panic!("complete_nearai_wallet_login is not used by operator setup tests")
+    }
+
+    async fn start_codex_login(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<CodexLoginStart, LlmConfigServiceError> {
+        panic!("start_codex_login is not used by operator setup tests")
+    }
+}
+
+#[tokio::test]
+async fn run_operator_setup_requires_provider_id_for_provider_changes() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_llm_config_service(llm_config.clone());
+
+    let response = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                adapter: Some("open_ai_completions".to_string()),
+                api_key: Some(SecretString::from("sk-secret".to_string())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("setup response");
+
+    assert!(response.diagnostics.iter().any(|diagnostic| {
+        diagnostic.key == "provider_id"
+            && diagnostic.reason_code == "operator_setup_provider_id_required"
+    }));
+    assert_eq!(llm_config.snapshot_count(), 1);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
 }
 
 fn lifecycle_package_ref(package_id: &str) -> LifecyclePackageRef {

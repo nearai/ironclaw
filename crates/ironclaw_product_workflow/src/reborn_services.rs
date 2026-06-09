@@ -1207,6 +1207,18 @@ impl RebornServicesApi for RebornServices {
                 "Include provider_id with the requested model.",
             ));
         }
+        if request.provider_id.is_none()
+            && (request.adapter.is_some()
+                || request.base_url.is_some()
+                || request.api_key.is_some())
+        {
+            diagnostics.push(operator_setup_diagnostic(
+                "provider_id",
+                "operator_setup_provider_id_required",
+                "Provider setup cannot be changed without a provider id.",
+                "Include provider_id when creating or repairing provider configuration.",
+            ));
+        }
         if request.api_key.is_some() && request.adapter.is_none() {
             diagnostics.push(operator_setup_diagnostic(
                 "api_key",
