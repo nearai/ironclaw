@@ -442,29 +442,37 @@ fn internal_skill_error() -> RebornServicesError {
 
 fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperatorStatusResponse {
     let mut checks = Vec::new();
-    let runtime_ready = !matches!(
-        readiness.state,
-        crate::RebornReadinessState::Disabled | crate::RebornReadinessState::DevOnly
-    );
+    let (runtime_status, runtime_severity, runtime_remediation) = match readiness.state {
+        crate::RebornReadinessState::Disabled => (
+            RebornOperatorStatusState::NotConfigured,
+            RebornOperatorStatusSeverity::Warning,
+            Some("finish Reborn runtime setup before production use".to_string()),
+        ),
+        crate::RebornReadinessState::DevOnly => (
+            RebornOperatorStatusState::Degraded,
+            RebornOperatorStatusSeverity::Warning,
+            Some("finish Reborn runtime setup before production use".to_string()),
+        ),
+        crate::RebornReadinessState::ProductionValidated => (
+            RebornOperatorStatusState::Ready,
+            RebornOperatorStatusSeverity::Info,
+            None,
+        ),
+        crate::RebornReadinessState::MigrationDryRunValidated => (
+            RebornOperatorStatusState::Ready,
+            RebornOperatorStatusSeverity::Info,
+            None,
+        ),
+    };
     checks.push(status_check(
         "runtime",
-        if runtime_ready {
-            RebornOperatorStatusState::Ready
-        } else if matches!(readiness.state, crate::RebornReadinessState::DevOnly) {
-            RebornOperatorStatusState::Degraded
-        } else {
-            RebornOperatorStatusState::NotConfigured
-        },
-        if runtime_ready {
-            RebornOperatorStatusSeverity::Info
-        } else {
-            RebornOperatorStatusSeverity::Warning
-        },
+        runtime_status,
+        runtime_severity,
         format!(
             "Reborn profile {:?} is {:?}",
             readiness.profile, readiness.state
         ),
-        (!runtime_ready).then(|| "finish Reborn runtime setup before production use".to_string()),
+        runtime_remediation,
     ));
     checks.push(bool_check(
         "storage",
