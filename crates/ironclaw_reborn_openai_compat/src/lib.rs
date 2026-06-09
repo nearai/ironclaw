@@ -16,6 +16,8 @@ mod descriptors;
 mod error;
 #[cfg(feature = "openai-compat-beta")]
 mod handlers;
+#[cfg(feature = "openai-compat-beta")]
+mod identity;
 mod refs;
 mod responses;
 #[cfg(feature = "openai-compat-beta")]

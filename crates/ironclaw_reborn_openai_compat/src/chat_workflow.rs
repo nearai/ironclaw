@@ -11,6 +11,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::identity::{
+    OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
+};
 use crate::{
     OpenAiChatChoice, OpenAiChatCompletionId, OpenAiChatCompletionRequest,
     OpenAiChatCompletionResponse, OpenAiChatFinishReason, OpenAiChatMessage, OpenAiChatMessageRole,
@@ -34,9 +37,6 @@ const DEFAULT_CHAT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CHAT_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CHAT_COMPLETION_MESSAGES: usize = 1_000;
-const OPENAI_COMPAT_ADAPTER_ID: &str = "openai_compat";
-const OPENAI_COMPAT_INSTALLATION_ID: &str = "openai_compat_default";
-const OPENAI_COMPAT_ACTOR_KIND: &str = "openai_compat_user";
 const OPENAI_COMPAT_CONVERSATION_PREFIX: &str = "chat_completion";
 
 #[derive(Debug, Clone)]

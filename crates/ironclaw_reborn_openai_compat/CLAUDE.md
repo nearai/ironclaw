@@ -1,7 +1,7 @@
 # ironclaw_reborn_openai_compat
 
 Reborn-native OpenAI-compatible API contract surface for #3283 / #4442 /
-#4443 / #4444.
+#4443 / #4444 / #4445.
 
 ## Boundary
 
@@ -65,6 +65,30 @@ Completions slice:
 - This crate still must not call v1 gateway handlers, `ironclaw_llm`,
   `TurnCoordinator`, projection internals, listener APIs, secrets, DBs, or the
   host runtime directly.
+
+## Responses Workflow
+
+With `openai-compat-beta`, host composition may also inject
+`OpenAiCompatRouterState::with_responses(...)` for the non-streaming Responses
+slice:
+
+- `POST /api/v1/responses` and `POST /v1/responses` reserve opaque `resp_*`
+  refs with actor-scoped idempotency, submit create requests through
+  `ProductWorkflow`, and wait through a composition-supplied
+  `OpenAiResponsesProjectionReader`.
+- `GET /api/v1/responses/{id}` and `GET /v1/responses/{id}` read
+  projection-backed state through an authorized opaque-ref lookup. They must not
+  reconstruct state from legacy messages.
+- `POST /api/v1/responses/{id}/cancel` and `POST /v1/responses/{id}/cancel`
+  submit a typed ProductWorkflow control action for authorized, bound response
+  refs. Unauthorized and nonexistent refs stay indistinguishable at the API
+  boundary.
+- Request `tools` / `tool_choice` remain unsupported in this slice, except that
+  an empty `tools: []` is treated like an omitted field.
+- Client-controlled Responses input is serialized as a structured
+  `openai_compat.responses_input.v1` JSON payload inside `UserMessagePayload`
+  text so CR/LF-delimited role spoofing cannot create synthetic transcript
+  lines while `function_call` `call_id` and `arguments` remain available.
 
 ## DTO Policy
 

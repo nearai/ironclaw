@@ -9,6 +9,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::identity::{
+    OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
+};
 use crate::{
     OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatBindInternalRefs,
     OpenAiCompatHttpError, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,
@@ -16,9 +19,8 @@ use crate::{
     OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
     OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
     OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
-    OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
-    OpenAiResponsesCreateRequest, OpenAiResponsesInput, OpenAiResponsesInputItem,
-    OpenAiResponsesMessageRole,
+    OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject, OpenAiResponsesCreateRequest,
+    OpenAiResponsesInput, OpenAiResponsesInputItem, OpenAiResponsesMessageRole,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -32,10 +34,8 @@ use ironclaw_product_adapters::{
 
 const DEFAULT_RESPONSES_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_RESPONSES_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RESPONSES_INPUT_ITEMS: usize = 1_000;
-const OPENAI_COMPAT_ADAPTER_ID: &str = "openai_compat";
-const OPENAI_COMPAT_INSTALLATION_ID: &str = "openai_compat_default";
-const OPENAI_COMPAT_ACTOR_KIND: &str = "openai_compat_user";
 const OPENAI_COMPAT_CONVERSATION_PREFIX: &str = "response";
 
 #[derive(Clone)]
@@ -78,6 +78,11 @@ impl OpenAiResponsesWorkflow {
         idempotency_key: Option<OpenAiCompatIdempotencyKey>,
         surface: OpenAiCompatRouteSurface,
     ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError> {
+        if raw_body.len() > MAX_RESPONSES_BODY_BYTES {
+            return Err(OpenAiCompatHttpError::invalid_request(Some(
+                "body".to_string(),
+            )));
+        }
         let request = parse_response_create_request(raw_body)?;
         validate_responses_request(&request)?;
 
@@ -342,12 +347,12 @@ impl OpenAiResponsesWorkflow {
         previous_mapping: Option<&OpenAiCompatResourceMapping>,
         user_message_payload: UserMessagePayload,
     ) -> Result<ProductInboundEnvelope, OpenAiCompatHttpError> {
-        if let Some(mapping) = previous_mapping {
-            if &mapping.owner != caller.scope() {
-                return Err(OpenAiCompatHttpError::not_found(Some(
-                    "previous_response_id".to_string(),
-                )));
-            }
+        if let Some(mapping) = previous_mapping
+            && &mapping.owner != caller.scope()
+        {
+            return Err(OpenAiCompatHttpError::not_found(Some(
+                "previous_response_id".to_string(),
+            )));
         }
         let conversation_ref = previous_mapping
             .map(|mapping| mapping.public_id.as_str())
@@ -465,7 +470,7 @@ fn validate_responses_request(
     if request
         .tools
         .as_ref()
-        .map_or(false, |tools| !tools.is_empty())
+        .is_some_and(|tools| !tools.is_empty())
     {
         return Err(OpenAiCompatHttpError::invalid_request(Some(
             "tools".to_string(),
@@ -632,20 +637,13 @@ fn responses_user_message_payload(
 fn responses_input_to_product_text(
     request: &OpenAiResponsesCreateRequest,
 ) -> Result<String, OpenAiCompatHttpError> {
-    let mut lines = Vec::new();
-    if let Some(instructions) = request
-        .instructions
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
-        lines.push(format!(
-            "instructions: {}",
-            sanitize_product_text_segment(instructions)
-        ));
-    }
-    match &request.input {
+    let input = match &request.input {
         OpenAiResponsesInput::Text(text) => {
-            lines.push(format!("user: {}", sanitize_product_text_segment(text)));
+            vec![serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": sanitize_product_text_fragment(text),
+            })]
         }
         OpenAiResponsesInput::Items(items) => {
             if items.is_empty() || items.len() > MAX_RESPONSES_INPUT_ITEMS {
@@ -653,52 +651,48 @@ fn responses_input_to_product_text(
                     "input".to_string(),
                 )));
             }
-            for item in items {
-                lines.push(response_input_item_to_text(item));
-            }
+            items.iter().map(response_input_item_to_value).collect()
         }
-    }
-    if lines.is_empty() {
-        return Err(OpenAiCompatHttpError::invalid_request(Some(
-            "input".to_string(),
-        )));
-    }
-    Ok(lines.join("\n"))
+    };
+    serde_json::to_string(&serde_json::json!({
+        "format": "openai_compat.responses_input.v1",
+        "instructions": request
+            .instructions
+            .as_ref()
+            .filter(|value| !value.is_empty())
+            .map(|value| sanitize_product_text_fragment(value)),
+        "input": input,
+    }))
+    .map_err(|_| OpenAiCompatHttpError::internal())
 }
 
-fn response_input_item_to_text(item: &OpenAiResponsesInputItem) -> String {
+fn response_input_item_to_value(item: &OpenAiResponsesInputItem) -> serde_json::Value {
     match item {
-        OpenAiResponsesInputItem::Message { role, content } => {
-            format!(
-                "{}: {}",
-                response_role_name(*role),
-                content_value_to_text(content)
-            )
-        }
+        OpenAiResponsesInputItem::Message { role, content } => serde_json::json!({
+            "type": "message",
+            "role": response_role_name(*role),
+            "content": content_value_to_text(content),
+        }),
         OpenAiResponsesInputItem::FunctionCall {
             call_id,
             name,
             arguments,
-        } => {
-            format!(
-                "function_call:{}:{}: {}",
-                sanitize_product_text_segment(call_id),
-                sanitize_product_text_segment(name),
-                sanitize_product_text_segment(arguments)
-            )
-        }
-        OpenAiResponsesInputItem::FunctionCallOutput { call_id, output } => {
-            format!(
-                "function_call_output:{}: {}",
-                sanitize_product_text_segment(call_id),
-                content_value_to_text(output)
-            )
-        }
+        } => serde_json::json!({
+            "type": "function_call",
+            "call_id": sanitize_product_text_fragment(call_id),
+            "name": sanitize_product_text_fragment(name),
+            "arguments": sanitize_product_text_fragment(arguments),
+        }),
+        OpenAiResponsesInputItem::FunctionCallOutput { call_id, output } => serde_json::json!({
+            "type": "function_call_output",
+            "call_id": sanitize_product_text_fragment(call_id),
+            "output": content_value_to_text(output),
+        }),
     }
 }
 
-fn sanitize_product_text_segment(value: &str) -> String {
-    value.replace(['\n', '\r', ':'], " ")
+fn sanitize_product_text_fragment(value: &str) -> String {
+    value.replace(['\n', '\r', '\u{2028}', '\u{2029}'], " ")
 }
 
 fn response_role_name(role: OpenAiResponsesMessageRole) -> &'static str {
@@ -712,7 +706,7 @@ fn response_role_name(role: OpenAiResponsesMessageRole) -> &'static str {
 
 fn content_value_to_text(content: &serde_json::Value) -> String {
     match content {
-        serde_json::Value::String(text) => sanitize_product_text_segment(text),
+        serde_json::Value::String(text) => sanitize_product_text_fragment(text),
         serde_json::Value::Array(items) => items
             .iter()
             .filter_map(content_array_item_text)
@@ -729,7 +723,7 @@ fn content_array_item_text(value: &serde_json::Value) -> Option<String> {
         Some("text" | "input_text" | "output_text") => object
             .get("text")
             .and_then(serde_json::Value::as_str)
-            .map(sanitize_product_text_segment),
+            .map(sanitize_product_text_fragment),
         _ => Some("[non_text_content]".to_string()),
     }
 }
