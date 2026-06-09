@@ -25,7 +25,7 @@ Decision legend as in `01-auth.md`: **Keep** / **Change** / **Beta-break**.
 | 4 | Redirect sanitization | v1 OAuth redirect handling | `?redirect_after=` must start `/`, reject `//`,`/\`, percent-decoded forms, CRLF, fragment markers (`auth/pending.rs`) | **Keep** (hardened) |
 | 5 | Request body limit | axum `DefaultBodyLimit` 14 MiB global; 128 KiB system-prompt route (`platform/router.rs:565,408`) | Outer `RequestBodyLimitLayer` 14 MiB default **plus** descriptor per-route caps: `create_thread` 16 KiB, `send_message` 1 MiB, `cancel_run`/`resolve_gate` 4 KiB, `get_timeline`/`stream_events` `NoBody`; SSO `session_exchange`/`logout` 1 KiB (`webui_body_limit.rs`, `auth/routes.rs:138`) | **Change** — strictly tighter; per-route descriptor caps replace one global limit |
 | 6 | Rate limiting | Sliding window: chat 30/60s per-user, webhook 10/60s global (`platform/state.rs:74-140`) | Descriptor-driven sliding window: mutation 60/60s, read 120/60s, stream 30/60s **PerCaller**; public SSO + OAuth callback **PerIp** 60–120/60s; unsupported scope fails closed at composition (`webui_rate_limit.rs`, `auth/routes.rs:140-258`) | **Change** — per-route + dual scope (PerCaller for the API, PerIp for the public surface) |
-| 7 | Connection limit | `GATEWAY_MAX_CONNECTIONS` (default 100, SSE+WS combined); `SSE_BROADCAST_BUFFER` (`platform/state.rs`) | `SseCapacity`: 3 concurrent streams per `(tenant,user)`, 5-min max lifetime; WS shares the pool (`ironclaw_webui_v2/src/sse_capacity.rs`) | **Change** — per-caller stream cap + max lifetime replaces a global connection ceiling |
+| 7 | Connection limit | `GATEWAY_MAX_CONNECTIONS` (default 100, SSE+WS combined); `SSE_BROADCAST_BUFFER` (`platform/state.rs`) | `SseCapacity`: 3 concurrent streams per `(tenant,user)`, 5-min max lifetime; WS shares the pool (`ironclaw_webui_v2/src/sse_capacity.rs`) | **Beta-break** → #3615 follow-up — the per-caller cap is *stricter per caller*, but v1's **global** ceiling (total SSE+WS process connections) has no v2 analogue: many authenticated callers / source IPs can exceed v1's total. A global backstop must land in the host `serve` lifecycle; no test locks it yet (none exists to lock) |
 | 8 | Peer-IP source | n/a | PerIp limiter keys on host-injected `ConnectInfo<SocketAddr>`, never `X-Forwarded-For`/`X-Real-IP`; missing peer fails closed (`webui_rate_limit.rs`) | **Keep** — trusted transport peer only |
 
 ## Test coverage
@@ -64,13 +64,23 @@ default.
 - `ironclaw_webui_v2/src/sse_capacity.rs::tests`: 3-stream per-caller
   cap, independent per caller (row 7).
 
-## Notes / no beta-breaks
+## Notes
 
-All rows are **Keep** or **Change** — no v1 capability is dropped in
-this slice; the changes tighten limits (per-route caps, dual-scope rate
-limiting) rather than relax them. The v1 `GATEWAY_MAX_CONNECTIONS`
-global ceiling has no direct v2 analogue (row 7): v2 bounds streams
-per-caller with a max lifetime instead, which is a stricter shape for
-the SSE/WS surface but does not cap total process connections — if a
-global ceiling is still wanted at the host listener, it belongs in the
-ingress `serve` lifecycle, not the per-route middleware.
+Rows 1–6 and 8 are **Keep** or **Change** — those changes tighten limits
+(per-route caps, dual-scope rate limiting) rather than relax them.
+
+### Intentional beta-break (linked)
+
+- **Global connection ceiling → per-caller stream cap** (row 7,
+  #3615 follow-up). v1's `GATEWAY_MAX_CONNECTIONS` bounded *total*
+  SSE+WS process connections (default 100). v2's `SseCapacity` is a
+  stricter cap **per `(tenant,user)`** (3 streams + 5-min lifetime) but
+  has **no global backstop**: an attacker controlling many authenticated
+  callers — or many source IPs against the public SSO surface — can open
+  more total concurrent streams than v1 permitted. This is the one row
+  where a v1 capability is genuinely dropped, not merely tightened. A
+  global ceiling belongs in the host `serve` listener lifecycle (e.g. a
+  `tower` concurrency-limit or a connection semaphore around the bound
+  `TcpListener`), not the per-route middleware; it is not yet
+  implemented, so no test locks it. Until it lands, treat row 7 as a
+  known parity gap on the v2 surface.
