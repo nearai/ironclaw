@@ -24,7 +24,7 @@ Plus: introduce the `CapabilityResultStore` trait (does not exist today). Introd
 | 2 | `CapabilityResultStore` trait lives in `ironclaw_reborn_event_store`, NOT `ironclaw_loop_support`. | Reviewer 1 R2 — `loop_support` is adapter glue, not persistence. |
 | 3 | Goal + tombstone stores use `ScopedFilesystem` (typed `FilesystemSubagentGoalStore` + new `FilesystemSubagentTombstoneStore`). | `.claude/rules/database.md` direction-of-travel for file-shaped, point-key/value access. Goal store already implements this. |
 | 4 | Gate resolution + capability result store + settlement event log + idempotency ledger use **typed libSQL/PostgreSQL repositories**, NOT ScopedFilesystem. | `_contract-freeze-index.md` §2 storage model: high write rate, transactional multi-table consistency, scoped index scans. |
-| 5 | All durable tables carry `tenant_id TEXT NOT NULL`, `user_id TEXT NOT NULL`, `agent_id TEXT NULL`. Primary lookup index leads with `(tenant_id, user_id, agent_id, …)`. | `_contract-freeze-index.md` §2 + §8 — cross-tenant scan isolation; `TurnScope` projection parity. |
+| 5 | All durable tables carry `tenant_id TEXT NOT NULL`, `user_id TEXT NOT NULL`, `agent_id TEXT NULL`. Scoped lookups are guaranteed by a scope-prefixed index on each table (e.g. `idx_*_scope` on `(tenant_id, user_id, agent_id, ...)`). Primary keys remain shape-appropriate per table (e.g. `(gate_ref, child_run_id)`, `(result_ref)`) — scope columns are always PRESENT and ALWAYS REACHED via a scoped index, but need not lead every PK. | `_contract-freeze-index.md` §2 + §8 — cross-tenant scan isolation; `TurnScope` projection parity. |
 | 6 | Settlement is first-writer-wins everywhere: `INSERT OR IGNORE` (libSQL) / `ON CONFLICT DO NOTHING` (PostgreSQL). | Plan Part 1 soft corrections — match in-memory `gate_resolution.rs` skip-if-set semantic. |
 | 7 | Tombstone store gets one behavior correction: in-memory store moves from last-writer-wins to first-writer-wins to match durable backend. | Same as #6 — keep contract uniform across in-memory and durable paths. |
 | 8 | In-flight RAM state at deploy → accept loss. Feature toggle (`subagent.background_enabled`, default false) gates user impact. | Plan WU-B "Migration of in-flight RAM state at deploy" — explicit recommendation. |
@@ -133,23 +133,27 @@ CREATE INDEX IF NOT EXISTS idx_sgac_undelivered_terminal
 -- Reverse-index table (replaces GateResolutionInner.gates_by_child)
 CREATE TABLE IF NOT EXISTS subagent_gate_child_index (
     tenant_id    TEXT NOT NULL,
+    user_id      TEXT NOT NULL,
+    agent_id     TEXT,                    -- NULL for non-agent runs
     child_run_id TEXT NOT NULL,
     gate_ref     TEXT NOT NULL,
     PRIMARY KEY (child_run_id, gate_ref)
 );
-CREATE INDEX IF NOT EXISTS idx_sgci_tenant_child
-    ON subagent_gate_child_index (tenant_id, child_run_id);
+CREATE INDEX IF NOT EXISTS idx_sgci_scope
+    ON subagent_gate_child_index (tenant_id, user_id, agent_id, child_run_id);
 
 -- Deliverable queue table (replaces GateResolutionInner.deliverable_by_child)
 CREATE TABLE IF NOT EXISTS subagent_gate_deliverable_queue (
     tenant_id    TEXT NOT NULL,
+    user_id      TEXT NOT NULL,
+    agent_id     TEXT,
     child_run_id TEXT NOT NULL,
     gate_ref     TEXT NOT NULL,
     queued_at    TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (child_run_id, gate_ref)
 );
-CREATE INDEX IF NOT EXISTS idx_sgdq_tenant_child
-    ON subagent_gate_deliverable_queue (tenant_id, child_run_id);
+CREATE INDEX IF NOT EXISTS idx_sgdq_scope
+    ON subagent_gate_deliverable_queue (tenant_id, user_id, agent_id, child_run_id);
 
 -- Capacity counter (replaces per-spawn SELECT COUNT(*) on hot path)
 -- Sharded by bucket for write throughput on hot scopes:
@@ -219,22 +223,26 @@ CREATE INDEX IF NOT EXISTS idx_sgac_undelivered_terminal
 
 CREATE TABLE IF NOT EXISTS subagent_gate_child_index (
     tenant_id    TEXT NOT NULL,
+    user_id      TEXT NOT NULL,
+    agent_id     TEXT,
     child_run_id TEXT NOT NULL,
     gate_ref     TEXT NOT NULL,
     PRIMARY KEY (child_run_id, gate_ref)
 );
-CREATE INDEX IF NOT EXISTS idx_sgci_tenant_child
-    ON subagent_gate_child_index (tenant_id, child_run_id);
+CREATE INDEX IF NOT EXISTS idx_sgci_scope
+    ON subagent_gate_child_index (tenant_id, user_id, agent_id, child_run_id);
 
 CREATE TABLE IF NOT EXISTS subagent_gate_deliverable_queue (
     tenant_id    TEXT        NOT NULL,
+    user_id      TEXT        NOT NULL,
+    agent_id     TEXT,
     child_run_id TEXT        NOT NULL,
     gate_ref     TEXT        NOT NULL,
     queued_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (child_run_id, gate_ref)
 );
-CREATE INDEX IF NOT EXISTS idx_sgdq_tenant_child
-    ON subagent_gate_deliverable_queue (tenant_id, child_run_id);
+CREATE INDEX IF NOT EXISTS idx_sgdq_scope
+    ON subagent_gate_deliverable_queue (tenant_id, user_id, agent_id, child_run_id);
 
 -- Capacity counter (replaces per-spawn SELECT COUNT(*) on hot path)
 -- Sharded by bucket for write throughput on hot scopes:
@@ -710,6 +718,7 @@ Soundness eval: "Doc treats the durable swap as drop-in; reality requires introd
 
 ```rust
 use async_trait::async_trait;
+use ironclaw_host_api::InvocationId;
 use ironclaw_turns::{TurnRunId, TurnScope};
 use ironclaw_turns::run_profile::host::LoopResultRef;
 use thiserror::Error;
@@ -732,17 +741,22 @@ pub enum CapabilityResultStoreError {
 pub trait CapabilityResultStore: Send + Sync {
     /// Persist pre-serialized capability result bytes.
     ///
-    /// Caller MUST pass JSON bytes (typically from `serde_json::to_vec(&value)`).
-    /// Returns `(result_ref, byte_len)`. `byte_len` is `payload.len() as u64` —
+    /// Returns `(result_ref, byte_len)`. `byte_len = payload.len() as u64` —
     /// no second serialization happens.
     ///
-    /// Idempotent under retries keyed on (scope, run_id, capability_id) within
-    /// the same invocation.
+    /// **True idempotency** is keyed on `(scope, run_id, capability_id,
+    /// invocation_id)`. Two writes with the same tuple return the SAME
+    /// `result_ref` — the first write's value (first-writer-wins via the
+    /// UNIQUE index on `(tenant_id, user_id, run_id, capability_id,
+    /// invocation_id)`). This matters for retry-after-transient-error and
+    /// for reconciler replay. A fresh `invocation_id` always gets a fresh
+    /// `result_ref`.
     async fn write(
         &self,
         scope: &TurnScope,
         run_id: &TurnRunId,
         capability_id: &str,
+        invocation_id: InvocationId,
         payload: Vec<u8>,
     ) -> Result<(LoopResultRef, u64), CapabilityResultStoreError>;
 
@@ -804,6 +818,7 @@ Capability results are the wrong shape for `ScopedFilesystem`:
 - **`ironclaw_reborn_event_store` already has libSQL and PostgreSQL typed-repo backends** for `DurableEventLog`. The `capability_results` table follows the same module shape: `crates/ironclaw_reborn_event_store/src/libsql/capability_result_repo.rs` and `.../postgres/capability_result_repo.rs`. No new dependency; existing feature flags gate respective backends.
 
 **In-memory impl** (`InMemoryCapabilityResultStore`) retained as `local_dev` fallback — same role as `InMemoryDurableEventLog`. Wraps `Mutex<HashMap<String, Vec<u8>>>` (no `BoundedRing` — production-readiness check gates its use to `LocalDevTest` mode).
+The in-memory impl keyed on `(scope, run_id, capability_id, invocation_id) → (result_ref, payload)` provides the same true-idempotency guarantee as the SQL backends. A second write with the same tuple returns the cached `result_ref`.
 
 **Implementation note.** Both libSQL and PostgreSQL backends use a single statement: `INSERT INTO capability_results (..., payload, byte_len) VALUES (..., ?, ?)` with `byte_len = payload.len() as u64`. No `serde_json` call inside the backend. PostgreSQL's JSONB column accepts a `bytea`/`Vec<u8>` parameter via `payload::jsonb` cast: the Postgres driver converts the bytes to JSONB representation server-side. libSQL stores raw bytes in BLOB. The in-memory `InMemoryCapabilityResultStore` holds `Mutex<HashMap<String, Vec<u8>>>` — keys are the opaque ref strings, values are the serialized bytes. Round-trip parity is byte-exact across all three impls: bytes in == bytes out.
 
@@ -816,18 +831,21 @@ CREATE TABLE IF NOT EXISTS capability_results (
     agent_id      TEXT,                         -- nullable: non-agent runs
     run_id        TEXT NOT NULL,
     capability_id TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
     result_ref    TEXT NOT NULL PRIMARY KEY,     -- opaque ref minted by write()
     byte_len      INTEGER NOT NULL,             -- serialized byte count
     payload       BLOB NOT NULL                 -- raw JSON bytes (Vec<u8> from serde_json::to_vec)
         CHECK (length(payload) <= 8388608),     -- 8 MiB hard cap
     tombstoned_at TEXT,                         -- ISO-8601; NULL = live
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_capability_results_run
     ON capability_results (tenant_id, user_id, run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_capability_results_cap
     ON capability_results (tenant_id, user_id, agent_id, capability_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_capability_results_invocation
+    ON capability_results (tenant_id, user_id, run_id, capability_id, invocation_id);
 ```
 
 `payload` is `BLOB` (libSQL has no native JSONB). Application deserializes with `serde_json::from_slice`. `tombstoned_at` nullable TEXT for causal ordering on GC audits.
@@ -843,6 +861,7 @@ CREATE TABLE IF NOT EXISTS capability_results (
     agent_id      TEXT,
     run_id        TEXT        NOT NULL,
     capability_id TEXT        NOT NULL,
+    invocation_id TEXT        NOT NULL,
     result_ref    TEXT        NOT NULL PRIMARY KEY,
     byte_len      BIGINT      NOT NULL,
     payload       JSONB       NOT NULL          -- written from Vec<u8> via JSONB cast; bytes stored canonically
@@ -855,6 +874,8 @@ CREATE INDEX IF NOT EXISTS idx_capability_results_run
     ON capability_results (tenant_id, user_id, run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_capability_results_cap
     ON capability_results (tenant_id, user_id, agent_id, capability_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_capability_results_invocation
+    ON capability_results (tenant_id, user_id, run_id, capability_id, invocation_id);
 ```
 
 PostgreSQL uses `JSONB` (supports `@>` containment + future partial reads), `BIGINT` for `byte_len` (Rust `u64` via `i64` cast with range check at boundary), `TIMESTAMPTZ` for time columns. Idempotency: `INSERT INTO ... ON CONFLICT (result_ref) DO NOTHING`.
@@ -890,6 +911,7 @@ async fn write_capability_result(
             &scope_from_run_context(write.run_context),
             &write.run_context.run_id.into(),
             write.capability_id.as_str(),
+            write.invocation_id,
             bytes,
         )
         .await
@@ -1495,7 +1517,7 @@ When toggle flips `true` for the first time:
 
 If `subagent.background_enabled` is set back to `false` after a period it was `true`:
 
-1. `ironclaw_reborn_composition`'s runtime wiring re-selects `InMemoryBoundedSubagentGoalStore` and the in-memory gate/tombstone stores — same path used before WU-C landed.
+1. `ironclaw_reborn_composition`'s runtime wiring continues to use whichever stores were already wired — goal store stays `FilesystemSubagentGoalStore` (durable), gate resolution / tombstone / capability result stores stay on their configured durable backends. The toggle controls only the admission gate (whether `SpawnSubagentPort` accepts `mode=background`), NOT the backend selection. Toggling OFF does not flip any store from durable to in-memory.
 2. `SubagentRestartReconciler` still runs at boot (required component per `production_readiness.rs`). With toggle off, no new background spawns admitted → no new durable rows written. Reconciler scans durable settlement event log, finds no undelivered rows with living in-memory consumers, exits as no-op.
 3. Durable rows written during ON-period remain. Not deleted, cannot be deleted without explicit GC migration. Correct per **LLM data retention rule** in `CLAUDE.md`: "LLM data is never deleted."
 
