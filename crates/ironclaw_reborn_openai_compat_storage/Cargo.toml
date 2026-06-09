@@ -27,6 +27,8 @@ sha2 = "0.10"
 tracing = "0.1"
 
 [dev-dependencies]
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 tokio = { version = "1", features = ["macros", "rt"] }
 
 [lints]

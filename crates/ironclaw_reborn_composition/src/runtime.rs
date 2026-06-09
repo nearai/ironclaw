@@ -710,6 +710,15 @@ impl RebornRuntime {
         &self.services
     }
 
+    #[cfg(test)]
+    #[allow(
+        dead_code,
+        reason = "used only by selected test modules; feature-filtered all-target builds may not compile those call sites"
+    )]
+    pub(crate) fn clear_local_runtime_for_test(&mut self) {
+        self.services.local_runtime = None;
+    }
+
     /// Operator boot config, when the runtime was assembled with one. The
     /// WebUI facade uses it to compose the LLM-config settings service.
     #[cfg(feature = "root-llm-provider")]

@@ -65,6 +65,7 @@ middleware with v1's `src/channels/web/`.
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<UserId>` |
 | `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
 | `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw-reborn serve` subcommand (follow-up PR) hands it to `axum::serve` from a host-owned listener |
+| `ProtectedRouteMount` | Host-supplied protected API route fragment merged inside the WebUI bearer-auth layer with descriptor-driven body/rate limits. Reborn OpenAI-compatible routes use this seam; do not use it for v1 gateway routers. |
 
 ### Middleware stack composed by `webui_v2_app`
 
@@ -108,6 +109,9 @@ Inbound order (outer → inner → handler):
    timeline reads stay bearer-only. On success the middleware inserts
    a `WebUiAuthenticatedCaller` extension built from
    `config.tenant_id` plus the authenticator's `UserId`.
+   When `openai-compat-beta` is enabled, the same verified bearer result also
+   inserts an `OpenAiCompatAuthenticatedCaller` extension for protected
+   OpenAI-compatible route mounts; route crates must not mint this evidence.
 8. **Descriptor-driven per-route rate limit**
    (`webui_rate_limit::enforce_rate_limit`) — reads
    `ironclaw_webui_v2::webui_v2_routes()` plus mounted product-auth

@@ -1,8 +1,12 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use tokio::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_product_adapters::ProductInboundAck;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -13,6 +17,7 @@ const RESPONSE_PREFIX: &str = "resp_";
 const MAX_PUBLIC_REF_BYTES: usize = 96;
 const MAX_INTERNAL_REF_BYTES: usize = 256;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
+const DEFAULT_IN_MEMORY_REF_CAPACITY: usize = 4_096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum OpenAiCompatRefError {
@@ -320,8 +325,11 @@ pub struct OpenAiCompatResourceMapping {
     pub owner: OpenAiCompatActorScope,
     pub surface: OpenAiCompatRouteSurface,
     pub request_fingerprint: OpenAiCompatRequestFingerprint,
+    pub created_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<OpenAiCompatIdempotencyKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_ack: Option<ProductInboundAck>,
     pub binding: OpenAiCompatResourceBinding,
 }
 
@@ -332,7 +340,11 @@ struct OpenAiCompatResourceMappingFields {
     owner: OpenAiCompatActorScope,
     surface: OpenAiCompatRouteSurface,
     request_fingerprint: OpenAiCompatRequestFingerprint,
+    #[serde(default)]
+    created_at: Option<u64>,
     idempotency_key: Option<OpenAiCompatIdempotencyKey>,
+    #[serde(default)]
+    accepted_ack: Option<ProductInboundAck>,
     binding: OpenAiCompatResourceBinding,
 }
 
@@ -347,7 +359,9 @@ impl<'de> Deserialize<'de> for OpenAiCompatResourceMapping {
             owner: fields.owner,
             surface: fields.surface,
             request_fingerprint: fields.request_fingerprint,
+            created_at: fields.created_at.unwrap_or_else(unix_timestamp_now),
             idempotency_key: fields.idempotency_key,
+            accepted_ack: fields.accepted_ack,
             binding: fields.binding,
         };
         mapping.validate().map_err(serde::de::Error::custom)?;
@@ -468,6 +482,27 @@ impl OpenAiCompatBindInternalRefs {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiCompatRecordAcceptedAck {
+    pub owner: OpenAiCompatActorScope,
+    pub public_id: OpenAiCompatPublicId,
+    pub accepted_ack: ProductInboundAck,
+}
+
+impl OpenAiCompatRecordAcceptedAck {
+    pub fn new(
+        owner: OpenAiCompatActorScope,
+        public_id: OpenAiCompatPublicId,
+        accepted_ack: ProductInboundAck,
+    ) -> Self {
+        Self {
+            owner,
+            public_id,
+            accepted_ack,
+        }
+    }
+}
+
 #[async_trait]
 pub trait OpenAiCompatRefStore: Send + Sync {
     async fn reserve(
@@ -480,15 +515,21 @@ pub trait OpenAiCompatRefStore: Send + Sync {
         request: OpenAiCompatBindInternalRefs,
     ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError>;
 
+    async fn record_accepted_ack(
+        &self,
+        request: OpenAiCompatRecordAcceptedAck,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError>;
+
     async fn lookup_authorized(
         &self,
         request: OpenAiCompatRefLookup,
     ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError>;
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct InMemoryOpenAiCompatRefStore {
     state: Arc<Mutex<InMemoryOpenAiCompatRefState>>,
+    max_mappings: usize,
 }
 
 #[derive(Default)]
@@ -504,13 +545,37 @@ struct IdempotencyIndexKey {
     key: OpenAiCompatIdempotencyKey,
 }
 
+impl Default for InMemoryOpenAiCompatRefStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InMemoryOpenAiCompatRefStore {
+    pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_IN_MEMORY_REF_CAPACITY)
+    }
+
+    pub fn with_capacity(max_mappings: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(InMemoryOpenAiCompatRefState::default())),
+            max_mappings: max_mappings.max(1),
+        }
+    }
+
+    async fn lock_state(&self) -> MutexGuard<'_, InMemoryOpenAiCompatRefState> {
+        self.state.lock().await
+    }
+}
+
 #[async_trait]
 impl OpenAiCompatRefStore for InMemoryOpenAiCompatRefStore {
     async fn reserve(
         &self,
         request: OpenAiCompatRefReservation,
     ) -> Result<OpenAiCompatRefReservationOutcome, OpenAiCompatRefError> {
-        let mut state = self.lock_state()?;
+        let mut state = self.lock_state().await;
+        evict_oldest_if_needed(&mut state, self.max_mappings);
         if let Some(key) = request.idempotency_key.clone() {
             let index = IdempotencyIndexKey {
                 owner: request.owner.clone(),
@@ -555,7 +620,7 @@ impl OpenAiCompatRefStore for InMemoryOpenAiCompatRefStore {
         &self,
         request: OpenAiCompatBindInternalRefs,
     ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        let mut state = self.lock_state()?;
+        let mut state = self.lock_state().await;
         let Some(mapping) = state.by_public_id.get_mut(&request.public_id) else {
             return Ok(None);
         };
@@ -569,11 +634,27 @@ impl OpenAiCompatRefStore for InMemoryOpenAiCompatRefStore {
         Ok(Some(mapping.clone()))
     }
 
+    async fn record_accepted_ack(
+        &self,
+        request: OpenAiCompatRecordAcceptedAck,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
+        let mut state = self.lock_state().await;
+        let Some(mapping) = state.by_public_id.get_mut(&request.public_id) else {
+            return Ok(None);
+        };
+        mapping.validate()?;
+        if !mapping.is_authorized_for(&request.owner) {
+            return Ok(None);
+        }
+        mapping.accepted_ack = Some(request.accepted_ack);
+        Ok(Some(mapping.clone()))
+    }
+
     async fn lookup_authorized(
         &self,
         request: OpenAiCompatRefLookup,
     ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        let state = self.lock_state()?;
+        let state = self.lock_state().await;
         let Some(mapping) = state.by_public_id.get(&request.public_id) else {
             return Ok(None);
         };
@@ -585,32 +666,41 @@ impl OpenAiCompatRefStore for InMemoryOpenAiCompatRefStore {
     }
 }
 
-impl InMemoryOpenAiCompatRefStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn lock_state(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, InMemoryOpenAiCompatRefState>, OpenAiCompatRefError> {
-        self.state
-            .lock()
-            .map_err(|_| OpenAiCompatRefError::StoreUnavailable)
-    }
-}
-
 fn new_pending_mapping(request: OpenAiCompatRefReservation) -> OpenAiCompatResourceMapping {
-    let public_id = OpenAiCompatPublicId::generate_for(request.surface);
     let mapping = OpenAiCompatResourceMapping {
-        public_id,
+        public_id: OpenAiCompatPublicId::generate_for(request.surface),
         owner: request.owner,
         surface: request.surface,
         request_fingerprint: request.request_fingerprint,
+        created_at: unix_timestamp_now(),
         idempotency_key: request.idempotency_key,
+        accepted_ack: None,
         binding: OpenAiCompatResourceBinding::Pending,
     };
     debug_assert!(mapping.validate().is_ok());
     mapping
+}
+
+pub fn unix_timestamp_now() -> u64 {
+    Utc::now().timestamp().try_into().unwrap_or(0)
+}
+
+fn evict_oldest_if_needed(state: &mut InMemoryOpenAiCompatRefState, max_mappings: usize) {
+    if state.by_public_id.len() < max_mappings {
+        return;
+    }
+    let Some(public_id) = state
+        .by_public_id
+        .iter()
+        .min_by_key(|(_, mapping)| mapping.created_at)
+        .map(|(public_id, _)| public_id.clone())
+    else {
+        return;
+    };
+    state.by_public_id.remove(&public_id);
+    state
+        .by_idempotency
+        .retain(|_, mapped_public_id| mapped_public_id != &public_id);
 }
 
 fn validate_public_ref(
@@ -726,4 +816,154 @@ fn contains_no_exposure_sentinel(value: &str) -> bool {
     NO_EXPOSURE_SENTINELS
         .iter()
         .any(|sentinel| value.contains(sentinel))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+
+    fn scope(user: &str) -> OpenAiCompatActorScope {
+        OpenAiCompatActorScope::new(
+            TenantId::new("tenant-a").expect("tenant"),
+            UserId::new(user).expect("user"),
+            None,
+            None,
+        )
+    }
+
+    fn fingerprint(label: &str) -> OpenAiCompatRequestFingerprint {
+        OpenAiCompatRequestFingerprint::from_body_bytes(label.as_bytes())
+    }
+
+    fn idempotency_key() -> OpenAiCompatIdempotencyKey {
+        OpenAiCompatIdempotencyKey::new("same-key").expect("key")
+    }
+
+    fn accepted_ack() -> ProductInboundAck {
+        ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("msg:test").expect("message ref"),
+            submitted_run_id: TurnRunId::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_record_accepted_ack_wrong_owner_is_none() {
+        let store = InMemoryOpenAiCompatRefStore::new();
+        let alice = scope("alice");
+        let bob = scope("bob");
+        let created = store
+            .reserve(OpenAiCompatRefReservation::new(
+                alice.clone(),
+                OpenAiCompatRouteSurface::ChatCompletions,
+                fingerprint("body"),
+                Some(idempotency_key()),
+            ))
+            .await
+            .expect("reserve");
+        let mapping = created.mapping().expect("created mapping").clone();
+
+        let wrong_owner = store
+            .record_accepted_ack(OpenAiCompatRecordAcceptedAck::new(
+                bob,
+                mapping.public_id.clone(),
+                accepted_ack(),
+            ))
+            .await
+            .expect("record ack");
+        assert!(wrong_owner.is_none());
+
+        let alice_lookup = store
+            .lookup_authorized(OpenAiCompatRefLookup::new(
+                alice,
+                mapping.public_id,
+                OpenAiCompatRefOperation::Retrieve,
+            ))
+            .await
+            .expect("lookup")
+            .expect("alice mapping");
+        assert!(alice_lookup.accepted_ack.is_none());
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_same_key_distinct_actors_create_distinct_refs() {
+        let store = InMemoryOpenAiCompatRefStore::new();
+        let first = store
+            .reserve(OpenAiCompatRefReservation::new(
+                scope("alice"),
+                OpenAiCompatRouteSurface::ChatCompletions,
+                fingerprint("body"),
+                Some(idempotency_key()),
+            ))
+            .await
+            .expect("first reserve");
+        let second = store
+            .reserve(OpenAiCompatRefReservation::new(
+                scope("bob"),
+                OpenAiCompatRouteSurface::ChatCompletions,
+                fingerprint("body"),
+                Some(idempotency_key()),
+            ))
+            .await
+            .expect("second reserve");
+
+        let first_id = first.mapping().expect("first mapping").public_id.clone();
+        let second_id = second.mapping().expect("second mapping").public_id.clone();
+        assert_ne!(first_id, second_id);
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_evicts_oldest_mapping_when_capacity_is_reached() {
+        let store = InMemoryOpenAiCompatRefStore::with_capacity(1);
+        let owner = scope("alice");
+        let first = store
+            .reserve(OpenAiCompatRefReservation::new(
+                owner.clone(),
+                OpenAiCompatRouteSurface::ChatCompletions,
+                fingerprint("one"),
+                Some(OpenAiCompatIdempotencyKey::new("key-one").expect("key")),
+            ))
+            .await
+            .expect("first reserve")
+            .mapping()
+            .expect("first mapping")
+            .public_id
+            .clone();
+        let second = store
+            .reserve(OpenAiCompatRefReservation::new(
+                owner.clone(),
+                OpenAiCompatRouteSurface::ChatCompletions,
+                fingerprint("two"),
+                Some(OpenAiCompatIdempotencyKey::new("key-two").expect("key")),
+            ))
+            .await
+            .expect("second reserve")
+            .mapping()
+            .expect("second mapping")
+            .public_id
+            .clone();
+
+        assert!(
+            store
+                .lookup_authorized(OpenAiCompatRefLookup::new(
+                    owner.clone(),
+                    first,
+                    OpenAiCompatRefOperation::Retrieve,
+                ))
+                .await
+                .expect("lookup first")
+                .is_none()
+        );
+        assert!(
+            store
+                .lookup_authorized(OpenAiCompatRefLookup::new(
+                    owner,
+                    second,
+                    OpenAiCompatRefOperation::Retrieve,
+                ))
+                .await
+                .expect("lookup second")
+                .is_some()
+        );
+    }
 }

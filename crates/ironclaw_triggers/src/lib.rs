@@ -6,7 +6,7 @@
 //! by later slices.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -38,6 +38,8 @@ pub use trusted_submit::{
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
 const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
 const MAX_TRIGGER_LIST_LIMIT: usize = 100;
+const MAX_TRIGGER_RUN_HISTORY_LIMIT: usize = 500;
+const MAX_TRIGGER_RUN_HISTORY_RETAINED: usize = 500;
 pub const MAX_TRIGGER_NAME_BYTES: usize = 256;
 pub const MAX_TRIGGER_PROMPT_BYTES: usize = 32 * 1024;
 const IDENTITY_VERSION_LABEL: &str = "ironclaw.trigger-fire.v1";
@@ -393,6 +395,57 @@ pub enum TriggerRunStatus {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerRunHistoryStatus {
+    Running,
+    Ok,
+    Error,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn trigger_run_history_status_text(value: TriggerRunHistoryStatus) -> &'static str {
+    match value {
+        TriggerRunHistoryStatus::Running => "running",
+        TriggerRunHistoryStatus::Ok => "ok",
+        TriggerRunHistoryStatus::Error => "error",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerRunRecord {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub run_id: Option<TurnRunId>,
+    pub thread_id: TriggerRouteThreadId,
+    pub status: TriggerRunHistoryStatus,
+    pub submitted_at: Timestamp,
+    pub completed_at: Option<Timestamp>,
+}
+
+impl TriggerRunRecord {
+    fn running(
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: Option<TurnRunId>,
+        submitted_at: Timestamp,
+    ) -> Self {
+        let identity = TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot);
+        Self {
+            tenant_id,
+            trigger_id,
+            fire_slot,
+            run_id,
+            thread_id: identity.route_thread_id,
+            status: TriggerRunHistoryStatus::Running,
+            submitted_at,
+            completed_at: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerFireIdentity {
     pub tenant_id: TenantId,
@@ -538,6 +591,7 @@ pub struct ClearActiveFireRequest {
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub run_id: TurnRunId,
+    pub status: TriggerRunHistoryStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -732,6 +786,55 @@ pub trait TriggerRepository: Send + Sync {
         &self,
         request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    /// Returns recent run-history rows for one tenant-scoped trigger.
+    ///
+    /// Rows are ordered newest first by fire slot. Implementations must clamp
+    /// the caller-provided limit to the repository maximum, and a limit of zero
+    /// must return an empty list without touching storage.
+    async fn list_trigger_run_history(
+        &self,
+        _tenant_id: TenantId,
+        _trigger_id: TriggerId,
+        _limit: usize,
+    ) -> Result<Vec<TriggerRunRecord>, TriggerError> {
+        Ok(Vec::new())
+    }
+
+    /// Returns recent run-history rows for several tenant-scoped triggers.
+    ///
+    /// Each entry is ordered newest first by fire slot and truncated to `limit`.
+    ///
+    /// The default implementation is a non-production fallback: it issues one
+    /// serial [`list_trigger_run_history`] call per trigger id and logs when it
+    /// is exercised. Storage-backed repositories used by list-page or UI paths
+    /// must override this with a true batch query so callers do not
+    /// accidentally introduce N sequential round-trips.
+    async fn list_trigger_run_history_batch(
+        &self,
+        tenant_id: TenantId,
+        trigger_ids: &[TriggerId],
+        limit: usize,
+    ) -> Result<HashMap<TriggerId, Vec<TriggerRunRecord>>, TriggerError> {
+        let mut runs_by_trigger = HashMap::with_capacity(trigger_ids.len());
+        if limit == 0 {
+            return Ok(runs_by_trigger);
+        }
+        if !trigger_ids.is_empty() {
+            tracing::warn!(
+                trigger_count = trigger_ids.len(),
+                "default trigger run-history batch fallback is issuing serial per-trigger lookups"
+            );
+        }
+        for trigger_id in trigger_ids {
+            runs_by_trigger.insert(
+                *trigger_id,
+                self.list_trigger_run_history(tenant_id.clone(), *trigger_id, limit)
+                    .await?,
+            );
+        }
+        Ok(runs_by_trigger)
+    }
 }
 
 /// Feature-gated durable libSQL repository type for composition/test wiring.
@@ -750,7 +853,13 @@ pub use worker::{
 
 #[derive(Clone, Default)]
 pub struct InMemoryTriggerRepository {
-    state: Arc<Mutex<HashMap<TriggerRepositoryKey, TriggerRecord>>>,
+    state: Arc<Mutex<InMemoryTriggerRepositoryState>>,
+}
+
+#[derive(Debug, Default)]
+struct InMemoryTriggerRepositoryState {
+    records: HashMap<TriggerRepositoryKey, TriggerRecord>,
+    runs: HashMap<TriggerRunRepositoryKey, TriggerRunRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -768,12 +877,29 @@ impl TriggerRepositoryKey {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TriggerRunRepositoryKey {
+    tenant_id: TenantId,
+    trigger_id: TriggerId,
+    fire_slot: Timestamp,
+}
+
+impl TriggerRunRepositoryKey {
+    fn new(tenant_id: &TenantId, trigger_id: TriggerId, fire_slot: Timestamp) -> Self {
+        Self {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+        }
+    }
+}
+
 #[async_trait]
 impl TriggerRepository for InMemoryTriggerRepository {
     async fn upsert_trigger(&self, record: TriggerRecord) -> Result<(), TriggerError> {
         record.validate()?;
         let mut state = self.lock_state()?;
-        state.insert(
+        state.records.insert(
             TriggerRepositoryKey::new(&record.tenant_id, record.trigger_id),
             record,
         );
@@ -787,6 +913,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         Ok(self
             .lock_state()?
+            .records
             .get(&TriggerRepositoryKey::new(&tenant_id, trigger_id))
             .cloned())
     }
@@ -794,6 +921,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
         let state = self.lock_state()?;
         let mut records = state
+            .records
             .values()
             .filter(|record| record.tenant_id == tenant_id)
             .cloned()
@@ -816,6 +944,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         let limit = limit.min(MAX_TRIGGER_LIST_LIMIT);
         let state = self.lock_state()?;
         let mut records = state
+            .records
             .values()
             .filter(|record| {
                 record.tenant_id == tenant_id
@@ -837,6 +966,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         Ok(self
             .lock_state()?
+            .records
             .remove(&TriggerRepositoryKey::new(&tenant_id, trigger_id)))
     }
 
@@ -850,7 +980,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         let mut state = self.lock_state()?;
         let key = TriggerRepositoryKey::new(&tenant_id, trigger_id);
-        let Some(record) = state.get(&key) else {
+        let Some(record) = state.records.get(&key) else {
             return Ok(None);
         };
         if record.creator_user_id != creator_user_id
@@ -859,7 +989,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         {
             return Ok(None);
         }
-        Ok(state.remove(&key))
+        Ok(state.records.remove(&key))
     }
 
     async fn list_due_triggers(
@@ -873,6 +1003,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         let limit = limit.min(MAX_DUE_TRIGGER_POLL_LIMIT);
         let state = self.lock_state()?;
         let mut selected_keys = state
+            .records
             .iter()
             .filter(|(_, record)| record.is_due_at(now) && !record.has_active_fire())
             .map(|(key, record)| {
@@ -890,7 +1021,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         selected_keys.truncate(limit);
         Ok(selected_keys
             .into_iter()
-            .filter_map(|(_, _, _, key)| state.get(&key).cloned())
+            .filter_map(|(_, _, _, key)| state.records.get(&key).cloned())
             .collect())
     }
 
@@ -910,6 +1041,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         let mut selected_records = {
             let state = self.lock_state()?;
             state
+                .records
                 .values()
                 .filter_map(|record| {
                     let active_fire_slot = record.active_fire_slot?;
@@ -951,7 +1083,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
     ) -> Result<ClaimDueFireOutcome, TriggerError> {
         let mut state = self.lock_state()?;
         let key = TriggerRepositoryKey::new(&request.tenant_id, request.trigger_id);
-        let Some(record) = state.get_mut(&key) else {
+        let Some(record) = state.records.get_mut(&key) else {
             return Ok(ClaimDueFireOutcome::NotFound);
         };
 
@@ -973,8 +1105,20 @@ impl TriggerRepository for InMemoryTriggerRepository {
 
         record.active_fire_slot = Some(request.fire_slot);
         record.active_run_ref = None;
+        let record = record.clone();
+        state.runs.insert(
+            TriggerRunRepositoryKey::new(&request.tenant_id, request.trigger_id, request.fire_slot),
+            TriggerRunRecord::running(
+                request.tenant_id,
+                request.trigger_id,
+                request.fire_slot,
+                None,
+                request.now,
+            ),
+        );
+        prune_run_history_locked(&mut state, &record.tenant_id, record.trigger_id);
         Ok(ClaimDueFireOutcome::Claimed(ClaimedTriggerFire {
-            record: record.clone(),
+            record,
             fire_slot: request.fire_slot,
         }))
     }
@@ -1005,6 +1149,13 @@ impl TriggerRepository for InMemoryTriggerRepository {
         else {
             return Ok(None);
         };
+        self.upsert_running_run_history(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            request.run_id,
+            record.last_run_at.unwrap_or(request.submitted_at),
+        )?;
         Ok(Some(record))
     }
 
@@ -1034,6 +1185,13 @@ impl TriggerRepository for InMemoryTriggerRepository {
         else {
             return Ok(None);
         };
+        self.upsert_running_run_history(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            request.original_run_id,
+            record.last_run_at.unwrap_or(request.replayed_at),
+        )?;
         Ok(Some(record))
     }
 
@@ -1062,6 +1220,14 @@ impl TriggerRepository for InMemoryTriggerRepository {
         else {
             return Ok(None);
         };
+        self.complete_run_history(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            None,
+            TriggerRunHistoryStatus::Error,
+            Utc::now(),
+        )?;
         Ok(Some(record))
     }
 
@@ -1086,6 +1252,14 @@ impl TriggerRepository for InMemoryTriggerRepository {
         else {
             return Ok(None);
         };
+        self.complete_run_history(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            None,
+            TriggerRunHistoryStatus::Error,
+            Utc::now(),
+        )?;
         Ok(Some(record))
     }
 
@@ -1109,6 +1283,14 @@ impl TriggerRepository for InMemoryTriggerRepository {
         else {
             return Ok(None);
         };
+        self.complete_run_history(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            None,
+            TriggerRunHistoryStatus::Error,
+            Utc::now(),
+        )?;
         Ok(Some(record))
     }
 
@@ -1118,7 +1300,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         let mut state = self.lock_state()?;
         let key = TriggerRepositoryKey::new(&request.tenant_id, request.trigger_id);
-        let Some(record) = state.get_mut(&key) else {
+        let Some(record) = state.records.get_mut(&key) else {
             return Ok(None);
         };
         if record.active_fire_slot != Some(request.fire_slot)
@@ -1128,15 +1310,96 @@ impl TriggerRepository for InMemoryTriggerRepository {
         }
         record.active_fire_slot = None;
         record.active_run_ref = None;
-        Ok(Some(record.clone()))
+        let record = record.clone();
+        let completed_at = Utc::now();
+        state
+            .runs
+            .entry(TriggerRunRepositoryKey::new(
+                &request.tenant_id,
+                request.trigger_id,
+                request.fire_slot,
+            ))
+            .and_modify(|run| {
+                run.run_id = Some(request.run_id);
+                run.status = request.status;
+                run.completed_at = Some(completed_at);
+            })
+            .or_insert_with(|| {
+                let mut run = TriggerRunRecord::running(
+                    request.tenant_id.clone(),
+                    request.trigger_id,
+                    request.fire_slot,
+                    Some(request.run_id),
+                    completed_at,
+                );
+                run.status = request.status;
+                run.completed_at = Some(completed_at);
+                run
+            });
+        prune_run_history_locked(&mut state, &request.tenant_id, request.trigger_id);
+        Ok(Some(record))
+    }
+
+    async fn list_trigger_run_history(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        limit: usize,
+    ) -> Result<Vec<TriggerRunRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(MAX_TRIGGER_RUN_HISTORY_LIMIT);
+        let state = self.lock_state()?;
+        let mut runs = state
+            .runs
+            .values()
+            .filter(|run| run.tenant_id == tenant_id && run.trigger_id == trigger_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        runs.sort_by_key(|run| std::cmp::Reverse(run.fire_slot));
+        runs.truncate(limit);
+        Ok(runs)
+    }
+
+    async fn list_trigger_run_history_batch(
+        &self,
+        tenant_id: TenantId,
+        trigger_ids: &[TriggerId],
+        limit: usize,
+    ) -> Result<HashMap<TriggerId, Vec<TriggerRunRecord>>, TriggerError> {
+        let mut runs_by_trigger = HashMap::with_capacity(trigger_ids.len());
+        if limit == 0 || trigger_ids.is_empty() {
+            return Ok(runs_by_trigger);
+        }
+        let limit = limit.min(MAX_TRIGGER_RUN_HISTORY_LIMIT);
+        let state = self.lock_state()?;
+        let trigger_id_set = trigger_ids.iter().copied().collect::<HashSet<_>>();
+        for trigger_id in trigger_ids {
+            runs_by_trigger.insert(*trigger_id, Vec::new());
+        }
+        for run in state
+            .runs
+            .values()
+            .filter(|run| run.tenant_id == tenant_id && trigger_id_set.contains(&run.trigger_id))
+        {
+            runs_by_trigger
+                .entry(run.trigger_id)
+                .or_default()
+                .push(run.clone());
+        }
+        for runs in runs_by_trigger.values_mut() {
+            runs.sort_by_key(|run| std::cmp::Reverse(run.fire_slot));
+            runs.truncate(limit);
+        }
+        Ok(runs_by_trigger)
     }
 }
 
 impl InMemoryTriggerRepository {
     fn lock_state(
         &self,
-    ) -> Result<std::sync::MutexGuard<'_, HashMap<TriggerRepositoryKey, TriggerRecord>>, TriggerError>
-    {
+    ) -> Result<std::sync::MutexGuard<'_, InMemoryTriggerRepositoryState>, TriggerError> {
         self.state.lock().map_err(|_| TriggerError::Backend {
             reason: "trigger repository mutex poisoned".to_string(),
         })
@@ -1151,7 +1414,7 @@ impl InMemoryTriggerRepository {
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         let mut state = self.lock_state()?;
         let key = TriggerRepositoryKey::new(tenant_id, trigger_id);
-        let Some(record) = state.get_mut(&key) else {
+        let Some(record) = state.records.get_mut(&key) else {
             return Ok(None);
         };
         if record.active_fire_slot != Some(fire_slot) {
@@ -1159,6 +1422,92 @@ impl InMemoryTriggerRepository {
         }
         update(record)?;
         Ok(Some(record.clone()))
+    }
+
+    fn upsert_running_run_history(
+        &self,
+        tenant_id: &TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+        submitted_at: Timestamp,
+    ) -> Result<(), TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRunRepositoryKey::new(tenant_id, trigger_id, fire_slot);
+        if state
+            .runs
+            .get(&key)
+            .is_some_and(|run| run.completed_at.is_some())
+        {
+            return Ok(());
+        }
+        state.runs.insert(
+            key,
+            TriggerRunRecord::running(
+                tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                Some(run_id),
+                submitted_at,
+            ),
+        );
+        prune_run_history_locked(&mut state, tenant_id, trigger_id);
+        Ok(())
+    }
+
+    fn complete_run_history(
+        &self,
+        tenant_id: &TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: Option<TurnRunId>,
+        status: TriggerRunHistoryStatus,
+        completed_at: Timestamp,
+    ) -> Result<(), TriggerError> {
+        let mut state = self.lock_state()?;
+        state
+            .runs
+            .entry(TriggerRunRepositoryKey::new(
+                tenant_id, trigger_id, fire_slot,
+            ))
+            .and_modify(|run| {
+                if run.run_id.is_none() {
+                    run.run_id = run_id;
+                }
+                run.status = status;
+                run.completed_at = Some(completed_at);
+            })
+            .or_insert_with(|| {
+                let mut run = TriggerRunRecord::running(
+                    tenant_id.clone(),
+                    trigger_id,
+                    fire_slot,
+                    run_id,
+                    completed_at,
+                );
+                run.status = status;
+                run.completed_at = Some(completed_at);
+                run
+            });
+        prune_run_history_locked(&mut state, tenant_id, trigger_id);
+        Ok(())
+    }
+}
+
+fn prune_run_history_locked(
+    state: &mut InMemoryTriggerRepositoryState,
+    tenant_id: &TenantId,
+    trigger_id: TriggerId,
+) {
+    let mut keys = state
+        .runs
+        .keys()
+        .filter(|key| key.tenant_id == *tenant_id && key.trigger_id == trigger_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort_by_key(|key| std::cmp::Reverse(key.fire_slot));
+    for key in keys.into_iter().skip(MAX_TRIGGER_RUN_HISTORY_RETAINED) {
+        state.runs.remove(&key);
     }
 }
 
@@ -1924,6 +2273,45 @@ mod tests {
             .await
             .expect("list due");
         assert_eq!(due_records.len(), MAX_DUE_TRIGGER_POLL_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_running_history_does_not_overwrite_terminal_history() {
+        let repo = InMemoryTriggerRepository::default();
+        let tenant_id = tenant("tenant-a");
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+        let completed_at = fire_slot + chrono::Duration::seconds(30);
+        let later_submitted_at = fire_slot + chrono::Duration::seconds(45);
+
+        repo.complete_run_history(
+            &tenant_id,
+            trigger_id,
+            fire_slot,
+            Some(run_id),
+            TriggerRunHistoryStatus::Ok,
+            completed_at,
+        )
+        .expect("seed terminal history");
+
+        repo.upsert_running_run_history(
+            &tenant_id,
+            trigger_id,
+            fire_slot,
+            run_id,
+            later_submitted_at,
+        )
+        .expect("late running upsert is ignored");
+
+        let runs = repo
+            .list_trigger_run_history(tenant_id, trigger_id, 10)
+            .await
+            .expect("list run history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, TriggerRunHistoryStatus::Ok);
+        assert_eq!(runs[0].submitted_at, completed_at);
+        assert_eq!(runs[0].completed_at, Some(completed_at));
     }
 
     #[test]

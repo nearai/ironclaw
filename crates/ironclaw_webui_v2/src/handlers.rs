@@ -433,14 +433,18 @@ pub struct ListThreadsQuery {
 /// `GET /api/webchat/v2/automations`
 ///
 /// Lists the caller-scoped schedule automations visible to the browser. The
-/// optional `?limit=N` query is capped by the product workflow facade; the
-/// response is a single bounded page and does not include a cursor.
+/// optional `?limit=N` and `?run_limit=N` queries are capped by the product
+/// workflow facade; the response is a single bounded page and does not include
+/// a cursor.
 pub async fn list_automations(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Query(query): Query<ListAutomationsQuery>,
 ) -> Result<Json<RebornListAutomationsResponse>, WebUiV2HttpError> {
-    let request = WebUiListAutomationsRequest { limit: query.limit };
+    let request = WebUiListAutomationsRequest {
+        limit: query.limit,
+        run_limit: query.run_limit,
+    };
     let response = state.services().list_automations(caller, request).await?;
     Ok(Json(response))
 }
@@ -450,6 +454,9 @@ pub struct ListAutomationsQuery {
     /// Optional maximum number of schedule automations to return.
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Optional maximum number of recent runs to return per automation row.
+    #[serde(default)]
+    pub run_limit: Option<u32>,
 }
 
 /// `GET /api/webchat/v2/channels/connectable`

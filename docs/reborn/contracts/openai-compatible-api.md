@@ -1,6 +1,7 @@
 # Reborn OpenAI-Compatible API Contract
 
-**Status:** contract and identity slices (#4442, #4443)
+**Status:** contract, identity, and non-streaming Chat Completions workflow
+slices (#4442, #4443, #4444)
 **Parent:** #3283
 **Crates:** `crates/ironclaw_reborn_openai_compat`,
 `crates/ironclaw_reborn_openai_compat_storage`
@@ -12,10 +13,13 @@ that speak Chat Completions or Responses. It is behavior-compatible at the HTTP
 shape where practical, but it must not reuse the v1 gateway's stateless LLM
 proxy code path.
 
-These first slices are contract-first. They define DTOs, host-owned ingress
-descriptors, a sanitized OpenAI-style error envelope, fail-closed route
-fragments, and the opaque ref/idempotency vocabulary. They do not submit turns,
-retrieve projections, cancel runs, or translate SSE yet.
+These first slices are contract-first, with one narrow ProductWorkflow-backed
+route. They define DTOs, host-owned ingress descriptors, a sanitized
+OpenAI-style error envelope, route fragments, and the opaque ref/idempotency
+vocabulary. `POST /v1/chat/completions` can submit non-streaming user-message
+requests through ProductWorkflow when host composition injects the workflow
+state. Responses routes, retrieve, cancel, and SSE translation remain
+fail-closed.
 
 ## Route Surface
 
@@ -49,6 +53,12 @@ bind sockets or call `axum::serve`.
   contract crate defines the port and the storage crate provides
   filesystem-backed adapters under `/engine/openai_compat/refs/` with
   per-public-id mapping records plus per-scope idempotency index records.
+  Reborn local-dev host composition places the production route's tenant-owned
+  ref store under `/tenants/{tenant}/shared/openai_compat/refs` on the root
+  filesystem; route handlers still access it only through `OpenAiCompatRefStore`.
+- The in-memory ref store is bounded and evicts the oldest mappings when full.
+  Durable filesystem retention and pruning are owned by host composition or the
+  storage adapter lifecycle, not by route handlers.
 - Client idempotency keys are scoped by authenticated actor scope, route
   surface, and request-body fingerprint. Same key + same fingerprint replays the
   same public ref; same key + different fingerprint is a sanitized conflict.
@@ -57,13 +67,48 @@ bind sockets or call `axum::serve`.
 - Ref lookup for retrieve, stream resume, and cancel is actor/scope checked.
   Unauthorized and nonexistent refs must produce the same sanitized not-found
   response at the API boundary.
+- Chat Completions projection reads must resolve through
+  `ProductWorkflow::read_projection(...)` and the returned canonical
+  actor/scope must match the authenticated caller before any projection reader
+  is called.
 - Ref mappings are two-stage: route code may reserve a pending public ref before
   ProductWorkflow side effects, then bind it to internal product-action,
   turn-run, and projection refs after those refs exist.
-- Non-streaming timeout behavior is a later slice: timeout detaches from the
-  wait, not from the underlying turn.
+- Non-streaming Chat Completions wait timeout detaches from the wait, not from
+  the underlying turn. The API response is a retryable sanitized service
+  unavailable error.
 - SSE translation is a later slice over `ironclaw_event_streams`; Reborn stream
   control frames must not leak into OpenAI-compatible SSE payloads.
+
+## Non-Streaming Chat Completions
+
+With the `openai-compat-beta` feature, `ironclaw-reborn serve` mounts
+`openai_compat_router_with_state(...)` inside the Reborn protected route stack
+with an `OpenAiChatCompletionsWorkflow` for `POST /v1/chat/completions`.
+Default routers remain fail-closed unless host composition injects that
+workflow state.
+
+The route:
+
+- Requires verified bearer/session auth middleware to provide
+  `OpenAiCompatAuthenticatedCaller`.
+- Rejects `stream: true` before ProductWorkflow side effects.
+- Reserves an actor-scoped opaque `chatcmpl-*` ref and idempotency mapping
+  before submission.
+- Converts OpenAI-compatible messages into a `UserMessagePayload` and submits it
+  through `ProductWorkflow`.
+- Resolves the canonical projection read request through
+  `ProductWorkflow::read_projection(...)`, then waits through a
+  composition-supplied projection reader. The local-dev Reborn composition
+  reader polls `SessionThreadService::finalized_assistant_message_by_run` for
+  the accepted run's finalized assistant message and returns a sanitized Chat
+  Completions response.
+- Carries the requested public model string as a composition/policy hint for
+  the projection reader; the route must not inject the model name into user
+  transcript text.
+- Preserves model-produced tool-call output shape in the response, while
+  treating client-supplied tools as model-only hints rather than executable
+  Reborn capabilities.
 
 ## Error Shape
 
@@ -86,7 +131,8 @@ prompts, raw tool input/output, secrets, or user content in error payloads.
 
 ## Current Fail-Closed Behavior
 
-With `openai-compat-beta`, the route fragment can be mounted for composition
-tests, but every handler returns `501` with code `unsupported`. Later slices
-replace these stubs one route family at a time through ProductWorkflow and
-projection/event-stream services.
+With `openai-compat-beta`, the default route fragment can be mounted for
+composition tests and returns `501` with code `unsupported`. Host composition
+can inject the non-streaming Chat Completions workflow state. Other route
+families keep returning fail-closed sanitized errors until their own
+ProductWorkflow, projection, cancel, or event-stream slices land.
