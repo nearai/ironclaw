@@ -275,42 +275,7 @@ Verification checklist:
 
 ## Troubleshooting
 
-`[slack].enabled = true requires ... slack-v2-host-beta`
-
-: Rebuild or rerun `ironclaw-reborn` with `--features slack-v2-host-beta`.
-
-Slack route never receives events
-
-: Confirm the Slack Request URL is exactly
-  `https://<public-host>/webhooks/slack/events`, the public URL reaches the
-  Reborn listener, and Socket Mode is disabled for this host-beta path.
-
-Slack URL verification fails
-
-: Confirm `IRONCLAW_REBORN_SLACK_SIGNING_SECRET` matches the app signing secret
-  and that any proxy preserves the raw request body and Slack signature headers.
-
-Slack replies fail with `missing_scope`
-
-: Add or confirm `chat:write`, reinstall the Slack app, and update
-  `IRONCLAW_REBORN_SLACK_BOT_TOKEN` if Slack issued a new token.
-
-Pairing code DM fails
-
-: Confirm `im:write` and `chat:write`, reinstall the app, and verify the bot
-  token starts with `xoxb-`.
-
-Channel mention does not reach Reborn
-
-: Confirm the app is invited to the channel, `app_mention` is subscribed, and
-  `[slack].team_id` / `[slack].api_app_id` match the Slack app that emitted the
-  event.
-
-Shared-channel turns are rejected
-
-: Add a static `[[slack.channel_routes]]` entry, configure
-  `shared_subject_user_id`, or use the WebUI Slack channel picker to allow the
-  channel.
+### [slack].enabled = true requires ... slack-v2-host-beta\n\nRebuild or rerun ironclaw-reborn with --features slack-v2-host-beta.\n\n### Slack route never receives events\n\nConfirm the Slack Request URL is exactly https://<public-host>/webhooks/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host-beta path.\n\n### Slack URL verification fails\n\nConfirm IRONCLAW_REBORN_SLACK_SIGNING_SECRET matches the app signing secret and that any proxy preserves the raw request body and Slack signature headers.\n\n### Slack replies fail with missing_scope\n\nAdd or confirm chat:write, reinstall the Slack app, and update IRONCLAW_REBORN_SLACK_BOT_TOKEN if Slack issued a new token.\n\n### Pairing code DM fails\n\nConfirm im:write and chat:write, reinstall the app, and verify the bot token starts with xoxb-.\n\n### Channel mention does not reach Reborn\n\nConfirm the app is invited to the channel, app_mention is subscribed, and [slack].team_id / [slack].api_app_id match the Slack app that emitted the event.\n\n### Shared-channel turns are rejected\n\nAdd a static [[slack.channel_routes]] entry, configure shared_subject_user_id, or use the WebUI Slack channel picker to allow the channel.
 
 ## Slack References
 
