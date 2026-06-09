@@ -35,6 +35,23 @@ if [ ! -f "$config_path" ]; then
 fi
 
 if [ "$#" -gt 0 ]; then
+  host="${IRONCLAW_REBORN_SERVE_HOST:-127.0.0.1}"
+  port="${PORT:-${IRONCLAW_REBORN_SERVE_PORT:-3000}}"
+  original_arg_count="$#"
+  while [ "$original_arg_count" -gt 0 ]; do
+    arg="$1"
+    shift
+    original_arg_count=$((original_arg_count - 1))
+    case "$arg" in
+      '$IRONCLAW_REBORN_SERVE_HOST'|'${IRONCLAW_REBORN_SERVE_HOST}')
+        arg="$host"
+        ;;
+      '$PORT'|'${PORT}'|'$IRONCLAW_REBORN_SERVE_PORT'|'${IRONCLAW_REBORN_SERVE_PORT}')
+        arg="$port"
+        ;;
+    esac
+    set -- "$@" "$arg"
+  done
   exec ironclaw-reborn "$@"
 fi
 
