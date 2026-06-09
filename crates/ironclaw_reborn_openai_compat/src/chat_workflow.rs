@@ -2,9 +2,11 @@
 //!
 //! This module is the first non-streaming OpenAI-compatible Chat slice. It
 //! translates the HTTP DTO into a product inbound user-message envelope, routes
-//! the mutating action through `ProductWorkflow`, and waits on a projection
-//! waiter port supplied by host composition. It deliberately does not call v1
-//! gateway handlers, LLM providers, `TurnCoordinator`, or projection internals.
+//! the mutating action through `ProductWorkflow`, resolves canonical projection
+//! read metadata through the ProductWorkflow read door, and waits on a
+//! projection reader port supplied by host composition. It deliberately does not
+//! call v1 gateway handlers, LLM providers, `TurnCoordinator`, or projection
+//! internals.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,9 +25,9 @@ use chrono::Utc;
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     ParsedProductInbound, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductRejection, ProductRejectionKind, ProductTriggerReason,
-    ProductWorkflow, ProductWorkflowRejectionKind, ProtocolAuthEvidence, TrustedInboundContext,
-    UserMessagePayload,
+    ProductInboundPayload, ProductProjectionReadInput, ProductProjectionSubject, ProductRejection,
+    ProductRejectionKind, ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind,
+    ProjectionReadRequest, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
 };
 
 const DEFAULT_CHAT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -83,7 +85,7 @@ impl OpenAiCompatAuthenticatedCaller {
 pub struct OpenAiChatCompletionsWorkflow {
     product_workflow: Arc<dyn ProductWorkflow>,
     ref_store: Arc<dyn OpenAiCompatRefStore>,
-    completion_waiter: Arc<dyn OpenAiChatCompletionWaiter>,
+    projection_reader: Arc<dyn OpenAiChatCompletionProjectionReader>,
     wait_timeout: Duration,
     adapter_id: ProductAdapterId,
     installation_id: AdapterInstallationId,
@@ -93,12 +95,12 @@ impl OpenAiChatCompletionsWorkflow {
     pub fn new(
         product_workflow: Arc<dyn ProductWorkflow>,
         ref_store: Arc<dyn OpenAiCompatRefStore>,
-        completion_waiter: Arc<dyn OpenAiChatCompletionWaiter>,
+        projection_reader: Arc<dyn OpenAiChatCompletionProjectionReader>,
     ) -> Self {
         Self {
             product_workflow,
             ref_store,
-            completion_waiter,
+            projection_reader,
             wait_timeout: DEFAULT_CHAT_WAIT_TIMEOUT,
             adapter_id: ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID)
                 .expect("OPENAI_COMPAT_ADAPTER_ID is valid"), // safety: hard-coded non-empty product adapter id literal.
@@ -174,18 +176,24 @@ impl OpenAiChatCompletionsWorkflow {
                 )));
             }
         };
-        let wait_request = OpenAiChatCompletionWaitRequest {
+        let projection_read = self
+            .product_workflow
+            .read_projection(self.chat_projection_read_input(&caller, &public_id)?)
+            .await?;
+        ensure_projection_read_matches_caller(&caller, &projection_read)?;
+        let projection_request = OpenAiChatCompletionProjectionRequest {
             public_id: public_id.clone(),
             actor_scope: caller.scope().clone(),
             accepted_ack,
+            projection_read,
             requested_model: request.model.clone(),
             model_only_tools,
         };
 
         let wait_result = tokio::time::timeout(
             self.wait_timeout,
-            self.completion_waiter
-                .wait_for_chat_completion(wait_request),
+            self.projection_reader
+                .read_chat_completion_projection(projection_request),
         )
         .await
         .map_err(|_| {
@@ -288,16 +296,49 @@ impl OpenAiChatCompletionsWorkflow {
         )?;
         ProductInboundEnvelope::from_trusted_parse(context, parsed).map_err(Into::into)
     }
+
+    fn chat_projection_read_input(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        public_id: &OpenAiChatCompletionId,
+    ) -> Result<ProductProjectionReadInput, OpenAiCompatHttpError> {
+        let Some(auth_claim) = caller.auth_evidence().claim().cloned() else {
+            return Err(OpenAiCompatHttpError::internal());
+        };
+        Ok(ProductProjectionReadInput::new(
+            ProductProjectionSubject::AdapterExternalRefs {
+                adapter_id: self.adapter_id.clone(),
+                installation_id: self.installation_id.clone(),
+                external_event_id: ExternalEventId::new(public_id.as_str())?,
+                external_actor_ref: ExternalActorRef::new(
+                    OPENAI_COMPAT_ACTOR_KIND,
+                    caller.scope().user_id().as_str(),
+                    Option::<String>::None,
+                )?,
+                external_conversation_ref: ExternalConversationRef::new(
+                    None,
+                    format!("{OPENAI_COMPAT_CONVERSATION_PREFIX}:{}", public_id.as_str()),
+                    None,
+                    None,
+                )?,
+                auth_claim,
+            },
+            None,
+            None,
+            None,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct OpenAiChatCompletionWaitRequest {
+pub struct OpenAiChatCompletionProjectionRequest {
     pub public_id: OpenAiChatCompletionId,
     pub actor_scope: OpenAiCompatActorScope,
     pub accepted_ack: ProductInboundAck,
+    pub projection_read: ProjectionReadRequest,
     /// Public model string requested by the OpenAI-compatible client.
     ///
-    /// This is a composition/policy hint for the completion waiter and must not
+    /// This is a composition/policy hint for the projection reader and must not
     /// be mixed into the user transcript text by this route crate.
     pub requested_model: String,
     /// Client-supplied OpenAI tool declarations for model planning only.
@@ -348,11 +389,36 @@ impl OpenAiChatCompletionProjection {
 }
 
 #[async_trait]
-pub trait OpenAiChatCompletionWaiter: Send + Sync {
-    async fn wait_for_chat_completion(
+pub trait OpenAiChatCompletionProjectionReader: Send + Sync {
+    async fn read_chat_completion_projection(
         &self,
-        request: OpenAiChatCompletionWaitRequest,
+        request: OpenAiChatCompletionProjectionRequest,
     ) -> Result<OpenAiChatCompletionProjection, OpenAiCompatHttpError>;
+}
+
+fn ensure_projection_read_matches_caller(
+    caller: &OpenAiCompatAuthenticatedCaller,
+    projection_read: &ProjectionReadRequest,
+) -> Result<(), OpenAiCompatHttpError> {
+    let scope = caller.scope();
+    let matches_caller = &projection_read.actor.user_id == scope.user_id()
+        && &projection_read.scope.tenant_id == scope.tenant_id()
+        && projection_read.scope.agent_id.as_ref() == scope.agent_id()
+        && projection_read.scope.project_id.as_ref() == scope.project_id()
+        && projection_read
+            .scope
+            .explicit_owner_user_id()
+            .is_none_or(|owner| owner == scope.user_id());
+    if matches_caller {
+        Ok(())
+    } else {
+        Err(OpenAiCompatHttpError::from_kind(
+            403,
+            false,
+            crate::OpenAiCompatErrorKind::PermissionDenied,
+            None,
+        ))
+    }
 }
 
 fn accepted_ack_from_ack(

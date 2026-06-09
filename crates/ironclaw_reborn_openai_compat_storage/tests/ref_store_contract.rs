@@ -56,6 +56,22 @@ async fn durable_store_persists_accepted_ack_for_idempotency_replay_after_reopen
 }
 
 #[tokio::test]
+async fn durable_store_same_key_distinct_actors_create_distinct_refs() {
+    let (_, _, store) = test_store("same-key-distinct-actors");
+    let alice_request = reservation("tenant-a", "alice", "same-key", b"same body");
+    let bob_request = reservation("tenant-a", "bob", "same-key", b"same body");
+
+    let alice = expect_created(store.reserve(alice_request.clone()).await);
+    let bob = expect_created(store.reserve(bob_request.clone()).await);
+    let alice_replay = expect_replayed(store.reserve(alice_request).await);
+    let bob_replay = expect_replayed(store.reserve(bob_request).await);
+
+    assert_ne!(alice.public_id, bob.public_id);
+    assert_eq!(alice_replay.public_id, alice.public_id);
+    assert_eq!(bob_replay.public_id, bob.public_id);
+}
+
+#[tokio::test]
 async fn durable_store_record_accepted_ack_wrong_owner_is_missing() {
     let (_, _, store) = test_store("accepted-ack-auth");
     let created = expect_created(
