@@ -817,7 +817,7 @@ Capability results are the wrong shape for `ScopedFilesystem`:
 - **Atomic tombstone.** Setting `tombstoned_at` while reading `byte_len` is a single `UPDATE ... WHERE result_ref = $1` in SQL.
 - **`ironclaw_reborn_event_store` already has libSQL and PostgreSQL typed-repo backends** for `DurableEventLog`. The `capability_results` table follows the same module shape: `crates/ironclaw_reborn_event_store/src/libsql/capability_result_repo.rs` and `.../postgres/capability_result_repo.rs`. No new dependency; existing feature flags gate respective backends.
 
-**In-memory impl** (`InMemoryCapabilityResultStore`) retained as `local_dev` fallback — same role as `InMemoryDurableEventLog`. Wraps `Mutex<HashMap<String, Vec<u8>>>` (no `BoundedRing` — production-readiness check gates its use to `LocalDevTest` mode).
+**In-memory impl** (`InMemoryCapabilityResultStore`) retained as `local_dev` fallback — same role as `InMemoryDurableEventLog`. Wraps `Mutex<HashMap<String, Vec<u8>>>` PLUS a bounded eviction policy: max `INMEMORY_CAPABILITY_RESULT_STORE_MAX_ENTRIES = 1024` entries and `INMEMORY_CAPABILITY_RESULT_STORE_MAX_BYTES = 4 * 1024 * 1024` (4 MiB) aggregate. Eviction is FIFO by insertion order — oldest entries dropped when either cap is hit. Bounded variant prevents long-running local-dev sessions or CI suites from OOMing on accumulated megabyte-scale payloads. Production-readiness check gates this impl to `LocalDevTest` mode regardless. Constants live in `crates/ironclaw_reborn_event_store::InMemoryCapabilityResultStore`.
 The in-memory impl keyed on `(scope, run_id, capability_id, invocation_id) → (result_ref, payload)` provides the same true-idempotency guarantee as the SQL backends. A second write with the same tuple returns the cached `result_ref`.
 
 **Implementation note.** Both libSQL and PostgreSQL backends use a single statement: `INSERT INTO capability_results (..., payload, byte_len) VALUES (..., ?, ?)` with `byte_len = payload.len() as u64`. No `serde_json` call inside the backend. PostgreSQL's JSONB column accepts a `bytea`/`Vec<u8>` parameter via `payload::jsonb` cast: the Postgres driver converts the bytes to JSONB representation server-side. libSQL stores raw bytes in BLOB. The in-memory `InMemoryCapabilityResultStore` holds `Mutex<HashMap<String, Vec<u8>>>` — keys are the opaque ref strings, values are the serialized bytes. Round-trip parity is byte-exact across all three impls: bytes in == bytes out.
@@ -1642,6 +1642,8 @@ cargo test --features integration
 
 WU-G ships these tests. Per plan closing criteria, feature toggle `subagent.background_enabled` flips to `true` in production only after WU-G E2E + parity tests pass green.
 
+**Exception — `gate_resolution_scoped_query_excludes_rows_from_other_agents` ships in WU-C, not WU-G.** This test guards a security invariant (§1.7: every scoped query MUST include `agent_id` in the predicate; conditional `agent_id = ?` vs `agent_id IS NULL` per the new §1.6 scope-predicate convention). Deferring it to WU-G would mean shipping the durable gate store backend in WU-C without a guard that catches a missing `agent_id` predicate — a cross-tenant / cross-agent data-leakage class. WU-C MUST include this test in the same PR as the gate-resolution backend impl. Per `_contract-freeze-index.md` §8 isolation invariants.
+
 ---
 
 ## Section 8 — Scope propagation (`agent_id` columns + indexes)
@@ -1758,6 +1760,8 @@ All DDL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` for i
 - [ ] WU-C lands eager active-scope enumeration via runs-table query at boot. Lazy per-scope replay is a deferred follow-up.
 - [ ] WU-C lands the §5.7 observability contract: emit `RebornEventKind::SubagentReplayCompleted` per-scope; expose the five required metrics; wire the three required alerts.
 - [ ] WU-G E2E gates the background-mode toggle (`subagent.background_enabled = true` in production) on the observability dashboard being live AND the three alerts being silent over a 7-day soak.
+- [ ] **WU-C MUST include** the `gate_resolution_scoped_query_excludes_rows_from_other_agents` parity test in the same PR as the gate-resolution backend impl (promoted from WU-G — security gate, not E2E gate).
+- [ ] WU-C `InMemoryCapabilityResultStore` ships with `INMEMORY_CAPABILITY_RESULT_STORE_MAX_ENTRIES = 1024` + `INMEMORY_CAPABILITY_RESULT_STORE_MAX_BYTES = 4 MiB` FIFO eviction. Prevents local-dev / CI OOM on long sessions.
 - [ ] WU-C lands the bucketed capacity counter (D6-A + E.A): `subagent_gate_capacity_counter` table with `(tenant_id, user_id, agent_id, bucket)` PK; `counter_bucket` column on `subagent_gate_awaited_children`; `CAPACITY_COUNTER_BUCKETS = 16` constant in `ironclaw_reborn_event_store` exposed via `RebornEventStoreConfig`; insert / delivery / delete paths use the bucketed transactional protocol per §1.6.
 - [ ] WU-C implements `CapabilityResultStore` trait with `Vec<u8>` payload (D8-A). Executor calls `serde_json::to_vec` exactly once; backend INSERTs the bytes directly into BLOB / JSONB without re-serializing. `read()` returns bytes; callers deserialize lazily.
 - [ ] WU-C adds `RebornEventStoreConfig.reconciler_replay_jitter_ms: u64` (default 5000) and applies it via `tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % jitter))` immediately before launching the per-process replay task (A.A).
