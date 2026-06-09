@@ -9,8 +9,9 @@ use ironclaw_host_api::runtime_policy::{
 };
 #[cfg(all(test, feature = "slack-v2-host-beta"))]
 use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
-use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TenantSandboxProcessPort};
+use ironclaw_host_runtime::TenantSandboxProcessPort;
 use ironclaw_trust::HostTrustPolicy;
+use ironclaw_turns::TurnRunWakeNotifier;
 use secrecy::SecretString;
 
 use crate::google_oauth::google_provider_spec;
@@ -149,7 +150,7 @@ pub struct RebornBuildInput {
     pub(crate) storage: RebornStorageInput,
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
-    pub(crate) turn_run_wake_notifier: Option<Arc<SchedulerTurnRunWakeNotifier>>,
+    pub(crate) turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
@@ -375,9 +376,17 @@ impl RebornBuildInput {
         self.runtime_policy.as_ref()
     }
 
-    pub fn with_turn_run_wake_notifier(
+    pub fn with_turn_run_wake_notifier<T>(mut self, notifier: Arc<T>) -> Self
+    where
+        T: TurnRunWakeNotifier + 'static,
+    {
+        self.turn_run_wake_notifier = Some(notifier);
+        self
+    }
+
+    pub fn with_turn_run_wake_notifier_dyn(
         mut self,
-        notifier: Arc<SchedulerTurnRunWakeNotifier>,
+        notifier: Arc<dyn TurnRunWakeNotifier>,
     ) -> Self {
         self.turn_run_wake_notifier = Some(notifier);
         self

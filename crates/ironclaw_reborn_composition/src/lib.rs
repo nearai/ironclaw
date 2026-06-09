@@ -146,7 +146,7 @@ pub use extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
 };
-pub use factory::{RebornServices, build_reborn_services};
+pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use hooks::{
     HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
@@ -297,8 +297,8 @@ pub use webui_serve::{
 /// signature mentions a host-api identity). Kept narrow on purpose —
 /// the composition CLAUDE.md says "Expose facade-shaped handles only";
 /// these four newtypes are the WebUI gateway's host-identity facade.
-#[cfg(feature = "webui-v2-beta")]
 pub mod host_api {
+    pub use ironclaw_host_api::runtime_policy;
     pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 }
 

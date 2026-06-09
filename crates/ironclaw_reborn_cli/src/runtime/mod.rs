@@ -1,9 +1,13 @@
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+#[cfg(feature = "postgres")]
+use std::str::FromStr;
 use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
+#[cfg(feature = "postgres")]
+use ironclaw_reborn_composition::host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
 #[cfg(feature = "webui-v2-beta")]
@@ -16,6 +20,8 @@ use ironclaw_reborn_composition::{
     RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
     TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
 };
+#[cfg(feature = "postgres")]
+use ironclaw_reborn_composition::{RebornProductionRuntimePolicy, RebornRuntimeProcessBinding};
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
 };
@@ -396,11 +402,10 @@ pub(crate) fn build_services_input_with_options(
     // CLI-shaped default baked into composition).
     let config_file = read_config_file(config)?;
 
-    reject_unsupported_runtime_sections(config_file.as_ref(), caller)?;
-
     let owner_id = default_owner_id(config_file.as_ref());
 
     let profile = effective_profile(config, config_file.as_ref())?;
+    reject_unsupported_runtime_sections(config_file.as_ref(), caller, profile)?;
     let mut services_input = match profile {
         RebornProfile::LocalDev | RebornProfile::LocalDevYolo => {
             let local_dev_root: PathBuf = config.home().path().join("local-dev");
@@ -486,12 +491,67 @@ fn build_production_services_input(
         database_url.clone(),
     ))
     .context("failed to configure Reborn production PostgreSQL storage")?;
+    let runtime_policy = resolve_production_runtime_policy(profile, config_file)?;
+    RebornProductionRuntimePolicy::without_process_port(runtime_policy.clone()).with_context(
+        || {
+            format!(
+                "profile={profile} resolved runtime policy requires a production process binding; \
+                 choose a profile such as `secure_default` that does not require tenant-sandbox \
+                 processes for this CLI launch path"
+            )
+        },
+    )?;
+    let trust_policy = ironclaw_reborn_composition::builtin_first_party_trust_policy()
+        .context("failed to build bundled first-party trust policy")?;
+
     Ok(RebornBuildInput::postgres_with_resolved_secret_master_key(
         composition_profile(profile),
         owner_id,
         pool,
         SecretString::from(database_url),
     ))
+    .map(|input| {
+        input
+            .with_production_trust_policy(std::sync::Arc::new(trust_policy))
+            .with_runtime_policy(runtime_policy)
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::none())
+    })
+}
+
+#[cfg(feature = "postgres")]
+fn resolve_production_runtime_policy(
+    profile: RebornProfile,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<ironclaw_reborn_composition::host_api::runtime_policy::EffectiveRuntimePolicy> {
+    let policy = config_file
+        .and_then(|file| file.policy.as_ref())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "profile={profile} requires [policy].deployment_mode and [policy].default_profile"
+            )
+        })?;
+    let deployment_mode = policy
+        .deployment_mode
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile={profile} requires [policy].deployment_mode"))?;
+    let default_profile = policy
+        .default_profile
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile={profile} requires [policy].default_profile"))?;
+    let deployment = DeploymentMode::from_str(deployment_mode)
+        .with_context(|| format!("invalid [policy].deployment_mode `{deployment_mode}`"))?;
+    let requested_profile = RuntimeProfile::from_str(default_profile)
+        .with_context(|| format!("invalid [policy].default_profile `{default_profile}`"))?;
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        deployment,
+        requested_profile,
+    ))
+    .with_context(|| {
+        format!(
+            "failed to resolve runtime policy for deployment_mode={deployment_mode} \
+             default_profile={default_profile}"
+        )
+    })
 }
 
 #[cfg(not(feature = "postgres"))]
@@ -683,6 +743,7 @@ pub(crate) fn effective_profile(
 fn reject_unsupported_runtime_sections(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
     caller: RuntimeInputCaller,
+    profile: RebornProfile,
 ) -> anyhow::Result<()> {
     let Some(file) = config_file else {
         return Ok(());
@@ -704,7 +765,12 @@ fn reject_unsupported_runtime_sections(
     }
 
     let mut sections = Vec::new();
-    if file.policy.is_some() {
+    if file.policy.is_some()
+        && !matches!(
+            profile,
+            RebornProfile::Production | RebornProfile::MigrationDryRun
+        )
+    {
         sections.push("[policy]");
     }
     if file.drivers.is_some() {
@@ -947,6 +1013,10 @@ regex_activation_enabled = false
 [storage]
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
 "#,
         )
         .expect("write config");
@@ -987,6 +1057,10 @@ url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 [storage]
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
 "#,
         )
         .expect("write config");
@@ -1015,9 +1089,9 @@ url_env = "IRONCLAW_REBORN_POSTGRES_URL"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_constructs_postgres_services_input() {
-        let lock = lock_trigger_env();
-        let (enabled, interval) = clear_trigger_poller_env();
-        let postgres_url = EnvGuard::set(
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::set(
             "IRONCLAW_REBORN_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
         );
@@ -1034,6 +1108,10 @@ default_owner = "prod-owner"
 [storage]
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
 "#,
         )
         .expect("write config");
@@ -1051,20 +1129,11 @@ url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 
         assert_eq!(services.profile(), RebornCompositionProfile::Production);
         assert_eq!(services.owner_id(), "prod-owner");
-
-        drop(postgres_url);
-        drop(interval);
-        drop(enabled);
-        drop(lock);
-
-        let err = block_on_cli(async move {
-            ironclaw_reborn_composition::build_reborn_services(services).await
-        })
-        .expect_err("production composition should now fail on missing production wiring");
-        assert!(
-            format!("{err:#}").contains("production trust policy"),
-            "production storage handoff should reach production composition wiring, got: {err:#}"
-        );
+        let runtime_policy = services
+            .runtime_policy()
+            .expect("production CLI input wires runtime policy");
+        assert_eq!(runtime_policy.deployment.as_str(), "hosted_multi_tenant");
+        assert_eq!(runtime_policy.resolved_profile.as_str(), "secure_default");
     }
 
     // Regression for the review point that `serve` rejected legitimate

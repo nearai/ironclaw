@@ -1,6 +1,6 @@
 //! Default Reborn runtime-loop composition.
 
-use std::{error::Error, fmt, marker::PhantomData, sync::Arc};
+use std::{error::Error, fmt, sync::Arc};
 
 use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
@@ -61,12 +61,29 @@ pub struct DefaultPlannedRuntimeConfig {
     pub host: TextOnlyLoopHostConfig,
 }
 
-pub struct DefaultPlannedRuntimeParts<T, G>
+pub trait RuntimeTurnStateStore:
+    TurnSpawnTreeStateStore
+    + TurnRunTransitionPort
+    + ironclaw_turns::TurnEventProjectionSource
+    + Send
+    + Sync
+{
+}
+
+impl<T> RuntimeTurnStateStore for T where
+    T: TurnSpawnTreeStateStore
+        + TurnRunTransitionPort
+        + ironclaw_turns::TurnEventProjectionSource
+        + Send
+        + Sync
+{
+}
+
+pub struct DefaultPlannedRuntimeParts<G>
 where
-    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
-    pub turn_state: Arc<T>,
+    pub turn_state: Arc<dyn RuntimeTurnStateStore>,
     pub thread_service: Arc<dyn SessionThreadService>,
     pub thread_scope: ThreadScope,
     pub model_gateway: Arc<G>,
@@ -116,9 +133,8 @@ impl<T> RuntimeSubagentGoalStore for T where
 {
 }
 
-pub struct RebornRuntimeLoopComposition<T, S, G>
+pub struct RebornRuntimeLoopComposition<S, G>
 where
-    T: TurnStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
@@ -128,7 +144,6 @@ where
     pub host_factory: Arc<RebornLoopDriverHostFactory<S, G>>,
     pub worker: Arc<TurnRunnerWorker>,
     pub wake_sender: TurnRunnerWakeSender,
-    _turn_state: PhantomData<fn() -> T>,
 }
 
 #[derive(Debug)]
@@ -242,14 +257,10 @@ impl Error for ProductLiveRuntimeBuildError {
     }
 }
 
-pub fn build_product_live_planned_runtime<T, G>(
-    mut parts: DefaultPlannedRuntimeParts<T, G>,
-) -> Result<
-    RebornRuntimeLoopComposition<T, dyn SessionThreadService, G>,
-    ProductLiveRuntimeBuildError,
->
+pub fn build_product_live_planned_runtime<G>(
+    mut parts: DefaultPlannedRuntimeParts<G>,
+) -> Result<RebornRuntimeLoopComposition<dyn SessionThreadService, G>, ProductLiveRuntimeBuildError>
 where
-    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     if parts.model_route_resolver.is_none() {
@@ -315,14 +326,13 @@ fn local_development_noop_safety_context() -> InstructionSafetyContext {
     InstructionSafetyContext::local_development_noop()
 }
 
-pub fn build_default_planned_runtime<T, G>(
-    parts: DefaultPlannedRuntimeParts<T, G>,
+pub fn build_default_planned_runtime<G>(
+    parts: DefaultPlannedRuntimeParts<G>,
 ) -> Result<
-    RebornRuntimeLoopComposition<T, dyn SessionThreadService, G>,
+    RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
     DefaultPlannedRuntimeBuildError,
 >
 where
-    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     let mut registry = DriverRegistry::new();
@@ -489,14 +499,13 @@ where
     ));
 
     Ok(
-        RebornRuntimeLoopComposition::<T, dyn SessionThreadService, G> {
+        RebornRuntimeLoopComposition::<dyn SessionThreadService, G> {
             driver_registry,
             run_profile_resolver,
             coordinator,
             host_factory,
             worker,
             wake_sender,
-            _turn_state: PhantomData,
         },
     )
 }

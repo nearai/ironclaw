@@ -257,6 +257,24 @@ For `IRONCLAW_REBORN_PROFILE=local-dev-yolo`, `run`, `repl`, and `serve` require
 
 When `serve --confirm-host-access` grants trusted-laptop access, `serve` refuses non-loopback listeners such as `0.0.0.0`. Bind to `127.0.0.1` or `::1`, or use a less privileged profile for non-loopback test listeners.
 
+For `IRONCLAW_REBORN_PROFILE=production`, `run` requires production storage
+and an explicit runtime policy:
+
+```toml
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+```
+
+Set `IRONCLAW_REBORN_POSTGRES_URL` in the process environment. Remote managed
+PostgreSQL URLs must use TLS, for example `sslmode=require`. The standalone
+CLI production launch path currently supports policies that do not require a
+tenant-sandbox process binding.
+
 ### `skills list`
 
 Reports configured Reborn local-dev skills from `<reborn-home>/local-dev/skills`

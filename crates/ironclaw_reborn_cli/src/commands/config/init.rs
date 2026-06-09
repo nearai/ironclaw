@@ -162,8 +162,9 @@ default_owner  = "reborn-cli"
 # default_project = "your-project"
 
 # [policy]
-# # Policy selection lands with epic #3036. Leave this section commented in
-# # this slice; `run` rejects it rather than silently ignoring operator intent.
+# # Local-dev still derives policy from the selected boot profile. Production
+# # `run` requires this section and currently supports profiles that do not
+# # need a tenant-sandbox process binding, such as secure_default.
 # deployment_mode         = "local_single_user"
 # default_profile         = "local_dev"
 # default_approval_policy = "ask_destructive"
