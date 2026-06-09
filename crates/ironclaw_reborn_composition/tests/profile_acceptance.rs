@@ -1,8 +1,9 @@
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness, RebornReadiness,
-    RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
+    RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness,
+    RebornLocalRuntimeProfileOptions, RebornReadiness, RebornReadinessDiagnostic,
+    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
-    build_reborn_services, local_dev_yolo_runtime_policy,
+    build_reborn_services, local_dev_yolo_runtime_policy, local_runtime_build_input_with_options,
 };
 
 use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, RuntimeProfile, SecretMode};
@@ -75,15 +76,23 @@ fn local_dev_yolo_runtime_policy_requires_disclosure() {
 
 #[test]
 fn disabled_readiness_is_redaction_safe() {
-    let json = serde_json::to_string(&RebornReadiness::disabled()).unwrap();
+    let readiness = RebornReadiness::disabled();
+    let json = serde_json::to_string(&readiness).unwrap();
     assert!(json.contains("disabled"));
     assert!(!json.contains("postgres://"));
     assert!(!json.contains("/Users/"));
     assert!(!json.contains("secret"));
+    assert_eq!(readiness.state, RebornReadinessState::Disabled);
+    assert_eq!(readiness.diagnostics.len(), 1);
     assert_eq!(
-        RebornReadiness::disabled().state,
-        RebornReadinessState::Disabled
+        readiness.diagnostics[0].reason,
+        RebornReadinessDiagnosticReason::Disabled
     );
+    assert_eq!(
+        readiness.diagnostics[0].status,
+        RebornReadinessDiagnosticStatus::Blocking
+    );
+    assert!(readiness.diagnostics[0].blocks_production);
 }
 
 #[test]
@@ -147,6 +156,105 @@ fn readiness_deserializes_legacy_payload_without_diagnostics() {
 }
 
 #[test]
+fn readiness_deserializes_diagnostics_payload_into_typed_enums() {
+    let readiness: RebornReadiness = serde_json::from_value(json!({
+        "profile": "production",
+        "state": "production-validated",
+        "facades": {
+            "host_runtime": true,
+            "turn_coordinator": true,
+            "product_auth": true
+        },
+        "workers": {
+            "turn_runner": false,
+            "trigger_poller": false
+        },
+        "diagnostics": [{
+            "profile": "production",
+            "component": "runtime_http_egress",
+            "reason": "unverified",
+            "status": "blocking",
+            "blocks_production": true
+        }]
+    }))
+    .unwrap();
+
+    assert_eq!(
+        readiness.diagnostics,
+        vec![RebornReadinessDiagnostic::production_blocker(
+            RebornCompositionProfile::Production,
+            RebornReadinessDiagnosticComponent::RuntimeHttpEgress,
+            RebornReadinessDiagnosticReason::Unverified,
+        )]
+    );
+}
+
+#[test]
+fn readiness_diagnostic_unknown_wire_variants_deserialize_safely() {
+    let diagnostic: RebornReadinessDiagnostic = serde_json::from_value(json!({
+        "profile": "production",
+        "component": "new_future_component",
+        "reason": "new-future-reason",
+        "status": "new-future-status",
+        "blocks_production": true
+    }))
+    .unwrap();
+
+    assert_eq!(diagnostic.profile, RebornCompositionProfile::Production);
+    assert_eq!(
+        diagnostic.component,
+        RebornReadinessDiagnosticComponent::Unknown("new_future_component".to_owned())
+    );
+    assert_eq!(
+        diagnostic.reason,
+        RebornReadinessDiagnosticReason::Unknown("new-future-reason".to_owned())
+    );
+    assert_eq!(
+        diagnostic.status,
+        RebornReadinessDiagnosticStatus::Unknown("new-future-status".to_owned())
+    );
+    assert!(diagnostic.blocks_production);
+}
+
+#[test]
+fn readiness_diagnostic_unknown_wire_variants_round_trip_losslessly() {
+    let diagnostic: RebornReadinessDiagnostic = serde_json::from_value(json!({
+        "profile": "production",
+        "component": "runtime_future_proxy",
+        "reason": "future-production-reason",
+        "status": "future-status",
+        "blocks_production": true
+    }))
+    .unwrap();
+
+    let encoded = serde_json::to_value(diagnostic).unwrap();
+
+    assert_eq!(
+        encoded,
+        json!({
+            "profile": "production",
+            "component": "runtime_future_proxy",
+            "reason": "future-production-reason",
+            "status": "future-status",
+            "blocks_production": true
+        })
+    );
+}
+
+#[test]
+fn readiness_diagnostic_round_trips_through_serde() {
+    let diagnostic = RebornReadinessDiagnostic::production_blocker(
+        RebornCompositionProfile::MigrationDryRun,
+        RebornReadinessDiagnosticComponent::RuntimeProcessPort,
+        RebornReadinessDiagnosticReason::Unsupported,
+    );
+    let encoded = serde_json::to_string(&diagnostic).unwrap();
+    let decoded: RebornReadinessDiagnostic = serde_json::from_str(&encoded).unwrap();
+
+    assert_eq!(diagnostic, decoded);
+}
+
+#[test]
 fn dev_only_profiles_are_visible_non_production_in_readiness() {
     for (profile, diagnostic) in [
         (
@@ -167,7 +275,7 @@ fn dev_only_profiles_are_visible_non_production_in_readiness() {
             diagnostic.reason,
             RebornReadinessDiagnosticReason::DevOnlyProfile
         );
-        assert_eq!(diagnostic.status, RebornReadinessDiagnosticStatus::Warning);
+        assert_eq!(diagnostic.status, RebornReadinessDiagnosticStatus::Blocking);
         assert!(diagnostic.blocks_production);
     }
 }
@@ -190,6 +298,32 @@ async fn local_dev_factory_readiness_includes_non_production_diagnostic() {
     assert_eq!(
         services.readiness.diagnostics,
         vec![RebornReadinessDiagnostic::local_dev()]
+    );
+}
+
+#[tokio::test]
+async fn local_dev_yolo_factory_readiness_includes_non_production_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = local_runtime_build_input_with_options(
+        RebornCompositionProfile::LocalDevYolo,
+        "readiness-yolo-owner",
+        dir.path().to_path_buf(),
+        RebornLocalRuntimeProfileOptions {
+            confirm_host_access: true,
+        },
+    )
+    .unwrap()
+    .with_local_dev_confirmed_host_home_root(dir.path().to_path_buf());
+    let services = build_reborn_services(input).await.unwrap();
+
+    assert_eq!(
+        services.readiness.profile,
+        RebornCompositionProfile::LocalDevYolo
+    );
+    assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    assert_eq!(
+        services.readiness.diagnostics,
+        vec![RebornReadinessDiagnostic::local_dev_yolo()]
     );
 }
 
