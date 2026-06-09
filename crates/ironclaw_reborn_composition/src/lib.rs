@@ -63,6 +63,8 @@ mod oauth_dcr;
 mod oauth_dcr_protocol;
 mod oauth_gate;
 mod oauth_provider_client;
+#[cfg(feature = "openai-compat-beta")]
+mod openai_compat_serve;
 mod outbound_preferences;
 mod product_auth_durable;
 mod product_auth_providers;
@@ -179,6 +181,8 @@ pub use local_runtime_profile::{
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
+#[cfg(feature = "openai-compat-beta")]
+pub use openai_compat_serve::build_openai_compat_route_mount;
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -283,8 +287,9 @@ pub use webui::{RebornWebuiBundle, build_webui_services};
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_serve::{
-    PublicRouteDrain, PublicRouteDrains, PublicRouteMount, WebuiAuthenticator, WebuiServeConfig,
-    WebuiServeConfigError, WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount, WebuiAuthenticator,
+    WebuiServeConfig, WebuiServeConfigError, WebuiServeError, WebuiV2App, webui_v2_app,
+    webui_v2_app_with_lifecycle,
 };
 
 /// Re-exported identity vocabulary host binaries need to construct

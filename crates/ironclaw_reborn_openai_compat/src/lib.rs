@@ -30,9 +30,10 @@ pub use chat::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use chat_workflow::{
-    OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
-    OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow, OpenAiChatModelOnlyTools,
-    OpenAiCompatAuthenticatedCaller,
+    OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_CONVERSATION_PREFIX,
+    OPENAI_COMPAT_INSTALLATION_ID, OpenAiChatCompletionProjection,
+    OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
+    OpenAiChatCompletionsWorkflow, OpenAiChatModelOnlyTools, OpenAiCompatAuthenticatedCaller,
 };
 pub use descriptors::{
     OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS, OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,

@@ -41,8 +41,10 @@ routes are wired to ProductWorkflow:
 
 With `openai-compat-beta`, the default router remains fail-closed unless host
 composition injects `OpenAiCompatRouterState::with_chat_completions(...)`.
-The injected `OpenAiChatCompletionsWorkflow` is the non-streaming Chat
-Completions slice:
+`ironclaw_reborn_composition::build_openai_compat_route_mount` performs that
+host wiring for `ironclaw-reborn serve` by mounting the router inside the
+protected Reborn route stack. The injected `OpenAiChatCompletionsWorkflow` is
+the non-streaming Chat Completions slice:
 
 - `POST /v1/chat/completions` parses the OpenAI-compatible DTO, reserves an
   opaque `chatcmpl-*` ref with actor-scoped idempotency, and submits the user

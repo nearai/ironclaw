@@ -4981,6 +4981,8 @@ dependencies = [
  "ironclaw_reborn_config",
  "ironclaw_reborn_event_store",
  "ironclaw_reborn_identity",
+ "ironclaw_reborn_openai_compat",
+ "ironclaw_reborn_openai_compat_storage",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runtime_policy",
