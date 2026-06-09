@@ -1,7 +1,8 @@
 # Reborn OpenAI-Compatible API Contract
 
 **Status:** contract, identity, and non-streaming Chat Completions workflow
-slices (#4442, #4443, #4444)**Parent:** #3283
+slices (#4442, #4443, #4444)
+**Parent:** #3283
 **Crates:** `crates/ironclaw_reborn_openai_compat`,
 `crates/ironclaw_reborn_openai_compat_storage`
 
@@ -19,6 +20,7 @@ vocabulary. `POST /v1/chat/completions` can submit non-streaming user-message
 requests through ProductWorkflow when host composition injects the workflow
 state. Responses routes, retrieve, cancel, and SSE translation remain
 fail-closed.
+
 ## Route Surface
 
 | Route | Method | Effect path | Streaming |
@@ -62,6 +64,10 @@ bind sockets or call `axum::serve`.
 - Ref lookup for retrieve, stream resume, and cancel is actor/scope checked.
   Unauthorized and nonexistent refs must produce the same sanitized not-found
   response at the API boundary.
+- Chat Completions projection reads must resolve through
+  `ProductWorkflow::read_projection(...)` and the returned canonical
+  actor/scope must match the authenticated caller before any projection reader
+  is called.
 - Ref mappings are two-stage: route code may reserve a pending public ref before
   ProductWorkflow side effects, then bind it to internal product-action,
   turn-run, and projection refs after those refs exist.
@@ -85,14 +91,17 @@ The route:
   before submission.
 - Converts OpenAI-compatible messages into a `UserMessagePayload` and submits it
   through `ProductWorkflow`.
-- Waits through a composition-supplied projection waiter and returns a sanitized
-  Chat Completions response.
+- Resolves the canonical projection read request through
+  `ProductWorkflow::read_projection(...)`, then waits through a
+  composition-supplied projection reader and returns a sanitized Chat
+  Completions response.
 - Carries the requested public model string as a composition/policy hint for
-  the waiter; the route must not inject the model name into user transcript
-  text.
+  the projection reader; the route must not inject the model name into user
+  transcript text.
 - Preserves model-produced tool-call output shape in the response, while
   treating client-supplied tools as model-only hints rather than executable
   Reborn capabilities.
+
 ## Error Shape
 
 Errors serialize as:

@@ -47,14 +47,18 @@ Completions slice:
 - `POST /v1/chat/completions` parses the OpenAI-compatible DTO, reserves an
   opaque `chatcmpl-*` ref with actor-scoped idempotency, and submits the user
   message through the channel-neutral `ProductWorkflow` surface.
-- The route waits through a composition-supplied `OpenAiChatCompletionWaiter`.
-  Timeout returns a retryable sanitized API error and does not cancel or detach
-  the underlying product turn.
+- The route resolves the canonical projection read request through
+  `ProductWorkflow::read_projection(...)`, then waits through a
+  composition-supplied `OpenAiChatCompletionProjectionReader`. Timeout returns
+  a retryable sanitized API error and does not cancel or detach the underlying
+  product turn.
+- The canonical projection read actor/scope must match the authenticated caller
+  before the projection reader is invoked.
 - The requested public model string is carried as a composition/policy hint for
-  the waiter; do not inject it into the user transcript text.
+  the projection reader; do not inject it into the user transcript text.
 - Client-supplied `tools` and `tool_choice` are model hints only. They are
-  forwarded on the waiter request as model-only metadata and must not execute as
-  Reborn capabilities from this crate.
+  forwarded on the projection reader request as model-only metadata and must not
+  execute as Reborn capabilities from this crate.
 - The route requires a verified `OpenAiCompatAuthenticatedCaller` extension
   minted by host auth middleware. Do not mint auth evidence in this crate's
   production feature set.
