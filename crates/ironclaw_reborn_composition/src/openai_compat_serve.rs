@@ -14,8 +14,8 @@ use ironclaw_host_api::{
     ResourceScope, TenantId, UserId, VirtualPath,
 };
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ProductAdapterId, ProductInboundAck, ProductWorkflow,
-    ProjectionReadRequest,
+    AdapterInstallationId, ProductAdapterId, ProductInboundAck, ProductOutboundEnvelope,
+    ProductWorkflow, ProjectionReadRequest, ProjectionStream,
 };
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
@@ -26,13 +26,14 @@ use ironclaw_product_workflow_storage::RebornFilesystemIdempotencyLedger;
 use ironclaw_reborn_openai_compat::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
-    OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow, OpenAiCompatErrorKind,
-    OpenAiCompatHttpError, OpenAiCompatRefStore, OpenAiCompatResourceBinding,
+    OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,
+    OpenAiChatProjectionStreamRequest, OpenAiCompatErrorKind, OpenAiCompatHttpError,
+    OpenAiCompatProjectionStreamer, OpenAiCompatRefStore, OpenAiCompatResourceBinding,
     OpenAiCompatRouterState, OpenAiResponseObject, OpenAiResponseOutputItem,
-    OpenAiResponseOutputItemStatus, OpenAiResponseProjection, OpenAiResponseReadRequest,
-    OpenAiResponseStatus, OpenAiResponseWaitRequest, OpenAiResponsesMessageRole,
-    OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
-    openai_compat_routes,
+    OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
+    OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
+    OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
+    OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
 };
 use ironclaw_reborn_openai_compat_storage::FilesystemOpenAiCompatRefStore;
 use ironclaw_threads::{
@@ -123,16 +124,21 @@ pub async fn build_openai_compat_route_mount(
     let responses_projection_reader = Arc::new(OpenAiResponsesThreadProjectionReader::new(
         runtime.webui_thread_service(),
     ));
-    let chat_workflow = Arc::new(OpenAiChatCompletionsWorkflow::new(
-        product_workflow.clone(),
-        ref_store.clone(),
-        chat_projection_reader,
+    let projection_streamer = Arc::new(OpenAiCompatRuntimeProjectionStreamer::new(
+        runtime.webui_event_stream(),
     ));
-    let responses_workflow = Arc::new(OpenAiResponsesWorkflow::new(
-        product_workflow,
-        ref_store,
-        responses_projection_reader,
-    ));
+    let chat_workflow = Arc::new(
+        OpenAiChatCompletionsWorkflow::new(
+            product_workflow.clone(),
+            ref_store.clone(),
+            chat_projection_reader,
+        )
+        .with_projection_streamer(projection_streamer.clone()),
+    );
+    let responses_workflow = Arc::new(
+        OpenAiResponsesWorkflow::new(product_workflow, ref_store, responses_projection_reader)
+            .with_projection_streamer(projection_streamer),
+    );
     Ok(ProtectedRouteMount::new(
         openai_compat_router_with_state(
             OpenAiCompatRouterState::with_chat_completions(chat_workflow)
@@ -140,6 +146,43 @@ pub async fn build_openai_compat_route_mount(
         ),
         openai_compat_routes(),
     ))
+}
+
+struct OpenAiCompatRuntimeProjectionStreamer {
+    projection_stream: Arc<dyn ProjectionStream>,
+}
+
+impl OpenAiCompatRuntimeProjectionStreamer {
+    fn new(projection_stream: Arc<dyn ProjectionStream>) -> Self {
+        Self { projection_stream }
+    }
+}
+
+#[async_trait]
+impl OpenAiCompatProjectionStreamer for OpenAiCompatRuntimeProjectionStreamer {
+    async fn drain_chat(
+        &self,
+        request: OpenAiChatProjectionStreamRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+        let mut subscription = request.projection_subscription;
+        subscription.after_cursor = request.after_cursor;
+        self.projection_stream
+            .drain(subscription)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn drain_response(
+        &self,
+        request: OpenAiResponseProjectionStreamRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+        let mut subscription = request.projection_subscription;
+        subscription.after_cursor = request.after_cursor;
+        self.projection_stream
+            .drain(subscription)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 #[derive(Debug)]

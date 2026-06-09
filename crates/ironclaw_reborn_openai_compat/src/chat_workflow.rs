@@ -12,6 +12,9 @@ use crate::ack_helpers::internal_refs_from_ack;
 use crate::identity::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
 };
+use crate::projection_helpers::{
+    ensure_projection_read_matches_caller, ensure_projection_subscription_matches_caller,
+};
 use crate::{
     OpenAiChatChoice, OpenAiChatCompletionId, OpenAiChatCompletionRequest,
     OpenAiChatCompletionResponse, OpenAiChatFinishReason, OpenAiChatMessage, OpenAiChatMessageRole,
@@ -29,9 +32,10 @@ use chrono::Utc;
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     ParsedProductInbound, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductProjectionReadInput, ProductProjectionSubject, ProductRejection,
-    ProductRejectionKind, ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind,
-    ProjectionReadRequest, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    ProductInboundPayload, ProductProjectionReadInput, ProductProjectionSubject,
+    ProductProjectionSubscribeInput, ProductRejection, ProductRejectionKind, ProductTriggerReason,
+    ProductWorkflow, ProductWorkflowRejectionKind, ProjectionReadRequest, ProtocolAuthEvidence,
+    TrustedInboundContext, UserMessagePayload,
 };
 
 const DEFAULT_CHAT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -366,6 +370,11 @@ impl OpenAiChatCompletionsWorkflow {
             .bind_internal_refs_from_ack(caller.scope().clone(), public_id.clone(), &accepted_ack)
             .await?
             .unwrap_or(mapping);
+        let projection_subscription = self
+            .product_workflow
+            .subscribe_projection(self.chat_projection_subscribe_input(&caller, &public_id)?)
+            .await?;
+        ensure_projection_subscription_matches_caller(&caller, &projection_subscription)?;
 
         Ok(crate::streaming::chat_sse_response(
             projection_streamer,
@@ -375,6 +384,7 @@ impl OpenAiChatCompletionsWorkflow {
                 accepted_ack,
                 requested_model: request.model,
                 model_only_tools,
+                projection_subscription,
                 mapping,
                 wait_timeout: self.wait_timeout,
                 after_cursor: None,
@@ -466,31 +476,51 @@ impl OpenAiChatCompletionsWorkflow {
         caller: &OpenAiCompatAuthenticatedCaller,
         public_id: &OpenAiChatCompletionId,
     ) -> Result<ProductProjectionReadInput, OpenAiCompatHttpError> {
-        let Some(auth_claim) = caller.auth_evidence().claim().cloned() else {
-            return Err(OpenAiCompatHttpError::internal());
-        };
         Ok(ProductProjectionReadInput::new(
-            ProductProjectionSubject::AdapterExternalRefs {
-                adapter_id: self.adapter_id.clone(),
-                installation_id: self.installation_id.clone(),
-                external_event_id: ExternalEventId::new(public_id.as_str())?,
-                external_actor_ref: ExternalActorRef::new(
-                    OPENAI_COMPAT_ACTOR_KIND,
-                    caller.scope().user_id().as_str(),
-                    Option::<String>::None,
-                )?,
-                external_conversation_ref: ExternalConversationRef::new(
-                    None,
-                    format!("{OPENAI_COMPAT_CONVERSATION_PREFIX}:{}", public_id.as_str()),
-                    None,
-                    None,
-                )?,
-                auth_claim,
-            },
+            self.chat_projection_subject(caller, public_id)?,
             None,
             None,
             None,
         ))
+    }
+
+    fn chat_projection_subscribe_input(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        public_id: &OpenAiChatCompletionId,
+    ) -> Result<ProductProjectionSubscribeInput, OpenAiCompatHttpError> {
+        Ok(ProductProjectionSubscribeInput::new(
+            self.chat_projection_subject(caller, public_id)?,
+            None,
+            None,
+        ))
+    }
+
+    fn chat_projection_subject(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        public_id: &OpenAiChatCompletionId,
+    ) -> Result<ProductProjectionSubject, OpenAiCompatHttpError> {
+        let Some(auth_claim) = caller.auth_evidence().claim().cloned() else {
+            return Err(OpenAiCompatHttpError::internal());
+        };
+        Ok(ProductProjectionSubject::AdapterExternalRefs {
+            adapter_id: self.adapter_id.clone(),
+            installation_id: self.installation_id.clone(),
+            external_event_id: ExternalEventId::new(public_id.as_str())?,
+            external_actor_ref: ExternalActorRef::new(
+                OPENAI_COMPAT_ACTOR_KIND,
+                caller.scope().user_id().as_str(),
+                Option::<String>::None,
+            )?,
+            external_conversation_ref: ExternalConversationRef::new(
+                None,
+                format!("{OPENAI_COMPAT_CONVERSATION_PREFIX}:{}", public_id.as_str()),
+                None,
+                None,
+            )?,
+            auth_claim,
+        })
     }
 }
 
@@ -558,31 +588,6 @@ pub trait OpenAiChatCompletionProjectionReader: Send + Sync {
         &self,
         request: OpenAiChatCompletionProjectionRequest,
     ) -> Result<OpenAiChatCompletionProjection, OpenAiCompatHttpError>;
-}
-
-fn ensure_projection_read_matches_caller(
-    caller: &OpenAiCompatAuthenticatedCaller,
-    projection_read: &ProjectionReadRequest,
-) -> Result<(), OpenAiCompatHttpError> {
-    let scope = caller.scope();
-    let matches_caller = &projection_read.actor.user_id == scope.user_id()
-        && &projection_read.scope.tenant_id == scope.tenant_id()
-        && projection_read.scope.agent_id.as_ref() == scope.agent_id()
-        && projection_read.scope.project_id.as_ref() == scope.project_id()
-        && projection_read
-            .scope
-            .explicit_owner_user_id()
-            .is_none_or(|owner| owner == scope.user_id());
-    if matches_caller {
-        Ok(())
-    } else {
-        Err(OpenAiCompatHttpError::from_kind(
-            403,
-            false,
-            crate::OpenAiCompatErrorKind::PermissionDenied,
-            None,
-        ))
-    }
 }
 
 fn accepted_ack_from_ack(

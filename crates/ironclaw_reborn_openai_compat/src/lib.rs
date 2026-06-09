@@ -20,6 +20,8 @@ mod error;
 mod handlers;
 #[cfg(feature = "openai-compat-beta")]
 mod identity;
+#[cfg(feature = "openai-compat-beta")]
+mod projection_helpers;
 mod refs;
 mod responses;
 #[cfg(feature = "openai-compat-beta")]

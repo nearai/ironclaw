@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use futures_core::Stream;
 use ironclaw_product_adapters::{
     ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
-    ProductProjectionState, ProjectionCursor,
+    ProductProjectionState, ProjectionCursor, ProjectionSubscriptionRequest,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -40,6 +40,7 @@ pub struct OpenAiChatProjectionStreamRequest {
     pub accepted_ack: ProductInboundAck,
     pub requested_model: String,
     pub model_only_tools: Option<OpenAiChatModelOnlyTools>,
+    pub projection_subscription: ProjectionSubscriptionRequest,
     pub mapping: OpenAiCompatResourceMapping,
     pub wait_timeout: Duration,
     pub after_cursor: Option<ProjectionCursor>,
@@ -51,6 +52,7 @@ pub struct OpenAiResponseProjectionStreamRequest {
     pub actor_scope: OpenAiCompatActorScope,
     pub accepted_ack: ProductInboundAck,
     pub requested_model: String,
+    pub projection_subscription: ProjectionSubscriptionRequest,
     pub mapping: OpenAiCompatResourceMapping,
     pub wait_timeout: Duration,
     pub after_cursor: Option<ProjectionCursor>,
