@@ -541,7 +541,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
         let decision = request.decision;
         self.resolutions.lock().expect("lock").push(request);
         Ok(match decision {
-            ApprovalInteractionDecision::ApproveOnce => {
+            ApprovalInteractionDecision::ApproveOnce | ApprovalInteractionDecision::AlwaysAllow => {
                 ResolveApprovalInteractionResponse::Approved(ResumeTurnResponse {
                     run_id,
                     status: TurnStatus::Queued,
@@ -3869,11 +3869,8 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
     );
 }
 
-// Regression: `Approved { always: true }` requests a persistent approval which
-// this facade cannot honor (no approval-policy port). Reject as Unavailable
-// instead of silently downgrading to one-shot.
 #[tokio::test]
-async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
+async fn generic_gate_resolution_with_persistent_flag_is_rejected() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -3895,7 +3892,7 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
             .expect("request"),
         )
         .await
-        .expect_err("persistent approval must be rejected");
+        .expect_err("generic persistent gate resolution must be rejected");
 
     assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
     assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
@@ -3903,12 +3900,12 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
     assert_eq!(
         coordinator.resumption_count(),
         0,
-        "resume_turn must NOT be called for unsupported persistent approval"
+        "resume_turn must NOT be called for unsupported generic persistent gate"
     );
 }
 
 #[tokio::test]
-async fn approval_gate_resolution_with_persistent_flag_is_rejected_without_approval_interaction() {
+async fn approval_gate_resolution_with_persistent_flag_uses_approval_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
     let services = RebornServices::new(
@@ -3919,7 +3916,7 @@ async fn approval_gate_resolution_with_persistent_flag_is_rejected_without_appro
     create_thread_for(&services, caller(), "thread-alpha").await;
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
 
-    let err = services
+    let response = services
         .resolve_gate(
             caller(),
             serde_json::from_value::<WebUiResolveGateRequest>(json!({
@@ -3933,12 +3930,20 @@ async fn approval_gate_resolution_with_persistent_flag_is_rejected_without_appro
             .expect("request"),
         )
         .await
-        .expect_err("persistent approval must be rejected");
+        .expect("persistent approval resolution succeeds");
 
-    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
-    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
-    assert_eq!(err.status_code, 503);
-    assert_eq!(approval_interactions.resolution_count(), 0);
+    assert!(matches!(
+        response,
+        RebornResolveGateResponse::Resumed(response) if response.status == TurnStatus::Queued
+    ));
+    assert_eq!(approval_interactions.resolution_count(), 1);
+    assert_eq!(
+        approval_interactions
+            .last_resolution()
+            .expect("resolution")
+            .decision,
+        ApprovalInteractionDecision::AlwaysAllow
+    );
     assert_eq!(coordinator.resumption_count(), 0);
 }
 

@@ -245,7 +245,8 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 .expect("recorded")
                 .decision
             {
-                ApprovalInteractionDecision::ApproveOnce => {
+                ApprovalInteractionDecision::ApproveOnce
+                | ApprovalInteractionDecision::AlwaysAllow => {
                     ResolveApprovalInteractionResponse::Approved(ResumeTurnResponse {
                         run_id,
                         status: TurnStatus::Queued,
@@ -979,7 +980,7 @@ async fn approval_resolution_deny_routes_through_approval_interaction_service() 
 }
 
 #[tokio::test]
-async fn approval_resolution_always_allow_is_rejected_without_approval_interaction() {
+async fn approval_resolution_always_allow_routes_through_approval_interaction_service() {
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let binding = Arc::new(FakeConversationBindingService::new());
@@ -998,21 +999,17 @@ async fn approval_resolution_always_allow_is_rejected_without_approval_interacti
         ),
     );
 
-    let err = workflow
+    workflow
         .accept_inbound(envelope)
         .await
-        .expect_err("always allow unsupported");
+        .expect("always allow routes through approval interaction");
 
-    assert!(matches!(
-        err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ironclaw_product_adapters::ProductWorkflowRejectionKind::InvalidRequest,
-            status_code: 400,
-            retryable: false,
-            ..
-        }
-    ));
-    assert!(approval_service.resolutions().is_empty());
+    let resolutions = approval_service.resolutions();
+    assert_eq!(resolutions.len(), 1);
+    assert_eq!(
+        resolutions[0].decision,
+        ApprovalInteractionDecision::AlwaysAllow
+    );
 }
 
 #[tokio::test]
