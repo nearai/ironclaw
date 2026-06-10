@@ -1995,6 +1995,11 @@ fn history_messages(messages: &[ThreadMessageRecord]) -> Vec<ThreadMessageRecord
     messages.iter().map(history_message).collect()
 }
 
+// Deny-by-default projection: every field is listed deliberately so a newly
+// added sensitive field does NOT auto-flow into persisted history. Do not
+// collapse to `..message.clone()` — `tool_result_provider_call` is dropped
+// here precisely because raw runtime/tool payloads must never surface as
+// ordinary transcript content (see crate guardrails).
 fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
     ThreadMessageRecord {
         message_id: message.message_id,
