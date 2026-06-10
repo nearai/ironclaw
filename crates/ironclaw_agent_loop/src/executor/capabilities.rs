@@ -744,10 +744,11 @@ async fn append_blocked_capability_error_result(
     capability_batch: &mut CapabilityBatchTurnSummary,
 ) -> Result<(), AgentLoopExecutorError> {
     append_capability_error_ref(host, state, call, summary, model_observation).await?;
-    if capability_batch.invocation_count > 0 && call.provider_replay.is_some() {
-        if let Ok(signature) = capability_call_signature(call) {
-            capability_batch.record_result(signature, CapabilityProgress::Blocked, false);
-        }
+    if capability_batch.invocation_count > 0
+        && call.provider_replay.is_some()
+        && let Ok(signature) = capability_call_signature(call)
+    {
+        capability_batch.record_result(signature, CapabilityProgress::Blocked, false);
     }
     Ok(())
 }
