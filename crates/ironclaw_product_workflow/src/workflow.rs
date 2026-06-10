@@ -630,9 +630,7 @@ fn approval_interaction_decision(
     match decision {
         ApprovalDecision::ApproveOnce => Ok(ApprovalInteractionDecision::ApproveOnce),
         ApprovalDecision::Deny => Ok(ApprovalInteractionDecision::Deny),
-        ApprovalDecision::AlwaysAllow => Err(ProductWorkflowError::ApprovalInteractionRejected {
-            kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
-        }),
+        ApprovalDecision::AlwaysAllow => Ok(ApprovalInteractionDecision::AlwaysAllow),
     }
 }
 

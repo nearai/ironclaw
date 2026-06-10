@@ -64,6 +64,7 @@ async fn postgres_substrate_builder_wires_production_components_without_local_on
             pool,
             event_store: RebornEventStoreConfig::Postgres {
                 url: SecretString::from(database_url),
+                tls_options: Default::default(),
             },
             secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
@@ -97,6 +98,7 @@ async fn postgres_substrate_builder_rejects_invalid_secret_master_key() {
             pool,
             event_store: RebornEventStoreConfig::Postgres {
                 url: SecretString::from(database_url),
+                tls_options: Default::default(),
             },
             secret_master_key: Some(SecretString::from("too-short")),
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
@@ -134,6 +136,7 @@ async fn postgres_substrate_builder_rejects_weak_env_secret_master_key() {
             pool,
             event_store: RebornEventStoreConfig::Postgres {
                 url: SecretString::from(database_url),
+                tls_options: Default::default(),
             },
             secret_master_key: None,
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),

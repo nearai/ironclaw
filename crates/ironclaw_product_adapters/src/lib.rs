@@ -21,8 +21,10 @@ pub use adapter::{ProductAdapter, ProductAdapterHealth};
 pub use auth::{AuthRequirement, ProtocolAuthEvidence, ProtocolAuthFailure, VerifiedAuthClaim};
 #[cfg(feature = "host-auth-mint")]
 pub use auth::{
-    mark_bearer_token_verified, mark_request_signature_verified, mark_session_verified,
-    mark_shared_secret_header_verified,
+    mark_bearer_token_verified, mark_bearer_token_verified_for_tenant,
+    mark_request_signature_verified, mark_request_signature_verified_for_tenant,
+    mark_session_verified, mark_session_verified_for_tenant, mark_shared_secret_header_verified,
+    mark_shared_secret_header_verified_for_tenant,
 };
 pub use capabilities::{ProductAdapterCapabilities, ProductCapabilityFlag};
 pub use egress::{

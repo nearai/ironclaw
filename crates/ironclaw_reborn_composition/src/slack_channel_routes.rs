@@ -204,6 +204,49 @@ pub(crate) trait SlackChannelRouteStore: Send + Sync + std::fmt::Debug {
         &self,
         key: &SlackChannelRouteKey,
     ) -> Result<Option<UserId>, SlackChannelRouteError>;
+
+    /// List routes that belong to `subject_user_id`, paging through the store
+    /// `limit` entries at a time.  The default implementation re-uses
+    /// `list_routes` and filters each page in memory; it never materialises
+    /// more than `limit` entries at once and returns early once `cap` routes
+    /// have been accumulated.
+    ///
+    /// Implementors whose storage layout is subject-indexed may override this
+    /// with a cheaper query.  A true subject index remains a tracked follow-up
+    /// for stores where full-inventory scans become expensive at scale.
+    async fn list_routes_for_subject(
+        &self,
+        tenant_id: &TenantId,
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+        subject_user_id: &UserId,
+        page_size: usize,
+        cap: usize,
+    ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
+        let mut cursor = 0;
+        let mut result = Vec::new();
+        loop {
+            let page = self
+                .list_routes(tenant_id, installation_id, team_id, cursor, page_size)
+                .await?;
+            for route in page.routes {
+                if route.subject_user_id == subject_user_id.as_str() {
+                    if result.len() >= cap {
+                        return Err(SlackChannelRouteError::StoreUnavailable);
+                    }
+                    result.push(route);
+                }
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            if next_cursor <= cursor {
+                return Err(SlackChannelRouteError::StoreUnavailable);
+            }
+            cursor = next_cursor;
+        }
+        Ok(result)
+    }
 }
 
 #[cfg(test)]

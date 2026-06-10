@@ -574,12 +574,13 @@ impl CapabilityStage {
             {
                 RecoveryOutcome::ToolErrorResult { recovery } => {
                     state.recovery_state = recovery;
-                    append_capability_error_ref(
+                    append_blocked_capability_error_result(
                         ctx.host,
                         &mut state,
                         &call,
                         &summary,
                         model_observation.clone(),
+                        capability_batch,
                     )
                     .await?;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
@@ -593,12 +594,13 @@ impl CapabilityStage {
                     failure_kind,
                 } => {
                     state.recovery_state = recovery;
-                    append_capability_error_ref(
+                    append_blocked_capability_error_result(
                         ctx.host,
                         &mut state,
                         &call,
                         &summary,
                         model_observation.clone(),
+                        capability_batch,
                     )
                     .await?;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
@@ -674,8 +676,15 @@ impl CapabilityStage {
             }
         }
 
-        append_capability_error_ref(ctx.host, &mut state, &call, &summary, model_observation)
-            .await?;
+        append_blocked_capability_error_result(
+            ctx.host,
+            &mut state,
+            &call,
+            &summary,
+            model_observation,
+            capability_batch,
+        )
+        .await?;
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
@@ -766,6 +775,24 @@ async fn append_spawned_child_result(
         byte_len,
     };
     append_completed_capability_result(host, state, call, result, capability_batch).await
+}
+
+async fn append_blocked_capability_error_result(
+    host: &(dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync),
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+    summary: &CapabilityErrorSummary,
+    model_observation: Option<ironclaw_turns::run_profile::ModelVisibleToolObservation>,
+    capability_batch: &mut CapabilityBatchTurnSummary,
+) -> Result<(), AgentLoopExecutorError> {
+    append_capability_error_ref(host, state, call, summary, model_observation).await?;
+    if capability_batch.invocation_count > 0
+        && call.provider_replay.is_some()
+        && let Ok(signature) = capability_call_signature(call)
+    {
+        capability_batch.record_result(signature, CapabilityProgress::Blocked, false);
+    }
+    Ok(())
 }
 
 async fn append_completed_capability_result(

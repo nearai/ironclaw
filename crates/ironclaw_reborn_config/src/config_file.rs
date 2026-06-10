@@ -215,6 +215,8 @@ pub struct StorageSection {
     pub url_env: Option<String>,
     /// Environment variable name containing the Reborn secret master key.
     pub secret_master_key_env: Option<String>,
+    /// PostgreSQL connection pool size for production storage. Defaults to 16.
+    pub pool_max_size: Option<usize>,
 }
 
 /// WebChat v2 HTTP gateway configuration.
@@ -730,6 +732,15 @@ impl RebornConfigFile {
                     attributed_path,
                 )?;
             }
+            if let Some(pool_max_size) = storage.pool_max_size
+                && pool_max_size == 0
+            {
+                return Err(RebornConfigFileError::InvalidField {
+                    path: attributed_path.display().to_string(),
+                    field: "storage.pool_max_size".to_string(),
+                    reason: "must be greater than 0".to_string(),
+                });
+            }
         }
         if let Some(webui) = &self.webui {
             if let Some(host) = &webui.listen_host {
@@ -1156,6 +1167,7 @@ regex_activation_enabled = false
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+pool_max_size = 32
 
 [llm.default]
 provider_id = "openai"
@@ -1210,6 +1222,7 @@ subject_user_id = "eng-team-agent"
             storage.secret_master_key_env.as_deref(),
             Some("IRONCLAW_REBORN_SECRET_MASTER_KEY")
         );
+        assert_eq!(storage.pool_max_size, Some(32));
         let default_slot = cfg.default_llm_slot().expect("default slot present");
         assert_eq!(default_slot.provider_id.as_deref(), Some("openai"));
         assert_eq!(default_slot.model.as_deref(), Some("gpt-4o-mini"));
@@ -1391,6 +1404,7 @@ signing_secret_env = "sk-proj-1234567890abcdef1234567890"
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+pool_max_size = 24
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed())
             .expect("storage env reference must parse");
@@ -1403,6 +1417,22 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         assert_eq!(
             storage.secret_master_key_env.as_deref(),
             Some("IRONCLAW_REBORN_SECRET_MASTER_KEY")
+        );
+        assert_eq!(storage.pool_max_size, Some(24));
+    }
+
+    #[test]
+    fn rejects_zero_storage_pool_max_size() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+pool_max_size = 0
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("zero pool_max_size must be rejected");
+        assert!(
+            err.to_string().contains("storage.pool_max_size"),
+            "error should identify storage.pool_max_size: {err}"
         );
     }
 

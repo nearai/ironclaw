@@ -25,8 +25,9 @@ owns:
    the same path prefix the descriptors declare.
 2. **Bearer-token middleware.** Authenticate `Authorization: Bearer
    …` (or the matching session form) and inject a
-   `WebUiAuthenticatedCaller` as an `axum::Extension` *before* the
-   handler runs. The handlers fail closed (`500`) when this layer is
+   `WebUiAuthenticatedCaller` and request-scoped
+   `WebUiV2Capabilities` as `axum::Extension`s *before* the handler
+   runs. The handlers fail closed (`500`) when this layer is
    missing — verified by
    `missing_caller_extension_returns_500`.
 3. **Query-token path for the SSE route.** The browser's
@@ -78,6 +79,8 @@ browser-reachable.
 | `webui.v2.operator.get_setup` | GET | `/api/webchat/v2/operator/setup` | None | `ProjectionOnly` |
 | `webui.v2.operator.run_setup` | POST | `/api/webchat/v2/operator/setup` | None | `ProductWorkflow` |
 | `webui.v2.operator.list_config` | GET | `/api/webchat/v2/operator/config` | None | `ProjectionOnly` |
+| `webui.v2.operator.get_config_key` | GET | `/api/webchat/v2/operator/config/{key}` | None | `ProjectionOnly` |
+| `webui.v2.operator.set_config_key` | POST | `/api/webchat/v2/operator/config/{key}` | None | `ProductWorkflow` |
 | `webui.v2.operator.validate_config` | POST | `/api/webchat/v2/operator/config/validate` | None | `ProductWorkflow` |
 | `webui.v2.operator.diagnostics` | GET | `/api/webchat/v2/operator/diagnostics` | None | `ProjectionOnly` |
 | `webui.v2.operator.status` | GET | `/api/webchat/v2/operator/status` | None | `ProjectionOnly` |
@@ -86,15 +89,25 @@ browser-reachable.
 
 All routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
-constructing the `WebUiAuthenticatedCaller` and injecting it as an
-axum `Extension` before the handler runs.
+constructing the `WebUiAuthenticatedCaller`, carrying the matched
+token's `WebUiV2Capabilities`, and injecting both as axum
+`Extension`s before the handler runs.
 
 The LLM configuration and operator command-plane routes are operator-wide. Host
-composition must only mount them for authenticators that represent a single
-trusted operator; multi-user session/OIDC authenticators should leave those
-routes unmounted until an admin role boundary exists in
-`WebUiAuthenticatedCaller`. Unwired operator command-plane facade methods fail
-closed with sanitized `503 service_unavailable` responses.
+composition mounts them only when the authenticator says the deployment
+has an operator configuration surface, and must still authorize each
+request from the matched token's `operator_webui_config` capability.
+Multi-user session/OIDC authenticators should leave those routes
+unmounted or return non-operator capabilities until an admin role
+boundary exists. Unwired operator command-plane write, setup, log, and
+service-control methods fail closed with sanitized `503 service_unavailable`
+responses. Config validation plus read-only config, status, and diagnostics
+surfaces may instead return unavailable command-plane payloads with redacted
+diagnostics so operators can see why a setting is ignored. Stable
+unsupported-config reason codes currently include
+`operator_config_service_not_wired`, `operator_config_secret_not_wired`,
+`operator_config_deprecated`, `operator_config_immutable`,
+`operator_config_not_wired`, and `operator_config_unknown_key`.
 
 ### List-threads
 

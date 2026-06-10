@@ -197,6 +197,9 @@ regex_activation_enabled = true
 # backend = "postgres"
 # url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 # secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+# # Optional; defaults to 16. Keep below the PostgreSQL server's
+# # max_connections after reserving capacity for migrations/operator sessions.
+# pool_max_size = 16
 
 [llm.default]
 # LLM slot selection. `provider_id` references an entry in
