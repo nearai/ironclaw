@@ -78,6 +78,10 @@ pub struct SlackFinalReplyDeliverySettings {
     pub poll_interval: Duration,
     pub max_wait: Duration,
     pub max_concurrent_deliveries: NonZeroUsize,
+    /// Bounds the total number of spawned delivery tasks (active + waiting for a
+    /// delivery permit). When this limit is reached, new trigger fires are
+    /// recorded as `Skipped` rather than spawning an unbounded waiting task.
+    pub max_pending_deliveries: NonZeroUsize,
 }
 
 impl Default for SlackFinalReplyDeliverySettings {
@@ -86,6 +90,7 @@ impl Default for SlackFinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(250),
             max_wait: Duration::from_secs(120),
             max_concurrent_deliveries: NonZeroUsize::new(64).expect("non-zero literal"), // safety: static default literal is non-zero.
+            max_pending_deliveries: NonZeroUsize::new(256).expect("non-zero literal"), // safety: static default literal is non-zero.
         }
     }
 }
@@ -903,6 +908,10 @@ pub struct TriggeredRunDeliveryDriver {
     services: SlackFinalReplyDeliveryServices,
     settings: SlackFinalReplyDeliverySettings,
     delivery_permits: Arc<Semaphore>,
+    /// Bounds the total number of spawned delivery tasks (active + waiting).
+    /// Acquired via `try_acquire_owned` before spawning; released when the task
+    /// exits. Overflow is recorded as `Skipped` without spawning.
+    pending_permits: Arc<Semaphore>,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
     route_store: Arc<dyn DeliveredGateRouteStore>,
     /// Fallback agent id used when the submitted `TurnScope::agent_id` is
@@ -936,14 +945,26 @@ impl TriggeredRunDeliveryDriver {
         fallback_agent_id: ironclaw_host_api::AgentId,
     ) -> Self {
         let delivery_permits = Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get()));
+        let pending_permits = Arc::new(Semaphore::new(settings.max_pending_deliveries.get()));
         Self {
             services,
             settings,
             delivery_permits,
+            pending_permits,
             delivery_store,
             route_store,
             fallback_agent_id,
         }
+    }
+
+    /// Acquire a permit from the pending-delivery semaphore for testing.
+    ///
+    /// Allows tests to hold the pending slot without spawning a real delivery
+    /// task, making it straightforward to assert `Skipped` outcomes when the
+    /// queue is full.
+    #[cfg(test)]
+    pub fn try_acquire_pending_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(&self.pending_permits).try_acquire_owned().ok()
     }
 }
 
@@ -960,6 +981,19 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
                 .await;
             return;
         }
+
+        // Guard against unbounded task accumulation: if the pending-delivery
+        // queue is full, record Skipped immediately without spawning.
+        let Ok(pending_permit) = Arc::clone(&self.pending_permits).try_acquire_owned() else {
+            tracing::warn!(
+                target: "ironclaw::reborn::slack_delivery",
+                %run_id,
+                "triggered run delivery skipped: pending delivery queue full"
+            );
+            self.record_outcome(run_id, TriggeredRunDeliveryOutcomeKind::Skipped)
+                .await;
+            return;
+        };
 
         // Clone the Arcs we need into the spawned task.
         let permits = Arc::clone(&self.delivery_permits);
@@ -980,6 +1014,10 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
         let fallback_agent_id = self.fallback_agent_id.clone();
 
         tokio::spawn(async move {
+            // Hold the pending permit for the full lifetime of this task so it
+            // counts against the pending-delivery cap until delivery completes.
+            let _pending_permit = pending_permit;
+
             let Ok(_permit) = permits.clone().acquire_owned().await else {
                 tracing::warn!(
                     target = "ironclaw::reborn::slack_delivery",
@@ -2084,6 +2122,7 @@ mod tests {
             poll_interval: std::time::Duration::ZERO,
             max_wait: std::time::Duration::from_secs(5),
             max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
         };
         let driver = TriggeredRunDeliveryDriver::with_settings(
             services,
@@ -2150,6 +2189,7 @@ mod tests {
             poll_interval: std::time::Duration::ZERO,
             max_wait: std::time::Duration::from_secs(5),
             max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
         };
         let driver = TriggeredRunDeliveryDriver::with_settings(
             services,
@@ -2238,6 +2278,7 @@ mod tests {
             poll_interval: std::time::Duration::ZERO,
             max_wait: std::time::Duration::from_secs(5),
             max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
         };
         let driver = TriggeredRunDeliveryDriver::with_settings(
             services,
@@ -2409,6 +2450,7 @@ mod tests {
             poll_interval: std::time::Duration::ZERO,
             max_wait: std::time::Duration::from_secs(5),
             max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
         };
         let driver = TriggeredRunDeliveryDriver::with_settings(
             services,
@@ -2478,6 +2520,7 @@ mod tests {
             poll_interval: std::time::Duration::ZERO,
             max_wait: std::time::Duration::from_millis(1),
             max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
         };
         let driver = TriggeredRunDeliveryDriver::with_settings(
             services,
@@ -2503,6 +2546,80 @@ mod tests {
                 .iter()
                 .any(|c| c.path == "/api/chat.postMessage"),
             "no chat.postMessage egress expected for timed-out run"
+        );
+    }
+
+    // --- Pending-delivery queue cap tests -------------------------------------
+
+    /// When `max_pending_deliveries = 1` and the single pending slot is already
+    /// held, a second `on_trigger_submitted` call must record `Skipped` without
+    /// spawning a delivery task.
+    #[tokio::test]
+    async fn driver_pending_queue_full_records_skipped() {
+        let install = "test-install";
+        let scope = personal_turn_scope();
+        let run_id_blocked = TurnRunId::new();
+        let run_id_overflow = TurnRunId::new();
+
+        // The coordinator will always return Completed, but since we hold the
+        // pending permit the spawned task for run_id_blocked never proceeds.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Completed,
+        ));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(coordinator, thread_service, egress, outbound, install);
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(1).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        // Occupy the single pending slot directly so no real delivery task
+        // consumes it.
+        let _held = driver
+            .try_acquire_pending_permit()
+            .expect("pending slot must be available");
+
+        // Now submit a trigger fire — the pending queue is full so it must skip.
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id_overflow, scope.clone())
+            .await;
+
+        // The overflow run must be recorded as Skipped synchronously (no spawn).
+        let record = wait_for_delivery_record(&delivery_store, run_id_overflow).await;
+        assert_eq!(
+            record.outcome,
+            TriggeredRunDeliveryOutcomeKind::Skipped,
+            "overflow submission must record Skipped when pending queue is full"
+        );
+
+        // The held permit keeps the slot occupied for the duration of this test;
+        // drop it explicitly to document the intent.
+        drop(_held);
+
+        // The first run (run_id_blocked) was never submitted, so no record for it.
+        assert!(
+            delivery_store
+                .load_triggered_run_delivery(run_id_blocked)
+                .await
+                .expect("load record")
+                .is_none(),
+            "run_id_blocked was never submitted so must have no delivery record"
         );
     }
 

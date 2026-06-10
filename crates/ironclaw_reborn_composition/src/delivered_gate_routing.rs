@@ -19,6 +19,19 @@
 //! before forwarding to the inner service. On a miss it forwards unchanged
 //! (normal same-thread live runs keep working).
 //!
+//! ## Route record lifetime
+//!
+//! Route records are **not** removed after a successful resolve. This is
+//! intentional: approval resolution supports idempotent replay via
+//! `idempotency_key`, and a retried `approve <ref>` DM after the gate has
+//! already settled must still rewrite the request to the correct run scope so
+//! the inner service can return the settled result rather than `MissingGate`.
+//! Stale records are harmless — the inner service enforces gate state and
+//! actor authority, and a route record never widens authority (tenant and user
+//! are verified before the rewrite). Storage cleanup is a deferred follow-up
+//! (e.g., a TTL sweep); the `remove_delivered_gate_route` method on
+//! [`DeliveredGateRouteStore`] remains for that purpose.
+//!
 //! ## Security invariants
 //!
 //! The wrapper never widens authority:
@@ -133,10 +146,6 @@ impl ApprovalInteractionService for DeliveredGateRoutingApprovalService {
             "rewriting approval resolve request to triggered run scope"
         );
 
-        let route_tenant = record.tenant_id.clone();
-        let route_user = record.user_id.clone();
-        let route_gate_ref = gate_ref_str.to_string();
-
         let rewritten = ResolveApprovalInteractionRequest {
             scope: record.scope,
             run_id_hint: Some(record.run_id),
@@ -147,25 +156,7 @@ impl ApprovalInteractionService for DeliveredGateRoutingApprovalService {
             idempotency_key: request.idempotency_key,
         };
 
-        let response = self.inner.resolve(rewritten).await;
-
-        // The gate is settled (approved or denied) — best-effort cleanup of
-        // the route record so resolved gates do not accumulate route files.
-        if response.is_ok()
-            && let Err(reason) = self
-                .routes
-                .remove_delivered_gate_route(&route_tenant, &route_user, &route_gate_ref)
-                .await
-        {
-            tracing::debug!(
-                target = "ironclaw::reborn::delivered_gate_routing",
-                gate_ref = %route_gate_ref,
-                error = %reason,
-                "failed to remove resolved delivered gate route (best-effort)"
-            );
-        }
-
-        response
+        self.inner.resolve(rewritten).await
     }
 }
 
@@ -422,8 +413,10 @@ mod tests {
     // (different thread than the inbound DM conversation).  After the call:
     //  - the recording inner service must have received the rewritten scope
     //    (run thread) and `run_id_hint = Some(run_id)`.
-    //  - the route record must have been removed (best-effort cleanup after
-    //    successful inner resolve).
+    //  - the route record must STILL be present (not removed) so idempotent
+    //    retries can continue to rewrite the scope.
+    //  - a second resolve with the same gate_ref must again rewrite the scope
+    //    (the inner service sees the rewritten scope twice).
 
     /// Variant of [`RecordingApprovalService`] that returns `Ok(Approved)`
     /// so the routing wrapper performs its post-resolve cleanup.
@@ -509,7 +502,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routing_wrapper_through_workflow_rewrites_scope_and_removes_route_record() {
+    async fn routing_wrapper_through_workflow_rewrites_scope_and_keeps_route_record_for_idempotent_retry()
+     {
         use ironclaw_product_adapters::ProductWorkflow;
         use ironclaw_product_workflow::{
             DefaultProductWorkflow, FakeConversationBindingService, FakeIdempotencyLedger,
@@ -562,11 +556,11 @@ mod tests {
         let workflow = DefaultProductWorkflow::new(
             Arc::new(FakeInboundTurnService::new()),
             Arc::new(FakeIdempotencyLedger::new()),
-            binding,
+            Arc::clone(&binding) as _,
         )
         .with_approval_interaction_service(routed_approval);
 
-        // 6. Submit an approval resolution envelope.
+        // 6. Submit an approval resolution envelope (first attempt).
         let envelope = approval_envelope(gate_ref_str);
         let ack = workflow
             .submit_inbound(envelope)
@@ -585,7 +579,7 @@ mod tests {
         assert_eq!(
             calls.len(),
             1,
-            "inner should have received exactly one resolve call"
+            "inner should have received exactly one resolve call on first attempt"
         );
         let forwarded = &calls[0];
         assert_eq!(
@@ -598,14 +592,127 @@ mod tests {
             "run_id_hint must be set from route record"
         );
 
-        // 8. Assert route record was removed after successful resolve.
+        // 8. Route record must STILL be present — not removed — so idempotent
+        //    retries can continue to rewrite the scope.
         let still_present = route_store
             .load_delivered_gate_route(&route_tenant, &route_user, gate_ref_str)
             .await
-            .expect("load after resolve");
+            .expect("load after first resolve");
         assert!(
-            still_present.is_none(),
-            "route record should be removed after successful resolve; still present: {still_present:?}"
+            still_present.is_some(),
+            "route record must NOT be removed after successful resolve; idempotent retries need it"
+        );
+
+        // 9. Simulate an idempotent retry by calling the routing wrapper directly
+        //    (bypassing the workflow-level idempotency ledger which would short-
+        //    circuit before reaching the approval service).  Build a request that
+        //    matches the route record's (tenant, user) so the wrapper finds it.
+        let dm_thread_retry = ThreadId::new("thread:install_alpha:conv-dm").expect("dm thread");
+        let retry_scope = TurnScope::new_with_owner(
+            route_tenant.clone(),
+            Some(AgentId::new("agent:fake").expect("agent")),
+            None,
+            dm_thread_retry,
+            Some(route_user.clone()),
+        );
+        let retry_request = ResolveApprovalInteractionRequest {
+            scope: retry_scope,
+            actor: TurnActor::new(route_user.clone()),
+            run_id_hint: None,
+            gate_ref: GateRef::new(gate_ref_str).expect("gate ref"),
+            decision: ApprovalInteractionDecision::ApproveOnce,
+            idempotency_key: IdempotencyKey::new("idem-retry-001").expect("idempotency key"),
+        };
+        let routed_approval_direct = DeliveredGateRoutingApprovalService::new(
+            Arc::clone(&inner) as _,
+            Arc::clone(&route_store) as _,
+        );
+        let _ = routed_approval_direct.resolve(retry_request).await;
+
+        let calls2 = inner.resolve_calls();
+        assert_eq!(
+            calls2.len(),
+            2,
+            "inner should have received a second resolve call on retry"
+        );
+        let forwarded2 = &calls2[1];
+        assert_eq!(
+            forwarded2.scope.thread_id, run_thread,
+            "retry must also rewrite scope to run thread"
+        );
+        assert_eq!(
+            forwarded2.run_id_hint,
+            Some(run_id),
+            "retry must also carry the run_id_hint"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 5 — store read failure forwards request unchanged
+    // -------------------------------------------------------------------------
+    //
+    // When `load_delivered_gate_route` returns `Err`, the wrapper logs at
+    // debug and forwards the original request to the inner service unchanged
+    // (no scope rewrite, no run_id_hint).
+
+    struct FailingRouteStore;
+
+    #[async_trait]
+    impl DeliveredGateRouteStore for FailingRouteStore {
+        async fn record_delivered_gate_route(
+            &self,
+            _record: DeliveredGateRouteRecord,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn load_delivered_gate_route(
+            &self,
+            _tenant_id: &ironclaw_host_api::TenantId,
+            _user_id: &ironclaw_host_api::UserId,
+            _gate_ref: &str,
+        ) -> Result<Option<DeliveredGateRouteRecord>, String> {
+            Err("boom".into())
+        }
+
+        async fn remove_delivered_gate_route(
+            &self,
+            _tenant_id: &ironclaw_host_api::TenantId,
+            _user_id: &ironclaw_host_api::UserId,
+            _gate_ref: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn store_read_failure_forwards_original_request_unchanged() {
+        let inner = Arc::new(RecordingApprovalService::default());
+        let service = DeliveredGateRoutingApprovalService::new(
+            Arc::clone(&inner) as _,
+            Arc::new(FailingRouteStore),
+        );
+
+        let original_scope = dm_scope();
+        let original_thread_id = original_scope.thread_id.clone();
+        let request = resolve_request(original_scope, "gate:store-fail-001");
+        // The original request has run_id_hint = None (as constructed by
+        // resolve_request).
+        let _ = service.resolve(request).await;
+
+        let calls = inner.resolve_calls();
+        assert_eq!(calls.len(), 1, "inner must receive exactly one call");
+        let forwarded = &calls[0];
+
+        // Scope must be unchanged (not rewritten) because the store failed.
+        assert_eq!(
+            forwarded.scope.thread_id, original_thread_id,
+            "scope must be unchanged when store read fails"
+        );
+        // run_id_hint must remain None (original request had no hint).
+        assert_eq!(
+            forwarded.run_id_hint, None,
+            "run_id_hint must stay None when store read fails"
         );
     }
 }
