@@ -40,6 +40,15 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
     setDraftTargetId(currentTargetId);
   }, [currentTargetId]);
 
+  React.useEffect(
+    () => () => {
+      if (savedTimerRef.current) {
+        clearTimeout(savedTimerRef.current);
+      }
+    },
+    [],
+  );
+
   const isDirty = draftTargetId !== currentTargetId;
   const isBusy = deliveryState.isLoading || deliveryState.isSaving;
   const canSave = isDirty && !isBusy;
@@ -182,7 +191,6 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
                     isSelected &&
                       "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]",
                   )}
-                  onClick=${() => !isBusy && setDraftTargetId(tid)}
                 >
                   <input
                     type="radio"
@@ -247,7 +255,6 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
                 draftTargetId === "" &&
                   "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]",
               )}
-              onClick=${() => !isBusy && hasTargets && setDraftTargetId("")}
             >
               <input
                 type="radio"
