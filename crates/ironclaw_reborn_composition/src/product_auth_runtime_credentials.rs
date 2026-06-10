@@ -5,6 +5,7 @@ use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountStatus,
     CredentialOwnership, GOOGLE_PROVIDER_ID, ProviderScope,
+    select_latest_duplicate_user_reusable_account,
 };
 use ironclaw_first_party_extensions::gsuite_google_account_visible_to_requester;
 use ironclaw_host_api::{
@@ -287,47 +288,6 @@ fn account_visible_to_runtime_requester(
         return false;
     };
     gsuite_google_account_visible_to_requester(account, requester)
-}
-
-/// Runtime "default account" rule for the credential gate.
-///
-/// The runtime auth gate has no interactive account picker: when a capability
-/// needs a provider credential the engine must resolve to exactly one account
-/// or it raises an auth gate. When more than one reusable account matches
-/// (which happens because the OAuth `account_label` historically encoded the
-/// triggering capability — "gmail google", "google-calendar google", "google"
-/// — so the same login produced several rows), we deterministically select the
-/// **most-recently-used** account rather than failing with
-/// `AccountSelectionRequired` (→ `AuthRequired`), which re-prompted the user on
-/// every capability call (#auth-gate-reuse).
-///
-/// Recency *is* the default: the setup-time account picker controls which
-/// account wins at runtime by touching it (overwrite bumps `updated_at`;
-/// create-new starts a fresh, now-latest account). Account *selection* between
-/// genuinely distinct logins is a setup-time concern; at runtime we always have
-/// a usable default.
-///
-/// We still restrict to the *reusable, unbound* class — `UserReusable`, no
-/// `owner_extension`, no `granted_extensions`, `access_secret` present — so this
-/// never auto-selects across extension-owned or requester-bound accounts; those
-/// keep their explicit binding semantics.
-fn select_latest_duplicate_user_reusable_account(
-    accounts: &[CredentialAccount],
-) -> Option<CredentialAccount> {
-    let first = accounts.first()?;
-    if !accounts.iter().all(|account| {
-        account.provider == first.provider
-            && account.ownership == CredentialOwnership::UserReusable
-            && account.owner_extension.is_none()
-            && account.granted_extensions.is_empty()
-            && account.access_secret.is_some()
-    }) {
-        return None;
-    }
-    accounts
-        .iter()
-        .max_by_key(|account| (account.updated_at, account.created_at, account.id))
-        .cloned()
 }
 
 pub(crate) fn runtime_account_owner_scope(
