@@ -197,9 +197,7 @@ impl DefaultApprovalInteractionService {
                 ));
             }
         };
-        if let Err(error) = resolution {
-            return Err(error);
-        }
+        resolution?;
 
         let response = match self
             .turn_coordinator
