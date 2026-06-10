@@ -22,5 +22,11 @@ sha2 = "0.10"
 hex = "0.4.3"
 thiserror = "2"
 
+[dev-dependencies]
+# End-to-end stack test on the integration branch: drives the blueprint
+# parser, lockfile, apply engine, and harness parser together.
+ironclaw_harness = { path = "../ironclaw_harness" }
+tempfile = "3"
+
 [lints]
 workspace = true
