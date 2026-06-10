@@ -4823,9 +4823,11 @@ name = "ironclaw_product_workflow"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "futures",
  "ironclaw_approvals",
+ "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_common",
@@ -4970,6 +4972,7 @@ dependencies = [
  "http 1.4.1",
  "http-body-util",
  "ironclaw_approvals",
+ "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_capabilities",

@@ -12,6 +12,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
@@ -22,9 +23,10 @@ use ironclaw_product_adapters::{
     ProjectionSubscriptionRequest,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
-    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
+    MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -1271,11 +1273,30 @@ pub trait RebornServicesApi: Send + Sync {
     }
 }
 
+/// Lands inbound attachment bytes into durable, agent-accessible storage and
+/// returns the transcript references to persist on the user message.
+///
+/// Injected by host composition, which owns the project-scoped filesystem
+/// authority. `message_id` is a stable per-message id (the idempotency key)
+/// used only to disambiguate the storage path; the implementation writes
+/// through the same `MountView` the agent's file tools resolve through, so
+/// landed bytes are readable by `file_read`/`list_dir` in later turns.
+#[async_trait]
+pub trait InboundAttachmentLander: Send + Sync {
+    async fn land(
+        &self,
+        thread_scope: &ThreadScope,
+        message_id: &str,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<Vec<AttachmentRef>, RebornServicesError>;
+}
+
 /// Default facade implementation composed at the WebUI boundary.
 #[derive(Clone)]
 pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
@@ -1302,6 +1323,7 @@ impl RebornServices {
         Self {
             thread_service,
             turn_coordinator,
+            inbound_attachments: None,
             event_stream: None,
             lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
                 "reborn_lifecycle_facade_unwired",
@@ -1327,6 +1349,17 @@ impl RebornServices {
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    /// Wire the port that lands inbound attachment bytes into project storage.
+    /// Without it, a send-message carrying attachments is rejected rather than
+    /// silently dropping the files.
+    pub fn with_inbound_attachments(
+        mut self,
+        inbound_attachments: Arc<dyn InboundAttachmentLander>,
+    ) -> Self {
+        self.inbound_attachments = Some(inbound_attachments);
         self
     }
 
@@ -1611,6 +1644,9 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiSendMessageRequest,
     ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        // Decode + budget inline attachment bytes before the request is
+        // consumed into the (bytes-free, serializable) command.
+        let attachments = request.decode_attachments()?;
         let command = request.into_command(caller)?;
         let WebUiInboundCommand::SendMessage {
             scope,
@@ -1683,6 +1719,26 @@ impl RebornServicesApi for RebornServices {
                 }
             }
         } else {
+            // Land attachment bytes (if any) into project storage before the
+            // message is accepted, recording each as a transcript reference.
+            // Uses the stable per-message external_event_id for the storage
+            // path so a retry re-lands at the same deterministic location.
+            let message_content = if attachments.is_empty() {
+                MessageContent::text(content.clone())
+            } else {
+                let lander = self.inbound_attachments.as_ref().ok_or_else(|| {
+                    RebornServicesError::from_status_kind(
+                        RebornServicesErrorCode::Unavailable,
+                        RebornServicesErrorKind::ServiceUnavailable,
+                        503,
+                        false,
+                    )
+                })?;
+                let refs = lander
+                    .land(&thread_scope, &external_event_id, attachments)
+                    .await?;
+                MessageContent::with_attachments(content.clone(), refs)
+            };
             let accepted = self
                 .thread_service
                 .accept_inbound_message(AcceptInboundMessageRequest {
@@ -1692,7 +1748,7 @@ impl RebornServicesApi for RebornServices {
                     source_binding_id: Some(source_binding_id.clone()),
                     reply_target_binding_id: Some(source_binding_id.clone()),
                     external_event_id: Some(external_event_id),
-                    content: MessageContent::text(content.clone()),
+                    content: message_content,
                 })
                 .await
                 .map_err(map_thread_error)?;
