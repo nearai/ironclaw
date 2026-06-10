@@ -49,7 +49,8 @@ use crate::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialPr
 use crate::slack_host_state::FilesystemSlackHostState;
 use crate::slack_outbound_targets::{
     SlackConfiguredChannelRoute, SlackHostBetaOutboundTargetProvider,
-    SlackOutboundTargetProviderConfig, SlackPersonalDmTargetStore,
+    SlackOutboundTargetProviderConfig, SlackPersonalDmTargetProvisioner,
+    SlackPersonalDmTargetStore,
 };
 use crate::slack_pairing_notifier::SlackPairingChallengeHttpNotifier;
 use crate::slack_personal_binding::{
@@ -266,11 +267,20 @@ pub fn build_slack_host_beta_mounts(
     let notifier: Arc<dyn SlackPersonalBindingPairingNotifier> =
         Arc::new(SlackPairingChallengeHttpNotifier::new(
             slack_protocol_egress(runtime, &config, token_handle.clone())?,
-            token_handle,
+            token_handle.clone(),
         ));
     let challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore> = state.clone();
+    let dm_provisioner = Arc::new(SlackPersonalDmTargetProvisioner::new(
+        config.tenant_id.clone(),
+        config.installation_id.clone(),
+        config.team_id.clone(),
+        slack_protocol_egress(runtime, &config, token_handle.clone())?,
+        token_handle,
+        state.clone(),
+    ));
     let pairing =
-        SlackPersonalBindingPairingService::new(binding_service, challenge_store, notifier);
+        SlackPersonalBindingPairingService::new(binding_service, challenge_store, notifier)
+            .with_dm_provisioner(dm_provisioner);
     let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(
         config.installation_id.clone(),
         config.slack_actor.clone(),
@@ -2088,6 +2098,237 @@ mod tests {
         runtime.shutdown().await.expect("runtime shuts down");
     }
 
+    // ── provisioning-after-pairing: the production wiring ────────────────────
+
+    #[tokio::test]
+    async fn pairing_redeem_provisions_personal_dm_target_via_real_call_path() {
+        // After pairing-code redemption the provisioner must open the DM and
+        // register the personal DM target so it appears in the delivery-target
+        // list.  This is the caller-level test for the production seam:
+        // pairing-route → SlackPersonalBindingPairingService::redeem_challenge
+        // → background provisioner → SlackPersonalDmTargetStore.
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts =
+            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+
+        // Step 1: unknown Slack actor sends a DM → pairing challenge issued.
+        let first_body =
+            dm_event_body_with("Ev-dm-provision-first", "pair me", "1710000001.000001");
+        post_signed_slack_event(&mounts.events, &first_body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+        let pairing_code = wait_for_pairing_code(&egress).await;
+
+        // Step 2: authenticated WebUI user redeems the pairing code.
+        let pairing_mount =
+            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
+        let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
+        let redeem_response = pairing_mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
+                    .header("content-type", "application/json")
+                    .extension(WebUiAuthenticatedCaller {
+                        tenant_id: TenantId::new(TENANT).expect("tenant"),
+                        user_id: UserId::new(USER).expect("user"),
+                        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                        project_id: Some(ProjectId::new(PROJECT).expect("project")),
+                    })
+                    .body(Body::from(redeem_body))
+                    .expect("redeem request builds"),
+            )
+            .await
+            .expect("redeem route responds");
+        assert_eq!(redeem_response.status(), StatusCode::OK);
+
+        // Step 3: wait for the personal DM target to appear (the provisioner
+        // runs in a background task; we poll until it lands in the store).
+        let target_listed = {
+            let config = config_without_legacy_actor();
+            let mut listed = Vec::new();
+            for _ in 0..40 {
+                let mounts2 =
+                    build_slack_host_beta_mounts(&runtime, config.clone()).expect("rebuilt mounts");
+                let bundle = build_webui_services_with_slack_host_beta_mounts(
+                    &runtime,
+                    None,
+                    Some(&mounts2),
+                    SlackOperatorRouteVisibility::Hidden,
+                )
+                .expect("webui bundle");
+                listed = bundle
+                    .api
+                    .list_outbound_delivery_targets(operator_caller())
+                    .await
+                    .expect("target list")
+                    .targets;
+                if !listed.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            listed
+        };
+        assert_eq!(
+            target_listed.len(),
+            1,
+            "personal DM target must appear after pairing-code redemption"
+        );
+        assert!(
+            target_listed[0]
+                .target
+                .target_id
+                .as_str()
+                .contains("personal-dm"),
+            "listed target must be a personal DM target"
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn pairing_redeem_is_idempotent_and_does_not_duplicate_dm_target() {
+        // Re-provisioning (pairing re-fires) must not create duplicate targets.
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+
+        // First provisioning.
+        let config = config_without_legacy_actor();
+        personal_dm_target_provisioner_for_test(&runtime, &config)
+            .provision_for_user(
+                UserId::new(USER).expect("user"),
+                SlackUserId::new(SLACK_USER),
+            )
+            .await
+            .expect("first provisioning succeeds");
+
+        // Second provisioning of the same user — idempotent upsert.
+        personal_dm_target_provisioner_for_test(&runtime, &config)
+            .provision_for_user(
+                UserId::new(USER).expect("user"),
+                SlackUserId::new(SLACK_USER),
+            )
+            .await
+            .expect("second provisioning succeeds");
+
+        let mounts = build_slack_host_beta_mounts(&runtime, config).expect("mounts");
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Hidden,
+        )
+        .expect("webui bundle");
+        let targets = bundle
+            .api
+            .list_outbound_delivery_targets(operator_caller())
+            .await
+            .expect("target list");
+        assert_eq!(
+            targets.targets.len(),
+            1,
+            "idempotent re-provisioning must not duplicate the DM target"
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn pairing_redeem_succeeds_even_when_dm_provisioning_fails() {
+        // Provisioning failure must be silent — the pairing itself must succeed
+        // and the caller must receive a successful response.
+        //
+        // The pairing notifier calls conversations.open once (for the DM used
+        // to send the challenge code) — that must succeed so pairing completes.
+        // The provisioner then calls conversations.open again; we fail that
+        // second call to simulate a Slack API error during provisioning.
+        let egress = Arc::new(RecordingRuntimeHttpEgress::conversations_open_fail_after(1));
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts =
+            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+
+        // Trigger pairing challenge.
+        let first_body = dm_event_body_with(
+            "Ev-dm-provision-fail",
+            "pair me (fail)",
+            "1710000002.000001",
+        );
+        post_signed_slack_event(&mounts.events, &first_body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+        let pairing_code = wait_for_pairing_code(&egress).await;
+
+        // Redeem the code — provisioning will fail in background but the HTTP
+        // response must still be 200.
+        let pairing_mount =
+            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
+        let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
+        let redeem_response = pairing_mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
+                    .header("content-type", "application/json")
+                    .extension(WebUiAuthenticatedCaller {
+                        tenant_id: TenantId::new(TENANT).expect("tenant"),
+                        user_id: UserId::new(USER).expect("user"),
+                        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                        project_id: Some(ProjectId::new(PROJECT).expect("project")),
+                    })
+                    .body(Body::from(redeem_body))
+                    .expect("redeem request builds"),
+            )
+            .await
+            .expect("redeem route responds");
+
+        // Pairing must succeed despite the provisioning failure.
+        assert_eq!(
+            redeem_response.status(),
+            StatusCode::OK,
+            "provisioning failure must not propagate to the pairing caller"
+        );
+
+        // Wait for the provisioner's conversations.open attempt (the second
+        // call) so we know the background task ran and failed before asserting
+        // that no target was persisted.
+        wait_for_nth_conversations_open(&egress, 2).await;
+        let mounts2 =
+            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts2),
+            SlackOperatorRouteVisibility::Hidden,
+        )
+        .expect("webui bundle");
+        let targets = bundle
+            .api
+            .list_outbound_delivery_targets(operator_caller())
+            .await
+            .expect("target list");
+        assert!(
+            targets.targets.is_empty(),
+            "failed DM provisioning must not persist a stale target"
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
     #[tokio::test]
     async fn slack_host_beta_targets_reject_non_advancing_route_cursor() {
         let provider = outbound_target_provider(
@@ -3090,6 +3331,28 @@ mod tests {
         panic!("Slack pairing notifier did not post a pairing code");
     }
 
+    async fn wait_for_nth_conversations_open(egress: &RecordingRuntimeHttpEgress, n: usize) {
+        for _ in 0..80 {
+            let count = egress
+                .requests()
+                .iter()
+                .filter(|r| r.url.contains("/api/conversations.open"))
+                .count();
+            if count >= n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!(
+            "expected {n} conversations.open call(s); only {} recorded",
+            egress
+                .requests()
+                .iter()
+                .filter(|r| r.url.contains("/api/conversations.open"))
+                .count()
+        );
+    }
+
     async fn wait_for_slack_post_message(
         egress: &RecordingRuntimeHttpEgress,
         expected_text: &str,
@@ -3199,7 +3462,10 @@ mod tests {
     #[derive(Default)]
     struct RecordingRuntimeHttpEgress {
         requests: std::sync::Mutex<Vec<NetworkHttpRequest>>,
+        /// If set, returned for ALL conversations.open calls.
         conversations_open_response: Option<(u16, Vec<u8>)>,
+        /// If set, conversations.open succeeds this many times then fails.
+        conversations_open_fail_after: Option<usize>,
     }
 
     #[async_trait]
@@ -3209,9 +3475,24 @@ mod tests {
             request: NetworkHttpRequest,
         ) -> Result<NetworkHttpResponse, NetworkHttpError> {
             let (status, response) = if request.url.contains("/api/conversations.open") {
-                self.conversations_open_response
-                    .clone()
-                    .unwrap_or_else(|| (200, br#"{"ok":true,"channel":{"id":"D0HOST"}}"#.to_vec()))
+                if let Some(n) = self.conversations_open_fail_after {
+                    let count = self
+                        .requests
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .iter()
+                        .filter(|r| r.url.contains("/api/conversations.open"))
+                        .count();
+                    if count >= n {
+                        (200, br#"{"ok":false,"error":"not_allowed"}"#.to_vec())
+                    } else {
+                        (200, br#"{"ok":true,"channel":{"id":"D0HOST"}}"#.to_vec())
+                    }
+                } else {
+                    self.conversations_open_response.clone().unwrap_or_else(|| {
+                        (200, br#"{"ok":true,"channel":{"id":"D0HOST"}}"#.to_vec())
+                    })
+                }
             } else {
                 (200, br#"{"ok":true}"#.to_vec())
             };
@@ -3300,6 +3581,17 @@ mod tests {
             Self {
                 requests: std::sync::Mutex::new(Vec::new()),
                 conversations_open_response: Some((status, body.to_vec())),
+                conversations_open_fail_after: None,
+            }
+        }
+
+        /// Returns a successful conversations.open response for the first
+        /// `n` calls, then returns an error response for all subsequent calls.
+        fn conversations_open_fail_after(n: usize) -> Self {
+            Self {
+                requests: std::sync::Mutex::new(Vec::new()),
+                conversations_open_response: None,
+                conversations_open_fail_after: Some(n),
             }
         }
 
