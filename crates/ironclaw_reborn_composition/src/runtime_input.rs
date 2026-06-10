@@ -312,6 +312,12 @@ pub struct RebornRuntimeInput {
     /// run, so a downstream caller can reconstruct the full step-by-step
     /// trajectory (the sealed runtime otherwise exposes only the final reply).
     pub trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    /// Bench-only: extra tools (name/description/params) exposed to the agent,
+    /// dispatched via the supplied [`crate::ExtraCapabilityDispatch`]. Used by
+    /// nearai-bench to port its legacy service-mock tools onto reborn without
+    /// authoring first-party extensions.
+    pub extra_tools:
+        Option<(Vec<crate::ExtraToolSpec>, Arc<dyn crate::ExtraCapabilityDispatch>)>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
     /// Cost table to pair with the model-gateway override. Without this,
@@ -347,6 +353,7 @@ impl RebornRuntimeInput {
             budget_defaults: None,
             budget_event_observer: None,
             trajectory_observer: None,
+            extra_tools: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -385,6 +392,17 @@ impl RebornRuntimeInput {
         observer: Arc<dyn crate::RebornTrajectoryObserver>,
     ) -> Self {
         self.trajectory_observer = Some(observer);
+        self
+    }
+
+    /// Install extra tools (bench-only) exposed to the agent alongside the
+    /// built-in capabilities, dispatched via `dispatch`.
+    pub fn with_extra_tools(
+        mut self,
+        specs: Vec<crate::ExtraToolSpec>,
+        dispatch: Arc<dyn crate::ExtraCapabilityDispatch>,
+    ) -> Self {
+        self.extra_tools = Some((specs, dispatch));
         self
     }
 

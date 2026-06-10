@@ -1516,6 +1516,7 @@ pub async fn build_reborn_runtime(
         budget_defaults,
         budget_event_observer,
         trajectory_observer,
+        extra_tools,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -1778,9 +1779,25 @@ pub async fn build_reborn_runtime(
         trajectory_observer,
     )
     .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
-    let capability_factory = local_dev_capabilities.capability_factory;
     let capability_input_resolver = local_dev_capabilities.capability_input_resolver;
     let capability_result_writer = local_dev_capabilities.capability_result_writer;
+    // Bench-only: expose extra (legacy service-mock) tools alongside the
+    // built-in capabilities by decorating the local-dev port.
+    let capability_factory: Arc<dyn ironclaw_loop_support::LoopCapabilityPortFactory> =
+        match extra_tools {
+            Some((specs, dispatch)) => Arc::new(
+                ironclaw_loop_support::DecoratingLoopCapabilityPortFactory::new(
+                    local_dev_capabilities.capability_factory,
+                )
+                .with_decorator(Arc::new(crate::legacy_tools::ExtraCapabilitiesDecorator::new(
+                    specs,
+                    dispatch,
+                    Arc::clone(&capability_input_resolver),
+                    Arc::clone(&capability_result_writer),
+                ))),
+            ),
+            None => local_dev_capabilities.capability_factory,
+        };
     let model_gateway = local_dev_capabilities.model_gateway;
     // Hook framework activation (#3934 + third-party projection), gated behind
     // the typed `HooksActivationConfig` carried in `RebornRuntimeInput` (master
