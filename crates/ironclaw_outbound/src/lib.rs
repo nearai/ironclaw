@@ -6,6 +6,7 @@
 //! payloads, prompts, tool I/O, secrets, host paths, or backend detail strings.
 
 mod communication_preferences;
+mod delivered_gate_routes;
 mod delivery_resolution;
 mod error;
 mod filesystem_store;
@@ -22,6 +23,9 @@ pub use communication_preferences::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     CommunicationPreferenceVersion, DeliveryDefaultScope, VersionedCommunicationPreferenceRecord,
     WriteCommunicationPreferenceRequest,
+};
+pub use delivered_gate_routes::{
+    DeliveredGateRouteRecord, DeliveredGateRouteStore, InMemoryDeliveredGateRouteStore,
 };
 pub use delivery_resolution::{
     CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,

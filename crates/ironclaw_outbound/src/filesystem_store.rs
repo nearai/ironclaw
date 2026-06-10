@@ -30,6 +30,11 @@
 //!   scoped communication preference row keyed by a hashed
 //!   `CommunicationPreferenceKey`. Reply-target refs remain candidates and do
 //!   not grant send authority.
+//! - `/outbound/delivered-gate-routes/<sha256(tenant|user|gate_ref)>.json` —
+//!   cross-thread approval routing record keyed by `(tenant_id, user_id,
+//!   gate_ref)`. Written when an approval prompt is delivered to a personal
+//!   target on a different thread from the run; used by the routing wrapper to
+//!   rewrite DM replies to the correct run scope.
 
 use std::sync::Arc;
 
@@ -39,7 +44,7 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
     IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId};
+use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId, UserId};
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -51,12 +56,12 @@ use crate::validation::{
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
-    CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveryDefaultScope,
-    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError,
-    OutboundStateStore, ProjectionSubscriptionId, ProjectionSubscriptionRecord,
-    ThreadNotificationPolicy, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
-    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
-    WriteCommunicationPreferenceRequest,
+    CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveredGateRouteRecord,
+    DeliveredGateRouteStore, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
+    OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError, OutboundStateStore,
+    ProjectionSubscriptionId, ProjectionSubscriptionRecord, ThreadNotificationPolicy,
+    TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest,
+    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
 };
 
 /// Maximum number of compare-and-swap retries on a read-then-write path
@@ -90,6 +95,7 @@ const TENANT_ID_INDEX_NAME: &str = "outbound_by_tenant";
 const POLICIES_ROOT: &str = "/outbound/policies";
 const SUBSCRIPTIONS_ROOT: &str = "/outbound/subscriptions";
 const TRIGGERED_RUN_DELIVERY_ROOT: &str = "/outbound/triggered-run-delivery";
+const DELIVERED_GATE_ROUTES_ROOT: &str = "/outbound/delivered-gate-routes";
 
 /// Filesystem-backed outbound store. Construct with a [`ScopedFilesystem`]
 /// over any [`RootFilesystem`] implementation (libSQL, Postgres, in-memory,
@@ -625,6 +631,20 @@ fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<ScopedPath, Outboun
         .map_err(|_| OutboundError::Backend)
 }
 
+fn delivered_gate_route_path(
+    tenant_id: &TenantId,
+    user_id: &UserId,
+    gate_ref: &str,
+) -> Result<ScopedPath, OutboundError> {
+    let mut hasher = Sha256::new();
+    update_hash_part(&mut hasher, tenant_id.as_str());
+    update_hash_part(&mut hasher, user_id.as_str());
+    update_hash_part(&mut hasher, gate_ref);
+    let digest = hex::encode(hasher.finalize());
+    ScopedPath::new(format!("{DELIVERED_GATE_ROUTES_ROOT}/{digest}.json"))
+        .map_err(|_| OutboundError::Backend)
+}
+
 fn communication_preference_path(
     key: &CommunicationPreferenceKey,
 ) -> Result<ScopedPath, OutboundError> {
@@ -781,6 +801,54 @@ where
                 let record: TriggeredRunDeliveryRecord =
                     serde_json::from_slice(&versioned.entry.body)
                         .map_err(|e| format!("triggered run delivery deserialize: {e}"))?;
+                Ok(Some(record))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+#[async_trait]
+impl<F> DeliveredGateRouteStore for FilesystemOutboundStateStore<F>
+where
+    F: RootFilesystem,
+{
+    async fn record_delivered_gate_route(
+        &self,
+        record: DeliveredGateRouteRecord,
+    ) -> Result<(), String> {
+        let path = delivered_gate_route_path(&record.tenant_id, &record.user_id, &record.gate_ref)
+            .map_err(|e| format!("delivered gate route path: {e}"))?;
+        // Use system scope — the hash-keyed path already encodes tenant + user;
+        // the mount's path-prefix tenant isolation is an additional layer.
+        let resource_scope = ResourceScope::system();
+        let body = serde_json::to_vec(&record)
+            .map_err(|e| format!("delivered gate route serialize: {e}"))?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        self.put_with_byte_fallback(&resource_scope, &path, entry, CasExpectation::Any)
+            .await
+            .map_err(|e| format!("delivered gate route write: {e}"))
+    }
+
+    async fn load_delivered_gate_route(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        gate_ref: &str,
+    ) -> Result<Option<DeliveredGateRouteRecord>, String> {
+        let path = delivered_gate_route_path(tenant_id, user_id, gate_ref)
+            .map_err(|e| format!("delivered gate route path: {e}"))?;
+        let resource_scope = ResourceScope::system();
+        match self
+            .filesystem
+            .get(&resource_scope, &path)
+            .await
+            .map_err(|e| format!("delivered gate route read: {e}"))?
+        {
+            Some(versioned) => {
+                let record: DeliveredGateRouteRecord =
+                    serde_json::from_slice(&versioned.entry.body)
+                        .map_err(|e| format!("delivered gate route deserialize: {e}"))?;
                 Ok(Some(record))
             }
             None => Ok(None),
