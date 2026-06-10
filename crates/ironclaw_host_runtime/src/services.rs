@@ -11,7 +11,9 @@ mod process_executor;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_approvals::ApprovalResolver;
+use ironclaw_approvals::{
+    ApprovalResolver, InMemoryPersistentApprovalPolicyStore, PersistentApprovalPolicyStore,
+};
 use ironclaw_authorization::{
     CapabilityLeaseStore, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
@@ -137,6 +139,9 @@ where
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
+    // arch-exempt: optional_arc, service builders support minimal/test host runtime
+    // graphs while production Reborn wiring installs this store, plan #4539
+    persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
@@ -307,6 +312,7 @@ where
             approval_requests: None,
             run_state_approval_store: None,
             capability_leases: None,
+            persistent_approval_policies: None,
             event_sink: None,
             audit_sink: None,
             security_audit_sink: None,
@@ -344,6 +350,7 @@ where
                 run_state: None,
                 approval_requests: None,
                 capability_leases: None,
+                persistent_approval_policies: None,
                 event_sink: None,
                 audit_sink: None,
                 secret_store: None,
@@ -569,6 +576,9 @@ where
         }
         if let Some(capability_leases) = &self.capability_leases {
             runtime = runtime.with_capability_leases(Arc::clone(capability_leases));
+        }
+        if let Some(policies) = &self.persistent_approval_policies {
+            runtime = runtime.with_persistent_approval_policies(Arc::clone(policies));
         }
         runtime.with_obligation_handler(Arc::new(self.builtin_obligation_handler()))
     }

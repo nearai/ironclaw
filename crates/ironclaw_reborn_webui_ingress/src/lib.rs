@@ -179,7 +179,10 @@ pub enum EnvBearerConfigError {
 
 #[async_trait]
 impl WebuiAuthenticator for EnvBearerAuthenticator {
-    async fn authenticate(&self, candidate: &str) -> Option<UserId> {
+    async fn authenticate(
+        &self,
+        candidate: &str,
+    ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
         // Constant-time comparison so an attacker cannot use response
         // timing to learn the prefix of the configured token. Both
         // operands are coerced to `&[u8]` of the same length to make
@@ -189,13 +192,15 @@ impl WebuiAuthenticator for EnvBearerAuthenticator {
         let expected = self.token.expose_secret().as_bytes();
         let candidate = candidate.as_bytes();
         if expected.ct_eq(candidate).into() {
-            Some(self.user_id.clone())
+            Some(ironclaw_reborn_composition::WebuiAuthentication::operator(
+                self.user_id.clone(),
+            ))
         } else {
             None
         }
     }
 
-    fn allows_operator_webui_config(&self) -> bool {
+    fn mounts_operator_webui_config_routes(&self) -> bool {
         true
     }
 }
@@ -217,7 +222,16 @@ mod tests {
         )
         .expect("auth");
         let result = auth.authenticate("right-token").await;
-        assert_eq!(result.as_ref().map(|u| u.as_str()), Some("user-alpha"));
+        assert_eq!(
+            result.as_ref().map(|auth| auth.user_id.as_str()),
+            Some("user-alpha")
+        );
+        assert_eq!(
+            result
+                .as_ref()
+                .map(|auth| auth.capabilities.operator_webui_config),
+            Some(true)
+        );
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, ResourceScope,
+    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, ResourceScope,
     RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_workflow::{
@@ -55,6 +55,7 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) id: CapabilityId,
     pub(crate) provider: ExtensionId,
     pub(crate) effects: Vec<EffectKind>,
+    pub(crate) default_permission: PermissionMode,
     pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
 }
 
@@ -73,6 +74,7 @@ impl ActiveExtensionCapability {
             id: descriptor.id.clone(),
             provider: descriptor.provider.clone(),
             effects: descriptor.effects.clone(),
+            default_permission: descriptor.default_permission,
             runtime_credentials: descriptor.runtime_credentials.clone(),
         }
     }

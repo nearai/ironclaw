@@ -315,6 +315,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolver_does_not_use_reusable_account_from_different_user() {
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let alice_scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let admin_scope =
+            ResourceScope::local_default(UserId::new("admin").unwrap(), InvocationId::new())
+                .unwrap();
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: AuthProductScope::new(alice_scope, AuthSurface::Api),
+                provider: AuthProviderId::new("google").unwrap(),
+                label: CredentialAccountLabel::new("alice google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("alice-google-access").unwrap()),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
+
+        let error = resolver
+            .resolve_access_secret(RuntimeCredentialAccountRequest {
+                scope: &admin_scope,
+                provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                provider_scopes: &[],
+                requester_extension: &ExtensionId::new("gmail").unwrap(),
+            })
+            .await
+            .expect_err("admin must not resolve alice's reusable account");
+
+        assert_eq!(error, CredentialStageError::AuthRequired);
+    }
+
+    #[tokio::test]
     async fn resolver_matches_callback_setup_account_from_runtime_invocation() {
         let accounts = Arc::new(InMemoryAuthProductServices::new());
         let mut setup_scope =

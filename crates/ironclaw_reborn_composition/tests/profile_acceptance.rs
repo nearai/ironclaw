@@ -7,6 +7,10 @@ use ironclaw_reborn_composition::{
 };
 
 use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, RuntimeProfile, SecretMode};
+use ironclaw_host_runtime::{
+    ProductionWiringComponent, ProductionWiringIssue, ProductionWiringIssueKind,
+    ProductionWiringReport,
+};
 use ironclaw_runtime_policy::ResolveError;
 use serde_json::json;
 
@@ -377,6 +381,153 @@ fn readiness_diagnostics_do_not_carry_sensitive_detail_fields() {
     assert!(!json.contains("ironclaw_host_runtime::"));
     assert!(!json.contains("approval_id"));
     assert!(!json.contains("lease_id"));
+}
+
+#[test]
+fn production_wiring_issue_kinds_map_to_stable_readiness_reasons() {
+    assert_eq!(
+        RebornReadinessDiagnosticReason::from(ProductionWiringIssueKind::Missing),
+        RebornReadinessDiagnosticReason::Missing
+    );
+    assert_eq!(
+        RebornReadinessDiagnosticReason::from(ProductionWiringIssueKind::LocalOnlyImplementation),
+        RebornReadinessDiagnosticReason::LocalOnly
+    );
+    assert_eq!(
+        RebornReadinessDiagnosticReason::from(
+            ProductionWiringIssueKind::UnverifiedProductionImplementation,
+        ),
+        RebornReadinessDiagnosticReason::Unverified
+    );
+    assert_eq!(
+        RebornReadinessDiagnosticReason::from(ProductionWiringIssueKind::UnsupportedRequirement),
+        RebornReadinessDiagnosticReason::Unsupported
+    );
+}
+
+#[test]
+fn production_wiring_components_keep_host_runtime_stable_names() {
+    for component in [
+        ProductionWiringComponent::RuntimeBackend,
+        ProductionWiringComponent::RuntimePolicy,
+        ProductionWiringComponent::TrustPolicy,
+        ProductionWiringComponent::Filesystem,
+        ProductionWiringComponent::ResourceGovernor,
+        ProductionWiringComponent::ProcessStore,
+        ProductionWiringComponent::ProcessResultStore,
+        ProductionWiringComponent::RunState,
+        ProductionWiringComponent::ApprovalRequests,
+        ProductionWiringComponent::CapabilityLeases,
+        ProductionWiringComponent::PersistentApprovalPolicies,
+        ProductionWiringComponent::EventSink,
+        ProductionWiringComponent::AuditSink,
+        ProductionWiringComponent::SecretStore,
+        ProductionWiringComponent::CredentialAccountStore,
+        ProductionWiringComponent::CredentialSessionStore,
+        ProductionWiringComponent::RuntimeHttpEgress,
+        ProductionWiringComponent::RuntimeProcessPort,
+        ProductionWiringComponent::WasmCredentialProvider,
+        ProductionWiringComponent::ScriptRuntime,
+        ProductionWiringComponent::McpRuntime,
+        ProductionWiringComponent::WasmRuntime,
+        ProductionWiringComponent::FirstPartyRuntime,
+        ProductionWiringComponent::TurnState,
+        ProductionWiringComponent::RunProfileResolver,
+        ProductionWiringComponent::TurnRunWakeNotifier,
+    ] {
+        let expected = component.as_str();
+        let readiness_component = RebornReadinessDiagnosticComponent::from(component);
+        let serialized = serde_json::to_value(readiness_component).unwrap();
+
+        assert_eq!(serialized, json!(expected));
+    }
+}
+
+#[test]
+fn production_wiring_report_with_no_issues_returns_empty_diagnostics() {
+    let report = ProductionWiringReport::for_test(Vec::new());
+
+    for profile in [
+        RebornCompositionProfile::Production,
+        RebornCompositionProfile::MigrationDryRun,
+    ] {
+        assert!(
+            RebornReadinessDiagnostic::from_production_wiring_report(profile, &report).is_empty()
+        );
+    }
+}
+
+#[test]
+fn production_wiring_report_skipped_for_non_production_profiles() {
+    let report = ProductionWiringReport::for_test(vec![ProductionWiringIssue::for_test(
+        ProductionWiringComponent::SecretStore,
+        ProductionWiringIssueKind::Missing,
+    )]);
+
+    for profile in [
+        RebornCompositionProfile::Disabled,
+        RebornCompositionProfile::LocalDev,
+        RebornCompositionProfile::LocalDevYolo,
+    ] {
+        assert!(
+            RebornReadinessDiagnostic::from_production_wiring_report(profile, &report).is_empty()
+        );
+    }
+}
+
+#[test]
+fn production_wiring_report_maps_through_public_readiness_entrypoint() {
+    let report = ProductionWiringReport::for_test(vec![
+        ProductionWiringIssue::for_test(
+            ProductionWiringComponent::SecretStore,
+            ProductionWiringIssueKind::Missing,
+        ),
+        ProductionWiringIssue::for_test(
+            ProductionWiringComponent::AuditSink,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation,
+        ),
+        ProductionWiringIssue::for_test(
+            ProductionWiringComponent::RuntimeBackend,
+            ProductionWiringIssueKind::UnsupportedRequirement,
+        ),
+    ]);
+
+    for profile in [
+        RebornCompositionProfile::Production,
+        RebornCompositionProfile::MigrationDryRun,
+    ] {
+        let diagnostics =
+            RebornReadinessDiagnostic::from_production_wiring_report(profile, &report);
+
+        assert_eq!(diagnostics.len(), 3);
+        assert!(diagnostics.iter().all(|diagnostic| {
+            diagnostic.status == RebornReadinessDiagnosticStatus::Blocking
+                && diagnostic.blocks_production
+        }));
+        assert!(diagnostics.contains(&production_blocker(
+            profile,
+            RebornReadinessDiagnosticComponent::SecretStore,
+            RebornReadinessDiagnosticReason::Missing,
+        )));
+        assert!(diagnostics.contains(&production_blocker(
+            profile,
+            RebornReadinessDiagnosticComponent::AuditSink,
+            RebornReadinessDiagnosticReason::Unverified,
+        )));
+        assert!(diagnostics.contains(&production_blocker(
+            profile,
+            RebornReadinessDiagnosticComponent::RuntimeBackend,
+            RebornReadinessDiagnosticReason::Unsupported,
+        )));
+    }
+
+    assert!(
+        RebornReadinessDiagnostic::from_production_wiring_report(
+            RebornCompositionProfile::LocalDev,
+            &report,
+        )
+        .is_empty()
+    );
 }
 
 fn readiness_for_contract(
