@@ -746,6 +746,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn triggered_from_source_route_approval_needed_falls_back_to_final_reply_target_when_slot_unset()
+     {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(Some("reply:final"), None, None, None))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationOrigin::TriggeredFromSourceRoute {
+                trigger: trigger_context(),
+                source_route: SourceRouteContext {
+                    reply_target_binding_ref: reply_ref("reply:source-route"),
+                },
+            },
+            "reply:final",
+            CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn triggered_from_source_route_auth_required_falls_back_to_final_reply_target_when_slot_unset()
+     {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(Some("reply:final"), None, None, None))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::AuthRequired,
+            RunNotificationOrigin::TriggeredFromSourceRoute {
+                trigger: trigger_context(),
+                source_route: SourceRouteContext {
+                    reply_target_binding_ref: reply_ref("reply:source-route"),
+                },
+            },
+            "reply:final",
+            CommunicationDeliveryKind::AuthPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn triggered_approval_needed_falls_back_to_final_reply_target_when_slot_unset() {
         let store = InMemoryOutboundStateStore::default();
         let engine = OutboundResolutionEngine::new(&store);

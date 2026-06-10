@@ -212,7 +212,9 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
                   </div>
                   <${Badge}
                     tone=${targetTone(optStatus)}
-                    label=${t("automations.delivery.pill.ready")}
+                    label=${optStatus === "unavailable"
+                      ? t("automations.delivery.pill.unavailable")
+                      : t("automations.delivery.pill.ready")}
                     className="self-center shrink-0"
                   />
                 </label>

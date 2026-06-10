@@ -14,6 +14,13 @@
 //! incoming resolve request to use the stored scope before forwarding to the
 //! inner service.
 //!
+//! ## Record lifetime
+//!
+//! Route records expire after [`DELIVERED_GATE_ROUTE_TTL`]. Expired records
+//! are ignored on load (treated as a miss) and removed lazily by the routing
+//! wrapper. An opportunistic sweep runs when a new route is recorded (on
+//! approval-prompt delivery) via [`DeliveredGateRouteStore::sweep_expired_delivered_gate_routes`].
+//!
 //! Design constraints:
 //! - Channel-neutral: no Slack, WebUI, or other channel-specific words.
 //! - Best-effort writes: callers must swallow store errors and never abort
@@ -26,10 +33,17 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_turns::{TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
+
+/// How long a delivered-gate route record may live before it is considered
+/// expired. Bounds how long an approval reply in a personal DM can rewrite
+/// the request to the run's original thread. 48 hours far exceeds any gate's
+/// pending lifetime and the idempotent-replay window; after expiry the record
+/// is ignored on load and removed lazily (or swept opportunistically).
+pub const DELIVERED_GATE_ROUTE_TTL: Duration = Duration::hours(48);
 
 /// A route record mapping a delivered gate prompt back to the run and scope
 /// it was delivered for.
@@ -54,6 +68,15 @@ pub struct DeliveredGateRouteRecord {
     pub scope: TurnScope,
     /// When this record was written.
     pub recorded_at: DateTime<Utc>,
+}
+
+impl DeliveredGateRouteRecord {
+    /// Returns `true` when this record is older than [`DELIVERED_GATE_ROUTE_TTL`]
+    /// relative to `now`. Expired records should be treated as a store miss and
+    /// removed lazily.
+    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        now.signed_duration_since(self.recorded_at) > DELIVERED_GATE_ROUTE_TTL
+    }
 }
 
 /// Lookup key used by the routing wrapper.
@@ -109,6 +132,17 @@ pub trait DeliveredGateRouteStore: Send + Sync {
         user_id: &UserId,
         gate_ref: &str,
     ) -> Result<(), String>;
+
+    /// Remove all route records that are expired as of `now`. Returns the
+    /// number of records removed.
+    ///
+    /// Best-effort: implementations must not abort the sweep on a single
+    /// bad record. Callers must swallow errors and must not let sweep failure
+    /// affect the delivery path.
+    async fn sweep_expired_delivered_gate_routes(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<usize, String>;
 }
 
 /// In-memory [`DeliveredGateRouteStore`].
@@ -162,6 +196,19 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&key);
         Ok(())
+    }
+
+    async fn sweep_expired_delivered_gate_routes(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<usize, String> {
+        let mut records = self
+            .records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = records.len();
+        records.retain(|_key, record| !record.is_expired(now));
+        Ok(before - records.len())
     }
 }
 
@@ -269,6 +316,94 @@ mod tests {
 
         assert_eq!(loaded_a, Some(rec_a));
         assert_eq!(loaded_b, Some(rec_b));
+    }
+
+    #[test]
+    fn is_expired_returns_false_before_ttl() {
+        let now = Utc::now();
+        let rec = DeliveredGateRouteRecord {
+            recorded_at: now - DELIVERED_GATE_ROUTE_TTL + Duration::seconds(1),
+            ..record("gate:ttl-before")
+        };
+        assert!(!rec.is_expired(now));
+    }
+
+    #[test]
+    fn is_expired_returns_false_exactly_at_ttl_boundary() {
+        let now = Utc::now();
+        // exactly at TTL: duration == TTL → NOT expired (> is the check)
+        let rec = DeliveredGateRouteRecord {
+            recorded_at: now - DELIVERED_GATE_ROUTE_TTL,
+            ..record("gate:ttl-boundary")
+        };
+        assert!(!rec.is_expired(now));
+    }
+
+    #[test]
+    fn is_expired_returns_true_after_ttl() {
+        let now = Utc::now();
+        let rec = DeliveredGateRouteRecord {
+            recorded_at: now - DELIVERED_GATE_ROUTE_TTL - Duration::seconds(1),
+            ..record("gate:ttl-after")
+        };
+        assert!(rec.is_expired(now));
+    }
+
+    #[tokio::test]
+    async fn in_memory_sweep_removes_only_expired_records() {
+        let store = InMemoryDeliveredGateRouteStore::default();
+        let now = Utc::now();
+
+        // Fresh record: recorded just now.
+        let fresh = DeliveredGateRouteRecord {
+            recorded_at: now,
+            ..record("gate:sweep-fresh")
+        };
+        // Expired record: recorded 49 hours ago.
+        let expired = DeliveredGateRouteRecord {
+            recorded_at: now - Duration::hours(49),
+            ..record("gate:sweep-expired")
+        };
+
+        store
+            .record_delivered_gate_route(fresh.clone())
+            .await
+            .unwrap();
+        store
+            .record_delivered_gate_route(expired.clone())
+            .await
+            .unwrap();
+
+        let removed = store
+            .sweep_expired_delivered_gate_routes(now)
+            .await
+            .expect("sweep succeeds");
+        assert_eq!(removed, 1, "exactly one expired record removed");
+
+        // Fresh record still loadable.
+        let still_present = store
+            .load_delivered_gate_route(&tenant(), &user(), "gate:sweep-fresh")
+            .await
+            .expect("load succeeds")
+            .expect("fresh record must still be present");
+        assert_eq!(still_present.gate_ref, "gate:sweep-fresh");
+
+        // Expired record is gone.
+        let gone = store
+            .load_delivered_gate_route(&tenant(), &user(), "gate:sweep-expired")
+            .await
+            .expect("load succeeds");
+        assert!(gone.is_none(), "expired record must be absent after sweep");
+    }
+
+    #[tokio::test]
+    async fn in_memory_sweep_empty_store_returns_zero() {
+        let store = InMemoryDeliveredGateRouteStore::default();
+        let removed = store
+            .sweep_expired_delivered_gate_routes(Utc::now())
+            .await
+            .expect("sweep on empty store succeeds");
+        assert_eq!(removed, 0);
     }
 
     #[tokio::test]

@@ -39,10 +39,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
-    IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
+    CasExpectation, ContentType, Entry, FileType, FilesystemError, Filter, IndexKey, IndexKind,
+    IndexName, IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId, UserId};
 use ironclaw_turns::{TurnActor, TurnScope};
@@ -869,6 +870,107 @@ where
             Err(e) => Err(format!("delivered gate route delete: {e}")),
         }
     }
+
+    /// Sweep expired route records from the filesystem store.
+    ///
+    /// # Scope limitation
+    ///
+    /// The filesystem store is constructed with a per-(tenant, user) mount
+    /// view. This sweep can only list and delete files that are reachable
+    /// through the mount aliases on the current filesystem instance — i.e.,
+    /// files belonging to the tenant + user the store was created for. It
+    /// cannot enumerate records belonging to other tenant/user combinations.
+    /// The opportunistic sweep on write is therefore scoped to the triggering
+    /// user; a background sweep covering all users would require a separate
+    /// admin-scoped store or a direct backend scan. This limitation is
+    /// accepted for now.
+    ///
+    /// Best-effort per-file: one unreadable or undeserializable file does not
+    /// abort the sweep. A missing directory returns `Ok(0)`.
+    async fn sweep_expired_delivered_gate_routes(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<usize, String> {
+        let root = ScopedPath::new(DELIVERED_GATE_ROUTES_ROOT)
+            .map_err(|e| format!("delivered gate route sweep root path: {e}"))?;
+        // Use the system resource scope so the mount resolver picks up the
+        // tenant-scoped virtual root; the isolation boundary is enforced by
+        // the mount, not by a specific user_id in the ResourceScope here.
+        let resource_scope = ResourceScope::system();
+        let entries = match self.filesystem.list_dir(&resource_scope, &root).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(0),
+            Err(e) => return Err(format!("delivered gate route sweep list_dir: {e}")),
+        };
+
+        let mut removed = 0usize;
+        for entry in entries {
+            if entry.file_type != FileType::File {
+                continue;
+            }
+            // Reconstruct the ScopedPath from the file name.
+            let file_path =
+                match ScopedPath::new(format!("{DELIVERED_GATE_ROUTES_ROOT}/{}", entry.name)) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        tracing::debug!(
+                            target = "ironclaw::outbound::filesystem_store",
+                            name = %entry.name,
+                            "delivered gate route sweep: skipping entry with invalid scoped path"
+                        );
+                        continue;
+                    }
+                };
+            // Read the file; skip if unreadable.
+            let versioned = match self.filesystem.get(&resource_scope, &file_path).await {
+                Ok(Some(v)) => v,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::debug!(
+                        target = "ironclaw::outbound::filesystem_store",
+                        name = %entry.name,
+                        error = %e,
+                        "delivered gate route sweep: skipping unreadable file"
+                    );
+                    continue;
+                }
+            };
+            // Deserialize; skip if undeserializable.
+            let record: crate::DeliveredGateRouteRecord =
+                match serde_json::from_slice(&versioned.entry.body) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::debug!(
+                            target = "ironclaw::outbound::filesystem_store",
+                            name = %entry.name,
+                            error = %e,
+                            "delivered gate route sweep: skipping undeserializable file"
+                        );
+                        continue;
+                    }
+                };
+            if !record.is_expired(now) {
+                continue;
+            }
+            // Delete the expired file.
+            match self.filesystem.delete(&resource_scope, &file_path).await {
+                Ok(()) => removed += 1,
+                Err(FilesystemError::NotFound { .. }) => {
+                    // Already gone — count it as removed.
+                    removed += 1;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        target = "ironclaw::outbound::filesystem_store",
+                        name = %entry.name,
+                        error = %e,
+                        "delivered gate route sweep: failed to delete expired file (best-effort)"
+                    );
+                }
+            }
+        }
+        Ok(removed)
+    }
 }
 
 /// Resource scope for delivered-gate route records. Carries the real tenant
@@ -942,7 +1044,7 @@ fn map_fs_error(error: FilesystemError) -> OutboundError {
 mod tests {
     use std::sync::Arc;
 
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
         AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
@@ -1087,6 +1189,95 @@ mod tests {
 
     fn thread() -> ThreadId {
         ThreadId::new("thread-scope-key").unwrap()
+    }
+
+    #[tokio::test]
+    async fn filesystem_gate_route_sweep_removes_expired_keeps_fresh() {
+        let tenant_id = TenantId::new("sweep-tenant").expect("tenant");
+        let user_id = UserId::new("sweep-user").expect("user");
+        let agent_id = AgentId::new("sweep-agent").expect("agent");
+        let thread_id = ThreadId::new("sweep-thread").expect("thread");
+
+        let store = build_gate_route_store(&tenant_id, &user_id);
+        let now = Utc::now();
+
+        // Build two records: one fresh, one expired.
+        let scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(agent_id),
+            None,
+            thread_id,
+            Some(user_id.clone()),
+        );
+
+        let fresh = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            "gate:sweep-fs-fresh",
+            TurnRunId::new(),
+            scope.clone(),
+        );
+        // Override recorded_at to be well within TTL.
+        let fresh = crate::DeliveredGateRouteRecord {
+            recorded_at: now,
+            ..fresh
+        };
+
+        let expired = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            "gate:sweep-fs-expired",
+            TurnRunId::new(),
+            scope.clone(),
+        );
+        // Override recorded_at to be past TTL.
+        let expired = crate::DeliveredGateRouteRecord {
+            recorded_at: now - Duration::hours(49),
+            ..expired
+        };
+
+        store
+            .record_delivered_gate_route(fresh.clone())
+            .await
+            .expect("record fresh");
+        store
+            .record_delivered_gate_route(expired.clone())
+            .await
+            .expect("record expired");
+
+        let removed = store
+            .sweep_expired_delivered_gate_routes(now)
+            .await
+            .expect("sweep succeeds");
+        assert_eq!(removed, 1, "exactly one expired record removed");
+
+        // Fresh record is still loadable.
+        let still_there = store
+            .load_delivered_gate_route(&tenant_id, &user_id, "gate:sweep-fs-fresh")
+            .await
+            .expect("load after sweep")
+            .expect("fresh record must survive sweep");
+        assert_eq!(still_there.gate_ref, "gate:sweep-fs-fresh");
+
+        // Expired record is gone.
+        let gone = store
+            .load_delivered_gate_route(&tenant_id, &user_id, "gate:sweep-fs-expired")
+            .await
+            .expect("load after sweep for expired");
+        assert!(gone.is_none(), "expired record must be absent after sweep");
+    }
+
+    #[tokio::test]
+    async fn filesystem_gate_route_sweep_empty_directory_returns_zero() {
+        let tenant_id = TenantId::new("sweep-empty-tenant").expect("tenant");
+        let user_id = UserId::new("sweep-empty-user").expect("user");
+        let store = build_gate_route_store(&tenant_id, &user_id);
+
+        let removed = store
+            .sweep_expired_delivered_gate_routes(Utc::now())
+            .await
+            .expect("sweep on empty directory");
+        assert_eq!(removed, 0);
     }
 
     #[test]

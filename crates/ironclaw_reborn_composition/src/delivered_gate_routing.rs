@@ -26,11 +26,11 @@
 //! `idempotency_key`, and a retried `approve <ref>` DM after the gate has
 //! already settled must still rewrite the request to the correct run scope so
 //! the inner service can return the settled result rather than `MissingGate`.
-//! Stale records are harmless — the inner service enforces gate state and
-//! actor authority, and a route record never widens authority (tenant and user
-//! are verified before the rewrite). Storage cleanup is a deferred follow-up
-//! (e.g., a TTL sweep); the `remove_delivered_gate_route` method on
-//! [`DeliveredGateRouteStore`] remains for that purpose.
+//! Records expire after [`ironclaw_outbound::DELIVERED_GATE_ROUTE_TTL`]
+//! (48 hours). Expired records are ignored on load and removed lazily by this
+//! wrapper. An opportunistic sweep of expired records runs on the write path
+//! (when a new approval prompt is delivered), gated behind
+//! [`DeliveredGateRouteStore::sweep_expired_delivered_gate_routes`].
 //!
 //! ## Security invariants
 //!
@@ -52,6 +52,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_outbound::DeliveredGateRouteStore;
 use ironclaw_product_workflow::{
     ApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
@@ -118,6 +119,29 @@ impl ApprovalInteractionService for DeliveredGateRoutingApprovalService {
             // Miss: forward unchanged (normal same-thread live run path).
             return self.inner.resolve(request).await;
         };
+
+        // TTL check: if the record is older than DELIVERED_GATE_ROUTE_TTL,
+        // treat it as a miss and remove it lazily (best-effort).
+        if record.is_expired(Utc::now()) {
+            tracing::debug!(
+                target = "ironclaw::reborn::delivered_gate_routing",
+                gate_ref = gate_ref_str,
+                "delivered gate route record expired; treating as miss and removing lazily"
+            );
+            if let Err(remove_err) = self
+                .routes
+                .remove_delivered_gate_route(tenant_id, user_id, gate_ref_str)
+                .await
+            {
+                tracing::debug!(
+                    target = "ironclaw::reborn::delivered_gate_routing",
+                    gate_ref = gate_ref_str,
+                    error = %remove_err,
+                    "delivered gate route lazy removal failed (best-effort)"
+                );
+            }
+            return self.inner.resolve(request).await;
+        }
 
         // Defense-in-depth: the key already encodes tenant and actor user_id,
         // but verify both explicitly before rewriting. On mismatch, forward
@@ -683,6 +707,63 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+
+        async fn sweep_expired_delivered_gate_routes(
+            &self,
+            _now: chrono::DateTime<chrono::Utc>,
+        ) -> Result<usize, String> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_route_record_forwards_request_unchanged() {
+        // A route record whose recorded_at is older than DELIVERED_GATE_ROUTE_TTL
+        // must be treated as a miss: the wrapper forwards the original request
+        // unchanged (no scope rewrite, no run_id_hint).
+        use ironclaw_outbound::DELIVERED_GATE_ROUTE_TTL;
+
+        let run_id = TurnRunId::new();
+        let gate_ref_str = "gate:routing-expired-001";
+
+        let route_record = DeliveredGateRouteRecord {
+            tenant_id: tenant(),
+            user_id: user(),
+            gate_ref: gate_ref_str.to_string(),
+            run_id,
+            scope: run_scope(),
+            // Record is 49 hours old — past the 48-hour TTL.
+            recorded_at: chrono::Utc::now() - DELIVERED_GATE_ROUTE_TTL - chrono::Duration::hours(1),
+        };
+
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        route_store
+            .record_delivered_gate_route(route_record)
+            .await
+            .unwrap();
+
+        let inner = Arc::new(RecordingApprovalService::default());
+        let service =
+            DeliveredGateRoutingApprovalService::new(Arc::clone(&inner) as _, route_store);
+
+        // Request arrives on DM scope — would be rewritten if record were fresh.
+        let request = resolve_request(dm_scope(), gate_ref_str);
+        let original_thread_id = request.scope.thread_id.clone();
+        let _ = service.resolve(request).await;
+
+        let calls = inner.resolve_calls();
+        assert_eq!(calls.len(), 1, "inner must receive exactly one call");
+        let forwarded = &calls[0];
+
+        // Scope must be unchanged — expired record treated as a miss.
+        assert_eq!(
+            forwarded.scope.thread_id, original_thread_id,
+            "scope must be unchanged for expired route record"
+        );
+        assert_eq!(
+            forwarded.run_id_hint, None,
+            "run_id_hint must stay None for expired route record"
+        );
     }
 
     #[tokio::test]

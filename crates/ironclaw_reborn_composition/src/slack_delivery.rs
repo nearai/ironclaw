@@ -1217,6 +1217,22 @@ async fn deliver_triggered_run(
                             error = %error,
                             "failed to record delivered gate route (best-effort)"
                         );
+                    } else {
+                        // Opportunistic sweep: remove stale records for this
+                        // user now that we have just written a new one. The
+                        // sweep is best-effort — errors are logged at debug
+                        // and never affect the delivery outcome.
+                        if let Err(sweep_err) = route_store
+                            .sweep_expired_delivered_gate_routes(Utc::now())
+                            .await
+                        {
+                            tracing::debug!(
+                                target = "ironclaw::reborn::slack_delivery",
+                                %run_id,
+                                error = %sweep_err,
+                                "delivered gate route sweep failed (best-effort)"
+                            );
+                        }
                     }
                 }
                 if let Some(marker) = next_blocked_marker {

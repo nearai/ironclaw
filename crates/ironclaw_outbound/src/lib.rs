@@ -25,7 +25,8 @@ pub use communication_preferences::{
     WriteCommunicationPreferenceRequest,
 };
 pub use delivered_gate_routes::{
-    DeliveredGateRouteRecord, DeliveredGateRouteStore, InMemoryDeliveredGateRouteStore,
+    DELIVERED_GATE_ROUTE_TTL, DeliveredGateRouteRecord, DeliveredGateRouteStore,
+    InMemoryDeliveredGateRouteStore,
 };
 pub use delivery_resolution::{
     CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,
