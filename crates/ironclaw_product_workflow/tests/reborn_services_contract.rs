@@ -29,20 +29,23 @@ use ironclaw_product_workflow::{
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
-    ProductWorkflowError, RebornAutomationInfo, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornGetRunStateRequest, RebornOutboundDeliveryModality,
+    ListPendingAuthInteractionsResponse, OperatorLogsService, OperatorServiceLifecycleService,
+    OutboundPreferencesProductFacade, ProductAgentBoundCaller, ProductWorkflowError,
+    RebornAutomationInfo, RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornGetRunStateRequest,
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorLogsQuery,
+    RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    RebornResolveGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     StaticConnectableChannelsProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
@@ -5021,6 +5024,108 @@ fn reborn_automation_recent_run_info_round_trips_typed_ids_and_preserves_unknown
         "submitted_at": "2026-06-03T09:00:01Z",
     }))
     .expect_err("recent run rejects malformed thread_id");
+}
+
+#[derive(Default)]
+struct RecordingOperatorLogsService {
+    requests: Mutex<Vec<RebornLogQueryRequest>>,
+}
+
+impl RecordingOperatorLogsService {
+    fn requests(&self) -> Vec<RebornLogQueryRequest> {
+        self.requests.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl OperatorLogsService for RecordingOperatorLogsService {
+    async fn query_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        self.requests.lock().expect("lock").push(request);
+        Ok(RebornLogQueryResponse {
+            source: "test".to_string(),
+            entries: Vec::new(),
+            next_cursor: None,
+            tail_supported: false,
+            follow_supported: false,
+        })
+    }
+}
+
+struct CrateRootLifecycleBackend;
+
+#[async_trait]
+impl OperatorServiceLifecycleService for CrateRootLifecycleBackend {
+    async fn control_service(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+        Ok(RebornServiceLifecycleResponse {
+            action: request.action,
+            state: RebornServiceLifecycleState::Unsupported,
+            message: "not wired".to_string(),
+            remediation: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn query_operator_logs_bounds_query_before_logs_service() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    let oversized_cursor = format!("  {}  ", "c".repeat(2048));
+    let oversized_target = format!("{}é", "t".repeat(512));
+    let response = services
+        .query_operator_logs(
+            caller(),
+            RebornOperatorLogsQuery {
+                limit: Some(u32::MAX),
+                cursor: Some(oversized_cursor),
+                level: Some(RebornLogLevel::Warn),
+                target: Some(oversized_target),
+                tail: true,
+            },
+        )
+        .await
+        .expect("operator logs query");
+
+    assert_eq!(response.status, RebornOperatorSurfaceStatus::Available);
+    let requests = operator_logs.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].limit, Some(500));
+    assert_eq!(requests[0].cursor.as_ref().map(String::len), Some(512));
+    assert_eq!(requests[0].target.as_ref().map(String::len), Some(256));
+    assert_eq!(requests[0].level, Some(RebornLogLevel::Warn));
+    assert_eq!(
+        requests[0].tail, false,
+        "unsupported streaming must not reach the logs backend"
+    );
+}
+
+#[tokio::test]
+async fn operator_service_lifecycle_contract_is_implementable_from_crate_root() {
+    let backend = CrateRootLifecycleBackend;
+    let response = backend
+        .control_service(
+            caller(),
+            RebornServiceLifecycleRequest {
+                action: RebornServiceLifecycleAction::Status,
+            },
+        )
+        .await
+        .expect("crate-root lifecycle service implementation");
+
+    assert_eq!(response.action, RebornServiceLifecycleAction::Status);
+    assert_eq!(response.state, RebornServiceLifecycleState::Unsupported);
 }
 
 #[tokio::test]

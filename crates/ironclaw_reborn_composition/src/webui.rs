@@ -6,13 +6,13 @@ use async_trait::async_trait;
 use ironclaw_host_api::{InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
-    ConnectableChannelsProductFacade, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
-    RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    ConnectableChannelsProductFacade, OperatorStatusService, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
     RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
-    StaticOperatorStatusService, WebUiAuthenticatedCaller,
+    WebUiAuthenticatedCaller,
 };
 
 use crate::{
@@ -160,8 +160,8 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         api = api.with_connectable_channels_facade(connectable_channels);
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
-    api = api.with_operator_status_service(Arc::new(StaticOperatorStatusService::new(
-        status_response_from_readiness(&services.readiness),
+    api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
+        services.readiness.clone(),
     )));
 
     // Compose the operator LLM-config settings service when the runtime was
@@ -188,6 +188,26 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         product_auth: services.product_auth.clone(),
         readiness: services.readiness.clone(),
     })
+}
+
+struct ReadinessOperatorStatusService {
+    readiness: RebornReadiness,
+}
+
+impl ReadinessOperatorStatusService {
+    fn new(readiness: RebornReadiness) -> Self {
+        Self { readiness }
+    }
+}
+
+#[async_trait]
+impl OperatorStatusService for ReadinessOperatorStatusService {
+    async fn status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        Ok(status_response_from_readiness(&self.readiness))
+    }
 }
 
 struct LocalSkillsProductFacade {
@@ -593,7 +613,27 @@ mod tests {
         HostPath, MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId,
         VirtualPath,
     };
-    use std::path::Path;
+    use std::{path::Path, time::Duration};
+
+    #[tokio::test]
+    async fn readiness_operator_status_service_generates_timestamp_per_call() {
+        let service = ReadinessOperatorStatusService::new(RebornReadiness::disabled());
+
+        let first = service
+            .status(caller("runtime-owner"))
+            .await
+            .expect("first status response");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let second = service
+            .status(caller("runtime-owner"))
+            .await
+            .expect("second status response");
+
+        assert_ne!(
+            first.generated_at, second.generated_at,
+            "status generated_at must be refreshed for each operator status request"
+        );
+    }
 
     #[tokio::test]
     async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {

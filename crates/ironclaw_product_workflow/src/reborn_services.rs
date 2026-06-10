@@ -108,6 +108,11 @@ type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
 type ThreadOperationLocks = StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>;
 
+const OPERATOR_LOGS_DEFAULT_LIMIT: u32 = 100;
+const OPERATOR_LOGS_MAX_LIMIT: u32 = 500;
+const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
+const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
+
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
     async fn list_connectable_channels(
@@ -1737,13 +1742,7 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         query: RebornOperatorLogsQuery,
     ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let request = RebornLogQueryRequest {
-            limit: query.limit,
-            cursor: query.cursor,
-            level: query.level,
-            target: query.target,
-            tail: query.tail,
-        };
+        let request = bounded_operator_logs_query(query);
         let logs = self.operator_logs.query_logs(caller, request).await?;
         Ok(RebornOperatorCommandPlaneResponse {
             area: RebornOperatorArea::Logs,
@@ -3142,6 +3141,44 @@ fn create_thread_metadata_json(
         "client_action_id": client_action_id.as_str(),
     }))
     .map_err(|_| RebornServicesError::internal_invariant())
+}
+
+fn bounded_operator_logs_query(query: RebornOperatorLogsQuery) -> RebornLogQueryRequest {
+    RebornLogQueryRequest {
+        limit: Some(
+            query
+                .limit
+                .unwrap_or(OPERATOR_LOGS_DEFAULT_LIMIT)
+                .clamp(1, OPERATOR_LOGS_MAX_LIMIT),
+        ),
+        cursor: bounded_operator_logs_string(query.cursor, OPERATOR_LOGS_CURSOR_MAX_BYTES),
+        level: query.level,
+        target: bounded_operator_logs_string(query.target, OPERATOR_LOGS_TARGET_MAX_BYTES),
+        tail: false,
+    }
+}
+
+fn bounded_operator_logs_string(value: Option<String>, max_bytes: usize) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else if trimmed.len() <= max_bytes {
+            Some(trimmed.to_string())
+        } else {
+            Some(truncate_utf8_to_bytes(trimmed, max_bytes))
+        }
+    })
+}
+
+fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> String {
+    let end = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= max_bytes)
+        .last()
+        .unwrap_or(0);
+    value[..end].to_string()
 }
 
 fn product_agent_bound_caller_from_webui(
