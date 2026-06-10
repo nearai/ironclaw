@@ -2664,6 +2664,47 @@ async fn repeated_model_visible_multi_call_failures_stop_with_no_progress_fallba
 }
 
 #[tokio::test]
+async fn repeated_non_provider_replayable_failures_do_not_trigger_no_progress_stop() {
+    let host = MockHost::new(vec![calls_response(), calls_response(), calls_response()])
+        .with_batch_outcomes(
+            (0..3)
+                .map(|_| ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                    outcomes: vec![CapabilityOutcome::Failed(
+                        ironclaw_turns::run_profile::CapabilityFailure {
+                            error_kind: CapabilityFailureKind::OperationFailed,
+                            safe_summary: "non-replayable capability failed".to_string(),
+                            detail: None,
+                        },
+                    )],
+                    stopped_on_suspension: false,
+                })
+                .collect(),
+        );
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family_with_iteration_limit(3), &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::IterationLimit);
+        }
+        other => panic!("expected iteration-limit failure, got {other:?}"),
+    }
+    assert_eq!(host.model_requests().len(), 3);
+    assert_eq!(host.batch_invocations().len(), 3);
+    assert_eq!(
+        final_staged_state(&host)
+            .stop_state
+            .trailing_no_progress_results,
+        0
+    );
+}
+
+#[tokio::test]
 async fn model_visible_provider_tool_failures_append_failure_tool_result_for_replay() {
     for (error_kind, safe_summary, expected_summary) in [
         (
