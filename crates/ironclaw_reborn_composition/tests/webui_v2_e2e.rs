@@ -1005,15 +1005,17 @@ mod operator_llm_config {
 
     #[async_trait]
     impl WebuiAuthenticator for OperatorToken {
-        async fn authenticate(&self, token: &str) -> Option<UserId> {
+        async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             if token == VALID_TOKEN {
-                Some(UserId::new(USER).expect("user id"))
+                Some(WebuiAuthentication::operator(
+                    UserId::new(USER).expect("user id"),
+                ))
             } else {
                 None
             }
         }
 
-        fn allows_operator_webui_config(&self) -> bool {
+        fn mounts_operator_webui_config_routes(&self) -> bool {
             true
         }
     }

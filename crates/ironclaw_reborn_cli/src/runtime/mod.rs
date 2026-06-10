@@ -743,6 +743,14 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "postgres")]
+    fn clear_reborn_postgres_tls_env() -> (EnvGuard, EnvGuard) {
+        (
+            EnvGuard::clear("DATABASE_SSLMODE"),
+            EnvGuard::clear("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT"),
+        )
+    }
+
     #[tokio::test]
     async fn block_on_cli_can_run_inside_existing_tokio_runtime() {
         let value = block_on_cli(async { Ok::<_, anyhow::Error>(42) }).expect("block future");
@@ -1323,6 +1331,7 @@ default_profile = "secure_default"
     fn build_runtime_input_production_rejects_remote_postgres_sslmode_disable_redacted() {
         let _lock = lock_trigger_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
+        let (_database_sslmode, _allow_cleartext) = clear_reborn_postgres_tls_env();
         let _postgres_url = EnvGuard::set(
             "IRONCLAW_REBORN_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=disable",
@@ -1371,9 +1380,161 @@ default_profile = "secure_default"
 
     #[cfg(feature = "postgres")]
     #[test]
+    fn build_runtime_input_production_rejects_database_sslmode_disable_without_opt_in() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _database_sslmode = EnvGuard::set("DATABASE_SSLMODE", "Disable");
+        let _allow_cleartext = EnvGuard::clear("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT");
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let (_temp, config) = boot_config_with_config_toml(
+            "production",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#,
+        );
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("DATABASE_SSLMODE=disable must fail without the Reborn opt-in");
+        let rendered = format!("{err:#}");
+
+        assert!(
+            rendered.contains("sslmode=disable"),
+            "error should mention rejected sslmode, got: {rendered}"
+        );
+        assert!(!rendered.contains("RAW_PASSWORD_SENTINEL_3162"));
+        assert!(!rendered.contains("postgres://"));
+        assert!(!rendered.contains("db.example.com"));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_allows_database_sslmode_disable_with_opt_in() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _database_sslmode = EnvGuard::set("DATABASE_SSLMODE", "DISABLE");
+        let _allow_cleartext =
+            EnvGuard::set("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT", "On");
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let (_temp, config) = boot_config_with_config_toml(
+            "production",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#,
+        );
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        let services = runtime_input.services.expect("services input");
+        assert_eq!(services.profile(), RebornCompositionProfile::Production);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_rejects_invalid_cleartext_opt_in() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _database_sslmode = EnvGuard::set("DATABASE_SSLMODE", "disable");
+        let _allow_cleartext = EnvGuard::set(
+            "IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT",
+            "enabled",
+        );
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let (_temp, config) = boot_config_with_config_toml(
+            "production",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#,
+        );
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("invalid cleartext opt-in must fail loudly");
+        let rendered = format!("{err:#}");
+
+        assert!(rendered.contains("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT"));
+        assert!(rendered.contains("true"));
+        assert!(rendered.contains("false"));
+        assert!(!rendered.contains("RAW_PASSWORD_SENTINEL_3162"));
+        assert!(!rendered.contains("postgres://"));
+        assert!(!rendered.contains("db.example.com"));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_accepts_verify_full_database_sslmode() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _database_sslmode = EnvGuard::set("DATABASE_SSLMODE", "verify-full");
+        let _allow_cleartext = EnvGuard::clear("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT");
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let (_temp, config) = boot_config_with_config_toml(
+            "production",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#,
+        );
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        let services = runtime_input.services.expect("services input");
+        assert_eq!(services.profile(), RebornCompositionProfile::Production);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
     fn build_runtime_input_production_constructs_postgres_services_input() {
         let lock = lock_trigger_env();
         let (enabled, interval) = clear_trigger_poller_env();
+        let (database_sslmode, allow_cleartext) = clear_reborn_postgres_tls_env();
         let postgres_url = EnvGuard::set(
             "IRONCLAW_REBORN_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
@@ -1425,6 +1586,8 @@ default_profile = "secure_default"
         drop(secret_master_key);
         drop(interval);
         drop(enabled);
+        drop(allow_cleartext);
+        drop(database_sslmode);
         drop(lock);
     }
 

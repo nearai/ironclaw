@@ -479,6 +479,7 @@ async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
             url: SecretString::new(url.into_boxed_str()),
+            tls_options: Default::default(),
         },
     )
     .await
@@ -541,6 +542,7 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
             url: SecretString::new(url.clone().into_boxed_str()),
+            tls_options: Default::default(),
         },
     )
     .await
@@ -589,6 +591,7 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
             url: SecretString::new(url.into_boxed_str()),
+            tls_options: Default::default(),
         },
     )
     .await
