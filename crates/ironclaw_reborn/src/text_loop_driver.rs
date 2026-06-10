@@ -18,7 +18,8 @@ use ironclaw_turns::{
 };
 
 use crate::failure_categories::{
-    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_REASON_KIND,
+    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_REASON_KIND,
 };
 
 pub(crate) const TEXT_ONLY_DRIVER_ID: &str = "reborn:text-only-model-reply";
@@ -207,8 +208,15 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         AgentLoopHostErrorKind::BudgetExceeded
         | AgentLoopHostErrorKind::BudgetApprovalRequired
         | AgentLoopHostErrorKind::BudgetAccountingFailed
-        | AgentLoopHostErrorKind::CredentialUnavailable
         | AgentLoopHostErrorKind::PolicyDenied => AgentLoopDriverError::Failed {
+            reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string(),
+        },
+        AgentLoopHostErrorKind::CredentialUnavailable if stage == STAGE_MODEL => {
+            AgentLoopDriverError::Failed {
+                reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string(),
+            }
+        }
+        AgentLoopHostErrorKind::CredentialUnavailable => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string(),
         },
         AgentLoopHostErrorKind::CheckpointRejected => AgentLoopDriverError::Failed {
@@ -280,6 +288,24 @@ mod tests {
             mapped,
             AgentLoopDriverError::Failed {
                 reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn model_credential_unavailable_maps_to_sanitized_failure_category() {
+        let mapped = map_host_error(
+            "model",
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::CredentialUnavailable,
+                "model credentials are unavailable",
+            ),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string()
             }
         );
     }

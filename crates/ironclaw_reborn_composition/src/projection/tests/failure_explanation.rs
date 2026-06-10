@@ -1,4 +1,5 @@
 use super::*;
+use ironclaw_reborn::failure_categories::MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY;
 
 #[tokio::test]
 async fn webui_event_stream_projects_failed_run_failure_summary() {
@@ -166,6 +167,16 @@ async fn webui_event_stream_projects_model_credit_exhaustion_failure_summary() {
         }),
         _ => false,
     }));
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_model_credentials_failure_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-model-credentials-thread",
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
+        "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
+    )
+    .await;
 }
 
 #[tokio::test]

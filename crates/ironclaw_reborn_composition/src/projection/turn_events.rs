@@ -23,7 +23,9 @@ use ironclaw_turns::{
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
-use ironclaw_reborn::failure_categories::MODEL_CREDITS_EXHAUSTED_CATEGORY;
+use ironclaw_reborn::failure_categories::{
+    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+};
 
 use crate::AuthChallengeProvider;
 use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
@@ -507,7 +509,10 @@ async fn failure_summary_for_turn_event(
     category: &str,
     fallback_summary: String,
 ) -> String {
-    if category == MODEL_CREDITS_EXHAUSTED_CATEGORY {
+    if matches!(
+        category,
+        MODEL_CREDITS_EXHAUSTED_CATEGORY | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
+    ) {
         return fallback_summary;
     }
     failure_explainer
@@ -547,6 +552,9 @@ fn failure_summary_for_category(category: &str) -> &'static str {
         }
         MODEL_CREDITS_EXHAUSTED_CATEGORY => {
             "The AI provider account is out of credits. Add credits or switch providers and try again."
+        }
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY => {
+            "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL."
         }
         "heartbeat_failed" => "The run failed after the runner heartbeat could not be recorded.",
         "exit_application_failed" => "The run failed while recording its final result.",
