@@ -3099,7 +3099,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
 /// to assert the fail-closed branch fires.
 async fn product_live_parts_for_gate_test(
     thread_label: &'static str,
-) -> DefaultPlannedRuntimeParts<InMemoryTurnStateStore, RecordingGateway> {
+) -> DefaultPlannedRuntimeParts<RecordingGateway> {
     let fixture = HostFixture::new_unsubmitted(thread_label, "hello").await;
     let turn_store = Arc::new(InMemoryTurnStateStore::default());
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([

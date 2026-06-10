@@ -78,7 +78,10 @@ pub use types::{
     RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
     RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornOutboundDeliveryModality,
+    RebornListThreadsResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigValidateRequest, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
+    RebornOperatorSetupRequest, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
@@ -700,6 +703,74 @@ pub trait RebornServicesApi: Send + Sync {
     ) -> Result<CodexLoginStart, RebornServicesError> {
         let _ = caller;
         Err(llm_config::llm_config_unavailable())
+    }
+
+    async fn get_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn run_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorSetupRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn list_operator_config(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn validate_operator_config(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorConfigValidateRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn get_operator_diagnostics(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn get_operator_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn query_operator_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornOperatorLogsQuery,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn run_operator_service_lifecycle(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorServiceLifecycleRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
     }
 }
 

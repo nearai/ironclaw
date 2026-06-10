@@ -78,6 +78,11 @@ Set the service Dockerfile path to `Dockerfile.reborn`. Railway sets `PORT`;
 keep `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0`. The Reborn WebUI service serves
 `/api/health` for Railway's healthcheck.
 
+Leave Railway's Start Command empty for the Docker image. The image entrypoint
+builds the `ironclaw-reborn serve` arguments from `PORT` and
+`IRONCLAW_REBORN_SERVE_HOST`; Railway does not shell-expand `$VAR` placeholders
+in Docker command arguments before they reach the entrypoint.
+
 Minimum Railway variables:
 
 ```bash
