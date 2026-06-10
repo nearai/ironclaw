@@ -783,9 +783,11 @@ fn runner_settings(
 mod tests {
     use std::collections::HashMap;
 
-    use ironclaw_reborn_composition::RebornCompositionProfile;
     #[cfg(feature = "webui-v2-beta")]
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
+    use ironclaw_reborn_composition::{
+        RebornCompositionProfile, TurnStatus, test_support::assistant_reply_without_text_for_test,
+    };
     use ironclaw_reborn_config::RebornBootConfig;
 
     use super::test_env::{EnvGuard, lock_trigger_env};
@@ -793,7 +795,8 @@ mod tests {
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
         RuntimeInputCaller, RuntimeInputOptions, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, failure_summary_for_cli, resolve_google_oauth_config,
+        build_runtime_input_with_options, failure_summary_for_cli, no_assistant_text_message,
+        resolve_google_oauth_config,
     };
 
     fn clear_trigger_poller_env() -> (EnvGuard, EnvGuard) {
@@ -831,6 +834,27 @@ mod tests {
         assert_eq!(
             failure_summary_for_cli(Some("unexpected_category")),
             "The run failed before producing a reply."
+        );
+    }
+
+    #[test]
+    fn no_assistant_text_message_formats_failed_reply_with_category() {
+        let reply = assistant_reply_without_text_for_test(TurnStatus::Failed, Some("driver_panic"));
+
+        let message = no_assistant_text_message(&reply);
+
+        assert!(
+            message.contains("The run failed because the execution driver stopped unexpectedly."),
+            "{message}"
+        );
+        assert!(
+            message.contains("failure_category=driver_panic"),
+            "{message}"
+        );
+        assert!(message.contains("status=Failed"), "{message}");
+        assert!(
+            message.contains(&format!("run_id={}", reply.run_id)),
+            "{message}"
         );
     }
 
