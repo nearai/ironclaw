@@ -53,6 +53,105 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Default additional parameters merged into every request.
     /// Used by providers that need extra top-level fields (e.g., Ollama `think: true`).
     default_additional_params: Option<serde_json::Value>,
+    /// Optional `/models` listing endpoint. When set, [`LlmProvider::list_models`]
+    /// performs a `GET {base_url}/models` request (OpenAI-compatible shape) instead
+    /// of returning the empty default. rig-core's `CompletionModel` does not expose
+    /// model discovery, so this is wired explicitly for the OpenAI-compatible path.
+    models_endpoint: Option<ModelsEndpoint>,
+}
+
+/// Connection details for an OpenAI-compatible `GET /models` request.
+#[derive(Clone)]
+struct ModelsEndpoint {
+    /// Provider id, used only for error/log context.
+    provider_id: String,
+    /// Already-normalized base URL (e.g. `https://api.openai.com/v1`).
+    base_url: String,
+    /// Bearer API key.
+    api_key: String,
+    /// Extra headers applied to every request to this provider.
+    extra_headers: reqwest::header::HeaderMap,
+}
+
+impl ModelsEndpoint {
+    /// Perform a `GET {base_url}/models` request and return the model ids.
+    ///
+    /// Parses the OpenAI-compatible list shape (`{ "data": [{ "id": ... }] }`).
+    /// Network, auth, and parse failures map to `LlmError` so the caller can
+    /// surface a real message instead of an empty list.
+    async fn fetch_models(&self) -> Result<Vec<String>, LlmError> {
+        let url = format!("{}/models", self.base_url.trim_end_matches('/'));
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| LlmError::RequestFailed {
+                provider: self.provider_id.clone(),
+                reason: format!("failed to build HTTP client: {e}"),
+            })?;
+
+        let response = client
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .headers(self.extra_headers.clone())
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: self.provider_id.clone(),
+                reason: format!("request to {url} failed: {e}"),
+            })?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(LlmError::AuthFailed {
+                provider: self.provider_id.clone(),
+            });
+        }
+        if !status.is_success() {
+            return Err(LlmError::RequestFailed {
+                provider: self.provider_id.clone(),
+                reason: format!("{url} returned HTTP {}", status.as_u16()),
+            });
+        }
+
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| LlmError::InvalidResponse {
+                provider: self.provider_id.clone(),
+                reason: format!("could not read /models response: {e}"),
+            })?;
+        parse_models_response(&self.provider_id, &body)
+    }
+}
+
+/// Extract model ids from an OpenAI-compatible `GET /models` response body
+/// (`{ "data": [{ "id": ... }] }`). Empty/whitespace ids are dropped.
+///
+/// Split out from the HTTP call so the parsing contract is unit-testable
+/// without a live endpoint.
+fn parse_models_response(provider_id: &str, body: &[u8]) -> Result<Vec<String>, LlmError> {
+    #[derive(serde::Deserialize)]
+    struct ModelsResponse {
+        #[serde(default)]
+        data: Vec<ModelEntry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ModelEntry {
+        id: String,
+    }
+
+    let parsed: ModelsResponse =
+        serde_json::from_slice(body).map_err(|e| LlmError::InvalidResponse {
+            provider: provider_id.to_string(),
+            reason: format!("could not parse /models response: {e}"),
+        })?;
+
+    Ok(parsed
+        .data
+        .into_iter()
+        .map(|entry| entry.id)
+        .filter(|id| !id.trim().is_empty())
+        .collect())
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -69,7 +168,29 @@ impl<M: CompletionModel> RigAdapter<M> {
             cache_retention: CacheRetention::None,
             unsupported_params: HashSet::new(),
             default_additional_params: None,
+            models_endpoint: None,
         }
+    }
+
+    /// Enable OpenAI-compatible model discovery via `GET {base_url}/models`.
+    ///
+    /// Without this, [`LlmProvider::list_models`] falls back to the trait default
+    /// (an empty list). Wire it from the OpenAI-compatible provider factory so the
+    /// "Fetch models" UI returns the provider's catalog.
+    pub fn with_model_listing(
+        mut self,
+        provider_id: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        extra_headers: reqwest::header::HeaderMap,
+    ) -> Self {
+        self.models_endpoint = Some(ModelsEndpoint {
+            provider_id: provider_id.into(),
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            extra_headers,
+        });
+        self
     }
 
     /// Set Anthropic prompt cache retention policy.
@@ -622,6 +743,15 @@ where
         (self.input_cost, self.output_cost)
     }
 
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        let Some(endpoint) = self.models_endpoint.as_ref() else {
+            // No discovery endpoint wired (e.g. Anthropic/Ollama paths); preserve
+            // the trait default rather than guessing a URL.
+            return Ok(Vec::new());
+        };
+        endpoint.fetch_models().await
+    }
+
     fn cache_write_multiplier(&self) -> Decimal {
         match self.cache_retention {
             CacheRetention::None => Decimal::ONE,
@@ -841,6 +971,36 @@ mod tests {
     use super::*;
     use rig::completion::CompletionError;
     use rig::streaming::StreamingCompletionResponse;
+
+    #[test]
+    fn parse_models_response_extracts_ids() {
+        let body =
+            br#"{"object":"list","data":[{"id":"gpt-4o","object":"model"},{"id":"gpt-4o-mini"}]}"#;
+        let models = parse_models_response("openai", body).expect("parses");
+        assert_eq!(models, vec!["gpt-4o", "gpt-4o-mini"]);
+    }
+
+    #[test]
+    fn parse_models_response_drops_blank_ids_and_tolerates_missing_data() {
+        let with_blank = br#"{"data":[{"id":"a"},{"id":"  "},{"id":""}]}"#;
+        assert_eq!(
+            parse_models_response("openai", with_blank).expect("parses"),
+            vec!["a"]
+        );
+        // A successful response with no `data` key yields an empty list, not an error.
+        let no_data = br#"{"object":"list"}"#;
+        assert!(
+            parse_models_response("openai", no_data)
+                .expect("parses")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn parse_models_response_rejects_malformed_json() {
+        let err = parse_models_response("openai", b"not json").expect_err("rejects");
+        assert!(matches!(err, LlmError::InvalidResponse { .. }));
+    }
 
     #[derive(Clone)]
     struct FailingCompletionModel;

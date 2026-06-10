@@ -577,11 +577,19 @@ impl LlmConfigService for RebornLlmConfigService {
                 models,
                 message: String::new(),
             }),
-            Err(_) => Ok(LlmModelsResult {
-                ok: false,
-                models: Vec::new(),
-                message: "could not list models for this provider".to_string(),
-            }),
+            Err(error) => {
+                tracing::debug!(
+                    provider_id = %request.provider_id,
+                    adapter = %request.adapter,
+                    error = %error,
+                    "list_models probe failed"
+                );
+                Ok(LlmModelsResult {
+                    ok: false,
+                    models: Vec::new(),
+                    message: "could not list models for this provider".to_string(),
+                })
+            }
         }
     }
 

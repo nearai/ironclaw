@@ -373,13 +373,20 @@ fn create_openai_compat_from_registry(
             "no-key".to_string()
         });
 
+    // Default to the public OpenAI endpoint for model discovery when no base
+    // URL is configured; rig-core uses the same default internally.
+    let normalized_base_url = if config.base_url.is_empty() {
+        "https://api.openai.com/v1".to_string()
+    } else {
+        normalize_openai_base_url(&config.base_url)
+    };
+
     let mut builder = openai::Client::builder().api_key(&api_key);
     if !config.base_url.is_empty() {
-        let base_url = normalize_openai_base_url(&config.base_url);
-        builder = builder.base_url(&base_url);
+        builder = builder.base_url(&normalized_base_url);
     }
     if !extra_headers.is_empty() {
-        builder = builder.http_headers(extra_headers);
+        builder = builder.http_headers(extra_headers.clone());
     }
 
     let client: openai::Client = builder.build().map_err(|e| LlmError::RequestFailed {
@@ -401,7 +408,13 @@ fn create_openai_compat_from_registry(
     );
 
     let adapter = RigAdapter::new(model, &config.model)
-        .with_unsupported_params(config.unsupported_params.clone());
+        .with_unsupported_params(config.unsupported_params.clone())
+        .with_model_listing(
+            &config.provider_id,
+            &normalized_base_url,
+            &api_key,
+            extra_headers,
+        );
     Ok(Arc::new(adapter))
 }
 
