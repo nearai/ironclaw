@@ -220,6 +220,7 @@ struct StubServices {
     list_operator_config_calls: Mutex<usize>,
     get_operator_config_key_calls: Mutex<Vec<String>>,
     set_operator_config_key_calls: Mutex<Vec<OperatorConfigSetCall>>,
+    next_set_operator_config_key_error: Mutex<Option<RebornServicesError>>,
     validate_operator_config_calls: Mutex<Vec<Vec<String>>>,
     get_operator_diagnostics_calls: Mutex<usize>,
     get_operator_status_calls: Mutex<usize>,
@@ -257,6 +258,13 @@ impl StubServices {
     fn fail_list_connectable_channels(&self, error: RebornServicesError) {
         *self
             .next_list_connectable_channels_error
+            .lock()
+            .expect("lock") = Some(error);
+    }
+
+    fn fail_set_operator_config_key(&self, error: RebornServicesError) {
+        *self
+            .next_set_operator_config_key_error
             .lock()
             .expect("lock") = Some(error);
     }
@@ -672,6 +680,14 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .push((key.clone(), request.value.clone()));
+        if let Some(error) = self
+            .next_set_operator_config_key_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
         Ok(RebornOperatorConfigGetResponse {
             entry: operator_config_entry(key, request.value),
         })
@@ -1895,6 +1911,7 @@ async fn operator_config_validation_surfaces_redacted_reason_codes() {
 #[tokio::test]
 async fn operator_config_set_failure_does_not_echo_secret_value() {
     let services = Arc::new(StubServices::default());
+    services.fail_set_operator_config_key(RebornServicesError::service_unavailable(false));
     let router = router_with_capabilities(
         services,
         WebUiV2Capabilities {
