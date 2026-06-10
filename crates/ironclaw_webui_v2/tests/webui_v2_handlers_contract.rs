@@ -243,7 +243,6 @@ struct StubServices {
     /// branches, or empty drains in a deterministic order.
     next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
     stream_events_notify: Arc<Notify>,
-    operator_calls: Mutex<Vec<String>>,
 }
 
 impl StubServices {
