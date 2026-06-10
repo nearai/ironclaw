@@ -5613,7 +5613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_webui_services_without_host_runtime_returns_503_on_list_automations() {
+    async fn build_webui_services_without_local_runtime_returns_503_on_list_automations() {
         let root = tempfile::tempdir().expect("tempdir");
         let gateway = Arc::new(RecordingGateway {
             reply: "unused".to_string(),
@@ -5639,7 +5639,7 @@ mod tests {
         .with_model_gateway_override(gateway);
 
         let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
-        runtime.services.host_runtime = None;
+        runtime.services.local_runtime = None;
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
             TenantId::new("runtime-webui-no-host-tenant").unwrap(),

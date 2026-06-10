@@ -77,10 +77,6 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
-    let automation_facade = services
-        .host_runtime
-        .as_ref()
-        .map(|host_runtime| Arc::new(RebornAutomationProductFacade::new(Arc::clone(host_runtime))));
 
     let mut api = ProductRebornServices::new(
         runtime.webui_thread_service(),
@@ -141,10 +137,10 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             Arc::clone(product_auth),
         )));
     }
-    if let Some(automation_facade) = automation_facade {
-        api = api.with_automation_product_facade(automation_facade);
-    }
     if let Some(local_runtime) = &services.local_runtime {
+        api = api.with_automation_product_facade(Arc::new(RebornAutomationProductFacade::new(
+            Arc::clone(&local_runtime.trigger_repository),
+        )));
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
             Arc::clone(&local_runtime.outbound_preferences),
             Arc::new(OutboundDeliveryTargetRegistry::new(
