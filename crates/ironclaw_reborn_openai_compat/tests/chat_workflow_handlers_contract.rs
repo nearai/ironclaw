@@ -758,10 +758,50 @@ fn authenticated_caller_rejects_auth_subject_scope_mismatch() {
             None,
             None,
         ),
-        ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "user-b"),
+        ProtocolAuthEvidence::test_verified_for_tenant(
+            AuthRequirement::BearerToken,
+            "user-b",
+            TenantId::new("tenant-a").expect("tenant"),
+        ),
     );
 
     let error = result.expect_err("subject mismatch rejected");
+    assert_eq!(error.status_code(), 403);
+}
+
+#[test]
+fn authenticated_caller_rejects_unscoped_auth_claim() {
+    let result = OpenAiCompatAuthenticatedCaller::new(
+        OpenAiCompatActorScope::new(
+            TenantId::new("tenant-a").expect("tenant"),
+            UserId::new("user-a").expect("user"),
+            None,
+            None,
+        ),
+        ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "user-a"),
+    );
+
+    let error = result.expect_err("unscoped claim rejected");
+    assert_eq!(error.status_code(), 403);
+}
+
+#[test]
+fn authenticated_caller_rejects_auth_tenant_scope_mismatch() {
+    let result = OpenAiCompatAuthenticatedCaller::new(
+        OpenAiCompatActorScope::new(
+            TenantId::new("tenant-a").expect("tenant"),
+            UserId::new("user-a").expect("user"),
+            None,
+            None,
+        ),
+        ProtocolAuthEvidence::test_verified_for_tenant(
+            AuthRequirement::BearerToken,
+            "user-a",
+            TenantId::new("tenant-b").expect("tenant"),
+        ),
+    );
+
+    let error = result.expect_err("tenant mismatch rejected");
     assert_eq!(error.status_code(), 403);
 }
 
@@ -1092,7 +1132,11 @@ fn caller() -> OpenAiCompatAuthenticatedCaller {
             Some(AgentId::new("agent-a").expect("agent")),
             Some(ProjectId::new("project-a").expect("project")),
         ),
-        ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "user-a"),
+        ProtocolAuthEvidence::test_verified_for_tenant(
+            AuthRequirement::BearerToken,
+            "user-a",
+            TenantId::new("tenant-a").expect("tenant"),
+        ),
     )
     .expect("caller")
 }

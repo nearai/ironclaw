@@ -132,6 +132,8 @@ mod webui;
 mod webui_body_limit;
 mod webui_extension_credentials;
 #[cfg(feature = "webui-v2-beta")]
+mod webui_operator_auth;
+#[cfg(feature = "webui-v2-beta")]
 mod webui_rate_limit;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_route_match;
@@ -219,7 +221,9 @@ pub use provider_admin_product_command::RebornProviderAdminProductCommandService
 #[cfg(feature = "root-llm-provider")]
 pub use provider_repo::{ProviderRepo, ProviderRepoError};
 pub use readiness::{
-    RebornFacadeReadiness, RebornReadiness, RebornReadinessState, RebornWorkerReadiness,
+    RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
+    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
+    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
 };
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
@@ -303,9 +307,9 @@ pub use webui::{RebornWebuiBundle, build_webui_services};
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_serve::{
-    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount, WebuiAuthenticator,
-    WebuiServeConfig, WebuiServeConfigError, WebuiServeError, WebuiV2App, webui_v2_app,
-    webui_v2_app_with_lifecycle,
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
+    WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
 };
 
 /// Re-exported identity vocabulary host binaries need to construct

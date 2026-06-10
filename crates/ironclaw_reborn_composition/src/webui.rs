@@ -179,7 +179,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     Ok(RebornWebuiBundle {
         api: Arc::new(api),
         product_auth: services.product_auth.clone(),
-        readiness: services.readiness,
+        readiness: services.readiness.clone(),
     })
 }
 

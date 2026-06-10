@@ -747,6 +747,13 @@ where
             }
         }
 
+        // Strict-mode tool schemas advertise every optional as required+nullable,
+        // so the model fills unset optionals with `null`. Strip those placeholders
+        // against each tool's original schema so only provided values reach the
+        // tool. `false`: rig providers send `null`, not `""`, so a deliberately
+        // empty string from the model is preserved.
+        crate::tool_schema::strip_unset_optional_fields(&mut tool_calls, &request.tools, false);
+
         let resp = ToolCompletionResponse {
             content: text,
             tool_calls,

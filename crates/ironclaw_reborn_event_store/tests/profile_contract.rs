@@ -1,3 +1,5 @@
+#[cfg(feature = "postgres")]
+use ironclaw_reborn_event_store::PostgresPoolTlsOptions;
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
 };
@@ -84,6 +86,7 @@ async fn unavailable_postgres_backend_error_does_not_leak_secret_config() {
                     .to_string()
                     .into_boxed_str(),
             ),
+            tls_options: Default::default(),
         },
     )
     .await;
@@ -118,6 +121,7 @@ async fn production_postgres_rejects_remote_sslmode_disable_before_connecting() 
                     .to_string()
                     .into_boxed_str(),
             ),
+            tls_options: Default::default(),
         },
     )
     .await;
@@ -137,6 +141,41 @@ async fn production_postgres_rejects_remote_sslmode_disable_before_connecting() 
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+async fn production_postgres_event_store_honors_explicit_remote_cleartext_opt_in() {
+    let result = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Postgres {
+            url: SecretString::new(
+                "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@example.invalid/events?sslmode=disable"
+                    .to_string()
+                    .into_boxed_str(),
+            ),
+            tls_options: PostgresPoolTlsOptions {
+                ssl_mode_override: None,
+                allow_remote_cleartext: true,
+            },
+        },
+    )
+    .await;
+
+    let error = result
+        .err()
+        .expect("invalid host should fail only after accepting the cleartext opt-in");
+    assert!(
+        !matches!(
+            error,
+            RebornEventStoreError::RemotePostgresClearTextDisabled
+        ),
+        "event-store factory must pass explicit TLS options into the Postgres backend"
+    );
+    let displayed = error.to_string();
+    assert!(!displayed.contains("RAW_PASSWORD_SENTINEL_3162"));
+    assert!(!displayed.contains("example.invalid"));
+    assert!(!displayed.contains("postgres://"));
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
 async fn postgres_connection_failure_does_not_fall_back_or_leak_secret_config() {
     let result = build_reborn_event_stores(
         RebornProfile::Production,
@@ -146,6 +185,7 @@ async fn postgres_connection_failure_does_not_fall_back_or_leak_secret_config() 
                     .to_string()
                     .into_boxed_str(),
             ),
+            tls_options: Default::default(),
         },
     )
     .await;
