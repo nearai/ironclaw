@@ -1723,6 +1723,36 @@ mod tests {
         assert!(second.is_consumed());
     }
 
+    /// Operator-wide secrets are stored under [`ResourceScope::system`], whose
+    /// reserved tenant/user id carries control bytes that normal `TenantId`
+    /// validation rejects. The persisted `StoredSecret` tags the entry with
+    /// that scope, so a read-back deserializes it — this must round-trip.
+    /// Regression for the WebUI NEAR AI save returning `service_unavailable`:
+    /// the key wrote but every read-back (metadata/lease) errored on the
+    /// system tenant id.
+    #[tokio::test]
+    async fn filesystem_secret_store_round_trips_system_scope() {
+        let fs = Arc::new(InMemoryBackend::new());
+        let scoped = default_scoped_fs(Arc::clone(&fs));
+        let store = FilesystemSecretStore::new(scoped, test_crypto());
+        let scope = ResourceScope::system();
+        let handle = SecretHandle::new("llm_provider_nearai_api_key").unwrap();
+
+        store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("sk-operator-wide"),
+            )
+            .await
+            .unwrap();
+
+        assert!(store.metadata(&scope, &handle).await.unwrap().is_some());
+        let lease = store.lease_once(&scope, &handle).await.unwrap();
+        let material = store.consume(&scope, lease.id).await.unwrap();
+        assert_eq!(material.expose_secret(), "sk-operator-wide");
+    }
+
     #[tokio::test]
     async fn filesystem_secret_store_delete_skips_pre_read() {
         let backend = Arc::new(DeleteCountingBackend::new(Arc::new(InMemoryBackend::new())));

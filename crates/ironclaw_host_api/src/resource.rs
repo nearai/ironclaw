@@ -193,3 +193,32 @@ pub struct ResourceReceipt {
     pub estimate: ResourceEstimate,
     pub actual: Option<ResourceUsage>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The system scope is built from a reserved id that fails normal
+    /// validation, so it must still survive a serde round-trip — otherwise any
+    /// persisted system-scoped record (e.g. an operator-wide secret entry)
+    /// serializes but cannot be read back. Regression for the WebUI NEAR AI
+    /// "save returns service_unavailable" bug.
+    #[test]
+    fn system_scope_survives_json_round_trip() {
+        let scope = ResourceScope::system();
+        let json = serde_json::to_string(&scope).expect("serialize system scope");
+        let restored: ResourceScope =
+            serde_json::from_str(&json).expect("deserialize system scope");
+        assert!(restored.is_system());
+        assert_eq!(restored.tenant_id.as_str(), SYSTEM_RESERVED_ID);
+        assert_eq!(restored.user_id.as_str(), SYSTEM_RESERVED_ID);
+    }
+
+    /// The trusted-sentinel exception must not widen into a general bypass:
+    /// an ordinary id carrying control characters is still rejected on the wire.
+    #[test]
+    fn other_control_character_ids_are_still_rejected() {
+        let json = "\"\u{1f}not-the-sentinel\u{1f}\"";
+        assert!(serde_json::from_str::<TenantId>(json).is_err());
+    }
+}
