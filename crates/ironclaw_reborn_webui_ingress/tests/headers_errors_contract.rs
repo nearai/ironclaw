@@ -70,6 +70,9 @@ const TOKEN: &str = "operator-secret-token";
 #[derive(Default)]
 struct StubServices {
     create_thread_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    /// When set, `create_thread` panics with this message so the panic
+    /// test can drive the `CatchPanicLayer` boundary (row 9).
+    create_thread_panic: Option<&'static str>,
 }
 
 #[async_trait]
@@ -79,6 +82,9 @@ impl RebornServicesApi for StubServices {
         caller: WebUiAuthenticatedCaller,
         _request: WebUiCreateThreadRequest,
     ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        if let Some(message) = self.create_thread_panic {
+            panic!("{message}");
+        }
         self.create_thread_callers
             .lock()
             .expect("lock")
@@ -301,7 +307,11 @@ impl RebornServicesApi for StubServices {
 // ─── harness ──────────────────────────────────────────────────────────
 
 fn build_app() -> (axum::Router, Arc<StubServices>) {
-    let services = Arc::new(StubServices::default());
+    build_app_from(StubServices::default())
+}
+
+fn build_app_from(services: StubServices) -> (axum::Router, Arc<StubServices>) {
+    let services = Arc::new(services);
     let authenticator = Arc::new(
         EnvBearerAuthenticator::new(
             SecretString::from(TOKEN.to_string()),
@@ -442,11 +452,81 @@ async fn malformed_request_body_returns_sanitized_client_error() {
             .is_empty(),
         "a malformed body must be rejected before the facade",
     );
+    // The body is axum's standard `JsonRejection` text — it does include
+    // serde's structural parse position (`line`/`column`), which is not
+    // sensitive (see 03-headers-errors.md row 7). What it must NOT carry
+    // is any genuinely internal detail: filesystem paths, Rust type or
+    // field names, panic/traceback markers, or the configured token.
     let body = body_string(response).await;
-    for leak in ["/Users/", "/home/", "src/", "panicked", "::"] {
+    for leak in [
+        "/Users/",
+        "/home/",
+        "src/",
+        "panicked",
+        "::",
+        "WebUiCreateThreadRequest",
+        "client_action_id",
+        TOKEN,
+    ] {
         assert!(
             !body.contains(leak),
             "validation error must not leak `{leak}`; body was `{body}`",
+        );
+    }
+}
+
+#[tokio::test]
+async fn panic_boundary_returns_sanitized_500() {
+    // Row 9: a handler panic must unwind into `CatchPanicLayer::custom`
+    // and return a generic 500 with the detail logged, not echoed. Drive
+    // a facade that panics with a sensitive-looking message and assert
+    // the response body is exactly the opaque string — no path, SQL,
+    // token, or `::` from the panic payload reaches the client — and that
+    // the static security headers still ride the 500.
+    let sensitive = "/Users/secret/db SELECT token=operator-secret-token";
+    let (app, _services) = build_app_from(StubServices {
+        create_thread_panic: Some(sensitive),
+        ..StubServices::default()
+    });
+    let response = app
+        .oneshot(create_thread_request(Some(TOKEN), "{}"))
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a panicking handler must be caught and return 500, not crash the connection",
+    );
+    // Security headers are applied outside the panic boundary, so the 500
+    // is still nosniff / DENY / no-referrer.
+    let headers = response.headers().clone();
+    assert_eq!(
+        headers
+            .get(header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff"),
+        "the sanitized 500 must still carry nosniff",
+    );
+    assert_eq!(
+        headers.get("referrer-policy").and_then(|v| v.to_str().ok()),
+        Some("no-referrer"),
+        "the sanitized 500 must still carry Referrer-Policy",
+    );
+    let body = body_string(response).await;
+    assert_eq!(
+        body, "Internal Server Error",
+        "the 500 body must be the fixed opaque string, not the panic payload",
+    );
+    for leak in [
+        "/Users/",
+        "SELECT",
+        "operator-secret-token",
+        "panicked",
+        "::",
+    ] {
+        assert!(
+            !body.contains(leak),
+            "the 500 body must not leak the panic detail `{leak}`; body was `{body}`",
         );
     }
 }
