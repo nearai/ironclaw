@@ -2071,6 +2071,14 @@ async fn operator_routes_are_not_mounted_for_multi_user_authenticator() {
         (Method::GET, "/api/webchat/v2/operator/setup"),
         (Method::POST, "/api/webchat/v2/operator/setup"),
         (Method::GET, "/api/webchat/v2/operator/config"),
+        (
+            Method::GET,
+            "/api/webchat/v2/operator/config/provider.default",
+        ),
+        (
+            Method::POST,
+            "/api/webchat/v2/operator/config/provider.default",
+        ),
         (Method::POST, "/api/webchat/v2/operator/config/validate"),
         (Method::GET, "/api/webchat/v2/operator/diagnostics"),
         (Method::GET, "/api/webchat/v2/operator/status"),

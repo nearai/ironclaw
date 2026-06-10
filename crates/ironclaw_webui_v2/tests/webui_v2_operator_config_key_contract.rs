@@ -8,7 +8,9 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_workflow::*;
-use ironclaw_webui_v2::{DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2State, webui_v2_router};
+use ironclaw_webui_v2::{
+    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
+};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -278,6 +280,9 @@ fn router_with(services: Arc<dyn RebornServicesApi>) -> Router {
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }))
 }
 
 #[tokio::test]

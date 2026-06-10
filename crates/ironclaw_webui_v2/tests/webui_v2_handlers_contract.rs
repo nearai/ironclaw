@@ -35,17 +35,18 @@ use ironclaw_product_workflow::{
     RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
     RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigListResponse,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
+    RebornOperatorSurfaceStatus, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
@@ -97,6 +98,99 @@ fn service_unavailable_error(retryable: bool) -> RebornServicesError {
         retryable,
         field: None,
         validation_code: None,
+    }
+}
+
+fn operator_config_surface_not_wired_diagnostic() -> RebornOperatorConfigDiagnostic {
+    RebornOperatorConfigDiagnostic {
+        key: "*".to_string(),
+        severity: RebornOperatorConfigDiagnosticSeverity::Error,
+        reason_code: "operator_config_service_not_wired".to_string(),
+        message: "Operator config diagnostics are available, but the effective config service is not wired yet.".to_string(),
+        owning_area: RebornOperatorArea::Config,
+        remediation: "Use bootstrap config, environment variables, or existing CLI setup until the operator config service is enabled.".to_string(),
+    }
+}
+
+fn operator_config_validation_diagnostics(
+    keys: Vec<String>,
+) -> Vec<RebornOperatorConfigDiagnostic> {
+    let keys = if keys.is_empty() {
+        vec!["*".to_string()]
+    } else {
+        keys
+    };
+
+    keys.into_iter()
+        .map(operator_config_key_diagnostic)
+        .collect()
+}
+
+fn operator_config_key_diagnostic(key: String) -> RebornOperatorConfigDiagnostic {
+    let normalized = key.to_ascii_lowercase();
+    let is_secret = ["api_key", "credential", "password", "secret", "token"]
+        .iter()
+        .any(|marker| normalized.contains(marker));
+
+    let (reason_code, message, remediation) = if key == "*" {
+        (
+            "operator_config_service_not_wired",
+            "Operator config validation is available, but the effective config service is not wired yet.",
+            "Use bootstrap config, environment variables, or existing CLI setup until the operator config service is enabled.",
+        )
+    } else if is_secret {
+        (
+            "operator_config_secret_not_wired",
+            "Secret-backed operator config is not writable through the operator API yet.",
+            "Store secrets through the configured secret provider or bootstrap environment until the operator secrets flow is enabled.",
+        )
+    } else if normalized.starts_with("deprecated.") || normalized.starts_with("legacy.") {
+        (
+            "operator_config_deprecated",
+            "This operator config key is deprecated and is not applied by the Reborn runtime.",
+            "Move the setting to the current config key before relying on operator-managed startup.",
+        )
+    } else if normalized.starts_with("bootstrap.") {
+        (
+            "operator_config_immutable",
+            "Bootstrap config is immutable from the browser operator API.",
+            "Change this setting in bootstrap config and restart the host process.",
+        )
+    } else if matches!(
+        normalized.as_str(),
+        "provider.default" | "model.default" | "profile.default"
+    ) {
+        (
+            "operator_config_not_wired",
+            "This parsed operator config key is not wired into runtime behavior yet.",
+            "Keep using the existing setup path for this setting until effective config persistence is enabled.",
+        )
+    } else {
+        (
+            "operator_config_unknown_key",
+            "This operator config key is not recognized by the current Reborn runtime.",
+            "Remove the key or rename it to a documented operator config key.",
+        )
+    };
+
+    RebornOperatorConfigDiagnostic {
+        key,
+        severity: RebornOperatorConfigDiagnosticSeverity::Error,
+        reason_code: reason_code.to_string(),
+        message: message.to_string(),
+        owning_area: RebornOperatorArea::Config,
+        remediation: remediation.to_string(),
+    }
+}
+
+fn operator_config_diagnostic_command_plane_response(
+    area: RebornOperatorArea,
+) -> RebornOperatorCommandPlaneResponse {
+    RebornOperatorCommandPlaneResponse {
+        area,
+        status: RebornOperatorSurfaceStatus::Unavailable,
+        message: "Operator config has unsupported or not-yet-wired settings.".to_string(),
+        diagnostics: vec![operator_config_surface_not_wired_diagnostic()],
     }
 }
 
@@ -604,7 +698,11 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .push(format!("validate_config:{:?}", request.keys));
-        Err(service_unavailable_error(false))
+        let diagnostics = operator_config_validation_diagnostics(request.keys);
+        Ok(RebornOperatorConfigValidateResponse {
+            valid: diagnostics.is_empty(),
+            diagnostics,
+        })
     }
 
     async fn get_operator_diagnostics(
@@ -615,7 +713,9 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .push("diagnostics".to_string());
-        Err(service_unavailable_error(false))
+        Ok(operator_config_diagnostic_command_plane_response(
+            RebornOperatorArea::Diagnostics,
+        ))
     }
 
     async fn get_operator_status(
@@ -626,7 +726,9 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .push("status".to_string());
-        Err(service_unavailable_error(false))
+        Ok(operator_config_diagnostic_command_plane_response(
+            RebornOperatorArea::Status,
+        ))
     }
 
     async fn query_operator_logs(
@@ -1359,7 +1461,7 @@ async fn get_session_returns_false_operator_capability_when_capabilities_default
 }
 
 #[tokio::test]
-async fn operator_route_defaults_to_sanitized_service_unavailable() {
+async fn operator_status_surfaces_unsupported_config_diagnostics() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(
         services,
@@ -1379,79 +1481,125 @@ async fn operator_route_defaults_to_sanitized_service_unavailable() {
         .await
         .expect("oneshot");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    assert_eq!(body["error"], "unavailable");
-    assert_eq!(body["kind"], "service_unavailable");
-    assert_eq!(body["retryable"], false);
+    assert_eq!(body["area"], "status");
+    assert_eq!(body["status"], "unavailable");
+    assert_eq!(
+        body["diagnostics"][0]["reason_code"],
+        "operator_config_service_not_wired"
+    );
+    assert_eq!(body["diagnostics"][0]["owning_area"], "config");
+    assert_eq!(body["diagnostics"][0]["severity"], "error");
+    assert!(body["diagnostics"][0]["remediation"].is_string());
 }
 
 #[tokio::test]
-async fn operator_routes_forward_body_and_query_to_facade_before_503() {
+async fn operator_diagnostics_surface_reports_same_unsupported_config_reason() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(
-        services.clone(),
+        services,
         WebUiV2Capabilities {
             operator_webui_config: true,
         },
     );
 
-    for (method, uri, body) in [
-        (Method::GET, "/api/webchat/v2/operator/setup", None),
-        (
-            Method::POST,
-            "/api/webchat/v2/operator/setup",
-            Some(r#"{"provider_id":"openai","model":"gpt-4","profile_id":"default"}"#),
-        ),
-        (Method::GET, "/api/webchat/v2/operator/config", None),
-        (
-            Method::POST,
-            "/api/webchat/v2/operator/config/validate",
-            Some(r#"{"keys":["provider.default","model.default"]}"#),
-        ),
-        (Method::GET, "/api/webchat/v2/operator/diagnostics", None),
-        (Method::GET, "/api/webchat/v2/operator/status", None),
-        (
-            Method::GET,
-            "/api/webchat/v2/operator/logs?limit=10&cursor=abc",
-            None,
-        ),
-        (
-            Method::POST,
-            "/api/webchat/v2/operator/service",
-            Some(r#"{"action":"start"}"#),
-        ),
-    ] {
-        let mut builder = Request::builder().method(method).uri(uri);
-        if body.is_some() {
-            builder = builder.header("content-type", "application/json");
-        }
-        let response = router
-            .clone()
-            .oneshot(
-                builder
-                    .body(body.map_or_else(Body::empty, Body::from))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/diagnostics")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
 
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{uri}");
-    }
-
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["area"], "diagnostics");
+    assert_eq!(body["status"], "unavailable");
     assert_eq!(
-        services.operator_calls.lock().expect("lock").as_slice(),
-        &[
-            String::from("get_setup"),
-            String::from("run_setup:Some(\"openai\"):Some(\"gpt-4\"):Some(\"default\")",),
-            String::from("list_config"),
-            String::from("validate_config:[\"provider.default\", \"model.default\"]"),
-            String::from("diagnostics"),
-            String::from("status"),
-            String::from("logs:Some(10):Some(\"abc\")"),
-            String::from("service:Start"),
+        body["diagnostics"][0]["reason_code"],
+        "operator_config_service_not_wired"
+    );
+}
+
+#[tokio::test]
+async fn operator_config_validation_surfaces_redacted_reason_codes() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services,
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/operator/config/validate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"keys":["provider.api_key","legacy.provider","bootstrap.database_url","provider.default","made.up"]}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["valid"], false);
+    let diagnostics = body["diagnostics"].as_array().expect("diagnostics");
+    let reason_codes: Vec<_> = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic["reason_code"].as_str().expect("reason code"))
+        .collect();
+    assert_eq!(
+        reason_codes,
+        [
+            "operator_config_secret_not_wired",
+            "operator_config_deprecated",
+            "operator_config_immutable",
+            "operator_config_not_wired",
+            "operator_config_unknown_key",
         ]
     );
+
+    let rendered = serde_json::to_string(&body).expect("render body");
+    assert!(!rendered.contains("sk-"));
+    assert!(!rendered.contains("secret-value"));
+}
+
+#[tokio::test]
+async fn operator_config_set_failure_does_not_echo_secret_value() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services,
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/operator/config/provider.api_key")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"value":"sk-secret-value"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_json(response).await;
+    let rendered = serde_json::to_string(&body).expect("render body");
+    assert_eq!(body["kind"], "service_unavailable");
+    assert!(!rendered.contains("sk-secret-value"));
 }
 
 #[tokio::test]
