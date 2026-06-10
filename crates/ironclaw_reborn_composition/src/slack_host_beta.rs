@@ -297,6 +297,7 @@ pub fn build_triggered_run_delivery_hook(
         &local_runtime.host_state_filesystem,
     )));
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> = outbound.clone();
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> = outbound;
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
     let binding_service: Arc<dyn ConversationBindingService> =
@@ -312,7 +313,7 @@ pub fn build_triggered_run_delivery_hook(
         delivery_sink,
         auth_challenges: runtime.auth_challenge_provider(),
     };
-    let driver = TriggeredRunDeliveryDriver::new(services, delivery_store);
+    let driver = TriggeredRunDeliveryDriver::new(services, delivery_store, route_store);
     Ok(Arc::new(driver))
 }
 
@@ -550,7 +551,14 @@ fn build_slack_events_route_mount_with_resolvers(
             ),
             Arc::new(binding.clone()),
         )
-        .with_approval_interaction_service(runtime.webui_approval_interaction_service())
+        .with_approval_interaction_service(Arc::new(
+            crate::delivered_gate_routing::DeliveredGateRoutingApprovalService::new(
+                runtime.webui_approval_interaction_service(),
+                Arc::new(FilesystemOutboundStateStore::new(Arc::clone(
+                    &local_runtime.host_state_filesystem,
+                ))),
+            ),
+        ))
         .with_auth_interaction_service(runtime.webui_auth_interaction_service()),
     );
 

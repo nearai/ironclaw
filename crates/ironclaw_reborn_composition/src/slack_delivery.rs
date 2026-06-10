@@ -15,12 +15,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
-    CommunicationPreferenceRepository, OutboundError, OutboundPolicyService, OutboundStateStore,
-    ProjectionUpdateRef, ReplyTargetBindingClaim, ReplyTargetBindingValidator,
-    ReplyTargetValidationRequest, RunNotificationContext, RunNotificationEventKind,
-    RunNotificationOrigin, SourceRouteContext, TriggerCommunicationContext, TriggerFireSlot,
-    TriggerOriginRef, TriggerSourceKind, TriggeredRunDeliveryOutcomeKind,
-    TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore, ValidatedReplyTargetBinding,
+    CommunicationPreferenceRepository, DeliveredGateRouteRecord, DeliveredGateRouteStore,
+    OutboundError, OutboundPolicyService, OutboundStateStore, ProjectionUpdateRef,
+    ReplyTargetBindingClaim, ReplyTargetBindingValidator, ReplyTargetValidationRequest,
+    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
+    TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
+    ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
     DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
@@ -64,6 +65,11 @@ struct BlockedActionableMarker {
 struct SlackActionableNotification {
     event_kind: RunNotificationEventKind,
     payload: ProductOutboundPayload,
+    /// Gate ref for approval prompts on triggered runs; consumed by the
+    /// delivered-gate route record so a DM reply can resolve the gate on the
+    /// triggered run's thread. `None` for live-run notifications (same-thread
+    /// replies need no routing) and non-approval kinds.
+    gate_ref_for_routing: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +240,7 @@ impl SlackFinalReplyDeliveryObserver {
                         text,
                         generated_at: Utc::now(),
                     }),
+                    gate_ref_for_routing: None,
                 }
             }
             TurnStatus::BlockedApproval => {
@@ -253,6 +260,7 @@ impl SlackFinalReplyDeliveryObserver {
                         body: "A step in the workflow requires your approval to resume."
                             .to_string(),
                     }),
+                    gate_ref_for_routing: None,
                 }
             }
             TurnStatus::BlockedAuth => {
@@ -279,6 +287,7 @@ impl SlackFinalReplyDeliveryObserver {
                 SlackActionableNotification {
                     event_kind: RunNotificationEventKind::AuthRequired,
                     payload: ProductOutboundPayload::AuthPrompt(view),
+                    gate_ref_for_routing: None,
                 }
             }
             _ => return Ok(None),
@@ -298,6 +307,7 @@ impl SlackFinalReplyDeliveryObserver {
         let SlackActionableNotification {
             event_kind,
             payload,
+            gate_ref_for_routing: _,
         } = notification;
         let reply_target = state.reply_target_binding_ref.clone();
         let target_authority = ObservedSlackReplyTargetAuthority {
@@ -887,17 +897,20 @@ pub struct TriggeredRunDeliveryDriver {
     settings: SlackFinalReplyDeliverySettings,
     delivery_permits: Arc<Semaphore>,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+    route_store: Arc<dyn DeliveredGateRouteStore>,
 }
 
 impl TriggeredRunDeliveryDriver {
     pub fn new(
         services: SlackFinalReplyDeliveryServices,
         delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+        route_store: Arc<dyn DeliveredGateRouteStore>,
     ) -> Self {
         Self::with_settings(
             services,
             SlackFinalReplyDeliverySettings::default(),
             delivery_store,
+            route_store,
         )
     }
 
@@ -905,6 +918,7 @@ impl TriggeredRunDeliveryDriver {
         services: SlackFinalReplyDeliveryServices,
         settings: SlackFinalReplyDeliverySettings,
         delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+        route_store: Arc<dyn DeliveredGateRouteStore>,
     ) -> Self {
         let delivery_permits = Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get()));
         Self {
@@ -912,6 +926,7 @@ impl TriggeredRunDeliveryDriver {
             settings,
             delivery_permits,
             delivery_store,
+            route_store,
         }
     }
 }
@@ -945,6 +960,7 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
         };
         let settings = self.settings;
         let delivery_store = Arc::clone(&self.delivery_store);
+        let route_store = Arc::clone(&self.route_store);
 
         tokio::spawn(async move {
             let Ok(_permit) = permits.clone().acquire_owned().await else {
@@ -962,9 +978,16 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
                 return;
             };
 
-            let outcome =
-                deliver_triggered_run(&services, &settings, &fire, run_id, scope, &*delivery_store)
-                    .await;
+            let outcome = deliver_triggered_run(
+                &services,
+                &settings,
+                &fire,
+                run_id,
+                scope,
+                &*delivery_store,
+                &*route_store,
+            )
+            .await;
             tracing::debug!(
                 target = "ironclaw::reborn::slack_delivery",
                 %run_id,
@@ -982,6 +1005,7 @@ impl TriggeredRunDeliveryDriver {
 }
 
 /// Inner delivery coroutine for a single triggered run.
+#[allow(clippy::too_many_arguments)]
 async fn deliver_triggered_run(
     services: &SlackFinalReplyDeliveryServices,
     settings: &SlackFinalReplyDeliverySettings,
@@ -989,6 +1013,7 @@ async fn deliver_triggered_run(
     run_id: TurnRunId,
     scope: TurnScope,
     delivery_store: &dyn TriggeredRunDeliveryStore,
+    route_store: &dyn DeliveredGateRouteStore,
 ) -> TriggeredRunDeliveryOutcomeKind {
     // The actor is the trigger creator.
     let actor = TurnActor::new(fire.creator_user_id.clone());
@@ -1091,6 +1116,7 @@ async fn deliver_triggered_run(
 
         let next_blocked_marker = blocked_actionable_marker(&state);
         let event_kind = notification.event_kind;
+        let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
 
         // Build the delivery request and deliver.
         let delivery_result = deliver_triggered_notification(
@@ -1106,6 +1132,31 @@ async fn deliver_triggered_run(
 
         match delivery_result {
             Ok(posted_messages) => {
+                // A delivered approval prompt invites "approve <gate_ref>" in
+                // the creator's DM — record the route so the reply resolves
+                // the gate on this run's thread. Best-effort: never affects
+                // the delivery outcome.
+                if event_kind == RunNotificationEventKind::ApprovalNeeded
+                    && let Some(gate_ref) = gate_ref_for_routing
+                    && let Some(owner) = scope.explicit_owner_user_id()
+                {
+                    let record = DeliveredGateRouteRecord {
+                        tenant_id: scope.tenant_id.clone(),
+                        user_id: owner.clone(),
+                        gate_ref,
+                        run_id,
+                        scope: scope.clone(),
+                        recorded_at: Utc::now(),
+                    };
+                    if let Err(error) = route_store.record_delivered_gate_route(record).await {
+                        tracing::debug!(
+                            target = "ironclaw::reborn::slack_delivery",
+                            %run_id,
+                            error = %error,
+                            "failed to record delivered gate route (best-effort)"
+                        );
+                    }
+                }
                 if let Some(marker) = next_blocked_marker {
                     if event_kind == RunNotificationEventKind::AuthRequired {
                         messages_to_delete_after_final.extend(posted_messages);
@@ -1216,6 +1267,7 @@ async fn triggered_notification_for_state(
                     text,
                     generated_at: Utc::now(),
                 }),
+                gate_ref_for_routing: None,
             }))
         }
         TurnStatus::BlockedApproval => {
@@ -1236,6 +1288,7 @@ async fn triggered_notification_for_state(
                     headline: "Approval needed".to_string(),
                     body: format!("Reply `approve {gate_ref_str}` to continue."),
                 }),
+                gate_ref_for_routing: Some(gate_ref_str),
             }))
         }
         TurnStatus::BlockedAuth => {
@@ -1275,6 +1328,7 @@ async fn triggered_notification_for_state(
             Ok(Some(SlackActionableNotification {
                 event_kind: RunNotificationEventKind::AuthRequired,
                 payload: ProductOutboundPayload::AuthPrompt(view),
+                gate_ref_for_routing: None,
             }))
         }
         _ => Ok(None),
@@ -1315,6 +1369,7 @@ async fn deliver_triggered_notification(
     let SlackActionableNotification {
         event_kind,
         payload,
+        gate_ref_for_routing: _,
     } = notification;
 
     let _reply_target = state.reply_target_binding_ref.clone();
@@ -1616,8 +1671,9 @@ mod tests {
     use std::sync::OnceLock;
 
     use ironclaw_outbound::{
-        CommunicationPreferenceRecord, DeliveryDefaultScope, InMemoryOutboundStateStore,
-        InMemoryTriggeredRunDeliveryStore, WriteCommunicationPreferenceRequest,
+        CommunicationPreferenceRecord, DeliveryDefaultScope, InMemoryDeliveredGateRouteStore,
+        InMemoryOutboundStateStore, InMemoryTriggeredRunDeliveryStore,
+        WriteCommunicationPreferenceRequest,
     };
     use ironclaw_product_adapters::{
         FakeOutboundDeliverySink, FakeProtocolHttpEgress, ProductAdapterId,
@@ -1964,6 +2020,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
         let services = make_services(
             coordinator,
             thread_service,
@@ -1976,8 +2033,12 @@ mod tests {
             max_wait: std::time::Duration::from_secs(5),
             max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
         };
-        let driver =
-            TriggeredRunDeliveryDriver::with_settings(services, settings, delivery_store.clone());
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+        );
 
         let fire = minimal_trigger_fire(None);
         driver.on_trigger_submitted(fire, run_id, scope).await;
@@ -2029,6 +2090,7 @@ mod tests {
         egress.allow_credential_handle("slack_bot_token");
 
         let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
         let services = make_services(
             coordinator,
             thread_service,
@@ -2041,8 +2103,12 @@ mod tests {
             max_wait: std::time::Duration::from_secs(5),
             max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
         };
-        let driver =
-            TriggeredRunDeliveryDriver::with_settings(services, settings, delivery_store.clone());
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+        );
 
         let fire = minimal_trigger_fire(None);
         driver.on_trigger_submitted(fire, run_id, scope).await;
@@ -2114,6 +2180,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
         let services = make_services(
             coordinator,
             thread_service,
@@ -2126,8 +2193,12 @@ mod tests {
             max_wait: std::time::Duration::from_secs(5),
             max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
         };
-        let driver =
-            TriggeredRunDeliveryDriver::with_settings(services, settings, delivery_store.clone());
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+        );
 
         let fire = minimal_trigger_fire(None);
         driver.on_trigger_submitted(fire, run_id, scope).await;
@@ -2161,6 +2232,21 @@ mod tests {
             .expect("load record")
             .expect("record exists");
         assert_eq!(record.outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+
+        // The delivered approval prompt must record a gate route so a DM
+        // reply can resolve the gate on the triggered run's thread.
+        let scope = personal_turn_scope();
+        let owner = scope
+            .explicit_owner_user_id()
+            .expect("personal scope owner")
+            .clone();
+        let route = route_store
+            .load_delivered_gate_route(&scope.tenant_id, &owner, gate_ref_str)
+            .await
+            .expect("load gate route")
+            .expect("gate route recorded");
+        assert_eq!(route.run_id, run_id);
+        assert_eq!(route.scope.thread_id, scope.thread_id);
     }
 
     #[tokio::test]
@@ -2178,6 +2264,7 @@ mod tests {
         egress.allow_credential_handle("slack_bot_token");
 
         let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
         let services = make_services(
             coordinator,
             thread_service,
@@ -2185,7 +2272,7 @@ mod tests {
             outbound,
             install,
         );
-        let driver = TriggeredRunDeliveryDriver::new(services, delivery_store.clone());
+        let driver = TriggeredRunDeliveryDriver::new(services, delivery_store.clone(), route_store);
 
         // project_id is set → non-personal scope → denied immediately (no spawn).
         let project_id = ironclaw_host_api::ProjectId::new("some-project").expect("project");
