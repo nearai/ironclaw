@@ -68,16 +68,74 @@ pub fn has_native_thinking(model: &str) -> bool {
     NATIVE_THINKING_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
-/// Models that are known to support OpenAI's Responses API `reasoning` field.
+/// The final non-empty path segment of *model*, lowercased.
+///
+/// Gateways prefix the provider (`openai/o3-mini`); the trailing-slash guard
+/// keeps `openai/o1/` from collapsing to an empty string.
+fn model_leaf(model: &str) -> String {
+    model
+        .split('/')
+        .rfind(|s| !s.is_empty())
+        .unwrap_or(model)
+        .to_ascii_lowercase()
+}
+
+/// OpenAI models that both support the Responses `reasoning` field and reject an
+/// explicit `temperature`: the o-series (`o1`/`o3`/`o4`) and the `gpt-5` family.
+///
+/// The short o-series names are anchored at the start of the leaf segment, so a
+/// gateway prefix like `openai/o3-mini` matches but an unrelated `vendor/sora4`
+/// does not. Shared by [`supports_openai_reasoning`] and
+/// [`model_rejects_temperature`] so the two classifiers can't drift apart.
+pub fn is_openai_o_series_or_gpt5(model: &str) -> bool {
+    let name = model_leaf(model);
+    const O_SERIES: &[&str] = &["o1", "o3", "o4"];
+    if O_SERIES.iter().any(|p| {
+        name.strip_prefix(p)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+    }) {
+        return true;
+    }
+    name.contains("gpt-5")
+}
+
+/// Returns `true` when *model* is known to support the Responses API `reasoning`
+/// field.
 ///
 /// Sending the `reasoning` object to unsupported models (e.g. `gpt-4o`) causes
-/// the API to reject the request instead of ignoring the parameter.
-const OPENAI_REASONING_PATTERNS: &[&str] = &["o1", "o3", "o4", "/reasoning/", "gpt-5", "gpt-4.1"];
-
-/// Returns `true` when *model* is known to support the Responses API `reasoning` field.
+/// the API to reject the request instead of ignoring the parameter. `gpt-4.1`
+/// supports the field but — unlike the o-series/`gpt-5` — accepts temperature, so
+/// it lives here and not in [`model_rejects_temperature`].
 pub fn supports_openai_reasoning(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
-    OPENAI_REASONING_PATTERNS.iter().any(|p| lower.contains(p))
+    is_openai_o_series_or_gpt5(model) || lower.contains("gpt-4.1") || lower.contains("/reasoning/")
+}
+
+/// Returns `true` when *model* rejects an explicit `temperature` (the caller must
+/// omit it, not just clamp it).
+///
+/// Two families 400 on a non-default temperature: OpenAI's reasoning models
+/// (o-series, `gpt-5`) and Anthropic's Claude Opus 4.7/4.8 (temperature is
+/// deprecated there). Model-aware rather than a provider-level `unsupported_params`
+/// flag because multi-model gateways (NEAR AI, OpenRouter, Bedrock) route to a mix
+/// where most models still honor temperature (#4334, #4535).
+pub fn model_rejects_temperature(model: &str) -> bool {
+    if is_openai_o_series_or_gpt5(model) {
+        return true;
+    }
+    let name = model_leaf(model);
+    name.contains("claude-opus-4-7") || name.contains("claude-opus-4-8")
+}
+
+/// The temperature to actually send for `model`: the requested value, or `None`
+/// when the model rejects an explicit temperature (#4334, #4535). Convenience
+/// over [`model_rejects_temperature`] for callers that build a request directly.
+pub fn effective_temperature(model: &str, requested: Option<f32>) -> Option<f32> {
+    if model_rejects_temperature(model) {
+        None
+    } else {
+        requested
+    }
 }
 
 /// Anthropic models that use the `adaptive` thinking mode (4.6+/4.7+).
@@ -226,5 +284,86 @@ mod tests {
         assert!(!has_native_thinking("glm-4-air"));
         assert!(!has_native_thinking("glm-4v"));
         assert!(!has_native_thinking("step-3-mini"));
+    }
+
+    // ── model_rejects_temperature tests ──
+
+    #[test]
+    fn temperature_rejected_for_reasoning_and_opus_47_48() {
+        for m in [
+            "o1",
+            "o1-mini",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+            "gpt-5",
+            "gpt-5.5",
+            "openai/gpt-5.5",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "anthropic.claude-opus-4-8-v1:0",
+            // A trailing slash must not collapse the final segment to empty.
+            "openai/o1/",
+            "claude-opus-4-8/",
+        ] {
+            assert!(
+                model_rejects_temperature(m),
+                "{m} should reject an explicit temperature"
+            );
+        }
+    }
+
+    #[test]
+    fn temperature_allowed_for_other_models() {
+        for m in [
+            "gpt-4o",
+            "gpt-4.1",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6",
+            "deepseek-ai/DeepSeek-V4-Flash",
+            "llama-3.3-70b",
+            "qwen3-30b",
+            "",
+            // Anti-false-positive: "o3"/"o4" appear mid-segment but must not
+            // match the anchored o-series patterns.
+            "vendor/sora4",
+            "audio3-preview",
+        ] {
+            assert!(
+                !model_rejects_temperature(m),
+                "{m} should keep an explicit temperature"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_temperature_drops_only_for_rejecting_models() {
+        assert_eq!(effective_temperature("openai/gpt-5.5", Some(0.7)), None);
+        assert_eq!(effective_temperature("claude-opus-4-8", Some(0.2)), None);
+        assert_eq!(
+            effective_temperature("claude-sonnet-4-6", Some(0.2)),
+            Some(0.2)
+        );
+        assert_eq!(effective_temperature("gpt-4o", None), None);
+    }
+
+    #[test]
+    fn supports_openai_reasoning_covers_o_series_gpt5_and_gpt41() {
+        for m in [
+            "o1",
+            "o3-mini",
+            "openai/o4-mini",
+            "gpt-5",
+            "openai/gpt-5.5",
+            "gpt-4.1",
+        ] {
+            assert!(
+                supports_openai_reasoning(m),
+                "{m} should support the reasoning field"
+            );
+        }
+        for m in ["gpt-4o", "claude-opus-4-8", "vendor/sora4", "llama-3.3-70b"] {
+            assert!(!supports_openai_reasoning(m), "{m} should not");
+        }
     }
 }

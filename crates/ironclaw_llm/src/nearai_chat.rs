@@ -519,10 +519,14 @@ impl LlmProvider for NearAiChatProvider {
             raw
         };
 
+        // NEAR AI routes to a mix of models, so temperature support is decided
+        // per-model rather than provider-wide (#4535).
+        let temperature = crate::reasoning_models::effective_temperature(&model, req.temperature);
+
         let request = ChatCompletionRequest {
             model,
             messages,
-            temperature: req.temperature,
+            temperature,
             max_tokens: req.max_tokens,
             stop: req.stop_sequences,
             tools: None,
@@ -595,11 +599,15 @@ impl LlmProvider for NearAiChatProvider {
             messages
         };
 
+        // Model-aware temperature: NEAR AI routes to many models, some of which
+        // reject an explicit temperature (#4535).
+        let temperature = crate::reasoning_models::effective_temperature(&model, req.temperature);
+
         let request = build_chat_completion_request(
             model,
             messages,
             req.tools,
-            req.temperature,
+            temperature,
             req.max_tokens,
             req.stop_sequences,
             req.tool_choice,
@@ -1277,6 +1285,97 @@ mod tests {
             }
             other => panic!("expected context-length error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn complete_omits_temperature_for_reasoning_model() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = tx.send(raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string());
+            let resp = serde_json::json!({
+                "choices": [{ "message": { "content": "ok" }, "finish_reason": "stop" }],
+                "usage": { "prompt_tokens": 0, "completion_tokens": 0 }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                resp.len(),
+                resp
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        // o3-mini rejects an explicit temperature; the outbound body must omit it
+        // even though the caller supplied one — exercised through the model
+        // resolution path in `complete()`, not just the helper (#4535).
+        let req = CompletionRequest::new(vec![ChatMessage::user("hi")])
+            .with_model("o3-mini")
+            .with_temperature(0.7);
+        let _ = provider.complete(req).await;
+
+        let body = rx.await.expect("captured request body");
+        let json: serde_json::Value =
+            serde_json::from_str(&body).expect("request body should be JSON");
+        assert!(
+            json.get("temperature").is_none(),
+            "reasoning model must omit temperature on the wire; body={body}"
+        );
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_omits_temperature_for_reasoning_model() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = tx.send(raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string());
+            let resp = serde_json::json!({
+                "choices": [{ "message": { "content": "ok" }, "finish_reason": "stop" }],
+                "usage": { "prompt_tokens": 0, "completion_tokens": 0 }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                resp.len(),
+                resp
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let req = ToolCompletionRequest::new(vec![ChatMessage::user("hi")], vec![])
+            .with_model("o3-mini")
+            .with_temperature(0.5);
+        let _ = provider.complete_with_tools(req).await;
+
+        let body = rx.await.expect("captured request body");
+        let json: serde_json::Value =
+            serde_json::from_str(&body).expect("request body should be JSON");
+        assert!(
+            json.get("temperature").is_none(),
+            "reasoning model must omit temperature on the wire; body={body}"
+        );
+        let _ = server.await;
     }
 
     #[test]
