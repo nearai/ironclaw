@@ -155,13 +155,17 @@ has been selected and validated.
 
 ## 5. Preference Fields
 
-User communication preferences are owned by an
-`ironclaw_outbound::CommunicationPreferenceRepository` backed by a dedicated
-typed tenant/user database table. They are not stored in the generic JSON
-settings store and are not profile/tone preferences.
+Communication preferences are owned by an
+`ironclaw_outbound::CommunicationPreferenceRepository`. They are not stored in
+the generic JSON settings store and are not profile/tone preferences.
 
-The V1 preference row is keyed by `(tenant_id, user_id)` and may contain these
-optional `ReplyTargetBindingRef` candidate fields:
+Preference records are keyed by a scoped `CommunicationPreferenceKey`:
+
+- `personal(tenant_id, user_id)` — per-user personal preferences;
+- `project(tenant_id, project_id)` — per-project shared preferences.
+
+Each scope holds the same set of optional `ReplyTargetBindingRef` candidate
+fields:
 
 - `final_reply_target`: default target for ordinary run results when no live
   source route applies;
@@ -171,6 +175,9 @@ optional `ReplyTargetBindingRef` candidate fields:
 - `auth_prompt_target`: exact-owner target for auth prompts;
 - `default_modality`: preferred modality when a caller does not specify a more
   specific supported modality.
+
+Writes use versioned compare-and-swap. Byte-only backends that cannot preserve
+`Absent`/`Version` expectations fail closed.
 
 Preference fields are candidates only. The outbound service must revalidate
 tenant ownership, exact owner where required, target capability, delivery kind,
@@ -196,23 +203,50 @@ The first matching rule yields the only candidate.
 3. **Live source route wins for ordinary run notifications.** If the run
    descended from a real inbound product message, final replies and supported
    progress/status updates prefer the live source route's reply target.
-4. **Triggered-from-source-route uses the live source route.** If the run
-   descended from both a trigger and a live source route, ordinary final
-   replies, progress updates, and delivery-status notices prefer the live
-   source route over the trigger creator's preferred target.
-5. **Triggered preferred target wins for ordinary trigger results without a
-   live source route.** If the run descended from a trigger and has no live
-   source route, final replies prefer the creator user's configured
+4. **Triggered-from-source-route uses scoped trigger defaults.** If the run
+   descended from both a trigger and a live source route, the source route is
+   provenance only; ordinary final replies, progress updates, and
+   delivery-status notices resolve through the same scoped trigger defaults as
+   other triggered delivery. The previous behavior (source route wins for
+   ordinary final replies and progress) is superseded; this contract is
+   authoritative, and the matching resolver change ships in the stacked
+   implementation PR (#4663) — implementers must not preserve source-route
+   precedence for triggered runs.
+5. **Triggered preferred target wins for ordinary trigger results.** If the run
+   descended from a trigger, final replies prefer the run owner's configured
    `final_reply_target`.
-6. **System events have no implicit external target in P0.** `SystemEvent`
+6. **Triggered gate-prompt fallback is a non-authority notification.** For
+   `Triggered` and `TriggeredFromSourceRoute` origins, an explicitly configured
+   `approval_prompt_target` or `auth_prompt_target` always wins per rule 1, and
+   those exact-owner-validated targets are the only recipients of the authority
+   prompt payload. When that slot is unset, the resolver falls back to the same
+   scope's `final_reply_target` — but the fallback delivery is a
+   **non-authority notification** with `DeliveryStatus` semantics: it carries
+   no authorization URLs, no secrets, and no interactive resume affordance; it
+   names the waiting state and links to the WebUI gate surface only.
+   Interactive gate resume remains exact-owner-only per rule 1 and is never
+   widened to shared destinations. Auth-gate fallback notifications additionally
+   name the credential owner ("waiting on &lt;owner&gt;'s &lt;provider&gt;
+   authorization"); only the credential owner can resolve an auth gate. When
+   neither the prompt slot nor `final_reply_target` is set, resolution fails
+   closed. Progress and delivery-status kinds never use this fallback.
+7. **Triggered scope resolution fails closed on ambiguous ownership.** For
+   `Triggered` and `TriggeredFromSourceRoute` origins, the preference key comes
+   from the persisted thread ownership: an explicit owner resolves the personal
+   scope `personal(tenant, owner)`; an explicitly ownerless thread with a project
+   id resolves the project scope `project(tenant, project)`. An explicitly
+   ownerless thread with no project id, or a thread with no explicit ownership
+   information, fails closed; triggered delivery never falls back to the turn
+   actor's personal scope.
+8. **System events have no implicit external target in P0.** `SystemEvent`
    origins require `RequestedOutbound` for external delivery. Without an
    explicit requested target, the event is recorded as delivery metadata only
    and no external send is attempted.
 
 Delivery-status notifications follow the same origin rule as the delivery they
-describe. Progress updates use the source route when that route validates for
-progress; otherwise they use `progress_target` when configured. Unsupported
-progress, approval, or auth delivery is recorded as delivery metadata only; it
+describe. Triggered progress updates use `progress_target` when configured,
+including `TriggeredFromSourceRoute`; unsupported progress, approval, or auth
+delivery is recorded as delivery metadata only; it
 must not resume work or change approval/auth state.
 
 The resolver does not keep searching after a target fails validation. If the

@@ -39,6 +39,7 @@ The trigger system is owned by `ironclaw_triggers` in implementation terms, but 
 | `creator_user_id` | User who created the trigger |
 | `agent_id` | Captured agent scope at create time |
 | `project_id` | Captured project scope at create time |
+| `ownership_scope` | Run/delivery ownership principal: `personal` (default) or `project`. `project` requires `project_id`. Host-derived authority: the capability handler rejects `project` unless constructed with shared-creation authority; model tool input and client bodies are never the source of that authority |
 | `name` | Human-readable label |
 | `source` | Trigger source kind |
 | `schedule` | V1 schedule definition |
@@ -99,9 +100,12 @@ TriggerFire {
     creator_user_id,
     agent_id,
     project_id,
+    ownership_scope,
     prompt,
 }
 ```
+
+The fire carries the `TriggerRecord`'s persisted `ownership_scope` field unchanged. The materializer maps `personal` ownership to a user-owned trusted scope (`TrustedOwnerScope::User(creator_user_id)`) and `project` ownership to a project-owned trusted scope (`TrustedOwnerScope::Project`). A personal automation may legitimately carry a `project_id` for execution context (e.g., the trigger was created while a project was in scope); ownership is always determined by `ownership_scope`, never inferred from the presence or absence of `project_id`.
 
 ### 4.1 Identity derivation
 
@@ -200,8 +204,8 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
 - Binding resolution for trigger fires must use the trusted-scope path from `conversation-binding.md`.
 - Product adapters, first-party capabilities, and product workflow code must not construct the conversation-owned trusted trigger submitter or submit `TrustedTriggerSubmitRequest`. PR18.5a enforces this with a private trusted request and architecture tests over adapter/product paths.
 - The host mints the trusted trigger ingress request from `TriggerRecord` state:
-  `tenant_id`, `creator_user_id`, `agent_id`, and `project_id` are host state,
-  not product payload data.
+  `tenant_id`, `creator_user_id`, `agent_id`, `project_id`, and
+  `ownership_scope` are host state, not product payload data.
 - Before a trusted trigger fire is submitted, host composition must scan the
   materialized trigger prompt for prompt-injection patterns and reject high- or
   critical-severity findings as permanent materialization failures. The
