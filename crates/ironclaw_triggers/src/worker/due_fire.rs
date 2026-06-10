@@ -132,6 +132,7 @@ impl TriggerPollerWorker {
             Ok(TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id,
                 submitted_at,
+                turn_scope: _,
             }) => {
                 let updated = self
                     .deps

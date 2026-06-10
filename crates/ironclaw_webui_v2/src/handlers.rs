@@ -32,11 +32,12 @@ use ironclaw_product_workflow::{
     RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
@@ -469,6 +470,43 @@ pub async fn list_connectable_channels(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornConnectableChannelListResponse>, WebUiV2HttpError> {
     let response = state.services().list_connectable_channels(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/outbound/preferences`
+pub async fn get_outbound_preferences(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    let response = state.services().get_outbound_preferences(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/outbound/preferences`
+///
+/// Body shape: [`RebornSetOutboundPreferencesRequest`]. Sending
+/// `{"final_reply_target_id": null}` clears the configured final-reply target.
+pub async fn set_outbound_preferences(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornSetOutboundPreferencesRequest>,
+) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_outbound_preferences(caller, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/outbound/targets`
+pub async fn list_outbound_delivery_targets(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOutboundDeliveryTargetListResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .list_outbound_delivery_targets(caller)
+        .await?;
     Ok(Json(response))
 }
 

@@ -81,6 +81,8 @@ mod profile;
 mod profile_approval_authorization;
 mod projection;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
+#[cfg(feature = "slack-v2-host-beta")]
+mod delivered_gate_routing;
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin;
 #[cfg(feature = "root-llm-provider")]
@@ -253,6 +255,10 @@ pub use slack_connectable_channel::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_delivery::{
+    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
 };
@@ -266,6 +272,7 @@ pub use slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
     SlackHostBetaConfigInput, SlackHostBetaMounts, build_slack_events_route_mount,
     build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
+    build_triggered_run_delivery_hook,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{
