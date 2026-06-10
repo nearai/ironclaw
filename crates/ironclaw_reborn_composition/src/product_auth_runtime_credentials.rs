@@ -285,7 +285,7 @@ fn account_visible_to_runtime_requester(
         return account.is_authorized_for_requester(requester);
     }
     let Some(requester) = requester else {
-        return false;
+        return account.is_authorized_for_requester(None);
     };
     gsuite_google_account_visible_to_requester(account, requester)
 }
