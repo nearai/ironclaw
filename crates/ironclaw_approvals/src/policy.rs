@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use async_trait::async_trait;
@@ -19,6 +19,7 @@ use thiserror::Error;
 
 const POLICY_PREFIX: &str = "/approvals/persistent";
 const POLICY_PATH_CACHE_MAX_ENTRIES: usize = 1024;
+const POLICY_CAS_RETRY_ATTEMPTS: usize = 3;
 
 pub fn permission_mode_allows_persistent_approval(permission: PermissionMode) -> bool {
     matches!(permission, PermissionMode::Allow)
@@ -304,6 +305,7 @@ where
 {
     filesystem: Arc<ScopedFilesystem<F>>,
     path_cache: RwLock<HashMap<PersistentApprovalPolicyKey, ScopedPath>>,
+    mutation_locks: Mutex<HashMap<PersistentApprovalPolicyKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl<F> FilesystemPersistentApprovalPolicyStore<F>
@@ -314,6 +316,7 @@ where
         Self {
             filesystem,
             path_cache: RwLock::new(HashMap::new()),
+            mutation_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -342,32 +345,38 @@ where
             input.grantee,
         )?;
         let path = self.cached_policy_path(&key)?;
-        let existing = self.lookup_versioned(&key).await?;
-        let now = Utc::now();
-        let (created_at, grant_id, cas) = existing.as_ref().map_or(
-            (now, CapabilityGrantId::new(), CasExpectation::Absent),
-            |(policy, version)| {
-                (
-                    policy.created_at,
-                    policy.grant_id,
-                    CasExpectation::Version(*version),
-                )
-            },
-        );
-        let policy = PersistentApprovalPolicy {
-            key,
-            grant_id,
-            approved_by: input.approved_by,
-            constraints: input.constraints,
-            source_approval_request_id: input.source_approval_request_id,
-            created_at,
-            updated_at: now,
-            revoked_at: None,
-        };
-        self.filesystem
-            .put(&scope, &path, Self::record_entry(&policy)?, cas)
-            .await?;
-        Ok(policy)
+        let lock = self.mutation_lock(&key);
+        let _guard = lock.lock().await;
+        for _ in 0..POLICY_CAS_RETRY_ATTEMPTS {
+            let existing = self.lookup_versioned(&key).await?;
+            let now = Utc::now();
+            let (created_at, grant_id, cas) = existing.as_ref().map_or(
+                (now, CapabilityGrantId::new(), CasExpectation::Absent),
+                |(policy, version)| {
+                    (
+                        policy.created_at,
+                        policy.grant_id,
+                        CasExpectation::Version(*version),
+                    )
+                },
+            );
+            let policy = PersistentApprovalPolicy {
+                key: key.clone(),
+                grant_id,
+                approved_by: input.approved_by.clone(),
+                constraints: input.constraints.clone(),
+                source_approval_request_id: input.source_approval_request_id.clone(),
+                created_at,
+                updated_at: now,
+                revoked_at: None,
+            };
+            match self.write_policy_raw(&scope, &path, &policy, cas).await {
+                Ok(()) => return Ok(policy),
+                Err(PersistentApprovalPolicyError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(PersistentApprovalPolicyError::CasConflict)
     }
 
     async fn lookup(
@@ -384,24 +393,28 @@ where
         &self,
         key: &PersistentApprovalPolicyKey,
     ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
-        let (mut policy, version) = self
-            .lookup_versioned(key)
-            .await?
-            .ok_or(PersistentApprovalPolicyError::UnknownPolicy)?;
-        let now = Utc::now();
-        policy.revoked_at = Some(now);
-        policy.updated_at = now;
         let scope = resource_scope_for_policy_key(key);
         let path = self.cached_policy_path(key)?;
-        self.filesystem
-            .put(
-                &scope,
-                &path,
-                Self::record_entry(&policy)?,
-                CasExpectation::Version(version),
-            )
-            .await?;
-        Ok(policy)
+        let lock = self.mutation_lock(key);
+        let _guard = lock.lock().await;
+        for _ in 0..POLICY_CAS_RETRY_ATTEMPTS {
+            let (mut policy, version) = self
+                .lookup_versioned(key)
+                .await?
+                .ok_or(PersistentApprovalPolicyError::UnknownPolicy)?;
+            let now = Utc::now();
+            policy.revoked_at = Some(now);
+            policy.updated_at = now;
+            match self
+                .write_policy_raw(&scope, &path, &policy, CasExpectation::Version(version))
+                .await
+            {
+                Ok(()) => return Ok(policy),
+                Err(PersistentApprovalPolicyError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(PersistentApprovalPolicyError::CasConflict)
     }
 
     async fn revoke_if_source_approval_request(
@@ -409,27 +422,31 @@ where
         key: &PersistentApprovalPolicyKey,
         source_approval_request_id: ApprovalRequestId,
     ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
-        let (mut policy, version) = self
-            .lookup_versioned(key)
-            .await?
-            .ok_or(PersistentApprovalPolicyError::UnknownPolicy)?;
-        if policy.source_approval_request_id != Some(source_approval_request_id) {
-            return Ok(None);
-        }
-        let now = Utc::now();
-        policy.revoked_at = Some(now);
-        policy.updated_at = now;
         let scope = resource_scope_for_policy_key(key);
         let path = self.cached_policy_path(key)?;
-        self.filesystem
-            .put(
-                &scope,
-                &path,
-                Self::record_entry(&policy)?,
-                CasExpectation::Version(version),
-            )
-            .await?;
-        Ok(Some(policy))
+        let lock = self.mutation_lock(key);
+        let _guard = lock.lock().await;
+        for _ in 0..POLICY_CAS_RETRY_ATTEMPTS {
+            let (mut policy, version) = self
+                .lookup_versioned(key)
+                .await?
+                .ok_or(PersistentApprovalPolicyError::UnknownPolicy)?;
+            if policy.source_approval_request_id != Some(source_approval_request_id) {
+                return Ok(None);
+            }
+            let now = Utc::now();
+            policy.revoked_at = Some(now);
+            policy.updated_at = now;
+            match self
+                .write_policy_raw(&scope, &path, &policy, CasExpectation::Version(version))
+                .await
+            {
+                Ok(()) => return Ok(Some(policy)),
+                Err(PersistentApprovalPolicyError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(PersistentApprovalPolicyError::CasConflict)
     }
 }
 
@@ -448,6 +465,41 @@ where
             return Ok(None);
         };
         deserialize_versioned_policy(key, versioned)
+    }
+
+    fn mutation_lock(&self, key: &PersistentApprovalPolicyKey) -> Arc<tokio::sync::Mutex<()>> {
+        self.mutation_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    async fn write_policy_raw(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        policy: &PersistentApprovalPolicy,
+        expectation: CasExpectation,
+    ) -> Result<(), PersistentApprovalPolicyError> {
+        let entry = Self::record_entry(policy)?;
+        match self
+            .filesystem
+            .put(scope, path, entry.clone(), expectation)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(FilesystemError::Unsupported { .. }) => {
+                let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
+                self.filesystem
+                    .put(scope, path, opaque, CasExpectation::Any)
+                    .await
+                    .map(|_| ())
+                    .map_err(PersistentApprovalPolicyError::from)
+            }
+            Err(error) => Err(PersistentApprovalPolicyError::from(error)),
+        }
     }
 
     fn cached_policy_path(
@@ -571,9 +623,9 @@ fn invalid_path(error: HostApiError) -> PersistentApprovalPolicyError {
 mod tests {
     use std::sync::Arc;
 
-    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
-        AgentId, EffectKind, GrantConstraints, InvocationId, MountAlias, MountGrant,
+        AgentId, EffectKind, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
         MountPermissions, MountView, NetworkPolicy, ProjectId, VirtualPath,
     };
 
@@ -669,6 +721,48 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .len()
                 <= POLICY_PATH_CACHE_MAX_ENTRIES
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_policy_store_updates_and_revokes_on_byte_only_backend() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut backend = LocalFilesystem::new();
+        backend
+            .mount_local(
+                VirtualPath::new("/engine").unwrap(),
+                HostPath::from_path_buf(tempdir.path().to_path_buf()),
+            )
+            .expect("mount local filesystem");
+        let scoped = scoped_fs(Arc::new(backend), "tenant-a", "alice");
+        let store = FilesystemPersistentApprovalPolicyStore::new(scoped);
+        let scope = scope(None, Some("thread-a"));
+        let key = key_for(&scope);
+
+        let first = store
+            .allow(input(scope.clone()))
+            .await
+            .expect("allow first policy");
+        let second_source = ApprovalRequestId::new();
+        let mut second_input = input(scope);
+        second_input.source_approval_request_id = Some(second_source);
+        let second = store
+            .allow(second_input)
+            .await
+            .expect("allow updated policy");
+        let revoked = store.revoke(&key).await.expect("revoke updated policy");
+
+        assert_eq!(second.grant_id, first.grant_id);
+        assert_eq!(second.source_approval_request_id, Some(second_source));
+        assert!(revoked.active_grant().is_none());
+        assert!(
+            store
+                .lookup(&key)
+                .await
+                .expect("lookup revoked policy")
+                .expect("policy")
+                .active_grant()
+                .is_none()
         );
     }
 

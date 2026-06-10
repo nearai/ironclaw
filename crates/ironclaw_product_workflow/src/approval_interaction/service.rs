@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
-    DenyApproval, PersistentApprovalAction, PersistentApprovalPolicyError,
-    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    DenyApproval, LeaseApproval, PersistentApprovalAction, PersistentApprovalPolicyInput,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
 };
 use ironclaw_host_api::{Action, Principal};
 use ironclaw_run_state::ApprovalStatus;
@@ -76,9 +76,9 @@ enum ApprovalCapabilityAction {
     Spawn,
 }
 
-struct PersistedAllowPolicy {
+struct PreparedAllowPolicy {
+    input: PersistentApprovalPolicyInput,
     key: PersistentApprovalPolicyKey,
-    source_approval_request_id: ironclaw_host_api::ApprovalRequestId,
 }
 
 impl ApprovalCapabilityAction {
@@ -162,14 +162,11 @@ impl DefaultApprovalInteractionService {
         }
         let mut terms = self.lease_terms_provider.lease_terms_for(&gate).await?;
         terms.issued_by = Principal::User(request.actor.user_id.clone());
-        let persisted_policy_key = if persistent {
+        let persistent_policy = if persistent && status == ApprovalStatus::Pending {
             self.lease_terms_provider
                 .persistent_approval_allowed(&gate)
                 .await?;
-            Some(
-                self.persist_allow_policy(&request, &gate, terms.clone())
-                    .await?,
-            )
+            Some(self.prepare_allow_policy(&request, &gate, terms.clone())?)
         } else {
             None
         };
@@ -201,9 +198,6 @@ impl DefaultApprovalInteractionService {
             }
         };
         if let Err(error) = resolution {
-            if let Some(policy_key) = &persisted_policy_key {
-                self.rollback_persistent_allow_policy(policy_key).await;
-            }
             return Err(error);
         }
 
@@ -223,27 +217,25 @@ impl DefaultApprovalInteractionService {
             .map_err(map_approval_resume_error)
         {
             Ok(response) => response,
-            Err(error) => {
-                if let Some(policy_key) = &persisted_policy_key {
-                    self.rollback_persistent_allow_policy(policy_key).await;
-                }
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
+        if let Some(policy) = persistent_policy {
+            self.persist_allow_policy(policy).await;
+        }
         Ok(ResolveApprovalInteractionResponse::Approved(response))
     }
 
-    async fn persist_allow_policy(
+    fn prepare_allow_policy(
         &self,
         request: &ResolveApprovalInteractionRequest,
         gate: &ApprovalGateRecord,
-        terms: ironclaw_approvals::LeaseApproval,
-    ) -> Result<PersistedAllowPolicy, ProductWorkflowError> {
-        let Some(persistent_policies) = self.persistent_policies.as_ref() else {
+        terms: LeaseApproval,
+    ) -> Result<PreparedAllowPolicy, ProductWorkflowError> {
+        if self.persistent_policies.is_none() {
             return Err(approval_rejected(
                 ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
             ));
-        };
+        }
         let Some((action, capability_id)) =
             PersistentApprovalAction::from_action(gate.request().action.as_ref())
         else {
@@ -251,74 +243,53 @@ impl DefaultApprovalInteractionService {
                 ApprovalInteractionRejectionKind::UnsupportedAction,
             ));
         };
-        persistent_policies
-            .allow(PersistentApprovalPolicyInput {
-                scope: gate.resource_scope().clone(),
-                action,
-                capability_id,
-                grantee: gate.request().requested_by.clone(),
-                approved_by: Principal::User(request.actor.user_id.clone()),
-                constraints: ironclaw_host_api::GrantConstraints {
-                    allowed_effects: terms.allowed_effects,
-                    mounts: terms.mounts,
-                    network: terms.network,
-                    secrets: terms.secrets,
-                    resource_ceiling: terms.resource_ceiling,
-                    expires_at: terms.expires_at,
-                    max_invocations: None,
-                },
-                source_approval_request_id: Some(gate.request().id),
-            })
-            .await
-            .map(|policy| PersistedAllowPolicy {
-                key: policy.key,
-                source_approval_request_id: gate.request().id,
-            })
-            .map_err(|error| {
-                tracing::warn!(
-                    error = %error,
-                    approval_request_id = %gate.request().id,
-                    "persistent approval policy write failed"
-                );
-                ProductWorkflowError::Transient {
-                    reason: "persistent approval policy unavailable".to_string(),
-                }
-            })
+        let input = PersistentApprovalPolicyInput {
+            scope: gate.resource_scope().clone(),
+            action,
+            capability_id,
+            grantee: gate.request().requested_by.clone(),
+            approved_by: Principal::User(request.actor.user_id.clone()),
+            constraints: ironclaw_host_api::GrantConstraints {
+                allowed_effects: terms.allowed_effects,
+                mounts: terms.mounts,
+                network: terms.network,
+                secrets: terms.secrets,
+                resource_ceiling: terms.resource_ceiling,
+                expires_at: terms.expires_at,
+                max_invocations: None,
+            },
+            source_approval_request_id: Some(gate.request().id),
+        };
+        let key = PersistentApprovalPolicyKey::new(
+            &input.scope,
+            input.action,
+            input.capability_id.clone(),
+            input.grantee.clone(),
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                error = %error,
+                approval_request_id = %gate.request().id,
+                "persistent approval policy preparation failed"
+            );
+            ProductWorkflowError::Transient {
+                reason: "persistent approval policy unavailable".to_string(),
+            }
+        })?;
+        Ok(PreparedAllowPolicy { input, key })
     }
 
-    async fn rollback_persistent_allow_policy(&self, persisted: &PersistedAllowPolicy) {
+    async fn persist_allow_policy(&self, policy: PreparedAllowPolicy) {
         let Some(persistent_policies) = self.persistent_policies.as_ref() else {
             return;
         };
-        match persistent_policies
-            .revoke_if_source_approval_request(&persisted.key, persisted.source_approval_request_id)
-            .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                tracing::debug!(
-                    capability_id = %persisted.key.capability_id,
-                    action = ?persisted.key.action,
-                    source_approval_request_id = %persisted.source_approval_request_id,
-                    "persistent approval policy rollback skipped because policy source changed"
-                );
-            }
-            Err(PersistentApprovalPolicyError::CasConflict) => {
-                tracing::debug!(
-                    capability_id = %persisted.key.capability_id,
-                    action = ?persisted.key.action,
-                    source_approval_request_id = %persisted.source_approval_request_id,
-                    "persistent approval policy rollback skipped because policy changed concurrently"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    capability_id = %persisted.key.capability_id,
-                    action = ?persisted.key.action,
-                    "persistent approval policy rollback failed"
-                );
-            }
+        if let Err(error) = persistent_policies.allow(policy.input).await {
+            tracing::warn!(
+                error = %error,
+                capability_id = %policy.key.capability_id,
+                action = ?policy.key.action,
+                "persistent approval policy write failed after approval resolution"
+            );
         }
     }
 
@@ -459,23 +430,7 @@ impl ApprovalInteractionService for DefaultApprovalInteractionService {
                 BlockedGateState::NotParkedOnGate,
                 ApprovalStatus::Approved,
                 ApprovalInteractionDecision::AlwaysAllow,
-            ) => {
-                let mut terms = self.lease_terms_provider.lease_terms_for(&gate).await?;
-                terms.issued_by = Principal::User(request.actor.user_id.clone());
-                self.lease_terms_provider
-                    .persistent_approval_allowed(&gate)
-                    .await?;
-                let persisted_policy_key =
-                    self.persist_allow_policy(&request, &gate, terms).await?;
-                match self.replay_approved_gate(request, run_id).await {
-                    Ok(response) => Ok(response),
-                    Err(error) => {
-                        self.rollback_persistent_allow_policy(&persisted_policy_key)
-                            .await;
-                        Err(error)
-                    }
-                }
-            }
+            ) => self.replay_approved_gate(request, run_id).await,
             (
                 BlockedGateState::NotParkedOnGate,
                 ApprovalStatus::Denied,

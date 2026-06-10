@@ -411,6 +411,8 @@ where
     where
         T: ironclaw_approvals::PersistentApprovalPolicyStore + 'static,
     {
+        self.component_types.persistent_approval_policies =
+            Some(ProductionComponentType::of::<T>());
         self.persistent_approval_policies = Some(policies);
         self
     }

@@ -11,7 +11,9 @@ mod process_executor;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStore};
+use ironclaw_approvals::{
+    ApprovalResolver, InMemoryPersistentApprovalPolicyStore, PersistentApprovalPolicyStore,
+};
 use ironclaw_authorization::{
     CapabilityLeaseStore, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
@@ -348,6 +350,7 @@ where
                 run_state: None,
                 approval_requests: None,
                 capability_leases: None,
+                persistent_approval_policies: None,
                 event_sink: None,
                 audit_sink: None,
                 secret_store: None,
