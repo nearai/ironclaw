@@ -5,6 +5,18 @@ use ironclaw_host_api::{
 use ironclaw_network::{NetworkHttpResponse, percent_decode_url_component_lossy};
 use ironclaw_safety::{LeakDetector, http_parts_contain_manual_credentials, redact_exact_values};
 
+/// Stable reason tokens for no-exposure request/response blocks.
+///
+/// These constants are the single source of truth for the reason strings
+/// carried by `RuntimeHttpEgressError` at the producer sites below and matched
+/// by the security-audit mapper in `super::no_exposure_audit_code`. Never
+/// inline these strings at either site: a rename here updates producer and
+/// mapper together.
+pub(super) const REASON_SENSITIVE_HEADER_DENIED: &str = "sensitive_header_denied";
+pub(super) const REASON_MANUAL_CREDENTIALS_DENIED: &str = "manual_credentials_denied";
+pub(super) const REASON_CREDENTIAL_LEAK_BLOCKED: &str = "credential_leak_blocked";
+pub(super) const REASON_RESPONSE_LEAK_BLOCKED: &str = "response_leak_blocked";
+
 pub(super) fn validate_runtime_request(
     request: &RuntimeHttpEgressRequest,
     leak_detector: &LeakDetector,
@@ -15,7 +27,7 @@ pub(super) fn validate_runtime_request(
         .find(|(name, _)| is_sensitive_runtime_request_header(name))
     {
         return Err(RuntimeHttpEgressError::Request {
-            reason: "sensitive_header_denied".to_string(),
+            reason: REASON_SENSITIVE_HEADER_DENIED.to_string(),
             request_bytes: 0,
             response_bytes: 0,
         });
@@ -23,7 +35,7 @@ pub(super) fn validate_runtime_request(
 
     if runtime_request_contains_manual_credentials(request) {
         return Err(RuntimeHttpEgressError::Request {
-            reason: "manual_credentials_denied".to_string(),
+            reason: REASON_MANUAL_CREDENTIALS_DENIED.to_string(),
             request_bytes: 0,
             response_bytes: 0,
         });
@@ -113,7 +125,7 @@ fn scan_decoded_component_for_leaks(
 
 fn runtime_request_leak_error() -> RuntimeHttpEgressError {
     RuntimeHttpEgressError::Request {
-        reason: "credential_leak_blocked".to_string(),
+        reason: REASON_CREDENTIAL_LEAK_BLOCKED.to_string(),
         request_bytes: 0,
         response_bytes: 0,
     }
@@ -144,7 +156,7 @@ pub(super) fn sanitize_runtime_response(
         }
         let cleaned = leak_detector.scan_and_clean(&exact_redacted).map_err(|_| {
             RuntimeHttpEgressError::Response {
-                reason: "response_leak_blocked".to_string(),
+                reason: REASON_RESPONSE_LEAK_BLOCKED.to_string(),
                 request_bytes: usage.request_bytes,
                 response_bytes: usage.response_bytes,
             }
@@ -161,7 +173,7 @@ pub(super) fn sanitize_runtime_response(
             let cleaned = leak_detector
                 .scan_and_clean(body_text.as_ref())
                 .map_err(|_| RuntimeHttpEgressError::Response {
-                    reason: "response_leak_blocked".to_string(),
+                    reason: REASON_RESPONSE_LEAK_BLOCKED.to_string(),
                     request_bytes: usage.request_bytes,
                     response_bytes: usage.response_bytes,
                 })?;
@@ -175,7 +187,7 @@ pub(super) fn sanitize_runtime_response(
             let exact_body_redacted = exact_redacted.contains("[REDACTED]");
             let cleaned = leak_detector.scan_and_clean(&exact_redacted).map_err(|_| {
                 RuntimeHttpEgressError::Response {
-                    reason: "response_leak_blocked".to_string(),
+                    reason: REASON_RESPONSE_LEAK_BLOCKED.to_string(),
                     request_bytes: usage.request_bytes,
                     response_bytes: usage.response_bytes,
                 }
@@ -228,7 +240,7 @@ mod tests {
         assert!(matches!(
             error,
             RuntimeHttpEgressError::Request { ref reason, .. }
-                if reason == "credential_leak_blocked"
+                if reason == REASON_CREDENTIAL_LEAK_BLOCKED
         ));
     }
 
@@ -245,7 +257,7 @@ mod tests {
         assert!(matches!(
             error,
             RuntimeHttpEgressError::Request { ref reason, .. }
-                if reason == "credential_leak_blocked"
+                if reason == REASON_CREDENTIAL_LEAK_BLOCKED
         ));
     }
 }
