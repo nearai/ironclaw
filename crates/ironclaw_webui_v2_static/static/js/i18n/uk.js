@@ -195,6 +195,7 @@ registerPack("uk", {
   "settings.restartRequired": "Деякі зміни потребують перезапуску, щоб набрати чинності.",
   "settings.restartNow": "Перезапустити зараз",
   "settings.restartStarting": "Перезапустити...",
+  "settings.restartUnavailable": "Перезапуск через вебінтерфейс ще недоступний. Перезапустіть процес шлюзу вручну, щоб застосувати незавершені зміни.",
 
   // Restart dialog
   "restart.title": "Перезапустити IronClaw",

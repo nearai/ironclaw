@@ -14,7 +14,15 @@ export function useTools() {
   const [savedTools, setSavedTools] = React.useState({});
 
   const mutation = useMutation({
-    mutationFn: ({ name, state }) => updateToolPermission(name, state),
+    // Treat `success: false` as a failed save so the UI never shows a fake
+    // "Saved" indicator for a permission change that didn't persist.
+    mutationFn: async ({ name, state }) => {
+      const data = await updateToolPermission(name, state);
+      if (data && data.success === false) {
+        throw new Error(data.message || "Save failed");
+      }
+      return data;
+    },
     onSuccess: (_data, { name, state }) => {
       queryClient.setQueryData(["settings-tools"], (old) => {
         if (!old) return old;

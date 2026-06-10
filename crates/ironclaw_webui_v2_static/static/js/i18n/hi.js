@@ -195,6 +195,7 @@ registerPack("hi", {
   "settings.restartRequired": "कुछ बदलाव लागू होने के लिए रीस्टार्ट की ज़रूरत है।",
   "settings.restartNow": "अभी पुनरारंभ करें",
   "settings.restartStarting": "पुनरारंभ हो रहा है...",
+  "settings.restartUnavailable": "वेब UI से पुनरारंभ अभी उपलब्ध नहीं है। लंबित परिवर्तनों को लागू करने के लिए गेटवे प्रक्रिया को मैन्युअल रूप से पुनरारंभ करें।",
 
   // Restart dialog
   "restart.title": "IronClaw पुनरारंभ करें",

@@ -195,6 +195,7 @@ registerPack("de", {
   "settings.restartRequired": "Einige Änderungen erfordern einen Neustart, um wirksam zu werden.",
   "settings.restartNow": "Jetzt neu starten",
   "settings.restartStarting": "Wird neu gestartet...",
+  "settings.restartUnavailable": "Ein Neustart über die Weboberfläche ist noch nicht verfügbar. Starten Sie den Gateway-Prozess manuell neu, um ausstehende Änderungen anzuwenden.",
 
   // Restart dialog
   "restart.title": "IronClaw neu starten",

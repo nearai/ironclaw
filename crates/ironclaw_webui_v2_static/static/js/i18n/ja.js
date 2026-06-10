@@ -195,6 +195,7 @@ registerPack("ja", {
   "settings.restartRequired": "一部の変更は反映に再起動が必要です。",
   "settings.restartNow": "今すぐ再起動します",
   "settings.restartStarting": "再起動中...",
+  "settings.restartUnavailable": "ウェブ UI からの再起動はまだ利用できません。保留中の変更を適用するには、ゲートウェイプロセスを手動で再起動してください。",
 
   // Restart dialog
   "restart.title": "IronClaw を再起動",

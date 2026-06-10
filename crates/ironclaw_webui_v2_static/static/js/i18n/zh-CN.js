@@ -195,6 +195,7 @@ registerPack("zh-CN", {
   "settings.restartRequired": "某些更改需要重启才能生效。",
   "settings.restartNow": "立即重启",
   "settings.restartStarting": "正在重启...",
+  "settings.restartUnavailable": "暂不支持从网页界面重启。请手动重启网关进程以应用待生效的更改。",
 
   // Restart dialog
   "restart.title": "重启 IronClaw",

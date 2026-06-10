@@ -195,6 +195,7 @@ registerPack("fr", {
   "settings.restartRequired": "Certaines modifications nécessitent un redémarrage pour prendre effet.",
   "settings.restartNow": "Redémarrer maintenant",
   "settings.restartStarting": "Redémarrer...",
+  "settings.restartUnavailable": "Le redémarrage depuis l'interface web n'est pas encore disponible. Redémarrez le processus de passerelle manuellement pour appliquer les modifications en attente.",
 
   // Restart dialog
   "restart.title": "Redémarrer IronClaw",

@@ -195,6 +195,7 @@ registerPack("ko", {
   "settings.restartRequired": "일부 변경사항은 재시작이 필요합니다.",
   "settings.restartNow": "지금 다시 시작",
   "settings.restartStarting": "다시 시작 중...",
+  "settings.restartUnavailable": "웹 UI에서의 다시 시작은 아직 지원되지 않습니다. 대기 중인 변경 사항을 적용하려면 게이트웨이 프로세스를 수동으로 다시 시작하세요.",
 
   // Restart dialog
   "restart.title": "IronClaw 다시 시작",

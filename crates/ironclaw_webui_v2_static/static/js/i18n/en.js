@@ -202,6 +202,7 @@ registerPack("en", {
   "settings.restartRequired": "Some changes require a restart to take effect.",
   "settings.restartNow": "Restart now",
   "settings.restartStarting": "Restarting...",
+  "settings.restartUnavailable": "Restart from the web UI isn't available yet. Restart the gateway process manually to apply pending changes.",
 
   // Restart dialog
   "restart.title": "Restart IronClaw",

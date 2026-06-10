@@ -195,6 +195,7 @@ registerPack("ar", {
   "settings.restartRequired": "بعض التغييرات تتطلب إعادة تشغيل لتطبيقها.",
   "settings.restartNow": "أعد التشغيل الآن",
   "settings.restartStarting": "إعادة التشغيل...",
+  "settings.restartUnavailable": "إعادة التشغيل من واجهة الويب غير متاحة بعد. أعد تشغيل عملية البوابة يدويًا لتطبيق التغييرات المعلّقة.",
 
   // Restart dialog
   "restart.title": "أعد تشغيل IronClaw",

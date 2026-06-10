@@ -195,6 +195,7 @@ registerPack("pt-BR", {
   "settings.restartRequired": "Algumas alterações exigem reinício para ter efeito.",
   "settings.restartNow": "Reiniciar agora",
   "settings.restartStarting": "Reiniciando...",
+  "settings.restartUnavailable": "Reiniciar pela interface web ainda não está disponível. Reinicie o processo do gateway manualmente para aplicar as alterações pendentes.",
 
   // Restart dialog
   "restart.title": "Reiniciar IronClaw",

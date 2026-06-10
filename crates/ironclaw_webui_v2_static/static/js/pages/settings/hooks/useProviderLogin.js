@@ -130,10 +130,14 @@ export function useProviderLogin({ onSuccess } = {}) {
     setNearaiBusy(true);
     try {
       const channelName = walletLoginChannelName();
+      // Keep the window handle (no `noopener`/`noreferrer`, which would make
+      // `window.open` return null) so `awaitWalletSignature` can detect the
+      // user closing the popup instead of waiting out the full timeout. The
+      // popup is a same-origin route we control, so the handle is safe.
       const popup = window.open(
         `/v2/wallet/connect?channel=${encodeURIComponent(channelName)}`,
         "_blank",
-        "noopener,noreferrer,width=460,height=640"
+        "width=460,height=640"
       );
       const signed = await awaitWalletSignature(popup, channelName);
       if (!signed) {
