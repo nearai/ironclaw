@@ -44,6 +44,13 @@ ask_destructive = [
     "external_write",
     "financial",
 ]
+exempt_capabilities = [
+    # The user chooses the public handle/bio in-turn before the agent invokes
+    # this first-party Trace Commons profile update. REPL approval prompts are
+    # tracked separately; keep this exemption narrow so other external writes
+    # still use the local-dev approval gate.
+    "builtin.trace_commons.profile_set",
+]
 
 [approval_defaults.spawn_capability]
 effects = [

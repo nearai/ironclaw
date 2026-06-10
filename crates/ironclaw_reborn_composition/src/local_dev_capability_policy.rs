@@ -174,6 +174,10 @@ impl LocalDevCapabilityPolicy {
             self.approval_gates.ask_destructive.clone(),
         )
     }
+
+    pub(crate) fn approval_gate_exempt_capabilities(&self) -> Vec<CapabilityId> {
+        self.approval_gates.exempt_capabilities.clone()
+    }
 }
 
 pub(crate) fn local_dev_one_shot_lease_approval(constraints: GrantConstraints) -> LeaseApproval {
@@ -209,6 +213,8 @@ pub(crate) struct LocalDevProviderPolicy {
 pub(crate) struct LocalDevApprovalGatePolicy {
     pub(crate) ask_writes: Vec<EffectKind>,
     pub(crate) ask_destructive: Vec<EffectKind>,
+    #[serde(default)]
+    pub(crate) exempt_capabilities: Vec<CapabilityId>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -474,6 +480,12 @@ mod tests {
             gate_effects
                 .ask_destructive
                 .contains(&EffectKind::SpawnProcess)
+        );
+        assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| capability.as_str() == "builtin.trace_commons.profile_set")
         );
         assert!(
             policy

@@ -2,12 +2,16 @@ use std::{borrow::Cow, sync::Arc};
 
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_host_api::{
-    Action, ApprovalRequest, ApprovalRequestId, CapabilityDescriptor, Decision, EffectKind,
-    ExecutionContext, Principal, ResourceEstimate, runtime_policy::ApprovalPolicy,
+    Action, ApprovalRequest, ApprovalRequestId, CapabilityDescriptor, CapabilityId, Decision,
+    EffectKind, ExecutionContext, Principal, ResourceEstimate, runtime_policy::ApprovalPolicy,
 };
 use ironclaw_trust::TrustDecision;
 
 pub(crate) trait ProfileApprovalGatePolicy: Send + Sync {
+    fn capability_exempt_from_approval(&self, _capability: &CapabilityId) -> bool {
+        false
+    }
+
     fn effects_require_approval(
         &self,
         approval_policy: ApprovalPolicy,
@@ -113,6 +117,7 @@ fn require_approval_for_profile_policy(
     // capability cannot be spawned as a live process without an approval gate.
     let gate_effects = approval_gate_effects(action_kind, descriptor);
     if let Decision::Allow { .. } = &decision
+        && !gate_policy.capability_exempt_from_approval(&descriptor.id)
         && gate_policy.effects_require_approval(approval_policy, &gate_effects)
         && !has_matching_one_shot_approval_grant(
             context,
