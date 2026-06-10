@@ -806,6 +806,11 @@ where
         &self,
         key: &SlackPersonalDmTargetKey,
     ) -> Result<Option<SlackPersonalDmTarget>, SlackPersonalDmTargetError> {
+        // Cross-tenant reads return Ok(None) (not an error) so a caller
+        // cannot distinguish "other tenant has this key" from "no target
+        // exists" — reads stay free of a tenant-existence oracle. Writes
+        // below differ deliberately: a cross-tenant upsert is a caller bug
+        // and fails loudly with InvalidTarget.
         if key.tenant_id != self.scope.tenant_id {
             return Ok(None);
         }
@@ -825,6 +830,11 @@ where
         }
         let path =
             Self::personal_dm_target_path(&target.key).map_err(map_personal_dm_target_fs_error)?;
+        // Lock key omits tenant_id: this store instance is pinned to one
+        // tenant (cross-tenant writes are rejected above before locking),
+        // so installation/team/user uniquely identify the record within
+        // the instance. Revisit if a multi-tenant store instance ever
+        // shares this lock map.
         let lock = self.lock_for(format!(
             "personal-dm:{}:{}:{}",
             target.key.installation_id.as_str(),
