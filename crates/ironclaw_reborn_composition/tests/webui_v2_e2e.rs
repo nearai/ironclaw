@@ -40,7 +40,8 @@ use ironclaw_loop_support::{
 };
 use ironclaw_reborn_composition::{
     PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime, build_webui_services, webui_v2_app,
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime,
+    build_webui_services, webui_v2_app,
 };
 use ironclaw_turns::run_profile::{LoopCapabilityPort, ProviderToolCall};
 use serde_json::{Value, json};
@@ -60,9 +61,11 @@ struct OnlyValidToken;
 
 #[async_trait]
 impl WebuiAuthenticator for OnlyValidToken {
-    async fn authenticate(&self, token: &str) -> Option<UserId> {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         if token == VALID_TOKEN {
-            Some(UserId::new(USER).expect("user id"))
+            Some(WebuiAuthentication::user(
+                UserId::new(USER).expect("user id"),
+            ))
         } else {
             None
         }
@@ -925,6 +928,231 @@ async fn webui_v2_google_drive_oauth_setup_projects_distinct_operation_scopes() 
         .shutdown()
         .await
         .expect("runtime shutdown clean");
+}
+
+/// SECURITY (review on #4673): a browser request body must not be able to set
+/// the caller scope. The v2 request DTOs carry no `tenant_id`/`user_id`/`scope`
+/// field and the caller scope is host-minted, so injecting the reserved system
+/// sentinel into the JSON body is inert — the thread is created under the
+/// authenticated caller and stays readable by them. If the injected sentinel
+/// had diverted creation to the system scope (or another tenant), this caller
+/// could not read the resulting thread's timeline.
+#[tokio::test]
+async fn untrusted_request_body_cannot_inject_system_scope() {
+    let harness = build_harness().await;
+    let sentinel = "\u{1f}SYSTEM\u{1f}";
+
+    let malicious = json!({
+        "client_action_id": "inject-scope-1",
+        "tenant_id": sentinel,
+        "user_id": sentinel,
+        "scope": { "tenant_id": sentinel, "user_id": sentinel },
+    });
+    let create = harness
+        .router
+        .clone()
+        .oneshot(bearer_post("/api/webchat/v2/threads", malicious))
+        .await
+        .expect("create oneshot");
+    assert_eq!(
+        create.status(),
+        StatusCode::OK,
+        "injected scope fields must be ignored (unknown fields), not honored or errored"
+    );
+    let body = read_json(create).await;
+    let thread_id = body["thread"]["thread_id"]
+        .as_str()
+        .expect("thread_id")
+        .to_string();
+
+    let timeline = harness
+        .router
+        .clone()
+        .oneshot(bearer_get(&format!(
+            "/api/webchat/v2/threads/{thread_id}/timeline"
+        )))
+        .await
+        .expect("timeline oneshot");
+    assert_eq!(
+        timeline.status(),
+        StatusCode::OK,
+        "the thread must belong to the authenticated caller — the body could not set scope"
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
+}
+
+// ─── operator LLM-config smoke (issue #4673) ──────────────────────────
+//
+// Stands up the same real local-dev runtime as the chat e2e, but with a boot
+// config (so the WebUI facade composes the operator LLM-config service) and an
+// operator-scoped authenticator (so the `/api/webchat/v2/llm/providers` routes
+// mount). Saving the built-in NEAR AI provider stores its API key under the
+// system scope; the regression was that the system-scoped secret serialized but
+// failed to deserialize, so the very next read-back (snapshot metadata, or the
+// previous-key read on a second save) returned `service_unavailable`.
+
+#[cfg(feature = "root-llm-provider")]
+mod operator_llm_config {
+    use super::*;
+    use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
+
+    struct OperatorToken;
+
+    #[async_trait]
+    impl WebuiAuthenticator for OperatorToken {
+        async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
+            if token == VALID_TOKEN {
+                Some(WebuiAuthentication::operator(
+                    UserId::new(USER).expect("user id"),
+                ))
+            } else {
+                None
+            }
+        }
+
+        fn mounts_operator_webui_config_routes(&self) -> bool {
+            true
+        }
+    }
+
+    async fn build_operator_harness() -> Harness {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        let home = RebornHome::resolve_from_env_parts(
+            Some(root.path().join("reborn-home").into_os_string()),
+            None,
+            None,
+        )
+        .expect("valid reborn home");
+        let boot = RebornBootConfig::new(home, RebornProfile::LocalDev);
+
+        let gateway = Arc::new(ToolCallingGateway::default());
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(USER, storage_root)
+                .with_runtime_policy(local_dev_effective_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: TENANT.to_string(),
+            agent_id: AGENT.to_string(),
+            source_binding_id: "e2e-source".to_string(),
+            reply_target_binding_id: "e2e-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(10),
+        })
+        .with_model_gateway_override(gateway)
+        .with_boot_config(boot);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            Arc::new(OperatorToken),
+            vec![HeaderValue::from_static("http://localhost:0")],
+        )
+        .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
+        let router = webui_v2_app(bundle, config).expect("webui v2 app");
+
+        Harness {
+            runtime,
+            router,
+            _root: Some(root),
+        }
+    }
+
+    fn nearai_save_payload() -> Value {
+        json!({
+            "id": "nearai",
+            "name": "NEAR AI",
+            "adapter": "near_ai",
+            "base_url": "https://cloud-api.near.ai",
+            "default_model": "deepseek-ai/DeepSeek-V4-Flash",
+            "api_key": "sk-e2e-operator-key",
+            "set_active": true,
+            "model": "deepseek-ai/DeepSeek-V4-Flash"
+        })
+    }
+
+    fn find_nearai(snapshot: &Value) -> &Value {
+        snapshot["providers"]
+            .as_array()
+            .expect("providers array")
+            .iter()
+            .find(|provider| provider["id"] == "nearai")
+            .expect("nearai provider in snapshot")
+    }
+
+    #[tokio::test]
+    async fn nearai_provider_save_persists_key_and_survives_resave() {
+        let harness = build_operator_harness().await;
+
+        // First save: persists the operator's NEAR AI key under the system scope
+        // and selects it active.
+        let response = harness
+            .router
+            .clone()
+            .oneshot(bearer_post(
+                "/api/webchat/v2/llm/providers",
+                nearai_save_payload(),
+            ))
+            .await
+            .expect("save request");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "saving the NEAR AI provider must succeed"
+        );
+        let body = read_json(response).await;
+        assert_eq!(body["active"]["provider_id"], "nearai");
+        assert_eq!(body["active"]["model"], "deepseek-ai/DeepSeek-V4-Flash");
+        assert_eq!(
+            find_nearai(&body)["api_key_set"],
+            true,
+            "the stored system-scope key must read back (regression #4673)"
+        );
+
+        // Re-saving reads the previous key back first — the exact op that
+        // returned service_unavailable before the system-scope deserialize fix.
+        let resave = harness
+            .router
+            .clone()
+            .oneshot(bearer_post(
+                "/api/webchat/v2/llm/providers",
+                nearai_save_payload(),
+            ))
+            .await
+            .expect("resave request");
+        assert_eq!(
+            resave.status(),
+            StatusCode::OK,
+            "re-saving an already-configured provider must not 503"
+        );
+
+        // The welcome-screen read-back path: GET must report NEAR AI as active
+        // with its key set, not as still requiring setup.
+        let get = harness
+            .router
+            .clone()
+            .oneshot(bearer_get("/api/webchat/v2/llm/providers"))
+            .await
+            .expect("get request");
+        assert_eq!(get.status(), StatusCode::OK);
+        let snapshot = read_json(get).await;
+        assert_eq!(snapshot["active"]["provider_id"], "nearai");
+        assert_eq!(find_nearai(&snapshot)["api_key_set"], true);
+
+        harness
+            .runtime
+            .shutdown()
+            .await
+            .expect("runtime shutdown clean");
+    }
 }
 
 /// Walks a `ThreadMessageRecord` JSON object and returns the rendered

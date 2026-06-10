@@ -33,13 +33,14 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ConversationBindingService, ProductOutboundDeliveryRequest, ProductOutboundTargetResolver,
     ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
-    VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
+    VerifiedProductOutboundTargetMetadata, is_approval_gate_ref,
+    prepare_and_render_product_outbound,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{
-    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
-    TurnScope, TurnStatus,
+    GateRef, GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnRunId,
+    TurnRunState, TurnScope, TurnStatus,
 };
 use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
 use serde::{Deserialize, Serialize};
@@ -253,13 +254,9 @@ impl SlackFinalReplyDeliveryObserver {
                 };
                 SlackActionableNotification {
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
-                    payload: ProductOutboundPayload::GatePrompt(GatePromptView {
-                        turn_run_id: run_id,
-                        gate_ref: gate_ref.as_str().to_string(),
-                        headline: "Approval needed".to_string(),
-                        body: "A step in the workflow requires your approval to resume."
-                            .to_string(),
-                    }),
+                    payload: ProductOutboundPayload::GatePrompt(slack_approval_gate_prompt_view(
+                        run_id, gate_ref,
+                    )),
                     gate_ref_for_routing: None,
                 }
             }
@@ -685,6 +682,16 @@ fn slack_run_notification_projection_id(
         RunNotificationEventKind::DeliveryStatus => "delivery-status",
     };
     format!("slack-run-notification:{suffix}:{run_id}")
+}
+
+fn slack_approval_gate_prompt_view(run_id: TurnRunId, gate_ref: &GateRef) -> GatePromptView {
+    GatePromptView {
+        turn_run_id: run_id,
+        gate_ref: gate_ref.as_str().to_string(),
+        headline: "Approval needed".to_string(),
+        body: "A step in the workflow requires your approval to resume.".to_string(),
+        allow_always: is_approval_gate_ref(gate_ref),
+    }
 }
 
 fn slack_auth_prompt_view(
@@ -1304,6 +1311,7 @@ async fn triggered_notification_for_state(
                     gate_ref: gate_ref_str.clone(),
                     headline: "Approval needed".to_string(),
                     body: format!("Reply `approve {gate_ref_str}` to continue."),
+                    allow_always: is_approval_gate_ref(gate_ref),
                 }),
                 gate_ref_for_routing: Some(gate_ref_str),
             }))
@@ -2555,5 +2563,29 @@ mod tests {
             slot.get().is_some(),
             "slot still occupied after duplicate set"
         );
+    }
+
+    #[test]
+    fn slack_approval_prompt_offers_always_for_typed_approval_gate() {
+        let gate_ref = GateRef::new(format!(
+            "gate:approval-{}",
+            ironclaw_host_api::ApprovalRequestId::new()
+        ))
+        .expect("gate ref");
+
+        let prompt = slack_approval_gate_prompt_view(TurnRunId::new(), &gate_ref);
+
+        assert_eq!(prompt.gate_ref, gate_ref.as_str());
+        assert!(prompt.allow_always);
+    }
+
+    #[test]
+    fn slack_approval_prompt_does_not_offer_always_for_generic_gate() {
+        let gate_ref = GateRef::new("gate:approve-slack").expect("gate ref");
+
+        let prompt = slack_approval_gate_prompt_view(TurnRunId::new(), &gate_ref);
+
+        assert_eq!(prompt.gate_ref, gate_ref.as_str());
+        assert!(!prompt.allow_always);
     }
 }

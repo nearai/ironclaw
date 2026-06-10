@@ -54,13 +54,41 @@ pub use filesystem_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog}
 #[cfg(feature = "postgres")]
 pub const DEFAULT_POSTGRES_POOL_MAX_SIZE: usize = 16;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PostgresPoolTlsOptions {
+    pub ssl_mode_override: Option<RebornPostgresSslMode>,
+    pub allow_remote_cleartext: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebornPostgresSslMode {
+    Disable,
+    Prefer,
+    Require,
+}
+
+impl std::str::FromStr for RebornPostgresSslMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "disable" => Ok(Self::Disable),
+            "allow" | "prefer" => Ok(Self::Prefer),
+            "require" | "verify-ca" | "verify-full" => Ok(Self::Require),
+            _ => Err(format!(
+                "invalid Postgres ssl mode '{value}', expected 'disable', 'allow', 'prefer', 'require', 'verify-ca', or 'verify-full'"
+            )),
+        }
+    }
+}
+
 /// Open a PostgreSQL pool using the same TLS policy as the production event
 /// store backend.
 #[cfg(feature = "postgres")]
 pub fn open_postgres_pool(
     url: SecretString,
 ) -> Result<deadpool_postgres::Pool, RebornEventStoreError> {
-    postgres_backed::build_pool(url, DEFAULT_POSTGRES_POOL_MAX_SIZE)
+    postgres_backed::build_pool(url, DEFAULT_POSTGRES_POOL_MAX_SIZE, Default::default())
 }
 
 /// Open a PostgreSQL pool with an explicit maximum connection count.
@@ -69,7 +97,17 @@ pub fn open_postgres_pool_with_max_size(
     url: SecretString,
     max_size: usize,
 ) -> Result<deadpool_postgres::Pool, RebornEventStoreError> {
-    postgres_backed::build_pool(url, max_size)
+    postgres_backed::build_pool(url, max_size, Default::default())
+}
+
+/// Open a PostgreSQL pool with explicit TLS options.
+#[cfg(feature = "postgres")]
+pub fn open_postgres_pool_with_tls_options(
+    url: SecretString,
+    max_size: usize,
+    tls_options: PostgresPoolTlsOptions,
+) -> Result<deadpool_postgres::Pool, RebornEventStoreError> {
+    postgres_backed::build_pool(url, max_size, tls_options)
 }
 
 /// Backend configuration for Reborn durable event/audit stores.
@@ -96,7 +134,10 @@ pub enum RebornEventStoreConfig {
     /// [`PostgresRootFilesystem`](ironclaw_filesystem::PostgresRootFilesystem)
     /// over the provided URL and runs durable-log ops through the unified
     /// filesystem dispatch fabric.
-    Postgres { url: SecretString },
+    Postgres {
+        url: SecretString,
+        tls_options: PostgresPoolTlsOptions,
+    },
     /// libSQL backend configuration. The store opens a
     /// [`LibSqlRootFilesystem`](ironclaw_filesystem::LibSqlRootFilesystem)
     /// over the provided local path or remote URL and runs durable-log ops
@@ -136,7 +177,7 @@ pub enum RebornEventStoreError {
     )]
     ProductionLibsqlAmbiguousTarget,
     #[error(
-        "remote Reborn Postgres event store requires sslmode=require (sslmode=disable rejected)"
+        "remote Reborn Postgres event store requires sslmode=require unless remote cleartext is explicitly allowed (sslmode=disable rejected)"
     )]
     RemotePostgresClearTextDisabled,
     #[error("Reborn Postgres pool max_size must be greater than 0")]
@@ -198,13 +239,14 @@ pub async fn build_reborn_event_stores(
                 audit: Arc::new(JsonlDurableAuditLog::from_store(store)),
             })
         }
-        RebornEventStoreConfig::Postgres { url } => {
+        RebornEventStoreConfig::Postgres { url, tls_options } => {
             #[cfg(feature = "postgres")]
             {
-                postgres_backed::build(url).await
+                postgres_backed::build(url, tls_options).await
             }
             #[cfg(not(feature = "postgres"))]
             {
+                let _ = tls_options;
                 let _ = url;
                 Err(RebornEventStoreError::BackendUnavailable {
                     backend: "postgres",
@@ -496,12 +538,16 @@ mod postgres_backed {
     use tokio_postgres::{Config, NoTls};
     use tokio_postgres_rustls::MakeRustlsConnect;
 
-    use super::{RebornEventStoreError, RebornEventStores, wrap_root_filesystem_as_event_stores};
+    use super::{
+        PostgresPoolTlsOptions, RebornEventStoreError, RebornEventStores, RebornPostgresSslMode,
+        wrap_root_filesystem_as_event_stores,
+    };
 
     pub(super) async fn build(
         url: SecretString,
+        tls_options: PostgresPoolTlsOptions,
     ) -> Result<RebornEventStores, RebornEventStoreError> {
-        let pool = build_pool(url, super::DEFAULT_POSTGRES_POOL_MAX_SIZE)?;
+        let pool = build_pool(url, super::DEFAULT_POSTGRES_POOL_MAX_SIZE, tls_options)?;
         let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
         filesystem.run_migrations().await.map_err(|source| {
             RebornEventStoreError::backend("postgres", "run migrations", source)
@@ -512,6 +558,7 @@ mod postgres_backed {
     pub(super) fn build_pool(
         url: SecretString,
         max_size: usize,
+        tls_options: PostgresPoolTlsOptions,
     ) -> Result<Pool, RebornEventStoreError> {
         if max_size == 0 {
             return Err(RebornEventStoreError::InvalidPostgresPoolMaxSize);
@@ -520,12 +567,25 @@ mod postgres_backed {
         let mut pg_config: Config = raw_url.parse().map_err(|source| {
             RebornEventStoreError::backend("postgres", "parse connection string", source)
         })?;
+        if let Some(ssl_mode) = tls_options.ssl_mode_override {
+            pg_config.ssl_mode(ssl_mode.into());
+        }
         let manager_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         };
         let local = is_local_postgres_config(&pg_config);
         let local_wants_tls = local && matches!(pg_config.get_ssl_mode(), SslMode::Require);
-        let manager = if local && !local_wants_tls {
+        let remote_cleartext = !local && matches!(pg_config.get_ssl_mode(), SslMode::Disable);
+        let manager = if remote_cleartext {
+            if !tls_options.allow_remote_cleartext {
+                return Err(RebornEventStoreError::RemotePostgresClearTextDisabled);
+            }
+            tracing::warn!(
+                target = "ironclaw::reborn::event_store::postgres",
+                "remote Reborn Postgres cleartext connection explicitly allowed; use only on a trusted private network"
+            );
+            Manager::from_config(pg_config, NoTls, manager_config)
+        } else if local && !local_wants_tls {
             // Local without an explicit `sslmode=require`: NoTls is acceptable
             // because the connection never leaves the host.
             Manager::from_config(pg_config, NoTls, manager_config)
@@ -621,6 +681,16 @@ mod postgres_backed {
         }
     }
 
+    impl From<RebornPostgresSslMode> for SslMode {
+        fn from(value: RebornPostgresSslMode) -> Self {
+            match value {
+                RebornPostgresSslMode::Disable => SslMode::Disable,
+                RebornPostgresSslMode::Prefer => SslMode::Prefer,
+                RebornPostgresSslMode::Require => SslMode::Require,
+            }
+        }
+    }
+
     /// Build a rustls TLS connector for remote Postgres connections.
     ///
     /// Mirrors `src/db/tls.rs`: prefer the platform's native certificate
@@ -655,8 +725,9 @@ mod postgres_backed {
 
     #[cfg(test)]
     mod tests {
-        use super::{Config, enforce_remote_ssl_mode, is_local_postgres_config};
-        use crate::RebornEventStoreError;
+        use super::{Config, build_pool, enforce_remote_ssl_mode, is_local_postgres_config};
+        use crate::{PostgresPoolTlsOptions, RebornEventStoreError, RebornPostgresSslMode};
+        use secrecy::SecretString;
         use tokio_postgres::config::SslMode;
 
         fn parse(url: &str) -> Config {
@@ -773,6 +844,51 @@ mod postgres_backed {
                 err,
                 RebornEventStoreError::RemotePostgresClearTextDisabled
             ));
+        }
+
+        #[test]
+        fn sslmode_aliases_parse_to_internal_modes() {
+            for value in ["allow", "prefer"] {
+                assert_eq!(
+                    value.parse::<RebornPostgresSslMode>().expect("parse"),
+                    RebornPostgresSslMode::Prefer,
+                    "{value} should map to the internal prefer mode"
+                );
+            }
+            for value in ["require", "verify-ca", "verify-full"] {
+                assert_eq!(
+                    value.parse::<RebornPostgresSslMode>().expect("parse"),
+                    RebornPostgresSslMode::Require,
+                    "{value} should map to the internal require mode"
+                );
+            }
+        }
+
+        #[test]
+        fn build_pool_rejects_remote_cleartext_without_explicit_opt_in() {
+            let err = build_pool(
+                SecretString::from("postgres://user@db.example.com/db?sslmode=disable".to_string()),
+                1,
+                PostgresPoolTlsOptions::default(),
+            )
+            .expect_err("remote cleartext must fail closed");
+            assert!(matches!(
+                err,
+                RebornEventStoreError::RemotePostgresClearTextDisabled
+            ));
+        }
+
+        #[test]
+        fn build_pool_allows_remote_cleartext_with_explicit_opt_in() {
+            build_pool(
+                SecretString::from("postgres://user@db.example.com/db?sslmode=disable".to_string()),
+                1,
+                PostgresPoolTlsOptions {
+                    ssl_mode_override: None,
+                    allow_remote_cleartext: true,
+                },
+            )
+            .expect("explicit remote cleartext opt-in should allow pool construction");
         }
 
         #[test]

@@ -433,26 +433,25 @@ impl LlmConfigService for RebornLlmConfigService {
             .as_ref()
             .is_some_and(|key| !is_masked_sentinel(key));
         let previous_key = if has_new_key {
-            self.keys
-                .read(&id)
-                .await
-                .map_err(|_| LlmConfigServiceError::Unavailable)?
+            self.keys.read(&id).await.map_err(|error| {
+                tracing::error!(provider_id = %id, %error, "LLM provider save: reading existing stored key failed");
+                LlmConfigServiceError::Unavailable
+            })?
         } else {
             None
         };
         let stored_key_present = if has_new_key {
             previous_key.is_some()
         } else {
-            self.keys
-                .exists(&id)
-                .await
-                .map_err(|_| LlmConfigServiceError::Unavailable)?
+            self.keys.exists(&id).await.map_err(|error| {
+                tracing::error!(provider_id = %id, %error, "LLM provider save: checking stored key existence failed");
+                LlmConfigServiceError::Unavailable
+            })?
         };
-        let previous_overlay = self
-            .repo
-            .load_async()
-            .await
-            .map_err(|_| LlmConfigServiceError::Unavailable)?;
+        let previous_overlay = self.repo.load_async().await.map_err(|error| {
+            tracing::error!(provider_id = %id, %error, "LLM provider save: loading provider overlay failed");
+            LlmConfigServiceError::Unavailable
+        })?;
         let previous_definition = previous_overlay
             .iter()
             .find(|definition| definition.id.eq_ignore_ascii_case(&id))
@@ -479,13 +478,14 @@ impl LlmConfigService for RebornLlmConfigService {
 
         // Store the key value only when a real (non-sentinel) one was supplied.
         if has_new_key && let Some(key) = request.api_key.as_ref() {
-            self.keys
-                .put(&id, key.clone())
-                .await
-                .map_err(|_| LlmConfigServiceError::Unavailable)?;
+            self.keys.put(&id, key.clone()).await.map_err(|error| {
+                tracing::error!(provider_id = %id, %error, "LLM provider save: storing API key failed");
+                LlmConfigServiceError::Unavailable
+            })?;
         }
 
-        if self.repo.upsert_async(definition).await.is_err() {
+        if let Err(error) = self.repo.upsert_async(definition).await {
+            tracing::error!(provider_id = %id, %error, "LLM provider save: writing provider overlay failed");
             if has_new_key {
                 self.rollback_provider_key(&id, previous_key).await;
             }
@@ -497,6 +497,7 @@ impl LlmConfigService for RebornLlmConfigService {
                 .set_provider_async(id.clone(), request.model.clone())
                 .await;
             if let Err(error) = active_result {
+                tracing::error!(provider_id = %id, %error, "LLM provider save: writing active selection failed");
                 self.rollback_upsert(&id, previous_definition, previous_key, has_new_key)
                     .await;
                 return Err(map_admin_error(error));
@@ -1428,6 +1429,100 @@ mod tests {
             !acme.api_key_set,
             "unavailable stored-key metadata must degrade to api_key_set=false"
         );
+    }
+
+    /// Reproduction for issue #4673: saving the NEAR AI (builtin) provider
+    /// returns `service_unavailable` even though Test connection succeeds. This
+    /// wires the secret store EXACTLY as production `ironclaw-reborn serve` does
+    /// — the dynamic `invocation_mount_view` scoped filesystem behind a real
+    /// `FilesystemSecretStore` — instead of the in-memory store the other tests
+    /// use, so a system-scope write/read regression in that path is caught.
+    #[tokio::test]
+    async fn upsert_builtin_nearai_with_production_secret_store_succeeds() {
+        use ironclaw_secrets::{FilesystemSecretStore, SecretsCrypto};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+
+        let backend = Arc::new(ironclaw_filesystem::InMemoryBackend::default());
+        let scoped = crate::wrap_scoped(backend);
+        let crypto = Arc::new(
+            SecretsCrypto::new(SecretMaterial::from(
+                "0123456789abcdef0123456789abcdef".to_string(),
+            ))
+            .expect("valid master key"),
+        );
+        let keys = LlmKeyStore::new(Arc::new(FilesystemSecretStore::new(scoped, crypto)));
+
+        let nearai_request = || UpsertLlmProviderRequest {
+            id: "nearai".to_string(),
+            name: Some("NEAR AI".to_string()),
+            adapter: "near_ai".to_string(),
+            base_url: Some("https://cloud-api.near.ai".to_string()),
+            default_model: Some("deepseek-ai/DeepSeek-V4-Flash".to_string()),
+            api_key: Some(SecretString::from("sk-near-test")),
+            set_active: true,
+            model: Some("deepseek-ai/DeepSeek-V4-Flash".to_string()),
+        };
+
+        let service = RebornLlmConfigService::new(boot.clone(), keys.clone());
+        // First save persists the operator's NEAR AI key under the system scope.
+        let snapshot = service
+            .upsert_provider(caller(), nearai_request())
+            .await
+            .expect("saving the builtin NEAR AI provider must succeed");
+        let active = snapshot.active.expect("an active provider after save");
+        assert_eq!(active.provider_id, "nearai");
+        assert_eq!(
+            active.model.as_deref(),
+            Some("deepseek-ai/DeepSeek-V4-Flash")
+        );
+
+        // The stored system-scoped key must read back (the #4673 regression: the
+        // reserved system tenant id failed to deserialize, so any read-back of a
+        // system-scoped secret errored — including a second save, which reads the
+        // previous key first).
+        assert_eq!(
+            keys.read("nearai")
+                .await
+                .expect("system-scope key must read back")
+                .expect("a stored key")
+                .expose_secret(),
+            "sk-near-test"
+        );
+        service
+            .upsert_provider(caller(), nearai_request())
+            .await
+            .expect("re-saving an already-configured NEAR AI provider must succeed");
+    }
+
+    /// Integration coverage for the resolver path at the composition boundary
+    /// (review on #4673): an explicit `config.toml` selection is honored
+    /// end-to-end through the real `resolve_reborn_runtime_llm`. The env-vs-
+    /// selection PRECEDENCE itself is unit-tested in
+    /// `ironclaw_llm::resolution` (`explicit_selection_overrides_env_for_model_and_base_url`),
+    /// where the env can be set — this crate is `#![forbid(unsafe_code)]` and the
+    /// resolver reads raw `std::env::var`, so the env dimension cannot be driven
+    /// here; this thin wrapper only adds the config.toml read it is exercised on.
+    #[tokio::test]
+    async fn reborn_runtime_llm_honors_explicit_config_selection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+
+        crate::provider_admin::RebornProviderAdmin::new(boot.clone())
+            .set_provider("nearai", Some("deepseek-ai/DeepSeek-V4-Flash"))
+            .expect("persist active selection");
+        let config_file =
+            ironclaw_reborn_config::RebornConfigFile::load(&boot.home().config_file_path())
+                .expect("load config file");
+
+        let resolved = crate::llm_catalog::resolve_reborn_runtime_llm(&boot, config_file.as_ref())
+            .expect("resolution succeeds")
+            .expect("a provider is resolved from the selection");
+        assert_eq!(resolved.provider_id(), "nearai");
+        assert_eq!(resolved.model(), "deepseek-ai/DeepSeek-V4-Flash");
     }
 
     #[tokio::test]

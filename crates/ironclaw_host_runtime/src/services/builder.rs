@@ -55,6 +55,7 @@ where
             approval_requests,
             run_state_approval_store,
             capability_leases,
+            persistent_approval_policies,
             event_sink,
             audit_sink,
             security_audit_sink,
@@ -98,6 +99,7 @@ where
             approval_requests,
             run_state_approval_store,
             capability_leases,
+            persistent_approval_policies,
             event_sink,
             audit_sink,
             security_audit_sink,
@@ -162,6 +164,7 @@ where
             approval_requests,
             run_state_approval_store,
             capability_leases,
+            persistent_approval_policies,
             event_sink,
             audit_sink,
             security_audit_sink,
@@ -215,6 +218,7 @@ where
             approval_requests,
             run_state_approval_store,
             capability_leases,
+            persistent_approval_policies,
             event_sink,
             audit_sink,
             security_audit_sink,
@@ -400,6 +404,16 @@ where
     {
         self.component_types.capability_leases = Some(ProductionComponentType::of::<T>());
         self.capability_leases = Some(capability_leases);
+        self
+    }
+
+    pub fn with_persistent_approval_policies<T>(mut self, policies: Arc<T>) -> Self
+    where
+        T: ironclaw_approvals::PersistentApprovalPolicyStore + 'static,
+    {
+        self.component_types.persistent_approval_policies =
+            Some(ProductionComponentType::of::<T>());
+        self.persistent_approval_policies = Some(policies);
         self
     }
 

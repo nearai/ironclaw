@@ -6,6 +6,8 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunResponse, EventCursor, GateRef, ResumeTurnResponse,
     SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
 };
+use secrecy::SecretString;
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::{
@@ -16,6 +18,118 @@ const OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES: usize = 512;
 const OUTBOUND_DELIVERY_CHANNEL_MAX_BYTES: usize = 128;
 const OUTBOUND_DELIVERY_DISPLAY_NAME_MAX_BYTES: usize = 256;
 const OUTBOUND_DELIVERY_DESCRIPTION_MAX_BYTES: usize = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornOperatorStatusState {
+    Ready,
+    Degraded,
+    Blocked,
+    Unsupported,
+    NotConfigured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornOperatorStatusSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOperatorStatusCheck {
+    pub id: String,
+    pub status: RebornOperatorStatusState,
+    pub severity: RebornOperatorStatusSeverity,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOperatorStatusResponse {
+    pub generated_at: DateTime<Utc>,
+    pub overall: RebornOperatorStatusState,
+    pub checks: Vec<RebornOperatorStatusCheck>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RebornLogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornLogQueryRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<RebornLogLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub tail: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornLogEntry {
+    pub id: String,
+    pub timestamp: DateTime<Utc>,
+    pub level: RebornLogLevel,
+    pub target: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornLogQueryResponse {
+    pub source: String,
+    pub entries: Vec<RebornLogEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub tail_supported: bool,
+    pub follow_supported: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornServiceLifecycleAction {
+    Install,
+    Start,
+    Stop,
+    Status,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornServiceLifecycleState {
+    Installed,
+    Running,
+    Stopped,
+    Unsupported,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornServiceLifecycleRequest {
+    pub action: RebornServiceLifecycleAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornServiceLifecycleResponse {
+    pub action: RebornServiceLifecycleAction,
+    pub state: RebornServiceLifecycleState,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornConnectableChannelListResponse {
@@ -1050,6 +1164,14 @@ pub struct RebornOperatorCommandPlaneResponse {
     pub area: RebornOperatorArea,
     pub status: RebornOperatorSurfaceStatus,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_status: Option<RebornOperatorStatusResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<RebornLogQueryResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_lifecycle: Option<RebornServiceLifecycleResponse>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<RebornOperatorConfigDiagnostic>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1059,14 +1181,22 @@ pub enum RebornOperatorSurfaceStatus {
     Unavailable,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct RebornOperatorSetupRequest {
     #[serde(default)]
     pub provider_id: Option<String>,
     #[serde(default)]
+    pub adapter: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub api_key: Option<SecretString>,
+    #[serde(default)]
     pub profile_id: Option<String>,
+    #[serde(default)]
+    pub webui_access_token: Option<SecretString>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1081,6 +1211,12 @@ pub struct RebornOperatorLogsQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub level: Option<RebornLogLevel>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub tail: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1095,4 +1231,102 @@ pub enum RebornOperatorServiceLifecycleAction {
     Start,
     Stop,
     Status,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornOperatorConfigListResponse {
+    pub entries: Vec<RebornOperatorConfigEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub precedence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<RebornOperatorConfigDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornOperatorConfigGetResponse {
+    pub entry: RebornOperatorConfigEntry,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RebornOperatorConfigEntry {
+    pub key: String,
+    pub value: serde_json::Value,
+    pub source: String,
+    pub redacted: bool,
+    pub mutable: bool,
+}
+
+impl Serialize for RebornOperatorConfigEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("RebornOperatorConfigEntry", 5)?;
+        state.serialize_field("key", &self.key)?;
+        if self.redacted {
+            state.serialize_field("value", &serde_json::Value::Null)?;
+        } else {
+            state.serialize_field("value", &self.value)?;
+        }
+        state.serialize_field("source", &self.source)?;
+        state.serialize_field("redacted", &self.redacted)?;
+        state.serialize_field("mutable", &self.mutable)?;
+        state.end()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornOperatorConfigSetRequest {
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOperatorConfigValidateResponse {
+    pub valid: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<RebornOperatorConfigDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOperatorConfigDiagnostic {
+    pub key: String,
+    pub severity: RebornOperatorConfigDiagnosticSeverity,
+    pub reason_code: String,
+    pub message: String,
+    pub owning_area: RebornOperatorArea,
+    pub remediation: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornOperatorConfigDiagnosticSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn operator_config_entry_masks_redacted_value_when_serialized() {
+        let entry = RebornOperatorConfigEntry {
+            key: "secret.api_key".to_string(),
+            value: json!("should-not-leak"),
+            source: "secret".to_string(),
+            redacted: true,
+            mutable: true,
+        };
+
+        let serialized = serde_json::to_value(entry).expect("serialize entry");
+        assert_eq!(serialized.get("value"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            serialized
+                .get("redacted")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+    }
 }

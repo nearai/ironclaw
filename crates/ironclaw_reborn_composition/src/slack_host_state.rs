@@ -1339,6 +1339,8 @@ struct StoredSlackPersonalDmTarget {
 }
 
 impl StoredSlackPersonalDmTarget {
+    // arch-exempt: dead_code, reserved for explicit Slack DM provisioning product route, plan #4600
+    #[allow(dead_code)]
     fn from_target(target: &SlackPersonalDmTarget, created_at: DateTime<Utc>) -> Self {
         Self {
             tenant_id: target.key.tenant_id.as_str().to_string(),

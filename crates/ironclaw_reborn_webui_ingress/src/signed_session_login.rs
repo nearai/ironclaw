@@ -38,7 +38,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use hmac::{Hmac, Mac};
 use ironclaw_host_api::{TenantId, UserId};
-use ironclaw_reborn_composition::WebuiAuthenticator;
+use ironclaw_reborn_composition::{WebuiAuthentication, WebuiAuthenticator};
 use parking_lot::RwLock;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -336,11 +336,15 @@ impl CompositeAuthenticator {
 
 #[async_trait]
 impl WebuiAuthenticator for CompositeAuthenticator {
-    async fn authenticate(&self, token: &str) -> Option<UserId> {
-        if let Some(user) = self.session.authenticate(token).await {
-            return Some(user);
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
+        if let Some(auth) = self.env_token.authenticate(token).await {
+            return Some(auth);
         }
-        self.env_token.authenticate(token).await
+        self.session.authenticate(token).await
+    }
+
+    fn mounts_operator_webui_config_routes(&self) -> bool {
+        self.env_token.mounts_operator_webui_config_routes()
     }
 }
 
@@ -569,16 +573,26 @@ mod tests {
     struct OneToken {
         token: &'static str,
         user: &'static str,
+        operator: bool,
     }
 
     #[async_trait]
     impl WebuiAuthenticator for OneToken {
-        async fn authenticate(&self, token: &str) -> Option<UserId> {
+        async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             if token == self.token {
-                Some(UserId::new(self.user).expect("valid user id"))
+                let user = UserId::new(self.user).expect("valid user id");
+                Some(if self.operator {
+                    WebuiAuthentication::operator(user)
+                } else {
+                    WebuiAuthentication::user(user)
+                })
             } else {
                 None
             }
+        }
+
+        fn mounts_operator_webui_config_routes(&self) -> bool {
+            self.operator
         }
     }
 
@@ -588,10 +602,12 @@ mod tests {
             Arc::new(OneToken {
                 token: "session-tok",
                 user: "alice@example.com",
+                operator: false,
             }),
             Arc::new(OneToken {
                 token: "env-tok",
                 user: "operator",
+                operator: true,
             }),
         );
 
@@ -600,14 +616,51 @@ mod tests {
                 .authenticate("session-tok")
                 .await
                 .unwrap()
+                .user_id
                 .as_str(),
             "alice@example.com"
         );
         assert_eq!(
-            composite.authenticate("env-tok").await.unwrap().as_str(),
+            composite
+                .authenticate("env-tok")
+                .await
+                .unwrap()
+                .user_id
+                .as_str(),
             "operator"
         );
         assert!(composite.authenticate("nope").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn composite_marks_only_env_token_as_operator_capable() {
+        let composite = CompositeAuthenticator::new(
+            Arc::new(OneToken {
+                token: "session-tok",
+                user: "alice@example.com",
+                operator: false,
+            }),
+            Arc::new(OneToken {
+                token: "env-tok",
+                user: "operator",
+                operator: true,
+            }),
+        );
+
+        let session = composite
+            .authenticate("session-tok")
+            .await
+            .expect("session token authenticates");
+        assert_eq!(session.user_id.as_str(), "alice@example.com");
+        assert!(!session.capabilities.operator_webui_config);
+
+        let env = composite
+            .authenticate("env-tok")
+            .await
+            .expect("env token authenticates");
+        assert_eq!(env.user_id.as_str(), "operator");
+        assert!(env.capabilities.operator_webui_config);
+        assert!(composite.mounts_operator_webui_config_routes());
     }
 
     /// Minimal host-supplied directory for the builder wiring tests.
@@ -657,6 +710,7 @@ mod tests {
             env_authenticator: Arc::new(OneToken {
                 token: "env-tok",
                 user: "operator",
+                operator: true,
             }),
         }
     }

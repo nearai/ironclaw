@@ -9,6 +9,7 @@ use ironclaw_product_adapters::{
     GatePromptView, ProductAdapterError, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
 };
+use ironclaw_product_workflow::is_approval_gate_ref;
 use ironclaw_turns::{
     GetRunStateRequest, SanitizedFailure, TurnCoordinator, TurnError, TurnEventKind,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
@@ -348,13 +349,17 @@ async fn blocked_prompt_payload(
             .await?;
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
-        TurnStatus::BlockedApproval => {
-            Ok(Some(gate_prompt(event, gate_ref_str, "Approval required")))
-        }
+        TurnStatus::BlockedApproval => Ok(Some(gate_prompt(
+            event,
+            gate_ref_str,
+            "Approval required",
+            is_approval_gate_ref(gate_ref),
+        ))),
         TurnStatus::BlockedResource => Ok(Some(gate_prompt(
             event,
             gate_ref_str,
             "Resource unavailable",
+            false,
         ))),
         // Non-blocked statuses: no prompt payload. Exhaustive match so a new
         // TurnStatus variant forces a compile error and an explicit decision.
@@ -373,6 +378,7 @@ fn gate_prompt(
     event: &TurnLifecycleEvent,
     gate_ref: String,
     headline: &'static str,
+    allow_always: bool,
 ) -> ProductOutboundPayload {
     ProductOutboundPayload::GatePrompt(GatePromptView {
         turn_run_id: event.run_id,
@@ -382,6 +388,7 @@ fn gate_prompt(
             .sanitized_reason
             .clone()
             .unwrap_or_else(|| "Resolve this gate to continue the run.".to_string()),
+        allow_always,
     })
 }
 
@@ -547,6 +554,9 @@ fn failure_summary_for_category(category: &str) -> &'static str {
         "interrupted_unexpectedly" => "The run stopped before it could complete cleanly.",
         "no_progress_detected" => {
             "The run stopped because it repeated the same step without making progress."
+        }
+        "iteration_limit" => {
+            "The run stopped after reaching its iteration limit before producing a reply."
         }
         "unknown_failure" => "The run failed for an unknown reason.",
         _ => "The run failed before producing a reply.",

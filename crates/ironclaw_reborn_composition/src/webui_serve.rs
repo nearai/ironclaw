@@ -73,6 +73,9 @@ use crate::slack_personal_binding_serve::{
 };
 use crate::webui::RebornWebuiBundle;
 use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
+use crate::webui_operator_auth::{
+    OperatorWebuiConfigRouteState, build_operator_webui_config_route_state,
+};
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
@@ -106,21 +109,63 @@ const REBORN_HEALTH_PATH: &str = "/api/health";
 /// auth evidence is host-owned and never leaks to clients.
 #[async_trait::async_trait]
 pub trait WebuiAuthenticator: Send + Sync + 'static {
-    async fn authenticate(&self, token: &str) -> Option<UserId>;
+    /// Authenticate a bearer and return the caller identity plus capabilities
+    /// that apply to this exact token.
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication>;
 
     /// Whether bearer tokens accepted by this authenticator represent a
     /// single trusted operator. Operator-wide WebUI config routes mutate
     /// shared host configuration such as provider catalogs, secrets, active
     /// models, or Slack channel routes, so host composition only mounts them
     /// for authenticators that explicitly opt in.
+    fn mounts_operator_webui_config_routes(&self) -> bool {
+        #[allow(deprecated)]
+        self.allows_operator_webui_config()
+    }
+
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use `mounts_operator_webui_config_routes`; this asks about route availability, not per-token capability."
+    )]
     fn allows_operator_webui_config(&self) -> bool {
         #[allow(deprecated)]
         self.allows_operator_llm_config()
     }
 
-    #[deprecated(since = "0.1.0", note = "Renamed to allows_operator_webui_config")]
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use `mounts_operator_webui_config_routes`; this asks about route availability, not per-token capability."
+    )]
     fn allows_operator_llm_config(&self) -> bool {
         false
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebuiAuthentication {
+    pub user_id: UserId,
+    pub capabilities: WebUiV2Capabilities,
+}
+
+impl WebuiAuthentication {
+    pub fn new(user_id: UserId, capabilities: WebUiV2Capabilities) -> Self {
+        Self {
+            user_id,
+            capabilities,
+        }
+    }
+
+    pub fn user(user_id: UserId) -> Self {
+        Self::new(user_id, WebUiV2Capabilities::default())
+    }
+
+    pub fn operator(user_id: UserId) -> Self {
+        Self::new(
+            user_id,
+            WebUiV2Capabilities {
+                operator_webui_config: true,
+            },
+        )
     }
 }
 
@@ -539,13 +584,6 @@ pub fn webui_v2_app_with_lifecycle(
         ]))
         .allow_credentials(true);
 
-    let auth_state = AuthLayerState {
-        tenant_id: config.tenant_id.clone(),
-        default_agent_id: config.default_agent_id.clone(),
-        default_project_id: config.default_project_id.clone(),
-        authenticator: config.authenticator.clone(),
-    };
-
     let product_auth_mount = bundle.product_auth.clone().map(|product_auth| {
         let mut state = ProductAuthRouteState::new(
             product_auth,
@@ -569,7 +607,7 @@ pub fn webui_v2_app_with_lifecycle(
         .slack_personal_binding_pairing
         .clone()
         .map(slack_personal_binding_pairing_route_mount);
-    let mount_operator_routes = config.authenticator.allows_operator_webui_config();
+    let mount_operator_routes = config.authenticator.mounts_operator_webui_config_routes();
     #[cfg(feature = "slack-v2-host-beta")]
     let slack_channel_routes_mount = config
         .slack_channel_routes
@@ -585,10 +623,18 @@ pub fn webui_v2_app_with_lifecycle(
             .collect(),
     );
     let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
+    let mut operator_descriptors: Vec<IngressRouteDescriptor> = descriptors
+        .iter()
+        .filter(|descriptor| {
+            is_webui_v2_operator_webui_config_route_id(descriptor.route_id().as_str())
+        })
+        .cloned()
+        .collect();
     if !mount_operator_routes {
         descriptors.retain(|descriptor| {
             !is_webui_v2_operator_webui_config_route_id(descriptor.route_id().as_str())
         });
+        operator_descriptors.clear();
     }
     if let Some(mount) = &product_auth_mount {
         descriptors.extend(mount.descriptors.iter().cloned());
@@ -603,6 +649,7 @@ pub fn webui_v2_app_with_lifecycle(
     }
     #[cfg(feature = "slack-v2-host-beta")]
     if let Some(mount) = &slack_channel_routes_mount {
+        operator_descriptors.extend(mount.descriptors.iter().cloned());
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     for mount in &public_mounts {
@@ -618,6 +665,14 @@ pub fn webui_v2_app_with_lifecycle(
         &config.allowed_origins,
         config.canonical_host.clone(),
     );
+    let operator_routes = build_operator_webui_config_route_state(&operator_descriptors);
+    let auth_state = AuthLayerState {
+        tenant_id: config.tenant_id.clone(),
+        default_agent_id: config.default_agent_id.clone(),
+        default_project_id: config.default_project_id.clone(),
+        authenticator: config.authenticator.clone(),
+        operator_routes,
+    };
 
     // Inner: the v2 route surface, retagged to `Router<()>` so it can
     // merge into the outer stateless router. `webui_v2_router` has
@@ -627,13 +682,7 @@ pub fn webui_v2_app_with_lifecycle(
     } else {
         WebUiV2RouteOptions::without_operator_routes()
     };
-    let v2_state = WebUiV2State::new(
-        bundle.api.clone(),
-        WebUiV2Capabilities {
-            operator_webui_config: mount_operator_routes,
-        },
-        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
-    );
+    let v2_state = WebUiV2State::new(bundle.api.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER);
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
@@ -796,6 +845,7 @@ struct AuthLayerState {
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
     authenticator: Arc<dyn WebuiAuthenticator>,
+    operator_routes: OperatorWebuiConfigRouteState,
 }
 
 /// Resolve `Authorization: Bearer <token>` for any v2 route, OR the
@@ -815,10 +865,17 @@ async fn authenticate_request(
         None => return unauthorized(),
     };
 
-    let user_id = match state.authenticator.authenticate(&token).await {
-        Some(uid) => uid,
+    let auth = match state.authenticator.authenticate(&token).await {
+        Some(auth) => auth,
         None => return unauthorized(),
     };
+    if state
+        .operator_routes
+        .requires_operator_webui_config(&request)
+        && !auth.capabilities.operator_webui_config
+    {
+        return forbidden();
+    }
 
     // Stamp the trusted agent/project from host installation config
     // onto every authenticated caller. The downstream facade builds
@@ -828,14 +885,15 @@ async fn authenticate_request(
     // browser body cannot influence either of these identifiers — by
     // contract `WebuiServeConfig` is host-owned.
     #[cfg(feature = "openai-compat-beta")]
-    let openai_user_id = user_id.clone();
+    let openai_user_id = auth.user_id.clone();
     let caller = WebUiAuthenticatedCaller::new(
         state.tenant_id.clone(),
-        user_id,
+        auth.user_id,
         state.default_agent_id.clone(),
         state.default_project_id.clone(),
     );
     request.extensions_mut().insert(caller);
+    request.extensions_mut().insert(auth.capabilities);
     #[cfg(feature = "openai-compat-beta")]
     {
         let scope = ironclaw_reborn_openai_compat::OpenAiCompatActorScope::new(
@@ -844,8 +902,10 @@ async fn authenticate_request(
             state.default_agent_id.clone(),
             state.default_project_id.clone(),
         );
-        let auth_evidence =
-            ironclaw_product_adapters::mark_bearer_token_verified(openai_user_id.as_str());
+        let auth_evidence = ironclaw_product_adapters::mark_bearer_token_verified_for_tenant(
+            openai_user_id.as_str(),
+            state.tenant_id.clone(),
+        );
         let caller = match ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller::new(
             scope,
             auth_evidence,
@@ -860,6 +920,14 @@ async fn authenticate_request(
 
 fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, "Invalid or missing auth token").into_response()
+}
+
+fn forbidden() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        "Operator WebUI configuration privileges required",
+    )
+        .into_response()
 }
 
 fn extract_bearer_token(request: &Request) -> Option<String> {

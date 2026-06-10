@@ -20,6 +20,16 @@ async fn webui_event_stream_projects_no_progress_failure_summary() {
     .await;
 }
 
+#[tokio::test]
+async fn webui_event_stream_projects_iteration_limit_failure_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-iteration-limit-thread",
+        "iteration_limit",
+        "The run stopped after reaching its iteration limit before producing a reply.",
+    )
+    .await;
+}
+
 async fn assert_failed_run_status_summary(
     thread_id: &str,
     failure_category: &str,

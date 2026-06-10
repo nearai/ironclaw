@@ -36,7 +36,12 @@ use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile, RebornServices};
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornReadinessState, build_reborn_services,
+    RebornReadinessDiagnostic, RebornReadinessState, build_reborn_services,
+};
+#[cfg(feature = "libsql")]
+use ironclaw_reborn_composition::{
+    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
+    RebornReadinessDiagnosticStatus,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
@@ -459,6 +464,10 @@ async fn disabled_returns_empty_services() {
     assert!(services.host_runtime.is_none());
     assert!(services.turn_coordinator.is_none());
     assert_eq!(services.readiness.state, RebornReadinessState::Disabled);
+    assert_eq!(
+        services.readiness.diagnostics,
+        vec![RebornReadinessDiagnostic::disabled()]
+    );
 }
 
 #[tokio::test]
@@ -899,6 +908,51 @@ async fn production_rejects_local_only_runtime_policy() {
         ),
         "local-only runtime policy should fail production wiring: {report:?}"
     );
+    let diagnostics = RebornReadinessDiagnostic::from_production_wiring_report(
+        RebornCompositionProfile::Production,
+        &report,
+    );
+    assert!(
+        RebornReadinessDiagnostic::from_production_wiring_report(
+            RebornCompositionProfile::LocalDev,
+            &report,
+        )
+        .is_empty(),
+        "production wiring reports should not produce production diagnostics for local-dev profiles"
+    );
+    assert!(
+        diagnostics.contains(
+            &RebornReadinessDiagnostic::production_blocker(
+                RebornCompositionProfile::Production,
+                RebornReadinessDiagnosticComponent::RuntimePolicy,
+                RebornReadinessDiagnosticReason::LocalOnly,
+            )
+            .expect("production profile should create a blocker")
+        ),
+        "runtime policy local-only issue should map to readiness diagnostics: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics.contains(
+            &RebornReadinessDiagnostic::production_blocker(
+                RebornCompositionProfile::Production,
+                RebornReadinessDiagnosticComponent::RuntimeProcessPort,
+                RebornReadinessDiagnosticReason::LocalOnly,
+            )
+            .expect("production profile should create a blocker")
+        ),
+        "runtime process port local-only issue should map to readiness diagnostics: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.status == RebornReadinessDiagnosticStatus::Blocking)
+    );
+    let serialized = serde_json::to_string(&diagnostics).unwrap();
+    assert!(!serialized.contains("LocalOnlyImplementation"));
+    assert!(!serialized.contains("EffectiveRuntimePolicy"));
+    assert!(!serialized.contains("ironclaw_"));
+    assert!(!serialized.contains("/root/"));
+    assert!(!serialized.contains("postgres://"));
 }
 
 #[cfg(feature = "libsql")]
@@ -1286,6 +1340,7 @@ async fn migration_dry_run_validates_libsql_shape() {
         services.readiness.state,
         RebornReadinessState::MigrationDryRunValidated
     );
+    assert!(services.readiness.diagnostics.is_empty());
     assert!(services.host_runtime.is_some());
     assert!(services.turn_coordinator.is_some());
 }

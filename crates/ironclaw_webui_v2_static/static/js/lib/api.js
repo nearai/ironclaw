@@ -68,6 +68,48 @@ async function parseErrorBody(response) {
   }
 }
 
+// Turn a snake_case / kebab-case wire token into a readable phrase, e.g.
+// `service_unavailable` -> "Service unavailable".
+function humanizeErrorToken(token) {
+  return String(token)
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .replace(/^\w/, (char) => char.toUpperCase());
+}
+
+// Derive a human-readable message from a WebChat v2 error response.
+//
+// The wire envelope (`ironclaw_webui_v2::WebUiV2HttpErrorBody`) carries only
+// snake_case enum codes — `kind` (the user-renderable family, e.g.
+// `service_unavailable`), `error` (a coarse code), and an optional
+// `validation_code` + `field` — never prose. Throwing the raw JSON body as the
+// error message means a dialog shows `{"error":"...","kind":"..."}`, which reads
+// as "no error" to a user. Humanize the most specific token instead, and only
+// fall back to a non-JSON body when it is short enough to be a real message.
+export function describeApiError({ payload, body, statusText } = {}) {
+  if (payload && typeof payload === "object") {
+    if (payload.validation_code) {
+      const base = humanizeErrorToken(payload.validation_code);
+      return payload.field ? `${base} (${payload.field})` : base;
+    }
+    const code = payload.kind || payload.error;
+    if (code) {
+      const base = humanizeErrorToken(code);
+      return payload.field ? `${base} (${payload.field})` : base;
+    }
+  }
+  const trimmed = (body || "").trim();
+  if (
+    trimmed &&
+    trimmed.length <= 200 &&
+    !trimmed.startsWith("{") &&
+    !trimmed.startsWith("[")
+  ) {
+    return trimmed;
+  }
+  return statusText || "Request failed";
+}
+
 export async function apiFetch(path, options = {}) {
   const token = readStoredToken();
   const headers = new Headers(options.headers || {});
@@ -87,13 +129,16 @@ export async function apiFetch(path, options = {}) {
 
   if (!response.ok) {
     const { text, payload } = await parseErrorBody(response);
-    throw new ApiError(text || response.statusText, {
-      status: response.status,
-      statusText: response.statusText,
-      body: text,
-      headers: response.headers,
-      payload,
-    });
+    throw new ApiError(
+      describeApiError({ payload, body: text, statusText: response.statusText }),
+      {
+        status: response.status,
+        statusText: response.statusText,
+        body: text,
+        headers: response.headers,
+        payload,
+      },
+    );
   }
 
   const contentType = response.headers.get("content-type") || "";

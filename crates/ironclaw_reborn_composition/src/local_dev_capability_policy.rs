@@ -273,6 +273,10 @@ impl<'a> LocalDevApprovalPolicyAction<'a> {
         }
     }
 
+    pub(crate) fn capability_id(&self) -> &CapabilityId {
+        self.capability()
+    }
+
     pub(crate) fn is_spawn_capability(&self) -> bool {
         matches!(self, Self::SpawnCapability { .. })
     }

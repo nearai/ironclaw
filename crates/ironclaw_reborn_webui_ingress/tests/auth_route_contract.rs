@@ -29,30 +29,12 @@
 
 #![cfg(feature = "dev-in-memory-session")]
 
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use axum::body::Body;
-use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product_workflow::{
-    LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
-};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
     RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
@@ -60,7 +42,6 @@ use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, InMemorySessionStore, OidcAuthenticator, OidcAuthenticatorConfig,
     SessionAuthenticator, SessionStore,
 };
-use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use secrecy::{ExposeSecret, SecretString};
 use tower::ServiceExt;
 
@@ -74,256 +55,12 @@ use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde_json::json;
 
-const TENANT: &str = "tenant-a";
-const AGENT: &str = "agent-default";
-const PROJECT: &str = "project-default";
+#[path = "support/harness.rs"]
+mod harness;
+use harness::{AGENT, PROJECT, StubServices, TENANT, with_peer};
+
 const ENV_TOKEN: &str = "operator-secret-token";
 const ENV_USER: &str = "operator-user";
-
-// ─── stub facade ──────────────────────────────────────────────────────
-
-/// `RebornServicesApi` stub — only `create_thread` records its caller
-/// (the protected route these tests drive) and `list_threads` returns
-/// an empty page defensively. Every other method panics or rejects so
-/// an accidental call surfaces loudly rather than masking a routing
-/// regression. Mirrors the stub in `session_round_trip.rs`.
-#[derive(Default)]
-struct StubServices {
-    create_thread_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
-    stream_events_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
-}
-
-#[async_trait]
-impl RebornServicesApi for StubServices {
-    async fn create_thread(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-        self.create_thread_callers
-            .lock()
-            .expect("lock")
-            .push(caller);
-        Ok(RebornCreateThreadResponse {
-            thread: SessionThreadRecord {
-                thread_id: ThreadId::new("thread.fake").expect("thread"),
-                scope: ThreadScope {
-                    tenant_id: TenantId::new(TENANT).expect("tenant"),
-                    agent_id: AgentId::new("agent.fake").expect("agent"),
-                    project_id: Some(ProjectId::new("project.fake").expect("project")),
-                    owner_user_id: Some(UserId::new("alice@example.com").expect("user")),
-                    mission_id: None,
-                },
-                created_by_actor_id: "alice@example.com".to_string(),
-                title: None,
-                metadata_json: None,
-                goal: None,
-            },
-        })
-    }
-
-    async fn submit_turn(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        unreachable!("test does not drive submit_turn")
-    }
-
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        unreachable!("test does not drive get_timeline")
-    }
-
-    async fn stream_events(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        // Record the caller so the `?token=` shim test can assert the
-        // query token was consumed as the session credential and stamped
-        // as that user — not merely that the route reached a 200. Returns
-        // an empty event page so the SSE route reaches 200 once auth
-        // passes.
-        self.stream_events_callers
-            .lock()
-            .expect("lock")
-            .push(caller);
-        Ok(RebornStreamEventsResponse { events: Vec::new() })
-    }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        unreachable!("test does not drive get_run_state")
-    }
-
-    async fn cancel_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        unreachable!("test does not drive cancel_run")
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        unreachable!("test does not drive resolve_gate")
-    }
-
-    async fn list_threads(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        Ok(RebornListThreadsResponse {
-            threads: Vec::new(),
-            next_cursor: None,
-        })
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        unreachable!("test does not drive delete_thread")
-    }
-
-    async fn list_automations(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn get_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_outbound_delivery_targets(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_extensions(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn search_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn install_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn read_skill_content(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn update_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn remove_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_extension_registry(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn install_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn activate_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn remove_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn setup_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-        _request: WebUiSetupExtensionRequest,
-    ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-}
 
 // ─── harness ──────────────────────────────────────────────────────────
 
@@ -366,16 +103,6 @@ fn session_app() -> (axum::Router, Arc<StubServices>, Arc<InMemorySessionStore>)
     let authenticator = Arc::new(SessionAuthenticator::new(store.clone()));
     let (app, services) = compose(authenticator);
     (app, services, store)
-}
-
-/// Tag a request with `ConnectInfo` so the descriptor-driven rate-limit
-/// middleware can resolve a peer address. Host composition injects this
-/// via `into_make_service_with_connect_info`; the `oneshot` harness has
-/// to do it explicitly. Mirrors `session_round_trip.rs::with_peer`.
-fn with_peer(mut req: Request<Body>) -> Request<Body> {
-    req.extensions_mut()
-        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
-    req
 }
 
 /// `POST /api/webchat/v2/threads` with an optional raw `Authorization`
@@ -614,6 +341,77 @@ fn callers_len(services: &Arc<StubServices>) -> usize {
     services.create_thread_callers.lock().expect("lock").len()
 }
 
+#[tokio::test]
+async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment() {
+    // v2 isolates tenants two ways: each deployment owns a separate
+    // `SessionStore`, and `caller.tenant_id` is always stamped from host
+    // config — never from the bearer. A session minted against tenant-a's
+    // store must therefore fail on a tenant-b deployment backed by its own
+    // (different) store: the lookup misses and the bearer is rejected. If
+    // the tenant binding were ever loosened to trust a shared store, this
+    // would catch it.
+    let tenant_a_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let bearer = tenant_a_store
+        .create_session(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new("session-user").expect("user"),
+            ChronoDuration::hours(1),
+        )
+        .await
+        .expect("create_session")
+        .expose_secret()
+        .to_string();
+
+    // A distinct deployment: tenant-b, its own empty store.
+    let tenant_b_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let authenticator = Arc::new(SessionAuthenticator::new(tenant_b_store.clone()));
+    let services = Arc::new(StubServices::default());
+    let bundle = RebornWebuiBundle {
+        api: services.clone(),
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let config = WebuiServeConfig::new(
+        TenantId::new("tenant-b").expect("tenant"),
+        authenticator,
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    let response = app
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"client_action_id":"act-1"}"#))
+                .expect("request"),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a tenant-a session must not authenticate on a tenant-b deployment's store",
+    );
+    assert!(
+        services
+            .create_thread_callers
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "a cross-deployment bearer must never reach the facade",
+    );
+    assert_eq!(
+        tenant_a_store.len(),
+        1,
+        "the tenant-a session stays intact in its own store",
+    );
+}
+
 // ─── query-token (`?token=`) shim ─────────────────────────────────────
 
 /// `GET /api/webchat/v2/threads/{id}/events` with an optional `?token=`
@@ -701,6 +499,73 @@ async fn query_token_honored_on_sse_events_route() {
         callers[0].tenant_id.as_str(),
         TENANT,
         "tenant comes from trusted host config, not the query token",
+    );
+}
+
+#[tokio::test]
+async fn query_token_wrong_token_rejected_on_sse_route() {
+    // The `?token=` shim must reject a wrong-but-non-empty token with a
+    // 401, exactly like the bearer header path. A regression that
+    // short-circuited an unknown query token to an unauthenticated
+    // default caller (instead of 401) would 200 with an empty stream and
+    // silently leak thread-id existence. Pairs with the no-token and
+    // valid-token cases in `query_token_honored_on_sse_events_route`.
+    let (app, services, _store) = session_app();
+    let response = app
+        .oneshot(sse_events_request(Some("wrong-but-non-empty-token")))
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a wrong `?token=` must 401, not fall through to an unauthenticated 200",
+    );
+    assert!(
+        services
+            .stream_events_callers
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "a rejected `?token=` must never reach the facade",
+    );
+}
+
+#[tokio::test]
+async fn expired_query_token_rejected_on_sse_route() {
+    // The `?token=` shim must honor session expiry at the route layer,
+    // not just the `Authorization: Bearer` path. If the shim were ever
+    // widened or the expiry check skipped on the query path, an expired
+    // session could keep streaming over `?token=` while bearer-header
+    // tests still pass. Mint a session that is already expired and
+    // present it through the query string.
+    let (app, services, store) = session_app();
+    let expired_bearer = store
+        .create_session(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new("session-user").expect("user"),
+            ChronoDuration::seconds(-1),
+        )
+        .await
+        .expect("create_session")
+        .expose_secret()
+        .to_string();
+
+    let response = app
+        .oneshot(sse_events_request(Some(&expired_bearer)))
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "an expired session presented via `?token=` must be rejected at the route layer",
+    );
+    assert!(
+        services
+            .stream_events_callers
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "an expired `?token=` must never reach the facade",
     );
 }
 
@@ -899,6 +764,9 @@ const OIDC_KID: &str = "route-test-key";
 /// Fresh RSA keypair: PKCS#8 PEM (for signing) + public key (for the JWK).
 fn generate_oidc_key() -> (String, RsaPublicKey) {
     let mut rng = rand::thread_rng();
+    // 2048-bit is required, not just preferred: `jsonwebtoken` rejects
+    // smaller RSA keys at sign time with `InvalidRsaKey("TooSmall")`, so
+    // a faster 1024-bit test key is not an option here.
     let private = RsaPrivateKey::new(&mut rng, 2048).expect("rsa gen");
     let pem = private
         .to_pkcs8_pem(LineEnding::LF)

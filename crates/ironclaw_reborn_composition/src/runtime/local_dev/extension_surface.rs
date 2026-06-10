@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, EffectKind, ExtensionId, GrantConstraints, MountView,
-    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
+    CapabilityGrant, CapabilityGrantId, CapabilityId, EffectKind, ExtensionId, GrantConstraints,
+    MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
@@ -90,6 +90,15 @@ impl LocalDevExtensionSurface {
                 constraints: Self::grant_constraints(capability),
             })
             .collect()
+    }
+
+    pub(in crate::runtime) fn capability(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Option<&ActiveExtensionCapability> {
+        self.active_capabilities
+            .iter()
+            .find(|capability| capability.id == *capability_id)
     }
 
     pub(super) fn provider_trust(&self) -> BTreeMap<ExtensionId, TrustDecision> {
@@ -180,7 +189,7 @@ fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPo
 mod tests {
     use super::*;
     use ironclaw_first_party_extensions::google_api_network_policy;
-    use ironclaw_host_api::CapabilityId;
+    use ironclaw_host_api::{CapabilityId, PermissionMode};
 
     #[test]
     fn web_access_search_gets_exa_mcp_network_target_without_credentials() {
@@ -188,6 +197,7 @@ mod tests {
             id: CapabilityId::new(WEB_SEARCH_CAPABILITY_ID).unwrap(),
             provider: ExtensionId::new(WEB_ACCESS_EXTENSION_ID).unwrap(),
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
         };
 
@@ -211,6 +221,7 @@ mod tests {
             id: CapabilityId::new(WEB_SEARCH_CAPABILITY_ID).unwrap(),
             provider: ExtensionId::new(WEB_ACCESS_EXTENSION_ID).unwrap(),
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Allow,
             runtime_credentials: vec![ironclaw_host_api::RuntimeCredentialRequirement {
                 handle: ironclaw_host_api::SecretHandle::new("exa_mcp_token").unwrap(),
                 source: ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle,
@@ -245,6 +256,7 @@ mod tests {
                 EffectKind::Network,
                 EffectKind::UseSecret,
             ],
+            default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
         };
 
@@ -264,6 +276,7 @@ mod tests {
                 EffectKind::Network,
                 EffectKind::UseSecret,
             ],
+            default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
         };
 

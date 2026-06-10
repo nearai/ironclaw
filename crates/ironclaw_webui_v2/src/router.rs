@@ -22,16 +22,17 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS,
     WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
     WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_LIST_SKILLS,
-    WEBUI_V2_PATTERN_OPERATOR_CONFIG, WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
-    WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS, WEBUI_V2_PATTERN_OPERATOR_LOGS,
-    WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE, WEBUI_V2_PATTERN_OPERATOR_SETUP,
-    WEBUI_V2_PATTERN_OPERATOR_STATUS, WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS,
-    WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES, WEBUI_V2_PATTERN_REMOVE_EXTENSION,
-    WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE,
-    WEBUI_V2_PATTERN_SET_ACTIVE_LLM, WEBUI_V2_PATTERN_SETUP_EXTENSION,
-    WEBUI_V2_PATTERN_SKILL_DETAIL, WEBUI_V2_PATTERN_START_CODEX_LOGIN,
-    WEBUI_V2_PATTERN_START_NEARAI_LOGIN, WEBUI_V2_PATTERN_STREAM_EVENTS,
-    WEBUI_V2_PATTERN_STREAM_EVENTS_WS, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG, WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE, WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS,
+    WEBUI_V2_PATTERN_OPERATOR_LOGS, WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE,
+    WEBUI_V2_PATTERN_OPERATOR_SETUP, WEBUI_V2_PATTERN_OPERATOR_STATUS,
+    WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS, WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
+    WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
+    WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
+    WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SKILL_DETAIL,
+    WEBUI_V2_PATTERN_START_CODEX_LOGIN, WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
+    WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
+    WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
 };
 use crate::handlers;
 use crate::sse_capacity::SseCapacity;
@@ -75,7 +76,6 @@ impl WebUiV2RouteOptions {
 pub struct WebUiV2State {
     services: Arc<dyn RebornServicesApi>,
     sse_capacity: Arc<SseCapacity>,
-    capabilities: WebUiV2Capabilities,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -86,13 +86,11 @@ pub struct WebUiV2Capabilities {
 impl WebUiV2State {
     pub fn new(
         services: Arc<dyn RebornServicesApi>,
-        capabilities: WebUiV2Capabilities,
         max_concurrent_streams_per_caller: usize,
     ) -> Self {
         Self {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
-            capabilities,
         }
     }
 
@@ -102,10 +100,6 @@ impl WebUiV2State {
 
     pub(crate) fn sse_capacity(&self) -> &Arc<SseCapacity> {
         &self.sse_capacity
-    }
-
-    pub(crate) fn capabilities(&self) -> WebUiV2Capabilities {
-        self.capabilities
     }
 }
 
@@ -246,7 +240,12 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             )
             .route(
                 WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
-                post(handlers::validate_operator_config),
+                get(handlers::reject_reserved_operator_config_key)
+                    .post(handlers::validate_operator_config),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,
+                get(handlers::get_operator_config_key).post(handlers::set_operator_config_key),
             )
             .route(
                 WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS,
