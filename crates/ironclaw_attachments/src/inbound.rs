@@ -7,28 +7,32 @@
 //! landed [`ScopedPath`]. `extracted_text` is left `None` here — document
 //! extraction and audio transcription run in a later pipeline stage.
 
-use ironclaw_common::{AttachmentKind, AttachmentRef};
+use ironclaw_common::{AttachmentRef, canonical_extension, kind_for_mime};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ResourceScope;
 
 use crate::landing::{AttachmentLanding, AttachmentLandingError, land_attachment};
 
+/// Canonical extension to synthesize a filename with when the MIME type is not
+/// in the attachment format registry.
+const UNKNOWN_EXTENSION: &str = "bin";
+
 /// One inbound attachment with its raw bytes, ready to be landed and turned
 /// into a transcript [`AttachmentRef`].
+///
+/// The attachment `kind` and the fallback filename extension are *derived from*
+/// `mime_type` against the [`ironclaw_common`] attachment format registry — the
+/// authoritative source — so callers cannot drift them out of sync with the
+/// MIME type they pass.
 #[derive(Debug, Clone)]
 pub struct InboundAttachment {
     /// Stable identifier for this attachment within its message.
     pub id: String,
-    /// Image / Audio / Document.
-    pub kind: AttachmentKind,
-    /// MIME type as received at the ingress boundary.
+    /// MIME type as received at the ingress boundary. The attachment kind and
+    /// fallback extension are derived from this.
     pub mime_type: String,
     /// Original filename, when the source provided one.
     pub filename: Option<String>,
-    /// Canonical extension (no dot) used to synthesize a filename when
-    /// `filename` is absent — typically resolved from the attachment format
-    /// registry by the caller.
-    pub fallback_extension: String,
     /// Raw attachment bytes to land in the project filesystem.
     pub bytes: Vec<u8>,
 }
@@ -59,18 +63,20 @@ where
     for (index, attachment) in attachments.into_iter().enumerate() {
         let InboundAttachment {
             id,
-            kind,
             mime_type,
             filename,
-            fallback_extension,
             bytes,
         } = attachment;
         let size_bytes = bytes.len() as u64;
+        // Derive kind and fallback extension from the MIME type so a ref's
+        // `kind` is always consistent with its `mime_type`.
+        let kind = kind_for_mime(&mime_type);
+        let fallback_extension = canonical_extension(&mime_type).unwrap_or(UNKNOWN_EXTENSION);
         let landing = AttachmentLanding {
             message_id,
             index,
             filename: filename.as_deref(),
-            fallback_extension: &fallback_extension,
+            fallback_extension,
         };
         let stored =
             land_attachment(filesystem, scope, project_alias, date, &landing, bytes).await?;
@@ -92,6 +98,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use ironclaw_common::AttachmentKind;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
         InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
@@ -127,19 +134,11 @@ mod tests {
         }
     }
 
-    fn inbound(
-        id: &str,
-        kind: AttachmentKind,
-        mime: &str,
-        filename: &str,
-        bytes: &[u8],
-    ) -> InboundAttachment {
+    fn inbound(id: &str, mime: &str, filename: &str, bytes: &[u8]) -> InboundAttachment {
         InboundAttachment {
             id: id.to_string(),
-            kind,
             mime_type: mime.to_string(),
             filename: Some(filename.to_string()),
-            fallback_extension: "bin".to_string(),
             bytes: bytes.to_vec(),
         }
     }
@@ -159,20 +158,8 @@ mod tests {
             "2026-06-09",
             "msg1",
             vec![
-                inbound(
-                    "att-0",
-                    AttachmentKind::Document,
-                    "application/pdf",
-                    "report.pdf",
-                    &doc_bytes,
-                ),
-                inbound(
-                    "att-1",
-                    AttachmentKind::Image,
-                    "image/png",
-                    "diagram.png",
-                    &img_bytes,
-                ),
+                inbound("att-0", "application/pdf", "report.pdf", &doc_bytes),
+                inbound("att-1", "image/png", "diagram.png", &img_bytes),
             ],
         )
         .await
@@ -191,6 +178,8 @@ mod tests {
         );
         assert!(refs[0].extracted_text.is_none());
 
+        // `kind` is derived from the MIME type, not supplied by the caller.
+        assert_eq!(refs[1].kind, AttachmentKind::Image);
         assert_eq!(
             refs[1].storage_key.as_deref(),
             Some("/workspace/attachments/2026-06-09/msg1-1-diagram.png")
@@ -223,20 +212,8 @@ mod tests {
             "2026-06-09",
             "msg1",
             vec![
-                inbound(
-                    "att-0",
-                    AttachmentKind::Document,
-                    "text/csv",
-                    "data.csv",
-                    b"a,b\n1,2",
-                ),
-                inbound(
-                    "att-1",
-                    AttachmentKind::Document,
-                    "text/csv",
-                    "data.csv",
-                    b"c,d\n3,4",
-                ),
+                inbound("att-0", "text/csv", "data.csv", b"a,b\n1,2"),
+                inbound("att-1", "text/csv", "data.csv", b"c,d\n3,4"),
             ],
         )
         .await
@@ -258,13 +235,7 @@ mod tests {
             DEFAULT_PROJECT_MOUNT_ALIAS,
             "2026-06-09",
             "msg1",
-            vec![inbound(
-                "att-0",
-                AttachmentKind::Document,
-                "application/pdf",
-                "report.pdf",
-                b"%PDF",
-            )],
+            vec![inbound("att-0", "application/pdf", "report.pdf", b"%PDF")],
         )
         .await
         .expect_err("a read-only project mount must reject the landing");
