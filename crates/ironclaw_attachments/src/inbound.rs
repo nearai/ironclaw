@@ -7,9 +7,9 @@
 //! landed [`ScopedPath`]. `extracted_text` is left `None` here — document
 //! extraction and audio transcription run in a later pipeline stage.
 
+use ironclaw_common::{AttachmentKind, AttachmentRef};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ResourceScope;
-use ironclaw_threads::{AttachmentKind, AttachmentRef};
 
 use crate::landing::{AttachmentLanding, AttachmentLandingError, land_attachment};
 

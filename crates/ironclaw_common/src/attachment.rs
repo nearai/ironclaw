@@ -54,6 +54,9 @@ impl AttachmentKind {
 }
 
 /// A file or media attachment on an incoming message.
+///
+/// See [`AttachmentRef`] for the durable, byte-free projection persisted on the
+/// transcript once the bytes have been landed in host-side storage.
 #[derive(Debug, Clone)]
 pub struct IncomingAttachment {
     /// Unique identifier within the channel (e.g., Telegram file_id).
@@ -78,6 +81,42 @@ pub struct IncomingAttachment {
     pub data: Vec<u8>,
     /// Duration in seconds (for audio/video).
     pub duration_secs: Option<u32>,
+}
+
+/// A reference to a single attachment carried alongside a durable transcript
+/// message.
+///
+/// This is the **durable, byte-free projection** of an [`IncomingAttachment`]:
+/// it is a *reference*, never the bytes. A durable transcript must not hold raw
+/// runtime payloads, host paths, or secrets, so an `AttachmentRef` deliberately
+/// drops `source_url` / `local_path` / `data` and carries only metadata plus an
+/// opaque `storage_key` (a rendered scoped path into host-side storage, not a
+/// raw host path) and the extracted/transcribed text once an extractor has run.
+/// The bytes live behind the filesystem authority that owns `storage_key`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AttachmentRef {
+    /// Stable identifier for this attachment within its message.
+    pub id: String,
+    /// Image / Audio / Document.
+    pub kind: AttachmentKind,
+    /// MIME type as received at the ingress boundary. Validated upstream
+    /// against the attachment format registry; stored verbatim here.
+    pub mime_type: String,
+    /// Original filename, when the source provided one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// File size in bytes, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// Opaque storage reference for the bytes (a rendered scoped path into
+    /// host-side storage, never a raw host path). `None` until the attachment
+    /// has been landed in storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_key: Option<String>,
+    /// Extracted document text or audio transcript, once an extractor has run.
+    /// Sanitized external data; never raw bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extracted_text: Option<String>,
 }
 
 #[cfg(test)]

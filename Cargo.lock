@@ -4137,9 +4137,9 @@ dependencies = [
 name = "ironclaw_attachments"
 version = "0.1.0"
 dependencies = [
+ "ironclaw_common",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_threads",
  "thiserror 2.0.18",
  "tokio",
 ]
