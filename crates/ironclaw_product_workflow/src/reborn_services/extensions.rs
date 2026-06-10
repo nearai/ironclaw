@@ -194,7 +194,7 @@ async fn lifecycle_extension_infos(
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     caller: WebUiAuthenticatedCaller,
 ) -> Result<Vec<RebornExtensionInfo>, RebornServicesError> {
-    let resolved = stream::iter(installed.into_iter())
+    let resolved = stream::iter(installed)
         .map(|installed| {
             let caller = caller.clone();
             let extension_credentials = extension_credentials.clone();
