@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const POLICY_PREFIX: &str = "/approvals/persistent";
+const POLICY_PATH_CACHE_MAX_ENTRIES: usize = 1024;
 
 pub fn permission_mode_allows_persistent_approval(permission: PermissionMode) -> bool {
     matches!(permission, PermissionMode::Allow)
@@ -189,6 +190,12 @@ pub trait PersistentApprovalPolicyStore: Send + Sync {
         &self,
         key: &PersistentApprovalPolicyKey,
     ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError>;
+
+    async fn revoke_if_source_approval_request(
+        &self,
+        key: &PersistentApprovalPolicyKey,
+        source_approval_request_id: ApprovalRequestId,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError>;
 }
 
 #[derive(Debug, Default)]
@@ -267,6 +274,27 @@ impl PersistentApprovalPolicyStore for InMemoryPersistentApprovalPolicyStore {
         policy.revoked_at = Some(now);
         policy.updated_at = now;
         Ok(policy.clone())
+    }
+
+    async fn revoke_if_source_approval_request(
+        &self,
+        key: &PersistentApprovalPolicyKey,
+        source_approval_request_id: ApprovalRequestId,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        let mut policies = self
+            .policies
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let policy = policies
+            .get_mut(key)
+            .ok_or(PersistentApprovalPolicyError::UnknownPolicy)?;
+        if policy.source_approval_request_id != Some(source_approval_request_id) {
+            return Ok(None);
+        }
+        let now = Utc::now();
+        policy.revoked_at = Some(now);
+        policy.updated_at = now;
+        Ok(Some(policy.clone()))
     }
 }
 
@@ -375,6 +403,34 @@ where
             .await?;
         Ok(policy)
     }
+
+    async fn revoke_if_source_approval_request(
+        &self,
+        key: &PersistentApprovalPolicyKey,
+        source_approval_request_id: ApprovalRequestId,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        let (mut policy, version) = self
+            .lookup_versioned(key)
+            .await?
+            .ok_or(PersistentApprovalPolicyError::UnknownPolicy)?;
+        if policy.source_approval_request_id != Some(source_approval_request_id) {
+            return Ok(None);
+        }
+        let now = Utc::now();
+        policy.revoked_at = Some(now);
+        policy.updated_at = now;
+        let scope = resource_scope_for_policy_key(key);
+        let path = self.cached_policy_path(key)?;
+        self.filesystem
+            .put(
+                &scope,
+                &path,
+                Self::record_entry(&policy)?,
+                CasExpectation::Version(version),
+            )
+            .await?;
+        Ok(Some(policy))
+    }
 }
 
 impl<F> FilesystemPersistentApprovalPolicyStore<F>
@@ -413,7 +469,14 @@ where
             .path_cache
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(cache.entry(key.clone()).or_insert(path).clone())
+        if let Some(path) = cache.get(key).cloned() {
+            return Ok(path);
+        }
+        if cache.len() >= POLICY_PATH_CACHE_MAX_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(key.clone(), path.clone());
+        Ok(path)
     }
 }
 
@@ -584,6 +647,55 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn filesystem_policy_store_bounds_policy_path_cache() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_fs(backend, "tenant-a", "alice");
+        let store = FilesystemPersistentApprovalPolicyStore::new(scoped);
+
+        for index in 0..(POLICY_PATH_CACHE_MAX_ENTRIES + 2) {
+            store
+                .allow(input(scope(None, Some(&format!("thread-{index}")))))
+                .await
+                .expect("allow policy");
+        }
+
+        assert!(
+            store
+                .path_cache
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len()
+                <= POLICY_PATH_CACHE_MAX_ENTRIES
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_if_source_approval_request_preserves_newer_policy() {
+        let store = InMemoryPersistentApprovalPolicyStore::new();
+        let scope = scope(None, Some("thread-a"));
+        let key = key_for(&scope);
+        let first_source = ApprovalRequestId::new();
+        let second_source = ApprovalRequestId::new();
+
+        let mut first = input(scope.clone());
+        first.source_approval_request_id = Some(first_source);
+        store.allow(first).await.expect("allow first policy");
+        let mut second = input(scope);
+        second.source_approval_request_id = Some(second_source);
+        store.allow(second).await.expect("allow second policy");
+
+        let revoked = store
+            .revoke_if_source_approval_request(&key, first_source)
+            .await
+            .expect("conditional revoke");
+
+        assert!(revoked.is_none());
+        let current = store.lookup(&key).await.expect("lookup").expect("policy");
+        assert_eq!(current.source_approval_request_id, Some(second_source));
+        assert!(current.active_grant().is_some());
     }
 
     #[tokio::test]

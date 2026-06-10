@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
-    DenyApproval, PersistentApprovalAction, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    DenyApproval, PersistentApprovalAction, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
 };
 use ironclaw_host_api::{Action, Principal};
 use ironclaw_run_state::ApprovalStatus;
@@ -74,6 +74,11 @@ pub struct DefaultApprovalInteractionService {
 enum ApprovalCapabilityAction {
     Dispatch,
     Spawn,
+}
+
+struct PersistedAllowPolicy {
+    key: PersistentApprovalPolicyKey,
+    source_approval_request_id: ironclaw_host_api::ApprovalRequestId,
 }
 
 impl ApprovalCapabilityAction {
@@ -233,7 +238,7 @@ impl DefaultApprovalInteractionService {
         request: &ResolveApprovalInteractionRequest,
         gate: &ApprovalGateRecord,
         terms: ironclaw_approvals::LeaseApproval,
-    ) -> Result<PersistentApprovalPolicyKey, ProductWorkflowError> {
+    ) -> Result<PersistedAllowPolicy, ProductWorkflowError> {
         let Some(persistent_policies) = self.persistent_policies.as_ref() else {
             return Err(approval_rejected(
                 ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
@@ -265,7 +270,10 @@ impl DefaultApprovalInteractionService {
                 source_approval_request_id: Some(gate.request().id),
             })
             .await
-            .map(|policy| policy.key)
+            .map(|policy| PersistedAllowPolicy {
+                key: policy.key,
+                source_approval_request_id: gate.request().id,
+            })
             .map_err(|error| {
                 tracing::warn!(
                     error = %error,
@@ -278,17 +286,39 @@ impl DefaultApprovalInteractionService {
             })
     }
 
-    async fn rollback_persistent_allow_policy(&self, key: &PersistentApprovalPolicyKey) {
+    async fn rollback_persistent_allow_policy(&self, persisted: &PersistedAllowPolicy) {
         let Some(persistent_policies) = self.persistent_policies.as_ref() else {
             return;
         };
-        if let Err(error) = persistent_policies.revoke(key).await {
-            tracing::warn!(
-                error = %error,
-                capability_id = %key.capability_id,
-                action = ?key.action,
-                "persistent approval policy rollback failed"
-            );
+        match persistent_policies
+            .revoke_if_source_approval_request(&persisted.key, persisted.source_approval_request_id)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                tracing::debug!(
+                    capability_id = %persisted.key.capability_id,
+                    action = ?persisted.key.action,
+                    source_approval_request_id = %persisted.source_approval_request_id,
+                    "persistent approval policy rollback skipped because policy source changed"
+                );
+            }
+            Err(PersistentApprovalPolicyError::CasConflict) => {
+                tracing::debug!(
+                    capability_id = %persisted.key.capability_id,
+                    action = ?persisted.key.action,
+                    source_approval_request_id = %persisted.source_approval_request_id,
+                    "persistent approval policy rollback skipped because policy changed concurrently"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    capability_id = %persisted.key.capability_id,
+                    action = ?persisted.key.action,
+                    "persistent approval policy rollback failed"
+                );
+            }
         }
     }
 

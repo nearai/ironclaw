@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::{
     DenyApproval, InMemoryPersistentApprovalPolicyStore, LeaseApproval, PersistentApprovalAction,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
 };
 use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStore, InMemoryCapabilityLeaseStore,
@@ -325,6 +325,79 @@ impl ApprovalResolutionPort for FailingApprovalResolver {
         _request_id: ApprovalRequestId,
         _approval: LeaseApproval,
     ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Err(resolver_failure())
+    }
+
+    async fn approve_spawn(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+        _approval: LeaseApproval,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Err(resolver_failure())
+    }
+
+    async fn ensure_dispatch_lease(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+        _approval: LeaseApproval,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Err(resolver_failure())
+    }
+
+    async fn ensure_spawn_lease(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+        _approval: LeaseApproval,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Err(resolver_failure())
+    }
+
+    async fn deny(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+        _denial: DenyApproval,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Err(resolver_failure())
+    }
+}
+
+struct ReplacingThenFailingApprovalResolver {
+    policies: Arc<InMemoryPersistentApprovalPolicyStore>,
+    replacement_source: ApprovalRequestId,
+}
+
+#[async_trait]
+impl ApprovalResolutionPort for ReplacingThenFailingApprovalResolver {
+    async fn approve_dispatch(
+        &self,
+        scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+        _approval: LeaseApproval,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        self.policies
+            .allow(PersistentApprovalPolicyInput {
+                scope: scope.clone(),
+                action: PersistentApprovalAction::Dispatch,
+                capability_id: CapabilityId::new("demo.echo").expect("capability"),
+                grantee: Principal::User(UserId::new("user-alpha").expect("user")),
+                approved_by: Principal::User(UserId::new("user-alpha").expect("user")),
+                constraints: ironclaw_host_api::GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+                source_approval_request_id: Some(self.replacement_source),
+            })
+            .await
+            .expect("replace persistent policy");
         Err(resolver_failure())
     }
 
@@ -851,6 +924,78 @@ async fn always_allow_rolls_back_persistent_policy_when_resolution_fails() {
         .expect("persistent policy rollback marker");
     assert!(policy.revoked_at.is_some());
     assert!(policy.active_grant().is_none());
+}
+
+#[tokio::test]
+async fn always_allow_rollback_preserves_newer_policy_source() {
+    let request = approval_request("send the email");
+    let capability = match request.action.as_ref() {
+        Action::Dispatch { capability, .. } => capability.clone(),
+        _ => panic!("test request should be dispatch"),
+    };
+    let actor = actor("user-alpha");
+    let policy_scope = resource_scope(&actor);
+    let key = PersistentApprovalPolicyKey::new(
+        &policy_scope,
+        PersistentApprovalAction::Dispatch,
+        capability,
+        Principal::User(UserId::new("user-alpha").expect("user")),
+    )
+    .expect("persistent policy key");
+    let gate_ref = approval_gate_ref(request.id).expect("gate ref");
+    let run_id = TurnRunId::new();
+    let gate = ApprovalGateRecord::with_status(
+        policy_scope,
+        run_id,
+        gate_ref.clone(),
+        request,
+        ApprovalStatus::Pending,
+    )
+    .expect("approval gate");
+    let coordinator = Arc::new(FakeTurnCoordinator::blocked(
+        actor.clone(),
+        gate_ref.clone(),
+    ));
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let replacement_source = ApprovalRequestId::new();
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let service = DefaultApprovalInteractionService::new(
+        Arc::new(FakeReadModel::with_gate(gate)),
+        Arc::new(FixedLeaseTermsProvider),
+        Arc::new(ReplacingThenFailingApprovalResolver {
+            policies: policies.clone(),
+            replacement_source,
+        }),
+        coordinator.clone(),
+    )
+    .with_persistent_policy_store(policy_store);
+
+    let err = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new("approve-always-newer-policy")
+                .expect("idempotency"),
+        })
+        .await
+        .expect_err("resolver failure");
+
+    assert!(matches!(
+        err,
+        ironclaw_product_workflow::ProductWorkflowError::Transient { .. }
+    ));
+    assert_eq!(coordinator.resumption_count(), 0);
+    let policy = policies
+        .lookup(&key)
+        .await
+        .expect("persistent policy lookup")
+        .expect("newer persistent policy");
+    assert_eq!(policy.source_approval_request_id, Some(replacement_source));
+    assert!(policy.revoked_at.is_none());
+    assert!(policy.active_grant().is_some());
 }
 
 #[tokio::test]

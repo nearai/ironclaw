@@ -30,10 +30,10 @@ use ironclaw_capabilities::{
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
-    PackageSource, Principal, ResourceScope, RuntimeCredentialAuthRequirement,
-    RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy,
-    sha256_digest_token,
+    ApprovalRequestId, CapabilityDispatcher, CapabilityId, Decision, DispatchFailureKind,
+    InvocationId, PackageSource, Principal, ResourceEstimate, ResourceScope,
+    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+    runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
@@ -377,6 +377,8 @@ impl HostRuntime for DefaultHostRuntime {
             &registry,
             PersistentApprovalAction::Dispatch,
             &capability_id,
+            &estimate,
+            &trust_decision,
         )
         .await;
         let host = self.capability_host(&registry);
@@ -458,6 +460,8 @@ impl HostRuntime for DefaultHostRuntime {
             &registry,
             PersistentApprovalAction::SpawnCapability,
             &capability_id,
+            &estimate,
+            &trust_decision,
         )
         .await;
         let host = self.capability_host(&registry);
@@ -965,6 +969,8 @@ impl DefaultHostRuntime {
         registry: &ExtensionRegistry,
         action: PersistentApprovalAction,
         capability_id: &CapabilityId,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
     ) {
         let Some(policies) = self.persistent_approval_policies.as_ref() else {
             return;
@@ -1022,6 +1028,49 @@ impl DefaultHostRuntime {
             let Some(grant) = policy.active_grant() else {
                 continue;
             };
+            let mut candidate_context = context.clone();
+            candidate_context.grants.grants.clear();
+            candidate_context.grants.grants.push(grant.clone());
+            let decision = match action {
+                PersistentApprovalAction::Dispatch => {
+                    self.authorizer
+                        .authorize_dispatch_with_trust(
+                            &candidate_context,
+                            descriptor,
+                            estimate,
+                            trust_decision,
+                        )
+                        .await
+                }
+                PersistentApprovalAction::SpawnCapability => {
+                    self.authorizer
+                        .authorize_spawn_with_trust(
+                            &candidate_context,
+                            descriptor,
+                            estimate,
+                            trust_decision,
+                        )
+                        .await
+                }
+            };
+            match decision {
+                Decision::Allow { .. } => {}
+                Decision::Deny { reason } => {
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        deny_reason = ?reason,
+                        "persistent approval policy matched but cannot authorize invocation"
+                    );
+                    continue;
+                }
+                Decision::RequireApproval { .. } => {
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        "persistent approval policy matched but still requires approval"
+                    );
+                    continue;
+                }
+            }
             tracing::debug!(
                 capability_id = %capability_id,
                 "persistent approval policy matched; injecting scoped grant"
