@@ -215,6 +215,7 @@ async fn webui_event_stream_projects_approval_gate_prompt() {
                     && prompt.gate_ref == gate_ref.as_str()
                     && prompt.headline == "Approval required"
                     && prompt.body == "capability requires approval"
+                    && prompt.allow_always
         )
     }));
 }

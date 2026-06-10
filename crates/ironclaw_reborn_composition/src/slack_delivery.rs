@@ -248,6 +248,7 @@ impl SlackFinalReplyDeliveryObserver {
                         headline: "Approval needed".to_string(),
                         body: "A step in the workflow requires your approval to resume."
                             .to_string(),
+                        allow_always: true,
                     }),
                 }
             }

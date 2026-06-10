@@ -348,13 +348,17 @@ async fn blocked_prompt_payload(
             .await?;
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
-        TurnStatus::BlockedApproval => {
-            Ok(Some(gate_prompt(event, gate_ref_str, "Approval required")))
-        }
+        TurnStatus::BlockedApproval => Ok(Some(gate_prompt(
+            event,
+            gate_ref_str,
+            "Approval required",
+            true,
+        ))),
         TurnStatus::BlockedResource => Ok(Some(gate_prompt(
             event,
             gate_ref_str,
             "Resource unavailable",
+            false,
         ))),
         // Non-blocked statuses: no prompt payload. Exhaustive match so a new
         // TurnStatus variant forces a compile error and an explicit decision.
@@ -373,6 +377,7 @@ fn gate_prompt(
     event: &TurnLifecycleEvent,
     gate_ref: String,
     headline: &'static str,
+    allow_always: bool,
 ) -> ProductOutboundPayload {
     ProductOutboundPayload::GatePrompt(GatePromptView {
         turn_run_id: event.run_id,
@@ -382,6 +387,7 @@ fn gate_prompt(
             .sanitized_reason
             .clone()
             .unwrap_or_else(|| "Resolve this gate to continue the run.".to_string()),
+        allow_always,
     })
 }
 

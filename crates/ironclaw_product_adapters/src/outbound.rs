@@ -564,6 +564,8 @@ pub struct GatePromptView {
     pub gate_ref: String,
     pub headline: String,
     pub body: String,
+    #[serde(default)]
+    pub allow_always: bool,
 }
 
 /// Discriminator for the kind of auth challenge surfaced in an `AuthPromptView`.
@@ -653,6 +655,8 @@ pub enum ProductProjectionItem {
     Gate {
         gate_ref: String,
         headline: String,
+        #[serde(default)]
+        allow_always: bool,
     },
     SkillActivation {
         id: String,
@@ -698,7 +702,9 @@ impl ProductProjectionItem {
                 }
                 Ok(())
             }
-            Self::Gate { gate_ref, headline } => {
+            Self::Gate {
+                gate_ref, headline, ..
+            } => {
                 validate_bounded_text(
                     "projection_gate_ref",
                     gate_ref,
@@ -785,6 +791,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
             Gate {
                 gate_ref: String,
                 headline: String,
+                #[serde(default)]
+                allow_always: bool,
             },
             SkillActivation {
                 id: String,
@@ -826,7 +834,15 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                     .map_err(serde::de::Error::custom)?,
                 failure_summary,
             },
-            Wire::Gate { gate_ref, headline } => ProductProjectionItem::Gate { gate_ref, headline },
+            Wire::Gate {
+                gate_ref,
+                headline,
+                allow_always,
+            } => ProductProjectionItem::Gate {
+                gate_ref,
+                headline,
+                allow_always,
+            },
             Wire::SkillActivation {
                 id,
                 run_id,
