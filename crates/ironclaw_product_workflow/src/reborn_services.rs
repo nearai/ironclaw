@@ -574,10 +574,10 @@ fn validate_llm_base_url(base_url: Option<&str>) -> Result<(), RebornServicesErr
     if host.eq_ignore_ascii_case("localhost") {
         return Err(operator_setup_validation_error("base_url"));
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if forbidden_llm_base_url_ip(ip) {
-            return Err(operator_setup_validation_error("base_url"));
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && forbidden_llm_base_url_ip(ip)
+    {
+        return Err(operator_setup_validation_error("base_url"));
     }
     Ok(())
 }
