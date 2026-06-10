@@ -1547,7 +1547,6 @@ fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -
     let mut grantees = vec![
         Principal::Extension(context.extension_id.clone()),
         Principal::User(context.user_id.clone()),
-        Principal::Tenant(context.tenant_id.clone()),
     ];
     if let Some(agent_id) = &context.agent_id {
         grantees.push(Principal::Agent(agent_id.clone()));

@@ -160,6 +160,11 @@ impl DefaultApprovalInteractionService {
                 ApprovalInteractionRejectionKind::StaleGate,
             ));
         }
+        if persistent && status != ApprovalStatus::Pending {
+            return Err(approval_rejected(
+                ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
+            ));
+        }
         let mut terms = self.lease_terms_provider.lease_terms_for(&gate).await?;
         terms.issued_by = Principal::User(request.actor.user_id.clone());
         let persistent_policy = if persistent && status == ApprovalStatus::Pending {
@@ -282,6 +287,7 @@ impl DefaultApprovalInteractionService {
             return;
         };
         if let Err(error) = persistent_policies.allow(policy.input).await {
+            // silent-ok: turn already resumed; next invocation re-prompts if lookup misses.
             tracing::warn!(
                 error = %error,
                 capability_id = %policy.key.capability_id,
@@ -428,7 +434,9 @@ impl ApprovalInteractionService for DefaultApprovalInteractionService {
                 BlockedGateState::NotParkedOnGate,
                 ApprovalStatus::Approved,
                 ApprovalInteractionDecision::AlwaysAllow,
-            ) => self.replay_approved_gate(request, run_id).await,
+            ) => Err(approval_rejected(
+                ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
+            )),
             (
                 BlockedGateState::NotParkedOnGate,
                 ApprovalStatus::Denied,

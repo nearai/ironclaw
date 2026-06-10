@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::{
     DenyApproval, InMemoryPersistentApprovalPolicyStore, LeaseApproval, PersistentApprovalAction,
-    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
 };
 use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStore, InMemoryCapabilityLeaseStore,
@@ -365,6 +366,42 @@ impl ApprovalResolutionPort for FailingApprovalResolver {
     }
 }
 
+struct FailingPersistentApprovalPolicyStore;
+
+#[async_trait]
+impl PersistentApprovalPolicyStore for FailingPersistentApprovalPolicyStore {
+    async fn allow(
+        &self,
+        _input: PersistentApprovalPolicyInput,
+    ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
+        Err(PersistentApprovalPolicyError::Filesystem(
+            "policy store unavailable".to_string(),
+        ))
+    }
+
+    async fn lookup(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        Ok(None)
+    }
+
+    async fn revoke(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+    ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
+        Err(PersistentApprovalPolicyError::UnknownPolicy)
+    }
+
+    async fn revoke_if_source_approval_request(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+        _source_approval_request_id: ApprovalRequestId,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        Ok(None)
+    }
+}
+
 fn resolver_failure() -> ironclaw_product_workflow::ProductWorkflowError {
     ironclaw_product_workflow::ProductWorkflowError::Transient {
         reason: "approval resolver unavailable".to_string(),
@@ -713,6 +750,34 @@ async fn always_allow_without_policy_store_rejects_before_approval_side_effects(
     assert_eq!(resolver.approval_count(), 0);
     assert_eq!(resolver.spawn_approval_count(), 0);
     assert_eq!(coordinator.resumption_count(), 0);
+}
+
+#[tokio::test]
+async fn always_allow_policy_write_failure_still_returns_approved_after_resume() {
+    let (service, resolver, coordinator, run_id, gate_ref) = service_fixture("send the email");
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> =
+        Arc::new(FailingPersistentApprovalPolicyStore);
+    let service = service.with_persistent_policy_store(policy_store);
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new("approve-always-store-fails")
+                .expect("idempotency"),
+        })
+        .await
+        .expect("always allow best-effort persistence");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Approved(_)
+    ));
+    assert_eq!(resolver.approval_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
 }
 
 #[tokio::test]
@@ -1070,7 +1135,7 @@ async fn already_approved_replay_reaches_turn_coordinator_when_run_is_not_parked
 }
 
 #[tokio::test]
-async fn already_approved_always_allow_replays_without_persisting_policy() {
+async fn already_approved_always_allow_replay_rejects_without_persisting_policy() {
     let request = approval_request("send the email");
     let capability = match request.action.as_ref() {
         Action::Dispatch { capability, .. } => capability.clone(),
@@ -1091,7 +1156,7 @@ async fn already_approved_always_allow_replays_without_persisting_policy() {
     let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
     let service = service.with_persistent_policy_store(policy_store);
 
-    let response = service
+    let err = service
         .resolve(ResolveApprovalInteractionRequest {
             scope: scope(),
             actor: actor("user-alpha"),
@@ -1101,15 +1166,17 @@ async fn already_approved_always_allow_replays_without_persisting_policy() {
             idempotency_key: IdempotencyKey::new("replay-approved-always").expect("idempotency"),
         })
         .await
-        .expect("replay approved always allow");
+        .expect_err("replay approved always allow");
 
     assert!(matches!(
-        response,
-        ResolveApprovalInteractionResponse::Approved(_)
+        err,
+        ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
+        }
     ));
     assert_eq!(resolver.approval_count(), 0);
     assert_eq!(resolver.dispatch_lease_retry_count(), 0);
-    assert_eq!(coordinator.resumption_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 0);
     assert!(
         policies
             .lookup(&key)

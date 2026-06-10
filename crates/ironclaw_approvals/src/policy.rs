@@ -177,6 +177,10 @@ pub struct PersistentApprovalPolicyInput {
 
 #[async_trait]
 pub trait PersistentApprovalPolicyStore: Send + Sync {
+    /// Creates or refreshes a reusable persistent approval policy.
+    ///
+    /// `max_invocations` is always cleared; persistent policies are
+    /// unlimited-use by design.
     async fn allow(
         &self,
         input: PersistentApprovalPolicyInput,
@@ -192,6 +196,9 @@ pub trait PersistentApprovalPolicyStore: Send + Sync {
         key: &PersistentApprovalPolicyKey,
     ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError>;
 
+    /// Revokes only when the current policy came from the provided approval
+    /// request. Returns `Ok(None)` when the policy is absent or has a different
+    /// source request.
     async fn revoke_if_source_approval_request(
         &self,
         key: &PersistentApprovalPolicyKey,
@@ -286,9 +293,9 @@ impl PersistentApprovalPolicyStore for InMemoryPersistentApprovalPolicyStore {
             .policies
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let policy = policies
-            .get_mut(key)
-            .ok_or(PersistentApprovalPolicyError::UnknownPolicy)?;
+        let Some(policy) = policies.get_mut(key) else {
+            return Ok(None);
+        };
         if policy.source_approval_request_id != Some(source_approval_request_id) {
             return Ok(None);
         }
@@ -427,10 +434,9 @@ where
         let lock = self.mutation_lock(key);
         let _guard = lock.lock().await;
         for _ in 0..POLICY_CAS_RETRY_ATTEMPTS {
-            let (mut policy, version) = self
-                .lookup_versioned(key)
-                .await?
-                .ok_or(PersistentApprovalPolicyError::UnknownPolicy)?;
+            let Some((mut policy, version)) = self.lookup_versioned(key).await? else {
+                return Ok(None);
+            };
             if policy.source_approval_request_id != Some(source_approval_request_id) {
                 return Ok(None);
             }
@@ -468,9 +474,12 @@ where
     }
 
     fn mutation_lock(&self, key: &PersistentApprovalPolicyKey) -> Arc<tokio::sync::Mutex<()>> {
-        self.mutation_locks
+        let mut locks = self
+            .mutation_locks
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        locks
             .entry(key.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
@@ -491,6 +500,10 @@ where
         {
             Ok(_) => Ok(()),
             Err(FilesystemError::Unsupported { .. }) => {
+                tracing::warn!(
+                    path = %path,
+                    "persistent approval policy store does not support versioned CAS; falling back to unconditional write"
+                );
                 let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
                 self.filesystem
                     .put(scope, path, opaque, CasExpectation::Any)
@@ -524,8 +537,10 @@ where
         if let Some(path) = cache.get(key).cloned() {
             return Ok(path);
         }
-        if cache.len() >= POLICY_PATH_CACHE_MAX_ENTRIES {
-            cache.clear();
+        if cache.len() >= POLICY_PATH_CACHE_MAX_ENTRIES
+            && let Some(evicted) = cache.keys().next().cloned()
+        {
+            cache.remove(&evicted);
         }
         cache.insert(key.clone(), path.clone());
         Ok(path)
@@ -540,6 +555,11 @@ fn deserialize_versioned_policy(
     if &policy.key == key {
         Ok(Some((policy, versioned.version)))
     } else {
+        tracing::error!(
+            stored = ?policy.key,
+            expected = ?key,
+            "persistent approval policy key mismatch"
+        );
         Ok(None)
     }
 }
@@ -579,6 +599,7 @@ fn policy_digest(
 ) -> Result<String, PersistentApprovalPolicyError> {
     let bytes = serde_json::to_vec(key).map_err(serialization)?;
     let digest = sha256_digest_token(&bytes);
+    // Safety: sha256_digest_token always returns "sha256:<hex>".
     Ok(digest
         .strip_prefix("sha256:")
         .unwrap_or(digest.as_str())
@@ -767,6 +788,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_policy_store_evicts_idle_mutation_locks() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_fs(backend, "tenant-a", "alice");
+        let store = FilesystemPersistentApprovalPolicyStore::new(scoped);
+
+        store
+            .allow(input(scope(None, Some("thread-a"))))
+            .await
+            .expect("allow first policy");
+        store
+            .allow(input(scope(None, Some("thread-b"))))
+            .await
+            .expect("allow second policy");
+
+        assert!(
+            store
+                .mutation_locks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len()
+                <= 1
+        );
+    }
+
+    #[tokio::test]
     async fn revoke_if_source_approval_request_preserves_newer_policy() {
         let store = InMemoryPersistentApprovalPolicyStore::new();
         let scope = scope(None, Some("thread-a"));
@@ -790,6 +836,63 @@ mod tests {
         let current = store.lookup(&key).await.expect("lookup").expect("policy");
         assert_eq!(current.source_approval_request_id, Some(second_source));
         assert!(current.active_grant().is_some());
+    }
+
+    #[tokio::test]
+    async fn revoke_if_source_approval_request_returns_none_for_absent_policy() {
+        let scope = scope(None, Some("thread-a"));
+        let key = key_for(&scope);
+        let source = ApprovalRequestId::new();
+
+        let in_memory = InMemoryPersistentApprovalPolicyStore::new();
+        assert!(
+            in_memory
+                .revoke_if_source_approval_request(&key, source)
+                .await
+                .expect("conditional revoke")
+                .is_none()
+        );
+
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_fs(backend, "tenant-a", "alice");
+        let filesystem = FilesystemPersistentApprovalPolicyStore::new(scoped);
+        assert!(
+            filesystem
+                .revoke_if_source_approval_request(&key, source)
+                .await
+                .expect("conditional revoke")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_revoke_if_source_approval_request_revokes_matching_source() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_fs(backend, "tenant-a", "alice");
+        let store = FilesystemPersistentApprovalPolicyStore::new(scoped);
+        let scope = scope(None, Some("thread-a"));
+        let key = key_for(&scope);
+        let source = ApprovalRequestId::new();
+        let mut input = input(scope);
+        input.source_approval_request_id = Some(source);
+
+        store.allow(input).await.expect("allow policy");
+        let revoked = store
+            .revoke_if_source_approval_request(&key, source)
+            .await
+            .expect("conditional revoke")
+            .expect("revoked policy");
+
+        assert!(revoked.active_grant().is_none());
+        assert!(
+            store
+                .lookup(&key)
+                .await
+                .expect("lookup revoked policy")
+                .expect("policy")
+                .active_grant()
+                .is_none()
+        );
     }
 
     #[tokio::test]

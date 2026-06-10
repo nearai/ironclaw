@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::{
-    InMemoryPersistentApprovalPolicyStore, PersistentApprovalAction, PersistentApprovalPolicyInput,
+    InMemoryPersistentApprovalPolicyStore, PersistentApprovalAction, PersistentApprovalPolicy,
+    PersistentApprovalPolicyError, PersistentApprovalPolicyInput, PersistentApprovalPolicyKey,
     PersistentApprovalPolicyStore,
 };
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
@@ -156,6 +157,70 @@ async fn default_runtime_uses_user_grantee_persistent_policy_as_dispatch_authori
 }
 
 #[tokio::test]
+async fn default_runtime_does_not_replay_tenant_grantee_persistent_policy() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let context = execution_context_without_grants();
+    policies
+        .allow(PersistentApprovalPolicyInput {
+            scope: context.resource_scope.clone(),
+            action: PersistentApprovalAction::Dispatch,
+            capability_id: capability_id(),
+            grantee: Principal::Tenant(context.tenant_id.clone()),
+            approved_by: Principal::User(context.user_id.clone()),
+            constraints: GrantConstraints {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+            source_approval_request_id: None,
+        })
+        .await
+        .expect("seed tenant persistent policy");
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_run_state(run_state)
+    .with_approval_requests(approval_requests)
+    .with_persistent_approval_policies(policy_store);
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "hello"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.capability_id, capability_id());
+            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+        }
+        other => panic!("expected authorization failure, got {:?}", other),
+    }
+    assert!(!dispatcher.has_request());
+}
+
+#[tokio::test]
 async fn default_runtime_skips_unusable_persistent_policy_for_later_match() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
@@ -237,6 +302,50 @@ async fn default_runtime_skips_unusable_persistent_policy_for_later_match() {
         other => panic!("expected Completed outcome, got {:?}", other),
     }
     assert!(dispatcher.has_request());
+}
+
+#[tokio::test]
+async fn default_runtime_falls_back_when_persistent_policy_lookup_fails() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let policies: Arc<dyn PersistentApprovalPolicyStore> =
+        Arc::new(FailingLookupPersistentApprovalPolicyStore);
+    let context = execution_context_without_grants();
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_run_state(run_state)
+    .with_approval_requests(approval_requests)
+    .with_persistent_approval_policies(policies);
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "hello"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.capability_id, capability_id());
+            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+        }
+        other => panic!("expected authorization failure, got {:?}", other),
+    }
+    assert!(!dispatcher.has_request());
 }
 
 #[tokio::test]
@@ -552,6 +661,44 @@ impl ProcessManager for RecordingProcessManager {
             resource_reservation_id: start.resource_reservation_id,
             error_kind: None,
         })
+    }
+}
+
+struct FailingLookupPersistentApprovalPolicyStore;
+
+#[async_trait]
+impl PersistentApprovalPolicyStore for FailingLookupPersistentApprovalPolicyStore {
+    async fn allow(
+        &self,
+        _input: PersistentApprovalPolicyInput,
+    ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
+        Err(PersistentApprovalPolicyError::Filesystem(
+            "lookup-only test store".to_string(),
+        ))
+    }
+
+    async fn lookup(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        Err(PersistentApprovalPolicyError::Filesystem(
+            "policy lookup failed".to_string(),
+        ))
+    }
+
+    async fn revoke(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+    ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
+        Err(PersistentApprovalPolicyError::UnknownPolicy)
+    }
+
+    async fn revoke_if_source_approval_request(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+        _source_approval_request_id: ApprovalRequestId,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        Ok(None)
     }
 }
 
