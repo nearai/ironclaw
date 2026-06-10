@@ -1285,10 +1285,11 @@ async fn cors_allows_configured_origin() {
 async fn malformed_user_id_from_authenticator_rejects_with_401() {
     // If a host authenticator returns a user id that doesn't satisfy
     // `UserId`'s grammar at construction time it never reaches the
-    // composition. The authenticator's contract is `Option<UserId>`,
-    // so the only way to produce a "malformed" id is to return None —
-    // which the composition treats as auth failure. This test locks
-    // the contract: a `None` decision becomes 401, never 500.
+    // composition. The authenticator's contract only accepts validated
+    // `UserId`s inside `WebuiAuthentication`, so the only way to
+    // produce a "malformed" id is to return None — which the
+    // composition treats as auth failure. This test locks the contract:
+    // a `None` decision becomes 401, never 500.
     struct AlwaysReject;
     #[async_trait]
     impl WebuiAuthenticator for AlwaysReject {

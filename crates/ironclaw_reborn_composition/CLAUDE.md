@@ -107,10 +107,10 @@ Inbound order (outer → inner → handler):
    honored ONLY on `GET /api/webchat/v2/threads/{id}/events` because
    the browser's `EventSource` cannot set headers. Mutations and
    timeline reads stay bearer-only. On success the middleware inserts
-  a `WebUiAuthenticatedCaller` extension built from
-  `config.tenant_id` plus the authenticator's `UserId`, and a
-  request-scoped `WebUiV2Capabilities` extension from the same
-  authentication result.
+   a `WebUiAuthenticatedCaller` extension built from
+   `config.tenant_id` plus the authentication result's `UserId`, and a
+   request-scoped `WebUiV2Capabilities` extension from the same
+   authentication result.
    When `openai-compat-beta` is enabled, the same verified bearer result also
    inserts an `OpenAiCompatAuthenticatedCaller` extension for protected
    OpenAI-compatible route mounts; route crates must not mint this evidence.
