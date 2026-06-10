@@ -27,282 +27,24 @@
 
 #![cfg(feature = "dev-in-memory-session")]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product_workflow::{
-    LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
-};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
     RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
 };
 use ironclaw_reborn_webui_ingress::EnvBearerAuthenticator;
-use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use secrecy::SecretString;
 use tower::ServiceExt;
 
-const TENANT: &str = "tenant-a";
-const AGENT: &str = "agent-default";
-const PROJECT: &str = "project-default";
-const TOKEN: &str = "operator-secret-token";
+#[path = "support/harness.rs"]
+mod harness;
+use harness::{AGENT, PROJECT, StubServices, TENANT, with_peer};
 
-// ─── stub facade ──────────────────────────────────────────────────────
-
-/// Minimal `RebornServicesApi` — `create_thread` records its caller so a
-/// test can assert the facade was (or was not) reached; everything else
-/// rejects/panics. Mirrors the stub shape in `session_round_trip.rs`.
-#[derive(Default)]
-struct StubServices {
-    create_thread_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
-    /// When set, `create_thread` panics with this message so the panic
-    /// test can drive the `CatchPanicLayer` boundary (row 9).
-    create_thread_panic: Option<&'static str>,
-}
-
-#[async_trait]
-impl RebornServicesApi for StubServices {
-    async fn create_thread(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-        if let Some(message) = self.create_thread_panic {
-            panic!("{message}");
-        }
-        self.create_thread_callers
-            .lock()
-            .expect("lock")
-            .push(caller);
-        Ok(RebornCreateThreadResponse {
-            thread: SessionThreadRecord {
-                thread_id: ThreadId::new("thread.fake").expect("thread"),
-                scope: ThreadScope {
-                    tenant_id: TenantId::new(TENANT).expect("tenant"),
-                    agent_id: AgentId::new("agent.fake").expect("agent"),
-                    project_id: Some(ProjectId::new("project.fake").expect("project")),
-                    owner_user_id: Some(UserId::new("alice@example.com").expect("user")),
-                    mission_id: None,
-                },
-                created_by_actor_id: "alice@example.com".to_string(),
-                title: None,
-                metadata_json: None,
-                goal: None,
-            },
-        })
-    }
-
-    async fn submit_turn(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        unreachable!("headers/errors tests do not drive submit_turn")
-    }
-
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        unreachable!("headers/errors tests do not drive get_timeline")
-    }
-
-    async fn stream_events(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        // The SSE cap test opens real streams; return an empty page so a
-        // stream that gets polled does not panic. The concurrency slot is
-        // acquired at handler entry regardless of stream contents.
-        Ok(RebornStreamEventsResponse { events: Vec::new() })
-    }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        unreachable!("headers/errors tests do not drive get_run_state")
-    }
-
-    async fn cancel_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        unreachable!("headers/errors tests do not drive cancel_run")
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        unreachable!("headers/errors tests do not drive resolve_gate")
-    }
-
-    async fn list_threads(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        Ok(RebornListThreadsResponse {
-            threads: Vec::new(),
-            next_cursor: None,
-        })
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        unreachable!("headers/errors tests do not drive delete_thread")
-    }
-
-    async fn list_automations(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn get_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_outbound_delivery_targets(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_extensions(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn search_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn install_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn read_skill_content(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn update_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn remove_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_extension_registry(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn install_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn activate_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn remove_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn setup_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-        _request: WebUiSetupExtensionRequest,
-    ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-}
+const ENV_TOKEN: &str = "operator-secret-token";
 
 // ─── harness ──────────────────────────────────────────────────────────
 
@@ -314,7 +56,7 @@ fn build_app_from(services: StubServices) -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(services);
     let authenticator = Arc::new(
         EnvBearerAuthenticator::new(
-            SecretString::from(TOKEN.to_string()),
+            SecretString::from(ENV_TOKEN.to_string()),
             UserId::new("operator").expect("user"),
         )
         .expect("env bearer authenticator"),
@@ -345,7 +87,7 @@ fn create_thread_request(bearer: Option<&str>, body: &'static str) -> Request<Bo
     if let Some(token) = bearer {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
-    builder.body(Body::from(body)).expect("request")
+    with_peer(builder.body(Body::from(body)).expect("request"))
 }
 
 async fn body_string(response: axum::response::Response) -> String {
@@ -403,7 +145,7 @@ async fn csp_directives_are_locked() {
     // `frame-ancestors 'none'` fails here rather than silently shipping.
     let (app, _services) = build_app();
     let response = app
-        .oneshot(create_thread_request(Some(TOKEN), "{}"))
+        .oneshot(create_thread_request(Some(ENV_TOKEN), "{}"))
         .await
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
@@ -434,7 +176,7 @@ async fn malformed_request_body_returns_sanitized_client_error() {
     let (app, services) = build_app();
     let response = app
         .oneshot(create_thread_request(
-            Some(TOKEN),
+            Some(ENV_TOKEN),
             "{ this is not valid json",
         ))
         .await
@@ -466,7 +208,7 @@ async fn malformed_request_body_returns_sanitized_client_error() {
         "::",
         "WebUiCreateThreadRequest",
         "client_action_id",
-        TOKEN,
+        ENV_TOKEN,
     ] {
         assert!(
             !body.contains(leak),
@@ -489,7 +231,7 @@ async fn panic_boundary_returns_sanitized_500() {
         ..StubServices::default()
     });
     let response = app
-        .oneshot(create_thread_request(Some(TOKEN), "{}"))
+        .oneshot(create_thread_request(Some(ENV_TOKEN), "{}"))
         .await
         .expect("oneshot");
     assert_eq!(
@@ -532,12 +274,14 @@ async fn panic_boundary_returns_sanitized_500() {
 }
 
 fn events_request() -> Request<Body> {
-    Request::builder()
-        .method(Method::GET)
-        .uri("/api/webchat/v2/threads/t1/events")
-        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
-        .body(Body::empty())
-        .expect("request")
+    with_peer(
+        Request::builder()
+            .method(Method::GET)
+            .uri("/api/webchat/v2/threads/t1/events")
+            .header(header::AUTHORIZATION, format!("Bearer {ENV_TOKEN}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
 }
 
 #[tokio::test]
