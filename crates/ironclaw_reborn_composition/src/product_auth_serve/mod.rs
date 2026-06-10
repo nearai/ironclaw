@@ -882,6 +882,12 @@ pub(super) async fn scoped_update_binding_for_requester(
             CredentialAccountSelectionRequest::new(scope.clone(), provider.clone())
                 .for_extension(requester_extension.clone()),
             scope.clone(),
+            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: provider_scopes
+                    .iter()
+                    .map(|scope| scope.as_str().to_string())
+                    .collect(),
+            },
             provider_scopes,
         ))
         .await;

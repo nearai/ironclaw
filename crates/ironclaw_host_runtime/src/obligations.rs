@@ -21,8 +21,8 @@ use ironclaw_host_api::{
     CapabilityDispatchResult, CapabilityId, CredentialStageError, DecisionSummary, EffectKind,
     ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
     ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
-    SandboxQuota, SecretHandle,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, SandboxQuota, SecretHandle,
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
@@ -45,6 +45,7 @@ pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from
 pub struct RuntimeCredentialAccountRequest<'a> {
     pub scope: &'a ResourceScope,
     pub provider: &'a RuntimeCredentialAccountProviderId,
+    pub setup: &'a RuntimeCredentialAccountSetup,
     pub provider_scopes: &'a [String],
     pub requester_extension: &'a ExtensionId,
 }
@@ -1288,6 +1289,7 @@ impl BuiltinObligationHandler {
                 .resolve_access_secret(RuntimeCredentialAccountRequest {
                     scope: &request.context.resource_scope,
                     provider: obligation.provider,
+                    setup: obligation.setup,
                     provider_scopes: obligation.provider_scopes,
                     requester_extension: obligation.requester_extension,
                 })
@@ -1721,6 +1723,7 @@ fn secret_injection_handles(obligations: &[Obligation]) -> Vec<SecretHandle> {
 struct CredentialAccountInjectionObligation<'a> {
     handle: &'a SecretHandle,
     provider: &'a RuntimeCredentialAccountProviderId,
+    setup: &'a RuntimeCredentialAccountSetup,
     provider_scopes: &'a [String],
     requester_extension: &'a ExtensionId,
 }
@@ -1734,11 +1737,13 @@ fn credential_account_injection_obligations(
             Obligation::InjectCredentialAccountOnce {
                 handle,
                 provider,
+                setup,
                 provider_scopes,
                 requester_extension,
             } => Some(CredentialAccountInjectionObligation {
                 handle,
                 provider,
+                setup,
                 provider_scopes,
                 requester_extension,
             }),
