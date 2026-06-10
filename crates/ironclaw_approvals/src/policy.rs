@@ -22,7 +22,7 @@ const POLICY_PATH_CACHE_MAX_ENTRIES: usize = 1024;
 const POLICY_CAS_RETRY_ATTEMPTS: usize = 3;
 
 pub fn permission_mode_allows_persistent_approval(permission: PermissionMode) -> bool {
-    matches!(permission, PermissionMode::Allow)
+    matches!(permission, PermissionMode::Allow | PermissionMode::Ask)
 }
 
 #[derive(Debug, Error)]
