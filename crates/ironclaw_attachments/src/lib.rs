@@ -17,8 +17,10 @@
 //! [`ScopedFilesystem`]: ironclaw_filesystem::ScopedFilesystem
 //! [`MountPermissions`]: ironclaw_host_api::MountPermissions
 
+mod inbound;
 mod landing;
 
+pub use inbound::{InboundAttachment, land_inbound_attachments};
 pub use landing::{
     ATTACHMENTS_DIR, AttachmentLanding, AttachmentLandingError, DEFAULT_MAX_ATTACHMENT_BYTES,
     attachment_scoped_path, land_attachment,
