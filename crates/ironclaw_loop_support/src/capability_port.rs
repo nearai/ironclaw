@@ -3260,6 +3260,102 @@ mod tests {
         assert_eq!(resolved, serde_json::json!({"message":"hello"}));
     }
 
+    /// Captures every trajectory callback the port forwards, so tests can drive
+    /// the real `invoke_capability` call site and assert the observer fired.
+    #[derive(Debug, Default)]
+    struct RecordingTrajectoryObserver {
+        inputs: Mutex<Vec<(String, String, serde_json::Value)>>,
+        results: Mutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    impl CapabilityTrajectoryObserver for RecordingTrajectoryObserver {
+        fn on_capability_input(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            arguments: &serde_json::Value,
+        ) {
+            self.inputs.lock().expect("inputs lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                arguments.clone(),
+            ));
+        }
+
+        fn on_capability_result(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            output: &serde_json::Value,
+        ) {
+            self.results.lock().expect("results lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                output.clone(),
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_capability_forwards_resolved_input_to_trajectory_observer() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+
+        // Mirror `runtime_capability_port`, but attach the trajectory observer
+        // to the factory via `with_trajectory_observer` so the port forwards the
+        // resolved tool-call input when a capability is invoked.
+        let mut context = execution_context("thread-trajectory-observer-input");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )])),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .with_trajectory_observer(Some(
+            observer.clone() as Arc<dyn CapabilityTrajectoryObserver>
+        ))
+        .port_for_run_context(run_context);
+
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("capability invocation succeeds");
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+
+        let inputs = observer.inputs.lock().expect("inputs lock");
+        assert_eq!(
+            inputs.len(),
+            1,
+            "observer should see exactly one capability input"
+        );
+        let (call_id, observed_capability, arguments) = &inputs[0];
+        assert!(!call_id.is_empty(), "call_id (input ref) should be present");
+        assert_eq!(
+            observed_capability,
+            capability_id.as_str(),
+            "observer should receive the resolved capability id"
+        );
+        assert_eq!(
+            arguments,
+            &serde_json::json!({"message": "hello"}),
+            "observer should receive the resolved tool-call arguments"
+        );
+    }
+
     #[tokio::test]
     async fn runtime_capability_invocation_emits_dispatch_lifecycle_milestones() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");

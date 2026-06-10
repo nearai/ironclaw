@@ -406,6 +406,91 @@ mod tests {
         }
     }
 
+    /// Records the trajectory callbacks `LocalDevCapabilityIo` forwards, so the
+    /// staging + result-write call sites can be driven directly and asserted.
+    #[derive(Debug, Default)]
+    struct RecordingTrajectoryObserver {
+        inputs: std::sync::Mutex<Vec<(String, String, serde_json::Value)>>,
+        results: std::sync::Mutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    impl crate::RebornTrajectoryObserver for RecordingTrajectoryObserver {
+        fn on_capability_input(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            arguments: &serde_json::Value,
+        ) {
+            self.inputs.lock().expect("inputs lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                arguments.clone(),
+            ));
+        }
+
+        fn on_capability_result(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            output: &serde_json::Value,
+        ) {
+            self.results.lock().expect("results lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                output.clone(),
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn capability_io_forwards_input_and_result_to_trajectory_observer() {
+        let run_context = run_context("trajectory-observer").await;
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+        let capability_io =
+            LocalDevCapabilityIo::new(Arc::new(CapabilityDisplayPreviewStore::default()))
+                .with_observer(Some(
+                    observer.clone() as Arc<dyn crate::RebornTrajectoryObserver>
+                ));
+
+        // Staging the tool-call input fires `on_capability_input`...
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+
+        // ...and writing the result fires `on_capability_result`.
+        let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
+        capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id: InvocationId::new(),
+                capability_id: &capability_id,
+                output: serde_json::json!({"content": "hello"}),
+                display_preview: None,
+            })
+            .await
+            .expect("result stages");
+
+        let inputs = observer.inputs.lock().expect("inputs lock");
+        assert_eq!(inputs.len(), 1, "one input callback");
+        assert_eq!(inputs[0].0, input_ref.as_str(), "input ref correlates");
+        // `register_provider_tool_call_input` forwards the provider tool-call
+        // name here (the resolved capability id is only known once the result is
+        // written — see the result assertion below).
+        assert_eq!(inputs[0].1, "builtin_echo");
+        assert_eq!(inputs[0].2, serde_json::json!({"message": "hello"}));
+
+        let results = observer.results.lock().expect("results lock");
+        assert_eq!(results.len(), 1, "one result callback");
+        assert_eq!(results[0].0, input_ref.as_str(), "result correlates by ref");
+        assert_eq!(results[0].1, capability_id.as_str());
+        assert_eq!(results[0].2, serde_json::json!({"content": "hello"}));
+    }
+
     #[tokio::test]
     async fn capability_io_writes_durable_preview_message_and_live_upsert_id() {
         let run_context = run_context("durable-preview").await;
@@ -895,6 +980,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: Some(Arc::clone(&activation_source)),
+            trajectory_observer: None,
         };
         let port = factory
             .create_capability_port(&run_context)
@@ -1087,6 +1173,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
         };
         let run_context = run_context("host-mount-read").await;
         let port = factory
@@ -1301,6 +1388,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
         };
         let run_context = run_context("skill-install-write").await;
         let port = factory
@@ -1391,6 +1479,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
         };
         let run_context = run_context("no-host-disclosure").await;
         let port = factory
