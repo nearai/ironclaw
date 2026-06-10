@@ -3773,8 +3773,8 @@ mod tests {
             .expect("active capabilities");
         let search = capabilities
             .iter()
-            .find(|capability| capability.id.as_str() == "nearai.search")
-            .expect("nearai.search active");
+            .find(|capability| capability.id.as_str() == "nearai.web_search")
+            .expect("nearai.web_search active");
 
         assert_eq!(search.provider.as_str(), "nearai");
         assert_eq!(search.effects, nearai_allowed_effects());

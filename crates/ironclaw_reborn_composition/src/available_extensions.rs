@@ -801,21 +801,21 @@ fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
     vec![
         bytes_asset("manifest.toml", manifest.as_bytes()),
         bytes_asset(
-            "schemas/nearai/search.input.v1.json",
+            "schemas/nearai/web_search.input.v1.json",
             include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/search.input.v1.json"
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/web_search.input.v1.json"
             ),
         ),
         bytes_asset(
-            "schemas/nearai/search.output.v1.json",
+            "schemas/nearai/web_search.output.v1.json",
             include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/search.output.v1.json"
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/web_search.output.v1.json"
             ),
         ),
         bytes_asset(
-            "prompts/nearai/search.md",
+            "prompts/nearai/web_search.md",
             include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/nearai-mcp/prompts/nearai/search.md"
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/prompts/nearai/web_search.md"
             ),
         ),
     ]

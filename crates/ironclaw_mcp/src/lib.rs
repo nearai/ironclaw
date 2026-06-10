@@ -1624,6 +1624,14 @@ mod tests {
     }
 
     #[test]
+    fn mcp_tool_name_strips_provider_prefix_for_canonical_tool_name() {
+        let provider = ExtensionId::new("nearai").unwrap();
+        let capability_id = CapabilityId::new("nearai.web_search").unwrap();
+
+        assert_eq!(mcp_tool_name(&provider, &capability_id), "web_search");
+    }
+
+    #[test]
     fn parse_mcp_sse_response_skips_empty_data_keepalives() {
         let body = b"event: ping\ndata:\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n";
 
