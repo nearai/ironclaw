@@ -20,6 +20,7 @@ use ironclaw_auth::{
     AuthFlowId, AuthFlowOwnerScope, AuthFlowRecord, AuthProductError, AuthSessionId, AuthSurface,
     CredentialAccount, CredentialAccountId, CredentialAccountOwnerScope,
     CredentialAccountSelectionRequest, CredentialAccountStatus, NewCredentialAccount,
+    TurnGateAuthFlowQuery, flow_matches_turn_gate_query,
 };
 
 use self::domain::validate_new_credential_account;
@@ -212,19 +213,48 @@ where
         Ok(flows)
     }
 
+    async fn find_flow_under_scope_root(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        predicate: impl Fn(&AuthFlowRecord) -> bool,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        let root = flow_root(scope)?;
+        let entries = match self.filesystem.list_dir(&scope.resource, &root).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(fs_error(error)),
+        };
+        const MAX_CONCURRENT_READS: usize = 16;
+        let mut records = stream::iter(
+            entries
+                .into_iter()
+                .filter(|e| e.name.ends_with(".json"))
+                .map(|entry| {
+                    let path = join_scoped(&root, &entry.name);
+                    async move {
+                        let path = path?;
+                        self.read_record::<AuthFlowRecord>(&scope.resource, &path)
+                            .await
+                    }
+                }),
+        )
+        .buffer_unordered(MAX_CONCURRENT_READS);
+        while let Some(record) = records.try_next().await? {
+            let Some((flow, _)) = record else {
+                continue;
+            };
+            if predicate(&flow) {
+                return Ok(Some(flow));
+            }
+        }
+        Ok(None)
+    }
+
     async fn flow_records_for_owner(
         &self,
         owner: &AuthFlowOwnerScope,
     ) -> Result<Vec<AuthFlowRecord>, AuthProductError> {
-        let resource = ResourceScope {
-            tenant_id: owner.tenant_id.clone(),
-            user_id: owner.user_id.clone(),
-            agent_id: owner.agent_id.clone(),
-            project_id: owner.project_id.clone(),
-            mission_id: None,
-            thread_id: Some(owner.thread_id.clone()),
-            invocation_id: ironclaw_host_api::InvocationId::new(),
-        };
+        let resource = flow_owner_resource(owner);
         let mut flows = Vec::new();
         for surface in AuthSurface::ALL {
             let scope = ironclaw_auth::AuthProductScope::new(resource.clone(), surface);
@@ -275,6 +305,62 @@ where
         flows.sort_by_key(|flow| flow.id);
         flows.dedup_by_key(|flow| flow.id);
         Ok(flows)
+    }
+
+    async fn flow_for_turn_gate_query(
+        &self,
+        query: &TurnGateAuthFlowQuery,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        let owner = &query.owner;
+        let resource = flow_owner_resource(owner);
+        for surface in AuthSurface::ALL {
+            let scope = ironclaw_auth::AuthProductScope::new(resource.clone(), surface);
+            if let Some(flow) = self
+                .find_flow_under_scope_root(&scope, |flow| {
+                    owner.matches(flow) && flow_matches_turn_gate_query(flow, query)
+                })
+                .await?
+            {
+                return Ok(Some(flow));
+            }
+            let sessions_root = surface_sessions_root(&resource, surface)?;
+            let mut entries = match self
+                .filesystem
+                .list_dir_bounded(
+                    &resource,
+                    &sessions_root,
+                    MAX_OWNER_SESSION_ROOTS_PER_SURFACE.saturating_add(1),
+                )
+                .await
+            {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => continue,
+                Err(error) => return Err(fs_error(error)),
+            };
+            if entries.len() > MAX_OWNER_SESSION_ROOTS_PER_SURFACE {
+                return Err(AuthProductError::BackendUnavailable);
+            }
+            entries.sort_by(|left, right| left.name.cmp(&right.name));
+            for entry in entries {
+                if entry.file_type != FileType::Directory {
+                    continue;
+                }
+                let Ok(session_id) = AuthSessionId::new(entry.name) else {
+                    continue;
+                };
+                let session_scope = ironclaw_auth::AuthProductScope::new(resource.clone(), surface)
+                    .with_session_id(session_id);
+                if let Some(flow) = self
+                    .find_flow_under_scope_root(&session_scope, |flow| {
+                        owner.matches(flow) && flow_matches_turn_gate_query(flow, query)
+                    })
+                    .await?
+                {
+                    return Ok(Some(flow));
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn read_account(
@@ -533,3 +619,15 @@ where
 }
 
 use ironclaw_auth::{credential_status_for_completed_flow, is_terminal_status, scope_matches};
+
+fn flow_owner_resource(owner: &AuthFlowOwnerScope) -> ResourceScope {
+    ResourceScope {
+        tenant_id: owner.tenant_id.clone(),
+        user_id: owner.user_id.clone(),
+        agent_id: owner.agent_id.clone(),
+        project_id: owner.project_id.clone(),
+        mission_id: None,
+        thread_id: Some(owner.thread_id.clone()),
+        invocation_id: ironclaw_host_api::InvocationId::new(),
+    }
+}

@@ -95,6 +95,62 @@ async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
     );
 }
 
+#[tokio::test]
+async fn filesystem_flow_for_turn_gate_finds_session_scoped_flow_without_owner_snapshot() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let mut scope = test_scope();
+    scope.surface = AuthSurface::Callback;
+    scope.resource.thread_id = Some(ThreadId::new("thread-turn-gate").unwrap());
+    scope.session_id = Some(AuthSessionId::new("session-turn-gate").unwrap());
+    let service = FilesystemAuthProductServices::new(filesystem, secret_store);
+    let turn_run_ref = TurnRunRef::new("run-turn-gate").unwrap();
+    let gate_ref = AuthGateRef::new("gate-product-auth").unwrap();
+    let expires_at = Utc::now() + Duration::minutes(5);
+    let flow = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::SetupRequired {
+                provider: google_provider(),
+                message: "connect account".to_string(),
+            },
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: turn_run_ref.clone(),
+                gate_ref: gate_ref.clone(),
+            },
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at,
+        })
+        .await
+        .unwrap();
+
+    let owner = AuthFlowOwnerScope {
+        tenant_id: scope.resource.tenant_id.clone(),
+        user_id: scope.resource.user_id.clone(),
+        agent_id: scope.resource.agent_id.clone(),
+        project_id: scope.resource.project_id.clone(),
+        thread_id: scope.resource.thread_id.clone().unwrap(),
+    };
+    let projected = service
+        .flow_for_turn_gate(TurnGateAuthFlowQuery {
+            owner,
+            turn_run_ref,
+            gate_ref,
+            include_terminal: false,
+        })
+        .await
+        .unwrap()
+        .expect("session-scoped turn-gate flow should be projected");
+
+    assert_eq!(projected.id, flow.id);
+    assert_eq!(projected.scope.session_id, scope.session_id);
+}
+
 // ─── tests: cancel_flow, fail_oauth_callback, complete_credential_selection ───
 
 #[tokio::test]

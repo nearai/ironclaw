@@ -248,4 +248,51 @@ mod tests {
             .unwrap_err();
         assert_eq!(refresh_err, AuthProductError::BackendUnavailable);
     }
+
+    #[tokio::test]
+    async fn unavailable_auth_provider_client_rejects_malformed_callback_before_backend_unavailable()
+     {
+        let client = UnavailableAuthProviderClient;
+        let ctx = OAuthProviderExchangeContext {
+            scope: auth_scope(),
+            flow_id: AuthFlowId::new(),
+        };
+        let authorization_code =
+            OAuthAuthorizationCode::new(secrecy::SecretString::from("real-code")).unwrap();
+        let pkce_verifier =
+            PkceVerifierSecret::new(secrecy::SecretString::from("real-verifier")).unwrap();
+        let authorization_code_hash = authorization_code_hash(&authorization_code).unwrap();
+        let pkce_verifier_hash = pkce_verifier_hash(&pkce_verifier).unwrap();
+        let malformed_code = OAuthProviderCallbackRequest {
+            provider: AuthProviderId::new("google").unwrap(),
+            account_label: CredentialAccountLabel::new("Alice Google").unwrap(),
+            authorization_code: OAuthAuthorizationCode(secrecy::SecretString::from("")),
+            authorization_code_hash: authorization_code_hash.clone(),
+            pkce_verifier,
+            pkce_verifier_hash: pkce_verifier_hash.clone(),
+            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+        };
+
+        let err = client
+            .exchange_callback(ctx.clone(), malformed_code)
+            .await
+            .unwrap_err();
+        assert_eq!(err, AuthProductError::MalformedCallback);
+
+        let malformed_pkce = OAuthProviderCallbackRequest {
+            provider: AuthProviderId::new("google").unwrap(),
+            account_label: CredentialAccountLabel::new("Alice Google").unwrap(),
+            authorization_code,
+            authorization_code_hash,
+            pkce_verifier: PkceVerifierSecret(secrecy::SecretString::from("")),
+            pkce_verifier_hash,
+            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+        };
+
+        let err = client
+            .exchange_callback(ctx, malformed_pkce)
+            .await
+            .unwrap_err();
+        assert_eq!(err, AuthProductError::MalformedCallback);
+    }
 }

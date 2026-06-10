@@ -13,7 +13,7 @@ use tokio::task::JoinSet;
 use super::*;
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthFlowOwnerScope,
-    AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId, AuthInteractionService,
+    AuthFlowRecordSource, AuthFlowStatus, AuthGateRef, AuthInteractionId, AuthInteractionService,
     AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
     AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountLabel,
     CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountRecordSource,
@@ -21,6 +21,7 @@ use ironclaw_auth::{
     CredentialOwnership, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
     NewCredentialAccount, OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackInput,
     OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderScope, SecretSubmitRequest,
+    TurnGateAuthFlowQuery, TurnRunRef,
 };
 
 fn test_scope() -> AuthProductScope {

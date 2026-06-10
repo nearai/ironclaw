@@ -304,6 +304,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_product_auth_secret_store_isolates_users_within_tenant() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let filesystem = local_dev_test_root_filesystem();
+        let secret_store = build_local_dev_secret_store(
+            dir.path(),
+            local_dev_product_auth_scoped_filesystem(filesystem)
+                .expect("local-dev product-auth filesystem"),
+        )
+        .expect("local-dev secret store");
+        let scope_a = local_dev_secret_scope("tenant-a", "alice");
+        let scope_b = local_dev_secret_scope("tenant-a", "bob");
+        let handle = SecretHandle::new("shared-runtime-token").expect("secret handle");
+
+        secret_store
+            .put(
+                scope_a.clone(),
+                handle.clone(),
+                ironclaw_secrets::SecretMaterial::from("alice-token"),
+            )
+            .await
+            .expect("put alice secret");
+        secret_store
+            .put(
+                scope_b.clone(),
+                handle.clone(),
+                ironclaw_secrets::SecretMaterial::from("bob-token"),
+            )
+            .await
+            .expect("put bob secret");
+
+        let lease_a = secret_store
+            .lease_once(&scope_a, &handle)
+            .await
+            .expect("alice lease");
+        let material_a = secret_store
+            .consume(&scope_a, lease_a.id)
+            .await
+            .expect("alice consume");
+        let lease_b = secret_store
+            .lease_once(&scope_b, &handle)
+            .await
+            .expect("bob lease");
+        let material_b = secret_store
+            .consume(&scope_b, lease_b.id)
+            .await
+            .expect("bob consume");
+
+        assert_eq!(material_a.expose_secret(), "alice-token");
+        assert_eq!(material_b.expose_secret(), "bob-token");
+    }
+
+    #[tokio::test]
     async fn local_dev_secret_store_preserves_master_key_across_rebuilds() {
         let dir = tempfile::tempdir().expect("tempdir");
         let filesystem = local_dev_test_root_filesystem();

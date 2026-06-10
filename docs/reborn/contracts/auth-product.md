@@ -122,13 +122,13 @@ V1 pending maps.
 ## Durable Production Slice (#4175)
 
 Production product-auth records use the `ironclaw_auth` contract types and are
-stored by the `ironclaw_reborn_composition` filesystem adapter under the normal
-Reborn scoped filesystem substrate, rooted at the caller's
-`/secrets/product-auth/{surface}` tree. The production factory constructs
-`FilesystemAuthProductServices` over the same libSQL/PostgreSQL-backed
-`ScopedFilesystem` and `SecretStore` used by the rest of Reborn; callers no
-longer need to inject `InMemoryAuthProductServices` or an external product-auth
-facade for production.
+stored by the `ironclaw_auth_storage` durable filesystem adapter under the
+normal Reborn scoped filesystem substrate, rooted at the caller's
+`/secrets/product-auth/{surface}` tree. `ironclaw_reborn_composition` is the
+wiring layer: the production factory constructs `FilesystemAuthProductServices`
+over the same libSQL/PostgreSQL-backed `ScopedFilesystem` and `SecretStore`
+used by the rest of Reborn, so callers no longer need to inject
+`InMemoryAuthProductServices` or an external product-auth facade for production.
 
 The storage-home decision is deliberately **not** to make
 `ironclaw_secrets::CredentialAccountStore` own product-auth UX records. Runtime

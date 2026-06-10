@@ -17,7 +17,7 @@ use ironclaw_auth::{
     CredentialAccountStatus, CredentialOwnership, CredentialSelectionInput,
     ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
     OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, ProviderCallbackOutcome,
-    TurnGateAuthFlowQuery, flow_matches_turn_gate_query,
+    TurnGateAuthFlowQuery,
 };
 
 #[async_trait]
@@ -391,11 +391,7 @@ where
         &self,
         query: TurnGateAuthFlowQuery,
     ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
-        Ok(self
-            .flow_records_for_owner(&query.owner)
-            .await?
-            .into_iter()
-            .find(|flow| flow_matches_turn_gate_query(flow, &query)))
+        self.flow_for_turn_gate_query(&query).await
     }
 
     async fn flows_for_owner(
