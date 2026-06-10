@@ -277,12 +277,12 @@ impl RebornServicesApi for RecordingServices {
 fn router_with(services: Arc<dyn RebornServicesApi>) -> Router {
     webui_v2_router(WebUiV2State::new(
         services,
-        WebUiV2Capabilities {
-            operator_webui_config: true,
-        },
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }))
 }
 
 #[tokio::test]
