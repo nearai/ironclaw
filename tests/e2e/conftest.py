@@ -331,6 +331,36 @@ def ironclaw_binary():
 
 
 @pytest.fixture(scope="session")
+def ironclaw_reborn_binary():
+    """Ensure the `ironclaw-reborn` binary is built with the WebChat v2 surface.
+
+    Distinct from `ironclaw_binary` (the legacy `ironclaw` web channel): the
+    Reborn WebUI v2 SPA and `serve` subcommand are gated behind the
+    `webui-v2-beta` Cargo feature, which transitively enables `libsql`. Returns
+    the binary path. Used by the Reborn WebUI v2 smoke scenario.
+    """
+    target_dir = _cargo_target_dir()
+    binary = target_dir / "debug" / "ironclaw-reborn"
+    if _binary_needs_rebuild(binary):
+        print("Building ironclaw-reborn (webui-v2-beta; this may take a while)...")
+        subprocess.run(
+            [
+                "cargo", "build",
+                "-p", "ironclaw_reborn_cli",
+                "--features", "webui-v2-beta",
+            ],
+            cwd=ROOT,
+            check=True,
+            timeout=600,
+        )
+    assert binary.exists(), (
+        f"Binary not found at {binary}. "
+        f"Cargo target dir resolved to: {target_dir}"
+    )
+    return str(binary)
+
+
+@pytest.fixture(scope="session")
 def server_ports():
     """Reserve dynamic ports for the gateway and HTTP webhook channel."""
     reserved = _reserve_loopback_sockets(2)

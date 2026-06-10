@@ -15,7 +15,7 @@ use super::{
     MAX_LIST_LIMIT, SLACK_CHANNEL_ROUTES_BODY_LIMIT_BYTES, SlackChannelRoute,
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackRouteError,
     WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, ensure_allowed_subject_user, ensure_authorized_operator,
-    route_policy, scan_route_admin_field,
+    route_policy, scan_route_admin_field, subjects,
 };
 use ironclaw_host_api::UserId;
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
@@ -57,6 +57,7 @@ pub(super) fn descriptors() -> Vec<IngressRouteDescriptor> {
 struct SlackAllowedChannel {
     channel_id: String,
     subject_user_id: String,
+    subject_display_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -339,6 +340,9 @@ impl From<SlackChannelRoute> for SlackAllowedChannel {
     fn from(route: SlackChannelRoute) -> Self {
         Self {
             channel_id: route.channel_id,
+            subject_display_name: subjects::display_name_for_subject_user_id(
+                &route.subject_user_id,
+            ),
             subject_user_id: route.subject_user_id,
         }
     }

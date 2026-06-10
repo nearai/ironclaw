@@ -35,7 +35,9 @@ use ironclaw_product_workflow::{
     RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
     RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigValidateRequest, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
@@ -128,6 +130,7 @@ struct StubServices {
     /// branches, or empty drains in a deterministic order.
     next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
     stream_events_notify: Arc<Notify>,
+    operator_calls: Mutex<Vec<String>>,
 }
 
 impl StubServices {
@@ -555,6 +558,98 @@ impl RebornServicesApi for StubServices {
             fields: Vec::new(),
             onboarding: None,
         })
+    }
+
+    async fn get_operator_setup(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push("get_setup".to_string());
+        Err(service_unavailable_error(false))
+    }
+
+    async fn run_operator_setup(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorSetupRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls.lock().expect("lock").push(format!(
+            "run_setup:{:?}:{:?}:{:?}",
+            request.provider_id, request.model, request.profile_id
+        ));
+        Err(service_unavailable_error(false))
+    }
+
+    async fn list_operator_config(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push("list_config".to_string());
+        Err(service_unavailable_error(false))
+    }
+
+    async fn validate_operator_config(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorConfigValidateRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push(format!("validate_config:{:?}", request.keys));
+        Err(service_unavailable_error(false))
+    }
+
+    async fn get_operator_diagnostics(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push("diagnostics".to_string());
+        Err(service_unavailable_error(false))
+    }
+
+    async fn get_operator_status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push("status".to_string());
+        Err(service_unavailable_error(false))
+    }
+
+    async fn query_operator_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        query: RebornOperatorLogsQuery,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push(format!("logs:{:?}:{:?}", query.limit, query.cursor));
+        Err(service_unavailable_error(false))
+    }
+
+    async fn run_operator_service_lifecycle(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorServiceLifecycleRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push(format!("service:{:?}", request.action));
+        Err(service_unavailable_error(false))
     }
 
     async fn get_llm_config(
@@ -1260,6 +1355,102 @@ async fn get_session_returns_false_operator_capability_when_capabilities_default
     assert_eq!(body["tenant_id"], "tenant-alpha");
     assert_eq!(body["user_id"], "user-alpha");
     assert_eq!(body["capabilities"]["operator_webui_config"], false);
+}
+
+#[tokio::test]
+async fn operator_route_defaults_to_sanitized_service_unavailable() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services,
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/status")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "unavailable");
+    assert_eq!(body["kind"], "service_unavailable");
+    assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn operator_routes_forward_body_and_query_to_facade_before_503() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    for (method, uri, body) in [
+        (Method::GET, "/api/webchat/v2/operator/setup", None),
+        (
+            Method::POST,
+            "/api/webchat/v2/operator/setup",
+            Some(r#"{"provider_id":"openai","model":"gpt-4","profile_id":"default"}"#),
+        ),
+        (Method::GET, "/api/webchat/v2/operator/config", None),
+        (
+            Method::POST,
+            "/api/webchat/v2/operator/config/validate",
+            Some(r#"{"keys":["provider.default","model.default"]}"#),
+        ),
+        (Method::GET, "/api/webchat/v2/operator/diagnostics", None),
+        (Method::GET, "/api/webchat/v2/operator/status", None),
+        (
+            Method::GET,
+            "/api/webchat/v2/operator/logs?limit=10&cursor=abc",
+            None,
+        ),
+        (
+            Method::POST,
+            "/api/webchat/v2/operator/service",
+            Some(r#"{"action":"start"}"#),
+        ),
+    ] {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let response = router
+            .clone()
+            .oneshot(
+                builder
+                    .body(body.map_or_else(Body::empty, Body::from))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+    }
+
+    assert_eq!(
+        services.operator_calls.lock().expect("lock").as_slice(),
+        &[
+            String::from("get_setup"),
+            String::from("run_setup:Some(\"openai\"):Some(\"gpt-4\"):Some(\"default\")",),
+            String::from("list_config"),
+            String::from("validate_config:[\"provider.default\", \"model.default\"]"),
+            String::from("diagnostics"),
+            String::from("status"),
+            String::from("logs:Some(10):Some(\"abc\")"),
+            String::from("service:Start"),
+        ]
+    );
 }
 
 #[tokio::test]

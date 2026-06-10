@@ -10,10 +10,10 @@ use http::Request;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
-    AuthRequirement, FakeProductWorkflow, ProductCommandResultPayload, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
+    AuthRequirement, FakeProductWorkflow, ProductAdapterError, ProductCommandResultPayload,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
     ProductProjectionSubject, ProductRejection, ProductRejectionKind, ProductWorkflow,
-    ProjectionReadRequest, ProtocolAuthEvidence, ProtocolAuthFailure,
+    ProjectionReadRequest, ProtocolAuthEvidence, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_reborn_openai_compat::{
     InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection,
@@ -561,6 +561,38 @@ async fn chat_completion_projection_reader_error_is_propagated_as_response() {
     assert_eq!(workflow.read_count(), 1);
 }
 
+#[tokio::test]
+async fn chat_completion_product_workflow_error_redacts_request_and_backend_details() {
+    let workflow = Arc::new(ErrorWorkflow::new(ProductAdapterError::Internal {
+        detail: RedactedString::new(
+            "provider stack /host/path /Users/alice SECRET_SENTINEL sk-live runtime trace",
+        ),
+    }));
+    let router = test_router_with_workflow(
+        workflow,
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{
+                    "role": "user",
+                    "content": "RAW_TOOL_INPUT_SENTINEL secret-token /host/path"
+                }]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    let rendered = json_body(response).await.to_string();
+    assert!(rendered.contains("internal_error"), "{rendered}");
+    assert_error_body_excludes_redaction_sentinels(&rendered);
+}
+
 #[test]
 fn authenticated_caller_rejects_missing_claim() {
     let result = OpenAiCompatAuthenticatedCaller::new(
@@ -734,7 +766,7 @@ fn authenticated_caller_rejects_auth_subject_scope_mismatch() {
 }
 
 #[tokio::test]
-async fn streaming_chat_completion_is_rejected_before_product_workflow() {
+async fn streaming_chat_completion_requires_streamer_before_product_workflow() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(
         workflow.clone(),
@@ -753,7 +785,7 @@ async fn streaming_chat_completion_is_rejected_before_product_workflow() {
         .await
         .expect("response");
 
-    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), http::StatusCode::NOT_IMPLEMENTED);
     assert_eq!(workflow.accepted_count(), 0);
 }
 
@@ -1131,6 +1163,26 @@ impl ProductWorkflow for FixedAckWorkflow {
     }
 }
 
+struct ErrorWorkflow {
+    error: ProductAdapterError,
+}
+
+impl ErrorWorkflow {
+    fn new(error: ProductAdapterError) -> Self {
+        Self { error }
+    }
+}
+
+#[async_trait]
+impl ProductWorkflow for ErrorWorkflow {
+    async fn submit_inbound(
+        &self,
+        _envelope: ProductInboundEnvelope,
+    ) -> Result<ProductInboundAck, ProductAdapterError> {
+        Err(self.error.clone())
+    }
+}
+
 fn accepted_ack() -> ProductInboundAck {
     ProductInboundAck::Accepted {
         accepted_message_ref: AcceptedMessageRef::new("msg:test").expect("accepted ref"),
@@ -1251,5 +1303,23 @@ impl OpenAiChatCompletionProjectionReader for RecordingChatProjectionReader {
             .lock()
             .expect("projection reader request lock") = Some(request);
         Ok(self.projection.clone())
+    }
+}
+
+fn assert_error_body_excludes_redaction_sentinels(rendered: &str) {
+    for forbidden in [
+        "RAW_TOOL_INPUT_SENTINEL",
+        "provider stack",
+        "/host/path",
+        "/Users/alice",
+        "SECRET_SENTINEL",
+        "secret-token",
+        "sk-live",
+        "runtime trace",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "error body leaked forbidden detail {forbidden:?}: {rendered}"
+        );
     }
 }

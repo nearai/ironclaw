@@ -20,6 +20,8 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+mod approval_test_support;
 mod auth;
 #[cfg(test)]
 mod auth_dcr_tests;
@@ -49,6 +51,7 @@ mod llm_config_service;
 mod llm_key_store;
 #[cfg(feature = "root-llm-provider")]
 mod llm_reload;
+mod local_dev_authorization;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
@@ -75,6 +78,7 @@ mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
 mod profile;
+mod profile_approval_authorization;
 mod projection;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
 #[cfg(feature = "root-llm-provider")]
@@ -86,6 +90,7 @@ mod provider_repo;
 mod readiness;
 mod runtime;
 mod runtime_input;
+mod runtime_profile_approval_policy;
 mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
@@ -96,11 +101,15 @@ mod slack_connectable_channel;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_delivery;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_dm_open;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_egress;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_beta;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_state;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_outbound_targets;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_pairing_notifier;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -146,7 +155,9 @@ pub use extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
 };
-pub use factory::{RebornServices, build_reborn_services};
+#[cfg(feature = "test-support")]
+pub use factory::RebornLocalDevApprovalTestParts;
+pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use hooks::{
     HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
@@ -161,6 +172,10 @@ pub use ironclaw_auth::GoogleOAuthRouteConfig;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,
+};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use ironclaw_runtime_policy::{
+    ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
 };
 pub use ironclaw_skills::{
     ManagedSkillSource as RebornSkillSource, SkillSummary as RebornSkillSummary,
@@ -866,6 +881,29 @@ where
     TWake: TurnRunWakeNotifier + 'static,
 {
     factory::build_postgres_production_host_runtime_services(config).await
+}
+
+/// Open a PostgreSQL pool for Reborn production storage using the same
+/// TLS/cleartext policy enforced by the production event-store backend.
+///
+/// Callers are responsible for validating that production boot selected the
+/// PostgreSQL storage backend and that the URL came from an env-only config
+/// reference before passing it here.
+#[cfg(feature = "postgres")]
+pub fn open_reborn_postgres_pool(
+    url: secrecy::SecretString,
+) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
+    Ok(ironclaw_reborn_event_store::open_postgres_pool(url)?)
+}
+
+/// Open a PostgreSQL pool for Reborn production storage with an explicit
+/// maximum connection count.
+#[cfg(feature = "postgres")]
+pub fn open_reborn_postgres_pool_with_max_size(
+    url: secrecy::SecretString,
+    max_size: usize,
+) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
+    Ok(ironclaw_reborn_event_store::open_postgres_pool_with_max_size(url, max_size)?)
 }
 
 #[cfg(all(test, any(feature = "libsql", feature = "postgres")))]

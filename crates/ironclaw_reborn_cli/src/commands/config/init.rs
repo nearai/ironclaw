@@ -189,6 +189,18 @@ poll_interval_ms        = 200
 # `$code-review` still activate skills.
 regex_activation_enabled = true
 
+# [storage]
+# # Production storage selection. The database URL value is env-only; this
+# # file may name the variable but must never contain the raw URL.
+# # Managed remote Postgres providers must use TLS, e.g. append
+# # `sslmode=require` to IRONCLAW_REBORN_POSTGRES_URL.
+# backend = "postgres"
+# url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+# secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+# # Optional; defaults to 16. Keep below the PostgreSQL server's
+# # max_connections after reserving capacity for migrations/operator sessions.
+# pool_max_size = 16
+
 [llm.default]
 # LLM slot selection. `provider_id` references an entry in
 # providers.json (built-in or user-overlay). `model` / `base_url` /

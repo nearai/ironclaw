@@ -34,12 +34,33 @@ if [ ! -f "$config_path" ]; then
   trap - EXIT HUP INT TERM
 fi
 
-if [ "$#" -gt 0 ]; then
-  exec ironclaw-reborn "$@"
-fi
-
 host="${IRONCLAW_REBORN_SERVE_HOST:-127.0.0.1}"
 port="${PORT:-${IRONCLAW_REBORN_SERVE_PORT:-3000}}"
+
+resolve_env_placeholder_arg() {
+  case "$1" in
+    '$IRONCLAW_REBORN_SERVE_HOST'|'${IRONCLAW_REBORN_SERVE_HOST}')
+      printf '%s\n' "$host"
+      ;;
+    '$PORT'|'${PORT}'|'$IRONCLAW_REBORN_SERVE_PORT'|'${IRONCLAW_REBORN_SERVE_PORT}')
+      printf '%s\n' "$port"
+      ;;
+    *)
+      printf '%s\n' "$1"
+      ;;
+  esac
+}
+
+if [ "$#" -gt 0 ]; then
+  original_arg_count="$#"
+  while [ "$original_arg_count" -gt 0 ]; do
+    arg="$(resolve_env_placeholder_arg "$1")"
+    shift
+    original_arg_count=$((original_arg_count - 1))
+    set -- "$@" "$arg"
+  done
+  exec ironclaw-reborn "$@"
+fi
 
 set -- serve --host "$host" --port "$port"
 
