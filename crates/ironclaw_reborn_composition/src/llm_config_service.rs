@@ -291,13 +291,24 @@ impl RebornLlmConfigService {
             {
                 apply_stored_api_key(&mut config, stored);
             }
-        } else {
+        } else if self
+            .keys
+            .exists(&request.provider_id)
+            .await
+            .map_err(|_| LlmConfigServiceError::Unavailable)?
+        {
+            // A stored key exists but this probe targets an overridden endpoint:
+            // refuse to inject it (a caller-controlled base_url could exfiltrate
+            // it). The caller must supply an inline key to probe elsewhere.
             return Err(LlmConfigServiceError::InvalidRequest {
                 field: Some("api_key".to_string()),
                 reason: "inline api_key is required when probing an overridden provider endpoint"
                     .to_string(),
             });
         }
+        // Otherwise there is neither an inline key nor a stored key to protect,
+        // so probe keyless — local OpenAI-compatible endpoints (e.g. Ollama)
+        // need no auth and must not be blocked behind a phantom key requirement.
 
         let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
         ironclaw_llm::build_static_provider_chain(&config, session)
@@ -1363,6 +1374,33 @@ mod tests {
                 } if field == "api_key" && reason.contains("overridden provider endpoint")
             ),
             "stored operator keys must not be applied to caller-controlled probe endpoints"
+        );
+    }
+
+    /// Reproduction for the "Fetch models" failure on a keyless local provider
+    /// (e.g. Ollama at `http://localhost:11434`). With neither an inline key nor
+    /// a stored key, the probe used to be rejected with an `invalid_request`
+    /// validation error demanding an `api_key`. There is no stored key to
+    /// exfiltrate, so the probe must be allowed to run keyless instead — it then
+    /// just reports the endpoint as unreachable in the test environment.
+    #[tokio::test]
+    async fn probe_keyless_local_provider_is_not_blocked_on_missing_api_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let service = RebornLlmConfigService::new(boot, key_store());
+
+        // Brand-new custom provider, never persisted, no stored key.
+        let result = service
+            .list_models(
+                caller(),
+                probe_request("local-ollama", "http://127.0.0.1:1", None),
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "keyless local provider must pass the probe validation gate, got {result:?}"
         );
     }
 
