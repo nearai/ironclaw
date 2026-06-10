@@ -110,8 +110,9 @@ Inbound order (outer → inner → handler):
    a `WebUiAuthenticatedCaller` extension built from
    `config.tenant_id` plus the authenticator's `UserId`.
    When `openai-compat-beta` is enabled, the same verified bearer result also
-   inserts an `OpenAiCompatAuthenticatedCaller` extension for protected
-   OpenAI-compatible route mounts; route crates must not mint this evidence.
+   inserts an `OpenAiCompatAuthenticatedCaller` extension with tenant-scoped
+   verified auth evidence for protected OpenAI-compatible route mounts; route
+   crates must not mint this evidence.
 8. **Descriptor-driven per-route rate limit**
    (`webui_rate_limit::enforce_rate_limit`) — reads
    `ironclaw_webui_v2::webui_v2_routes()` plus mounted product-auth

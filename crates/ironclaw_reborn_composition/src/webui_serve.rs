@@ -843,8 +843,10 @@ async fn authenticate_request(
             state.default_agent_id.clone(),
             state.default_project_id.clone(),
         );
-        let auth_evidence =
-            ironclaw_product_adapters::mark_bearer_token_verified(openai_user_id.as_str());
+        let auth_evidence = ironclaw_product_adapters::mark_bearer_token_verified_for_tenant(
+            openai_user_id.as_str(),
+            state.tenant_id.clone(),
+        );
         let caller = match ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller::new(
             scope,
             auth_evidence,
