@@ -27,9 +27,11 @@ pub use leak_detector::{
 pub use policy::{Policy, PolicyAction, PolicyRule, Severity};
 pub use prompt_validation::{PromptSafetyRejection, validate_trusted_trigger_prompt};
 pub use provider_validation::{
-    PROVIDER_TOOL_NAME_MAX_BYTES, ProviderValidationError,
-    validate_optional_provider_metadata_text, validate_provider_arguments,
-    validate_provider_identity, validate_provider_token, validate_provider_tool_name,
+    PROVIDER_TOOL_NAME_MAX_BYTES, ProviderValidationError, scrub_optional_provider_metadata_string,
+    scrub_optional_provider_metadata_text, scrub_provider_metadata_string,
+    scrub_provider_metadata_text, validate_optional_provider_metadata_text,
+    validate_provider_arguments, validate_provider_identity, validate_provider_token,
+    validate_provider_tool_name,
 };
 pub use redaction::{redact_exact_values, redaction_values_for_secret};
 pub use sanitizer::{InjectionWarning, SanitizedOutput, Sanitizer};

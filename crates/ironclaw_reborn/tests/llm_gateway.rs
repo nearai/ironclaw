@@ -146,6 +146,31 @@ async fn gateway_preserves_text_only_provider_reasoning() {
 }
 
 #[tokio::test]
+async fn gateway_redacts_text_only_provider_reasoning() {
+    let api_key = format!("sk-proj-{}", "a".repeat(24));
+    let provider = Arc::new(RecordingLlmProvider::reply_with_reasoning(
+        "assistant response",
+        &format!("use {api_key} to finish"),
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let response = gateway
+        .stream_model(model_request(interactive_model()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.safe_reasoning_deltas,
+        vec!["use [REDACTED] to finish".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn gateway_cleans_legacy_tool_marker_from_text_only_assistant_reply() {
     let provider = Arc::new(RecordingLlmProvider::reply(
         "Done.\n[Called tool `demo__echo` with arguments: {\"message\":\"hi\"}]",
@@ -249,6 +274,42 @@ async fn gateway_cleans_legacy_tool_marker_from_tool_capable_stop_reply() {
 }
 
 #[tokio::test]
+async fn gateway_redacts_tool_capable_stop_reply_provider_reasoning() {
+    let api_key = format!("sk-proj-{}", "a".repeat(24));
+    let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
+        content: Some("assistant response".to_string()),
+        tool_calls: Vec::new(),
+        input_tokens: 1,
+        output_tokens: 1,
+        finish_reason: FinishReason::Stop,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        reasoning: Some(format!("use {api_key} to finish")),
+    }));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.safe_reasoning_deltas,
+        vec!["use [REDACTED] to finish".to_string()]
+    );
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert_eq!(reply.content, "assistant response");
+}
+
+#[tokio::test]
 async fn gateway_cleans_flattened_tool_history_from_tool_capable_stop_reply() {
     let provider = Arc::new(ToolAwareProvider::tool_stop_reply(
         "Finished.\nTool result from the benchmark: passed.\nPrevious tool result from demo__echo: hi\nTool result from demo__echo: hi",
@@ -346,6 +407,121 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
     assert_eq!(
         registered[0].arguments,
         serde_json::json!({"message":"hello"})
+    );
+}
+
+#[tokio::test]
+async fn gateway_with_tool_surface_preserves_benign_reasoning_text_containing_api_key() {
+    let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"hello"}),
+            reasoning: None,
+            signature: None,
+        }],
+        input_tokens: 1,
+        output_tokens: 1,
+        finish_reason: FinishReason::ToolUse,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        reasoning: Some("use the api key to finish".to_string()),
+    }));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.safe_reasoning_deltas,
+        vec!["use the api key to finish".to_string()]
+    );
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected capability calls");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0]
+            .provider_replay
+            .as_ref()
+            .and_then(|replay| replay.response_reasoning.as_deref()),
+        Some("use the api key to finish")
+    );
+    assert_eq!(
+        capabilities
+            .registered
+            .lock()
+            .unwrap()
+            .first()
+            .and_then(|call| call.response_reasoning.as_deref()),
+        Some("use the api key to finish")
+    );
+}
+
+#[tokio::test]
+async fn gateway_with_tool_surface_redacts_secret_reasoning_before_persisting() {
+    let api_key = format!("sk-proj-{}", "a".repeat(24));
+    let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"hello"}),
+            reasoning: None,
+            signature: None,
+        }],
+        input_tokens: 1,
+        output_tokens: 1,
+        finish_reason: FinishReason::ToolUse,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        reasoning: Some(format!("use {api_key} to finish")),
+    }));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.safe_reasoning_deltas,
+        vec!["use [REDACTED] to finish".to_string()]
+    );
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected capability calls");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0]
+            .provider_replay
+            .as_ref()
+            .and_then(|replay| replay.response_reasoning.as_deref()),
+        Some("use [REDACTED] to finish")
+    );
+    assert_eq!(
+        capabilities
+            .registered
+            .lock()
+            .unwrap()
+            .first()
+            .and_then(|call| call.response_reasoning.as_deref()),
+        Some("use [REDACTED] to finish")
     );
 }
 

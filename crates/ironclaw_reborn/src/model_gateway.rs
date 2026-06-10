@@ -27,6 +27,7 @@ use ironclaw_loop_support::{
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedToolResultContent,
     ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
 };
+use ironclaw_safety::scrub_optional_provider_metadata_string;
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
@@ -943,6 +944,7 @@ async fn tool_response_to_host(
             FinishReason::ToolUse | FinishReason::Stop
         )
     {
+        let scrubbed_reasoning = scrub_provider_reasoning(response.reasoning)?;
         let advertised_tool_names = capabilities
             .tool_definitions()
             .map_err(map_capability_host_error)?
@@ -967,7 +969,7 @@ async fn tool_response_to_host(
             .map(|tool_call| {
                 provider_tool_call_from_llm(
                     tool_call,
-                    response.reasoning.clone(),
+                    scrubbed_reasoning.clone(),
                     provider_turn_id.clone(),
                     replay_identity,
                 )
@@ -992,7 +994,7 @@ async fn tool_response_to_host(
         return Ok(HostManagedModelResponse::capability_calls_with_reasoning(
             candidates,
             response.content.unwrap_or_default(),
-            response.reasoning,
+            scrubbed_reasoning,
         )
         .with_usage(LoopModelUsage {
             input_tokens: response.input_tokens,
@@ -1002,6 +1004,7 @@ async fn tool_response_to_host(
 
     match response.finish_reason {
         FinishReason::Stop => {
+            let scrubbed_reasoning = scrub_provider_reasoning(response.reasoning)?;
             let content = clean_response(&response.content.unwrap_or_default());
             if content.trim().is_empty() {
                 return Err(HostManagedModelError::safe(
@@ -1015,7 +1018,7 @@ async fn tool_response_to_host(
             );
             Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
                 content,
-                response.reasoning,
+                scrubbed_reasoning,
             )
             .with_usage(LoopModelUsage {
                 input_tokens: response.input_tokens,
@@ -1060,6 +1063,22 @@ fn provider_tool_call_from_llm(
     }
 }
 
+fn scrub_provider_reasoning(
+    reasoning: Option<String>,
+) -> Result<Option<String>, HostManagedModelError> {
+    scrub_optional_provider_metadata_string(reasoning, "provider response reasoning", 4096).map_err(
+        |error| {
+            ironclaw_loop_support::raw_host_managed_model_error(
+                "provider_reasoning_metadata",
+                "scrub_provider_reasoning",
+                HostManagedModelErrorKind::InvalidOutput,
+                "provider reasoning metadata is invalid",
+                error,
+            )
+        },
+    )
+}
+
 fn provider_turn_id(provider_turn_scope: &str, tool_calls: &[ToolCall]) -> String {
     let mut stable = String::new();
     stable.push_str(provider_turn_scope);
@@ -1092,10 +1111,11 @@ fn response_to_host_reply(
     };
     match response.finish_reason {
         FinishReason::Stop => {
+            let scrubbed_reasoning = scrub_provider_reasoning(response.reasoning)?;
             let content = clean_response(&response.content);
             Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
                 content,
-                response.reasoning,
+                scrubbed_reasoning,
             )
             .with_usage(usage))
         }

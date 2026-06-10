@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_reference_validation_rejects_sensitive_arguments_and_text() {
+    fn provider_reference_validation_rejects_sensitive_arguments_but_allows_reasoning_phrases() {
         let mut envelope = provider_reference();
         let api_key = format!("sk-proj-{}", "a".repeat(24));
         envelope.arguments = serde_json::json!({"api_key": api_key});
@@ -258,7 +258,9 @@ mod tests {
 
         let mut envelope = provider_reference();
         envelope.response_reasoning = Some("raw provider error included a stack trace".to_string());
-        assert!(envelope.validate().is_err());
+        envelope
+            .validate()
+            .expect("ordinary provider reasoning phrases should pass");
     }
 
     #[test]

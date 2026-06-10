@@ -1,5 +1,5 @@
 use ironclaw_safety::{
-    ProviderValidationError, validate_optional_provider_metadata_text,
+    scrub_optional_provider_metadata_string,
     validate_provider_arguments as validate_safety_provider_arguments, validate_provider_identity,
     validate_provider_token, validate_provider_tool_name as validate_safety_provider_tool_name,
 };
@@ -11,55 +11,125 @@ pub(super) fn validate_provider_tool_call(
     tool_call: &ProviderToolCall,
 ) -> Result<(), AgentLoopHostError> {
     validate_provider_identity(&tool_call.provider_id, "provider id", 512)
-        .map_err(invalid_invocation)?;
-    validate_provider_identity(&tool_call.provider_model_id, "provider model id", 512)
-        .map_err(invalid_invocation)?;
+        .map_err(|error| invalid_invocation("validate_provider_tool_call_provider_id", error))?;
+    validate_provider_identity(&tool_call.provider_model_id, "provider model id", 512).map_err(
+        |error| invalid_invocation("validate_provider_tool_call_provider_model_id", error),
+    )?;
     let turn_id = tool_call.turn_id.as_deref().ok_or_else(|| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "provider tool call is missing a provider turn id",
         )
     })?;
-    validate_provider_token(turn_id, "provider turn id", 512).map_err(invalid_invocation)?;
-    validate_provider_token(&tool_call.id, "provider call id", 512).map_err(invalid_invocation)?;
+    validate_provider_token(turn_id, "provider turn id", 512)
+        .map_err(|error| invalid_invocation("validate_provider_tool_call_turn_id", error))?;
+    validate_provider_token(&tool_call.id, "provider call id", 512)
+        .map_err(|error| invalid_invocation("validate_provider_tool_call_call_id", error))?;
     validate_provider_tool_name(&tool_call.name)?;
     validate_provider_arguments(&tool_call.arguments)?;
-    validate_optional_provider_metadata_text(
+    validate_optional_provider_reasoning_text(
         tool_call.response_reasoning.as_deref(),
         "provider response reasoning",
         4096,
     )
-    .map_err(invalid_invocation)?;
-    validate_optional_provider_metadata_text(
+    .map_err(|error| invalid_invocation("validate_provider_response_reasoning", error))?;
+    validate_optional_provider_reasoning_text(
         tool_call.reasoning.as_deref(),
         "provider reasoning",
         4096,
     )
-    .map_err(invalid_invocation)?;
-    validate_optional_provider_metadata_text(
+    .map_err(|error| invalid_invocation("validate_provider_reasoning", error))?;
+    validate_optional_provider_signature_text(
         tool_call.signature.as_deref(),
         "provider signature",
         4096,
     )
-    .map_err(invalid_invocation)?;
+    .map_err(|error| invalid_invocation("validate_provider_signature", error))?;
     Ok(())
 }
 
 pub(super) fn validate_provider_tool_name(value: &str) -> Result<(), AgentLoopHostError> {
-    validate_safety_provider_tool_name(value).map_err(invalid_invocation)
+    validate_safety_provider_tool_name(value)
+        .map_err(|error| invalid_invocation("validate_provider_tool_name", error))
 }
 
 pub(super) fn validate_provider_arguments(
     arguments: &serde_json::Value,
 ) -> Result<(), AgentLoopHostError> {
-    validate_safety_provider_arguments(arguments).map_err(invalid_invocation)
+    validate_safety_provider_arguments(arguments)
+        .map_err(|error| invalid_invocation("validate_provider_arguments", error))
 }
 
-fn invalid_invocation(error: ProviderValidationError) -> AgentLoopHostError {
+pub(super) fn sanitize_provider_tool_call_metadata(
+    tool_call: &mut ProviderToolCall,
+) -> Result<(), AgentLoopHostError> {
+    tool_call.response_reasoning = scrub_optional_provider_metadata_string(
+        tool_call.response_reasoning.take(),
+        "provider response reasoning",
+        4096,
+    )
+    .map_err(|error| invalid_invocation("sanitize_provider_response_reasoning", error))?;
+    tool_call.reasoning = scrub_optional_provider_metadata_string(
+        tool_call.reasoning.take(),
+        "provider reasoning",
+        4096,
+    )
+    .map_err(|error| invalid_invocation("sanitize_provider_reasoning", error))?;
+    validate_optional_provider_signature_text(
+        tool_call.signature.as_deref(),
+        "provider signature",
+        4096,
+    )
+    .map_err(|error| invalid_invocation("validate_provider_signature", error))?;
+    Ok(())
+}
+
+fn validate_optional_provider_reasoning_text(
+    value: Option<&str>,
+    label: &'static str,
+    max_len: usize,
+) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    validate_provider_metadata_text_bounds(value, label, max_len)
+}
+
+fn validate_optional_provider_signature_text(
+    value: Option<&str>,
+    label: &'static str,
+    max_len: usize,
+) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    validate_provider_metadata_text_bounds(value, label, max_len)
+}
+
+fn validate_provider_metadata_text_bounds(
+    value: &str,
+    label: &'static str,
+    max_len: usize,
+) -> Result<(), String> {
+    if value.len() > max_len {
+        return Err(format!("{label} exceeds {max_len} bytes"));
+    }
+    if value.chars().any(|character| {
+        character == '\0' || (character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    }) {
+        return Err(format!("{label} must not contain NUL/control characters"));
+    }
+    Ok(())
+}
+
+fn invalid_invocation(
+    operation: &'static str,
+    error: impl std::fmt::Display,
+) -> AgentLoopHostError {
     let safe_summary = error.to_string();
     crate::raw_agent_loop_host_error(
         "capability_provider_validation",
-        "validate_provider_arguments",
+        operation,
         AgentLoopHostErrorKind::InvalidInvocation,
         safe_summary,
         error,
@@ -89,15 +159,15 @@ mod tests {
     }
 
     #[test]
-    fn provider_tool_call_validation_rejects_sensitive_metadata() {
+    fn provider_tool_call_validation_allows_benign_metadata_phrases() {
         let mut call = provider_tool_call();
-        let api_key = format!("sk-proj-{}", "a".repeat(24));
-        call.arguments = serde_json::json!({"password": api_key});
-        assert!(validate_provider_tool_call(&call).is_err());
+        let benign_metadata = "provider error included traceback".to_string();
+        call.response_reasoning = Some(benign_metadata.clone());
+        call.reasoning = Some(benign_metadata.clone());
+        call.signature = Some(benign_metadata);
 
-        let mut call = provider_tool_call();
-        call.reasoning = Some("provider error included traceback".to_string());
-        assert!(validate_provider_tool_call(&call).is_err());
+        validate_provider_tool_call(&call)
+            .expect("benign provider metadata phrases should be accepted");
     }
 
     #[test]
@@ -120,6 +190,34 @@ mod tests {
         let error = validate_provider_tool_call(&call)
             .expect_err("non-whitespace response reasoning control should fail");
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn provider_tool_call_validation_rejects_overlong_signature() {
+        let mut call = provider_tool_call();
+        call.signature = Some("x".repeat(4097));
+
+        let error = validate_provider_tool_call(&call).expect_err("overlong signature rejected");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn provider_tool_call_metadata_sanitizer_redacts_secret_reasoning() {
+        let mut call = provider_tool_call();
+        let api_key = format!("sk-proj-{}", "a".repeat(24));
+        call.response_reasoning = Some(format!("use {api_key} to finish"));
+        call.reasoning = Some(format!("selected because {api_key} was present"));
+
+        sanitize_provider_tool_call_metadata(&mut call).expect("metadata should be scrubbed");
+
+        assert_eq!(
+            call.response_reasoning.as_deref(),
+            Some("use [REDACTED] to finish")
+        );
+        assert_eq!(
+            call.reasoning.as_deref(),
+            Some("selected because [REDACTED] was present")
+        );
     }
 
     #[test]

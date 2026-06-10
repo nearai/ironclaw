@@ -38,7 +38,8 @@ use self::provider_input::{
     normalize_provider_arguments, prepare_provider_arguments, schema_contains_external_ref,
 };
 use self::provider_validation::{
-    PROVIDER_TOOL_NAME_MAX_BYTES, validate_provider_arguments, validate_provider_tool_call,
+    PROVIDER_TOOL_NAME_MAX_BYTES, sanitize_provider_tool_call_metadata,
+    validate_provider_arguments, validate_provider_tool_call,
 };
 use self::surface_snapshot::{
     RuntimeSurfaceCapabilitySnapshot, SurfaceCapabilitySnapshot, SurfaceSnapshot,
@@ -1021,6 +1022,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         let prepared = self.prepare_provider_tool_call(&tool_call)?;
         let mut normalized_tool_call = tool_call.clone();
         normalized_tool_call.arguments = prepared.normalized_arguments;
+        sanitize_provider_tool_call_metadata(&mut normalized_tool_call)?;
         let input_ref = self
             .input_resolver
             .register_provider_tool_call_input(&self.run_context, &normalized_tool_call)
@@ -1043,9 +1045,9 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 provider_call_id: tool_call.id,
                 provider_tool_name: tool_call.name,
                 arguments: tool_call.arguments,
-                response_reasoning: tool_call.response_reasoning,
-                reasoning: tool_call.reasoning,
-                signature: tool_call.signature,
+                response_reasoning: normalized_tool_call.response_reasoning,
+                reasoning: normalized_tool_call.reasoning,
+                signature: normalized_tool_call.signature,
             }),
         })
     }
@@ -3191,6 +3193,47 @@ mod tests {
 
         assert!(input_ref.as_str().starts_with("input:provider-tool-"));
         assert_eq!(resolved, serde_json::json!({"message":"hello"}));
+    }
+
+    #[tokio::test]
+    async fn provider_tool_call_registration_redacts_secret_reasoning_in_replay() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )])),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-provider-reasoning-redaction",
+        )
+        .await;
+        let api_key = format!("sk-proj-{}", "a".repeat(24));
+        let mut call = provider_tool_call();
+        call.response_reasoning = Some(format!("response {api_key}"));
+        call.reasoning = Some(format!("call {api_key}"));
+
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities should load before provider registration");
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("provider tool call should register with redacted metadata");
+
+        let replay = candidate
+            .provider_replay
+            .expect("provider replay metadata should be recorded");
+        assert_eq!(
+            replay.response_reasoning.as_deref(),
+            Some("response [REDACTED]")
+        );
+        assert_eq!(replay.reasoning.as_deref(), Some("call [REDACTED]"));
+        assert!(!replay.response_reasoning.unwrap().contains(&api_key));
+        assert!(!replay.reasoning.unwrap().contains(&api_key));
     }
 
     #[tokio::test]

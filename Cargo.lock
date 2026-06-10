@@ -4835,6 +4835,7 @@ dependencies = [
  "ironclaw_processes",
  "ironclaw_reborn_event_store",
  "ironclaw_resources",
+ "ironclaw_safety",
  "ironclaw_scripts",
  "ironclaw_secrets",
  "ironclaw_skills",
