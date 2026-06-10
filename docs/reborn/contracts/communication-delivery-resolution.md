@@ -196,23 +196,38 @@ The first matching rule yields the only candidate.
 3. **Live source route wins for ordinary run notifications.** If the run
    descended from a real inbound product message, final replies and supported
    progress/status updates prefer the live source route's reply target.
-4. **Triggered-from-source-route uses the live source route.** If the run
-   descended from both a trigger and a live source route, ordinary final
-   replies, progress updates, and delivery-status notices prefer the live
-   source route over the trigger creator's preferred target.
-5. **Triggered preferred target wins for ordinary trigger results without a
-   live source route.** If the run descended from a trigger and has no live
-   source route, final replies prefer the creator user's configured
+4. **Triggered-from-source-route uses scoped trigger defaults.** If the run
+   descended from both a trigger and a live source route, the source route is
+   provenance only; ordinary final replies, progress updates, and
+   delivery-status notices resolve through the same scoped trigger defaults as
+   other triggered delivery.
+5. **Triggered preferred target wins for ordinary trigger results.** If the run
+   descended from a trigger, final replies prefer the run owner's configured
    `final_reply_target`.
-6. **System events have no implicit external target in P0.** `SystemEvent`
+6. **Triggered approval/auth prompts fall back to the final-reply target.** For
+   `Triggered` and `TriggeredFromSourceRoute` origins, an explicitly configured
+   `approval_prompt_target` or `auth_prompt_target` always wins; when that slot
+   is unset, the resolver falls back to the same scope's `final_reply_target`
+   so gate prompts are not silently dropped for scopes that configured
+   delivery. When neither slot is set, resolution fails closed. Progress and
+   delivery-status kinds never use this fallback.
+7. **Triggered scope resolution fails closed on ambiguous ownership.** For
+   `Triggered` and `TriggeredFromSourceRoute` origins, the preference key comes
+   from the persisted thread ownership: an explicit owner resolves the personal
+   scope `personal(tenant, owner)`; an explicitly ownerless thread with a project
+   id resolves the project scope `project(tenant, project)`. An explicitly
+   ownerless thread with no project id, or a thread with no explicit ownership
+   information, fails closed; triggered delivery never falls back to the turn
+   actor's personal scope.
+8. **System events have no implicit external target in P0.** `SystemEvent`
    origins require `RequestedOutbound` for external delivery. Without an
    explicit requested target, the event is recorded as delivery metadata only
    and no external send is attempted.
 
 Delivery-status notifications follow the same origin rule as the delivery they
-describe. Progress updates use the source route when that route validates for
-progress; otherwise they use `progress_target` when configured. Unsupported
-progress, approval, or auth delivery is recorded as delivery metadata only; it
+describe. Triggered progress updates use `progress_target` when configured,
+including `TriggeredFromSourceRoute`; unsupported progress, approval, or auth
+delivery is recorded as delivery metadata only; it
 must not resume work or change approval/auth state.
 
 The resolver does not keep searching after a target fails validation. If the

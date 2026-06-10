@@ -39,6 +39,7 @@ The trigger system is owned by `ironclaw_triggers` in implementation terms, but 
 | `creator_user_id` | User who created the trigger |
 | `agent_id` | Captured agent scope at create time |
 | `project_id` | Captured project scope at create time |
+| `ownership_scope` | Run/delivery ownership principal: `personal` (default) or `project`. `project` requires `project_id`. Host-derived authority: the capability handler rejects `project` unless constructed with shared-creation authority; model tool input and client bodies are never the source of that authority |
 | `name` | Human-readable label |
 | `source` | Trigger source kind |
 | `schedule` | V1 schedule definition |
