@@ -218,7 +218,9 @@ pub use provider_admin_product_command::RebornProviderAdminProductCommandService
 #[cfg(feature = "root-llm-provider")]
 pub use provider_repo::{ProviderRepo, ProviderRepoError};
 pub use readiness::{
-    RebornFacadeReadiness, RebornReadiness, RebornReadinessState, RebornWorkerReadiness,
+    RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
+    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
+    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
 };
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
