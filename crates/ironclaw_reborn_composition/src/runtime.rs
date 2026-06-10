@@ -108,8 +108,8 @@ use crate::trigger_poller::{
     spawn_trigger_poller,
 };
 use crate::{
-    RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
-    build_reborn_services,
+    RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornReadiness,
+    RebornReadinessState, RebornServices, build_reborn_services,
 };
 use production::{
     EmptyCapabilitySurfaceResolver, EmptyIdentityContextSource,
@@ -184,6 +184,46 @@ where
             &graph.scoped_filesystem,
         ))) as Arc<dyn RuntimeSubagentGoalStore>,
         trigger_repository: Some(Arc::clone(&graph.trigger_repository)),
+    }
+}
+
+fn enforce_runtime_cutover_gate(
+    profile: RebornCompositionProfile,
+    readiness: &RebornReadiness,
+) -> Result<(), RebornRuntimeError> {
+    match profile {
+        RebornCompositionProfile::Production => {
+            if readiness.state != RebornReadinessState::ProductionValidated {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "profile=production cannot start Reborn runtime before production readiness is validated; state={:?}",
+                        readiness.state
+                    ),
+                });
+            }
+            if let Some(diagnostic) = readiness
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.blocks_production)
+            {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "profile=production cannot start Reborn runtime while readiness diagnostic blocks production: component={:?}, reason={:?}",
+                        diagnostic.component, diagnostic.reason
+                    ),
+                });
+            }
+            Ok(())
+        }
+        RebornCompositionProfile::MigrationDryRun => Err(RebornRuntimeError::InvalidArgument {
+            reason:
+                "profile=migration-dry-run validates production-shaped wiring but must not start live Reborn runtime traffic"
+                    .to_string(),
+        }),
+        RebornCompositionProfile::Disabled => Err(RebornRuntimeError::InvalidArgument {
+            reason: "profile=disabled must not start live Reborn runtime traffic".to_string(),
+        }),
+        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => Ok(()),
     }
 }
 
@@ -1611,12 +1651,11 @@ impl RebornRuntime {
 /// On return, the turn-runner worker is already running in the background and
 /// the returned `RebornRuntime` is ready to accept `send_user_message` calls.
 ///
-/// **Currently supported profiles:** `RebornCompositionProfile::LocalDev` and
-/// `RebornCompositionProfile::LocalDevYolo` are wired end-to-end here;
-/// production profiles will follow in a later slice (they currently return
-/// their substrate-only `RebornServices` and need durable thread/checkpoint
-/// stores wired before being driven). Passing a production profile returns a
-/// "not yet wired" error rather than partially starting an agent.
+/// **Currently supported profiles:** `RebornCompositionProfile::LocalDev`,
+/// `RebornCompositionProfile::LocalDevYolo`, and
+/// `RebornCompositionProfile::Production` are wired end-to-end here. Production
+/// starts only after readiness diagnostics validate that live traffic can be
+/// exposed without a partial cutover.
 pub async fn build_reborn_runtime(
     input: RebornRuntimeInput,
 ) -> Result<RebornRuntime, RebornRuntimeError> {
@@ -1681,6 +1720,7 @@ pub async fn build_reborn_runtime(
     let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
     let mut services = build_reborn_services(services_input).await?;
+    enforce_runtime_cutover_gate(profile, &services.readiness)?;
 
     let runtime_parts = match profile {
         RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
@@ -2751,6 +2791,95 @@ mod tests {
             "local-dev Reborn skill activation should match the legacy 6000-token skill budget"
         );
     }
+
+    fn readiness_for_runtime_gate(
+        profile: RebornCompositionProfile,
+        state: RebornReadinessState,
+        diagnostics: Vec<crate::RebornReadinessDiagnostic>,
+    ) -> RebornReadiness {
+        RebornReadiness {
+            profile,
+            state,
+            facades: crate::RebornFacadeReadiness {
+                host_runtime: true,
+                turn_coordinator: true,
+                product_auth: true,
+            },
+            workers: crate::RebornWorkerReadiness {
+                turn_runner: true,
+                trigger_poller: false,
+            },
+            diagnostics,
+        }
+    }
+
+    #[test]
+    fn runtime_cutover_gate_allows_validated_production_readiness() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::Production,
+            RebornReadinessState::ProductionValidated,
+            Vec::new(),
+        );
+
+        super::enforce_runtime_cutover_gate(RebornCompositionProfile::Production, &readiness)
+            .expect("validated production runtime can start");
+    }
+
+    #[test]
+    fn runtime_cutover_gate_rejects_blocking_production_diagnostic() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::Production,
+            RebornReadinessState::ProductionValidated,
+            vec![
+                crate::RebornReadinessDiagnostic::production_blocker(
+                    RebornCompositionProfile::Production,
+                    crate::RebornReadinessDiagnosticComponent::RuntimePolicy,
+                    crate::RebornReadinessDiagnosticReason::LocalOnly,
+                )
+                .expect("production profile should create a blocker"),
+            ],
+        );
+
+        let error =
+            super::enforce_runtime_cutover_gate(RebornCompositionProfile::Production, &readiness)
+                .expect_err("blocking production diagnostic prevents runtime start");
+        let RebornRuntimeError::InvalidArgument { reason } = error else {
+            panic!("expected invalid argument, got {error:?}");
+        };
+        assert!(reason.contains("RuntimePolicy"), "reason: {reason}");
+        assert!(reason.contains("LocalOnly"), "reason: {reason}");
+    }
+
+    #[test]
+    fn runtime_cutover_gate_rejects_migration_dry_run_runtime_start() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::MigrationDryRun,
+            RebornReadinessState::MigrationDryRunValidated,
+            Vec::new(),
+        );
+
+        let error = super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::MigrationDryRun,
+            &readiness,
+        )
+        .expect_err("migration-dry-run cannot start live runtime");
+        let RebornRuntimeError::InvalidArgument { reason } = error else {
+            panic!("expected invalid argument, got {error:?}");
+        };
+        assert!(reason.contains("migration-dry-run"), "reason: {reason}");
+    }
+
+    #[test]
+    fn runtime_cutover_gate_allows_local_dev_readiness() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::LocalDev,
+            RebornReadinessState::DevOnly,
+            vec![crate::RebornReadinessDiagnostic::local_dev()],
+        );
+
+        super::enforce_runtime_cutover_gate(RebornCompositionProfile::LocalDev, &readiness)
+            .expect("local-dev runtime is not production traffic");
+    }
     use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_events::{EventStreamKey, ReadScope};
     use ironclaw_host_api::{
@@ -2798,6 +2927,8 @@ mod tests {
     use rust_decimal_macros::dec;
 
     #[cfg(feature = "libsql")]
+    use crate::RebornRuntimeProcessBinding;
+    #[cfg(feature = "libsql")]
     use crate::hooks::HooksActivationConfig;
     use crate::input::RebornBuildInput;
     use crate::runtime_input::{
@@ -2806,7 +2937,9 @@ mod tests {
         TriggerPollerSettings,
     };
     use crate::webui::build_webui_services;
-    use crate::{RebornReadinessState, RebornRuntimeProcessBinding};
+    use crate::{
+        RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError,
+    };
 
     use super::{
         RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND,
