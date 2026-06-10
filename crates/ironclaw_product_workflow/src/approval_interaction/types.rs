@@ -250,6 +250,7 @@ pub struct ListPendingApprovalsResponse {
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalInteractionDecision {
     ApproveOnce,
+    AlwaysAllow,
     Deny,
 }
 

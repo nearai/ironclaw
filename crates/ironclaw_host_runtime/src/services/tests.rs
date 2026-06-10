@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_approvals::InMemoryPersistentApprovalPolicyStore;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_capabilities::{
     CapabilityObligationCompletionRequest, CapabilityObligationError,
@@ -56,6 +57,33 @@ async fn shared_extension_registry_returns_same_instance() {
     let right = services.shared_extension_registry();
 
     assert_eq!(Arc::as_ptr(&left), Arc::as_ptr(&right)); // safety: test assertion only; verifies both accessors expose the same shared registry.
+}
+
+#[tokio::test]
+async fn production_wiring_reports_missing_persistent_approval_policies() {
+    let report = test_services()
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("minimal local graph should not satisfy production wiring");
+
+    assert!(report.contains(
+        ProductionWiringComponent::PersistentApprovalPolicies,
+        ProductionWiringIssueKind::Missing
+    ));
+}
+
+#[tokio::test]
+async fn production_wiring_reports_local_only_persistent_approval_policies() {
+    let services = test_services()
+        .with_persistent_approval_policies(Arc::new(InMemoryPersistentApprovalPolicyStore::new()));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("local-only persistent approval policies should not satisfy production");
+
+    assert!(report.contains(
+        ProductionWiringComponent::PersistentApprovalPolicies,
+        ProductionWiringIssueKind::LocalOnlyImplementation
+    ));
 }
 
 #[tokio::test]

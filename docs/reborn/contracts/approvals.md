@@ -250,10 +250,20 @@ The dispatcher remains auth-blind and state-blind. It never resolves approvals o
 
 This slice intentionally keeps approval resolution narrow:
 
-- no reusable approval-scope expansion yet; V1 leases are exact-invocation only
+- V1 leases are exact-invocation only; persistent approvals are represented as
+  separate Reborn approval-policy records, not as broadened V1 leases
 - no single-store ACID transaction across approval status update and lease issuance yet; an `Approved` request without a lease is recovered by retrying lease issuance against the durable approval decision
 - no approval support for actions other than dispatch and one-shot spawn yet
-- spawn approvals are supported only for one-shot `Action::SpawnCapability` requests through the approval interaction boundary; there is no reusable or persistent long-running-task approval policy in this slice
+- persistent approval policies cover dispatch and `Action::SpawnCapability`
+  approval interaction decisions at the current Reborn sandbox scope
+  (`tenant_id`, `user_id`, optional `agent_id`, and `project_id` when present,
+  otherwise `thread_id`)
+- persistent approval is fail-closed by manifest policy: the current default
+  only allows durable reuse for capabilities whose manifest
+  `default_permission` is `allow`; `ask` and `deny` remain one-shot approval
+  gates and are re-checked before any stored policy is injected as authority
+- revoke is exposed at the policy-store layer for future product integration;
+  no user-facing revoke flow is defined in this slice
 
 Before a durable/user-facing approval resume UI ships, the host should revisit whether approval records, lease writes, and run-state transitions should share one transactional persistence boundary.
 
