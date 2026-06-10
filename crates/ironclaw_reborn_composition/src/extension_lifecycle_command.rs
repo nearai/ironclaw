@@ -38,6 +38,11 @@ pub async fn execute_reborn_extension_lifecycle_command(
     if let Some(extension_management) = &local_runtime.extension_management {
         facade = facade.with_extension_management(extension_management.clone());
     }
+    if let Some(product_auth) = &services.product_auth {
+        facade = facade.with_runtime_credential_accounts(
+            product_auth.runtime_credential_account_selection_service(),
+        );
+    }
     Ok(facade
         .execute(
             extension_lifecycle_surface_context()?,

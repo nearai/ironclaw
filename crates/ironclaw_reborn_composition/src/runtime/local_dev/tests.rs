@@ -392,7 +392,8 @@ mod tests {
         let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
-        .with_extension_management(extension_management);
+        .with_extension_management(extension_management)
+        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
         for extension_id in ["gmail", "google-calendar"] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
@@ -415,6 +416,45 @@ mod tests {
                     .await
                     .expect("activate GSuite extension");
             }
+        }
+    }
+
+    struct ConfiguredRuntimeCredentialAccounts;
+
+    #[async_trait::async_trait]
+    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+        for ConfiguredRuntimeCredentialAccounts
+    {
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            let now = chrono::Utc::now();
+            Ok(ironclaw_auth::CredentialAccount {
+                id: ironclaw_auth::CredentialAccountId::new(),
+                scope: ironclaw_auth::AuthProductScope::new(
+                    ironclaw_host_api::ResourceScope::local_default(
+                        UserId::new("configured-credential-user").expect("user id"),
+                        ironclaw_host_api::InvocationId::new(),
+                    )
+                    .expect("resource scope"),
+                    ironclaw_auth::AuthSurface::Api,
+                ),
+                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider id"),
+                label: ironclaw_auth::CredentialAccountLabel::new("test-provider")
+                    .expect("account label"),
+                status: ironclaw_auth::CredentialAccountStatus::Configured,
+                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new("test-secret").expect("secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            })
         }
     }
 
@@ -1553,7 +1593,8 @@ mod tests {
             let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
                 local_runtime.skill_management.clone(),
             )
-            .with_extension_management(extension_management);
+            .with_extension_management(extension_management)
+            .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
             let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid github ref");
             facade
@@ -1649,7 +1690,8 @@ mod tests {
         let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
-        .with_extension_management(extension_management);
+        .with_extension_management(extension_management)
+        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid github ref");
         facade

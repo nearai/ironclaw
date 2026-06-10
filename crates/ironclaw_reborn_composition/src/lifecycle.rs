@@ -4,8 +4,8 @@ use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use async_trait::async_trait;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::{
-    HostApiError, HostPath, InvocationId, MountView, ResourceScope, RuntimeHttpEgress, UserId,
-    VirtualPath,
+    CredentialStageError, HostApiError, HostPath, InvocationId, MountView, ResourceScope,
+    RuntimeHttpEgress, UserId, VirtualPath,
 };
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
@@ -20,6 +20,9 @@ use ironclaw_skills::{
 };
 
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::product_auth_runtime_credentials::{
+    RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
+};
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 
@@ -216,6 +219,7 @@ pub(crate) struct RebornLocalLifecycleFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    credential_accounts: Option<Arc<dyn RuntimeCredentialAccountSelectionService>>,
 }
 
 impl RebornLocalLifecycleFacade {
@@ -224,6 +228,7 @@ impl RebornLocalLifecycleFacade {
             skill_management,
             extension_management: None,
             runtime_http_egress: None,
+            credential_accounts: None,
         }
     }
 
@@ -240,6 +245,14 @@ impl RebornLocalLifecycleFacade {
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     ) -> Self {
         self.runtime_http_egress = Some(runtime_http_egress);
+        self
+    }
+
+    pub(crate) fn with_runtime_credential_accounts(
+        mut self,
+        credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    ) -> Self {
+        self.credential_accounts = Some(credential_accounts);
         self
     }
 
@@ -341,6 +354,12 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
+                self.preflight_extension_activation_credentials(
+                    &context,
+                    extension_management,
+                    &package_ref,
+                )
+                .await?;
                 if extension_management
                     .package_requires_hosted_mcp_discovery(&package_ref)
                     .await?
@@ -385,6 +404,45 @@ impl RebornLocalLifecycleFacade {
             }
         }
     }
+
+    async fn preflight_extension_activation_credentials(
+        &self,
+        context: &LifecycleProductContext,
+        extension_management: &RebornLocalExtensionManagementPort,
+        package_ref: &LifecyclePackageRef,
+    ) -> Result<(), ProductWorkflowError> {
+        let requirements = extension_management
+            .activation_credential_requirements(package_ref)
+            .await?;
+        if requirements.is_empty() {
+            return Ok(());
+        }
+        let Some(credential_accounts) = &self.credential_accounts else {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} requires product auth credentials before activation",
+                    package_ref.id
+                ),
+            });
+        };
+        let scope = lifecycle_resource_scope(context)?;
+        let missing_requirements = missing_runtime_credential_auth_requirements(
+            credential_accounts.as_ref(),
+            &scope,
+            requirements,
+        )
+        .await
+        .map_err(map_lifecycle_credential_stage_error)?;
+        if missing_requirements.is_empty() {
+            return Ok(());
+        }
+        Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: format!(
+                "extension {} requires product auth credentials before activation",
+                package_ref.id
+            ),
+        })
+    }
 }
 
 #[async_trait]
@@ -421,7 +479,7 @@ fn lifecycle_resource_scope(
 ) -> Result<ResourceScope, ProductWorkflowError> {
     let LifecycleProductContext::Surface(context) = context else {
         return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: "hosted MCP lifecycle activation requires a surface caller".to_string(),
+            reason: "extension lifecycle activation requires a surface caller".to_string(),
         });
     };
     Ok(ResourceScope {
@@ -433,6 +491,17 @@ fn lifecycle_resource_scope(
         thread_id: None,
         invocation_id: InvocationId::new(),
     })
+}
+
+fn map_lifecycle_credential_stage_error(error: CredentialStageError) -> ProductWorkflowError {
+    match error {
+        CredentialStageError::AuthRequired => ProductWorkflowError::InvalidBindingRequest {
+            reason: "extension requires product auth credentials before activation".to_string(),
+        },
+        CredentialStageError::Backend => ProductWorkflowError::InvalidBindingRequest {
+            reason: "extension product auth credential state is invalid".to_string(),
+        },
+    }
 }
 
 pub(crate) fn response_with_payload(

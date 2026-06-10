@@ -9,7 +9,8 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, ResourceScope,
-    RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath, sha256_digest_token,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeHttpEgress, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_workflow::{
     LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
@@ -249,6 +250,18 @@ impl RebornLocalExtensionManagementPort {
             })
             .map(ActiveExtensionCapability::from_descriptor)
             .collect())
+    }
+
+    pub(crate) async fn activation_credential_requirements(
+        &self,
+        package_ref: &LifecyclePackageRef,
+    ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductWorkflowError> {
+        let (extension_id, installation_id) = extension_ids_from_package_ref(package_ref)?;
+        let _operation_guard = self.operation_lock.lock().await;
+        self.load_installation(&extension_id, &installation_id)
+            .await?;
+        let package = self.lifecycle_package(&extension_id).await?;
+        Ok(package_runtime_credential_auth_requirements(&package))
     }
 
     async fn installed_summaries(
@@ -876,6 +889,48 @@ impl RebornLocalExtensionManagementPort {
     }
 }
 
+fn package_runtime_credential_auth_requirements(
+    package: &ExtensionPackage,
+) -> Vec<RuntimeCredentialAuthRequirement> {
+    let mut requirements: Vec<RuntimeCredentialAuthRequirement> = Vec::new();
+    for capability in &package.manifest.capabilities {
+        for credential in &capability.runtime_credentials {
+            if !credential.required {
+                continue;
+            }
+            let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, .. } =
+                &credential.source
+            else {
+                continue;
+            };
+            let provider_scopes = normalized_provider_scopes(&credential.provider_scopes);
+            if requirements.iter().any(|requirement| {
+                requirement.provider == *provider
+                    && requirement.requester_extension == package.manifest.id
+                    && normalized_provider_scopes(&requirement.provider_scopes) == provider_scopes
+            }) {
+                continue;
+            }
+            let requirement = RuntimeCredentialAuthRequirement {
+                provider: provider.clone(),
+                requester_extension: package.manifest.id.clone(),
+                provider_scopes,
+            };
+            requirements.push(requirement);
+        }
+    }
+    requirements
+}
+
+fn normalized_provider_scopes(scopes: &[String]) -> Vec<String> {
+    scopes
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 struct HostedMcpDiscoveryRequest {
     base_package: ExtensionPackage,
     scope: ResourceScope,
@@ -1268,6 +1323,40 @@ mod tests {
         assert!(!capability_ids.contains(&CapabilityId::new("fixture.write").unwrap()));
         assert!(
             !capability_ids.contains(&CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap())
+        );
+    }
+
+    #[test]
+    fn activation_credential_requirements_keep_distinct_provider_scope_sets() {
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
+                .expect("valid package ref");
+        let package = catalog
+            .resolve(&package_ref)
+            .expect("google-calendar bundled");
+
+        let requirements = package_runtime_credential_auth_requirements(&package.package);
+
+        let scope_sets = requirements
+            .iter()
+            .map(|requirement| {
+                assert_eq!(requirement.provider.as_str(), "google");
+                assert_eq!(requirement.requester_extension.as_str(), "google-calendar");
+                requirement
+                    .provider_scopes
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            scope_sets,
+            BTreeSet::from([
+                BTreeSet::from(["https://www.googleapis.com/auth/calendar.readonly".to_string()]),
+                BTreeSet::from(["https://www.googleapis.com/auth/calendar.events".to_string()]),
+            ])
         );
     }
 
@@ -1888,6 +1977,8 @@ mod tests {
     async fn extension_lifecycle_installs_activates_and_removes_github() {
         let (_dir, storage_root, facade, active_registry, _installation_store) =
             github_extension_lifecycle_fixture();
+        let facade =
+            facade.with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
 
         let search = facade
             .execute(
@@ -2011,12 +2102,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lifecycle_facade_blocks_credentialed_extension_activation_without_product_auth() {
+        let (_dir, _storage_root, facade, active_registry, _installation_store) =
+            github_extension_lifecycle_fixture();
+        let facade =
+            facade.with_runtime_credential_accounts(Arc::new(MissingRuntimeCredentialAccounts));
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install extension");
+        let error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect_err("missing product-auth account blocks activation");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("github").unwrap())
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn lifecycle_facade_rejects_static_activation_for_hosted_mcp_packages() {
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets"),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
+        let facade =
+            facade.with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
 
@@ -2050,7 +2181,9 @@ mod tests {
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets"),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let facade = facade.with_runtime_http_egress(Arc::new(HostedMcpDiscoveryEgress::default()));
+        let facade = facade
+            .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts))
+            .with_runtime_http_egress(Arc::new(HostedMcpDiscoveryEgress::default()));
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
 
@@ -2084,6 +2217,8 @@ mod tests {
     async fn extension_lifecycle_installs_activates_and_removes_gsuite() {
         let (_dir, storage_root, facade, active_registry, _installation_store) =
             github_extension_lifecycle_fixture();
+        let facade =
+            facade.with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
 
         let search = facade
             .execute(
@@ -3442,6 +3577,61 @@ mod tests {
             request_bytes: 0,
             redaction_applied: false,
         })
+    }
+
+    struct MissingRuntimeCredentialAccounts;
+
+    #[async_trait]
+    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+        for MissingRuntimeCredentialAccounts
+    {
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+    }
+
+    struct ConfiguredRuntimeCredentialAccounts;
+
+    #[async_trait]
+    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+        for ConfiguredRuntimeCredentialAccounts
+    {
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            let now = chrono::Utc::now();
+            Ok(ironclaw_auth::CredentialAccount {
+                id: ironclaw_auth::CredentialAccountId::new(),
+                scope: ironclaw_auth::AuthProductScope::new(
+                    ResourceScope::local_default(
+                        UserId::new("credential-user").expect("valid user"),
+                        InvocationId::new(),
+                    )
+                    .expect("valid scope"),
+                    ironclaw_auth::AuthSurface::Api,
+                ),
+                provider: ironclaw_auth::AuthProviderId::new("test-provider")
+                    .expect("valid provider"),
+                label: ironclaw_auth::CredentialAccountLabel::new("test-provider")
+                    .expect("valid label"),
+                status: ironclaw_auth::CredentialAccountStatus::Configured,
+                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new("test-secret")
+                        .expect("valid secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            })
+        }
     }
 
     fn lifecycle_surface_context() -> LifecycleProductContext {

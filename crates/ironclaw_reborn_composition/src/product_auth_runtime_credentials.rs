@@ -6,8 +6,10 @@ use ironclaw_auth::{
     CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountStatus,
     CredentialOwnership, ProviderScope,
 };
-use ironclaw_host_api::CredentialStageError;
-use ironclaw_host_api::RuntimeCredentialAccountSetup;
+use ironclaw_host_api::{
+    CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
+};
 use ironclaw_host_runtime::{
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
     RuntimeCredentialAccountResolver,
@@ -52,6 +54,46 @@ impl RuntimeCredentialAccountSelectionRequest {
             setup,
             provider_scopes,
         }
+    }
+}
+
+pub(crate) async fn missing_runtime_credential_auth_requirements(
+    accounts: &dyn RuntimeCredentialAccountSelectionService,
+    scope: &ResourceScope,
+    requirements: Vec<RuntimeCredentialAuthRequirement>,
+) -> Result<Vec<RuntimeCredentialAuthRequirement>, CredentialStageError> {
+    let mut missing = Vec::new();
+    for requirement in requirements {
+        if runtime_credential_auth_requirement_configured(accounts, scope, &requirement).await? {
+            continue;
+        }
+        missing.push(requirement);
+    }
+    Ok(missing)
+}
+
+async fn runtime_credential_auth_requirement_configured(
+    accounts: &dyn RuntimeCredentialAccountSelectionService,
+    scope: &ResourceScope,
+    requirement: &RuntimeCredentialAuthRequirement,
+) -> Result<bool, CredentialStageError> {
+    let request = runtime_credential_account_selection_request(
+        scope,
+        &requirement.provider,
+        activation_auth_requirement_setup(requirement),
+        &requirement.provider_scopes,
+        &requirement.requester_extension,
+    )?;
+    match accounts
+        .select_unique_configured_runtime_account(request)
+        .await
+    {
+        Ok(account) if account.access_secret.is_some() => Ok(true),
+        Ok(_) => Err(CredentialStageError::Backend),
+        Err(error) => match map_account_error(error) {
+            CredentialStageError::AuthRequired => Ok(false),
+            CredentialStageError::Backend => Err(CredentialStageError::Backend),
+        },
     }
 }
 
@@ -129,41 +171,16 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
     ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
-        let auth_scope =
-            AuthProductScope::new(runtime_account_owner_scope(request.scope), AuthSurface::Api);
-        let provider = AuthProviderId::new(request.provider.as_str()).map_err(|e| {
-            tracing::debug!(
-                provider = %request.provider.as_str(),
-                err = %e,
-                "product-auth provider id is invalid"
-            );
-            CredentialStageError::Backend
-        })?;
-        let provider_scopes = request
-            .provider_scopes
-            .iter()
-            .map(|scope| {
-                ProviderScope::new(scope.clone()).map_err(|e| {
-                    tracing::debug!(
-                        scope = %scope,
-                        err = %e,
-                        "runtime credential provider scope is invalid"
-                    );
-                    CredentialStageError::Backend
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let selection_request = runtime_credential_account_selection_request(
+            request.scope,
+            request.provider,
+            request.setup.clone(),
+            request.provider_scopes,
+            request.requester_extension,
+        )?;
         let account = self
             .accounts
-            .select_unique_configured_runtime_account(
-                RuntimeCredentialAccountSelectionRequest::new(
-                    CredentialAccountSelectionRequest::new(auth_scope, provider)
-                        .for_extension(request.requester_extension.clone()),
-                    AuthProductScope::new(request.scope.clone(), AuthSurface::Api),
-                    request.setup.clone(),
-                    provider_scopes,
-                ),
-            )
+            .select_unique_configured_runtime_account(selection_request)
             .await
             .map_err(map_account_error)?;
         if account.status != CredentialAccountStatus::Configured {
@@ -180,6 +197,56 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             scope: account.scope.resource,
             handle,
         })
+    }
+}
+
+fn runtime_credential_account_selection_request(
+    scope: &ResourceScope,
+    provider: &RuntimeCredentialAccountProviderId,
+    setup: RuntimeCredentialAccountSetup,
+    provider_scopes: &[String],
+    requester_extension: &ExtensionId,
+) -> Result<RuntimeCredentialAccountSelectionRequest, CredentialStageError> {
+    let owner_scope = AuthProductScope::new(runtime_account_owner_scope(scope), AuthSurface::Api);
+    let provider = AuthProviderId::new(provider.as_str()).map_err(|e| {
+        tracing::debug!(
+            provider = %provider.as_str(),
+            err = %e,
+            "product-auth provider id is invalid"
+        );
+        CredentialStageError::Backend
+    })?;
+    let provider_scopes = provider_scopes
+        .iter()
+        .map(|scope| {
+            ProviderScope::new(scope.clone()).map_err(|e| {
+                tracing::debug!(
+                    scope = %scope,
+                    err = %e,
+                    "runtime credential provider scope is invalid"
+                );
+                CredentialStageError::Backend
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RuntimeCredentialAccountSelectionRequest::new(
+        CredentialAccountSelectionRequest::new(owner_scope, provider)
+            .for_extension(requester_extension.clone()),
+        AuthProductScope::new(scope.clone(), AuthSurface::Api),
+        setup,
+        provider_scopes,
+    ))
+}
+
+fn activation_auth_requirement_setup(
+    requirement: &RuntimeCredentialAuthRequirement,
+) -> RuntimeCredentialAccountSetup {
+    if requirement.provider_scopes.is_empty() {
+        RuntimeCredentialAccountSetup::ManualToken
+    } else {
+        RuntimeCredentialAccountSetup::OAuth {
+            scopes: requirement.provider_scopes.clone(),
+        }
     }
 }
 
@@ -262,7 +329,7 @@ fn select_latest_duplicate_user_reusable_account(
         .cloned()
 }
 
-fn runtime_account_owner_scope(
+pub(crate) fn runtime_account_owner_scope(
     scope: &ironclaw_host_api::ResourceScope,
 ) -> ironclaw_host_api::ResourceScope {
     let mut owner = scope.clone();
@@ -288,7 +355,7 @@ mod tests {
     };
     use ironclaw_host_api::{
         ExtensionId, InvocationId, MissionId, ResourceScope, RuntimeCredentialAccountProviderId,
-        SecretHandle, ThreadId, UserId,
+        RuntimeCredentialAuthRequirement, SecretHandle, ThreadId, UserId,
     };
 
     use super::*;
@@ -790,6 +857,45 @@ mod tests {
         // Data corruption: should be Backend, not AuthRequired (re-auth would not fix it).
         // The durable product-auth store preserves Configured ↔ access_secret=Some,
         // so this state cannot arise from legitimate cleanup or rotation paths.
+        assert_eq!(error, CredentialStageError::Backend);
+    }
+
+    #[tokio::test]
+    async fn activation_preflight_maps_configured_account_without_access_secret_to_backend() {
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: auth_scope,
+                provider: AuthProviderId::new("github").unwrap(),
+                label: CredentialAccountLabel::new("corrupt github").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: None,
+                refresh_secret: None,
+                scopes: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let selector = ProductAuthRuntimeCredentialAccountSelector::new(accounts);
+
+        let error = missing_runtime_credential_auth_requirements(
+            &selector,
+            &scope,
+            vec![RuntimeCredentialAuthRequirement {
+                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                requester_extension: ExtensionId::new("github").unwrap(),
+                provider_scopes: Vec::new(),
+            }],
+        )
+        .await
+        .unwrap_err();
+
         assert_eq!(error, CredentialStageError::Backend);
     }
 

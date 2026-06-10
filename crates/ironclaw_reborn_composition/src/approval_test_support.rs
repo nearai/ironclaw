@@ -22,6 +22,22 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
     input: serde_json::Value,
     trust_decision: TrustDecision,
 ) -> Result<serde_json::Value, RuntimeFailureKind> {
+    match invoke_with_local_dev_approval(services, capability_id, context, input, trust_decision)
+        .await
+    {
+        RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
+        RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
+        other => panic!("unexpected runtime outcome: {other:?}"),
+    }
+}
+
+pub(crate) async fn invoke_with_local_dev_approval(
+    services: &RebornServices,
+    capability_id: &str,
+    context: ExecutionContext,
+    input: serde_json::Value,
+    trust_decision: TrustDecision,
+) -> RuntimeCapabilityOutcome {
     let runtime = services
         .host_runtime
         .as_ref()
@@ -43,8 +59,6 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
         .await
         .expect("runtime invocation completes"); // safety: test-only helper in #[cfg(test)] module.
     match outcome {
-        RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
-        RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
             let approval_record = local_runtime
                 .approval_requests
@@ -101,13 +115,9 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
                 ))
                 .await
                 .expect("approved runtime invocation resumes"); // safety: test-only helper in #[cfg(test)] module.
-            match resumed {
-                RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
-                RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
-                other => panic!("unexpected resumed runtime outcome: {other:?}"),
-            }
+            resumed
         }
-        other => panic!("unexpected runtime outcome: {other:?}"),
+        other => other,
     }
 }
 

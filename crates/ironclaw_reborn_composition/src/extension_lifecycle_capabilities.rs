@@ -5,8 +5,8 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, PermissionMode,
-    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    CapabilityId, CapabilityProfileSchemaRef, CredentialStageError, EffectKind, HostApiError,
+    PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -17,6 +17,9 @@ use serde::Deserialize;
 
 use crate::extension_lifecycle::ExtensionActivationMode;
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::product_auth_runtime_credentials::{
+    RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
+};
 
 pub(crate) const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub(crate) const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
@@ -40,9 +43,11 @@ pub(crate) fn extend_builtin_first_party_package(
 pub(crate) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     extension_management: Arc<RebornLocalExtensionManagementPort>,
+    credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(ExtensionLifecycleToolHandler {
         extension_management,
+        credential_accounts,
     });
     for capability_id in EXTENSION_LIFECYCLE_CAPABILITY_IDS {
         registry.insert_handler(CapabilityId::new(capability_id)?, handler.clone());
@@ -54,19 +59,19 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         lifecycle_manifest(
             EXTENSION_SEARCH_CAPABILITY_ID,
-            "Search locally available Reborn extensions",
+            "Search the local Reborn extension catalog by extension, product, provider, or service name. The catalog includes host-bundled extensions that are not installed yet and installed extensions that are inactive; use this first for connect, enable, install, or integrate requests when the needed capability is not already visible.",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
         )?,
         lifecycle_manifest(
             EXTENSION_INSTALL_CAPABILITY_ID,
-            "Install a locally available Reborn extension into durable local-dev lifecycle state. If install fails because the extension is already installed, use builtin.extension_activate instead.",
+            "Install a searched Reborn extension into durable local-dev lifecycle state. If install fails because the extension is already installed, use builtin.extension_activate instead.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
         lifecycle_manifest(
             EXTENSION_ACTIVATE_CAPABILITY_ID,
-            "Activate an installed Reborn extension for the model-visible local-dev capability surface",
+            "Activate an installed Reborn extension for the model-visible local-dev capability surface. Use after install succeeds or when install reports the extension is already installed.",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
@@ -119,6 +124,7 @@ fn lifecycle_manifest(
 
 struct ExtensionLifecycleToolHandler {
     extension_management: Arc<RebornLocalExtensionManagementPort>,
+    credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +159,24 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
             EXTENSION_ACTIVATE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
                 let package_ref = extension_package_ref(input.extension_id)?;
+                let requirements = self
+                    .extension_management
+                    .activation_credential_requirements(&package_ref)
+                    .await
+                    .map_err(lifecycle_error)?;
+                let missing_requirements = missing_runtime_credential_auth_requirements(
+                    self.credential_accounts.as_ref(),
+                    &request.scope,
+                    requirements,
+                )
+                .await
+                .map_err(credential_stage_error)?;
+                if !missing_requirements.is_empty() {
+                    return Err(FirstPartyCapabilityError::auth_required_for_credentials(
+                        missing_requirements,
+                    )
+                    .with_usage(resource_usage(started)));
+                }
                 let mode = ExtensionActivationMode::from_dispatch_context(
                     request.scope.clone(),
                     request.services.runtime_http_egress.clone(),
@@ -177,11 +201,24 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
             .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode))?;
         Ok(FirstPartyCapabilityResult::new(
             output,
-            ResourceUsage {
-                wall_clock_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                ..ResourceUsage::default()
-            },
+            resource_usage(started),
         ))
+    }
+}
+
+fn resource_usage(started: Instant) -> ResourceUsage {
+    ResourceUsage {
+        wall_clock_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        ..ResourceUsage::default()
+    }
+}
+
+fn credential_stage_error(error: CredentialStageError) -> FirstPartyCapabilityError {
+    match error {
+        CredentialStageError::AuthRequired => FirstPartyCapabilityError::auth_required(),
+        CredentialStageError::Backend => {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+        }
     }
 }
 
@@ -216,16 +253,22 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
 mod tests {
     use std::collections::BTreeMap;
 
+    use ironclaw_auth::{
+        AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
+        CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
+    };
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilitySet, ExecutionContext,
         ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern,
-        PermissionMode, Principal, RuntimeKind, TrustClass, UserId,
+        PermissionMode, Principal, ResourceScope, RuntimeKind, SecretHandle, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{
-        CapabilitySurfacePolicy, RuntimeFailureKind, SurfaceKind, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeFailureKind, SurfaceKind,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+
+    use crate::product_auth_runtime_credentials::runtime_account_owner_scope;
 
     use super::*;
     use crate::{RebornBuildInput, RebornServices, build_reborn_services};
@@ -257,6 +300,17 @@ mod tests {
 
         let search = descriptor_for(&surface, EXTENSION_SEARCH_CAPABILITY_ID);
         assert_eq!(search.default_permission, PermissionMode::Allow);
+        assert!(
+            search.description.contains("host-bundled")
+                && search.description.contains("not installed")
+                && search
+                    .description
+                    .contains("installed extensions that are inactive")
+                && search.description.contains("connect")
+                && search.description.contains("service name"),
+            "extension_search description should teach the model to discover bundled or inactive integrations from generic service names: {}",
+            search.description
+        );
         assert_eq!(
             search.parameters_schema.get("required"),
             None,
@@ -310,7 +364,7 @@ mod tests {
         let search = invoke_json(
             &services,
             EXTENSION_SEARCH_CAPABILITY_ID,
-            serde_json::json!({"query": "github"}),
+            serde_json::json!({"query": "web-access"}),
         )
         .await
         .expect("search succeeds");
@@ -320,54 +374,211 @@ mod tests {
         let install = invoke_json(
             &services,
             EXTENSION_INSTALL_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "github"}),
+            serde_json::json!({"extension_id": "web-access"}),
         )
         .await
         .expect("install succeeds");
         assert_eq!(install["payload"]["installed"], true);
         assert!(
             storage_root
-                .join("system/extensions/github/manifest.toml")
+                .join("system/extensions/web-access/manifest.toml")
                 .exists()
         );
 
         let before_activate = active_extension_capability_ids(&extension_management).await;
-        assert!(
-            !before_activate
-                .iter()
-                .any(|id| id == "github.search_issues")
-        );
+        assert!(!before_activate.iter().any(|id| id == "web-access.search"));
 
         let activate = invoke_json(
             &services,
             EXTENSION_ACTIVATE_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "github"}),
+            serde_json::json!({"extension_id": "web-access"}),
         )
         .await
         .expect("activate succeeds");
         assert_eq!(activate["payload"]["activated"], true);
 
         let after_activate = active_extension_capability_ids(&extension_management).await;
-        assert!(after_activate.iter().any(|id| id == "github.search_issues"));
-        assert!(after_activate.iter().any(|id| id == "github.get_issue"));
+        assert!(after_activate.iter().any(|id| id == "web-access.search"));
+        assert!(
+            after_activate
+                .iter()
+                .any(|id| id == "web-access.get_content")
+        );
         let health = runtime.health().await.expect("runtime health");
         assert!(
-            !health.missing_runtime_backends.contains(&RuntimeKind::Wasm),
-            "activated GitHub WASM capabilities require a registered WASM runtime"
+            !health
+                .missing_runtime_backends
+                .contains(&RuntimeKind::FirstParty),
+            "activated Web Access capabilities require a registered first-party runtime"
         );
 
         let remove = invoke_json(
             &services,
             EXTENSION_REMOVE_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "github"}),
+            serde_json::json!({"extension_id": "web-access"}),
         )
         .await
         .expect("remove succeeds");
         assert_eq!(remove["payload"]["removed"], true);
 
         let after_remove = active_extension_capability_ids(&extension_management).await;
-        assert!(!after_remove.iter().any(|id| id == "github.search_issues"));
-        assert!(!storage_root.join("system/extensions/github").exists());
+        assert!(!after_remove.iter().any(|id| id == "web-access.search"));
+        assert!(!storage_root.join("system/extensions/web-access").exists());
+    }
+
+    #[tokio::test]
+    async fn local_dev_extension_activate_returns_auth_gate_for_missing_extension_credentials() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "extension-tools-auth-gate-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let extension_management = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate")
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+
+        invoke_json(
+            &services,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "github"}),
+        )
+        .await
+        .expect("install succeeds");
+
+        let outcome = invoke_outcome(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "github"}),
+        )
+        .await;
+        let RuntimeCapabilityOutcome::AuthRequired(gate) = outcome else {
+            panic!("expected extension activation to request auth, got {outcome:?}");
+        };
+        assert_eq!(
+            gate.capability_id.as_str(),
+            EXTENSION_ACTIVATE_CAPABILITY_ID
+        );
+        assert_eq!(gate.credential_requirements.len(), 1);
+        let requirement = &gate.credential_requirements[0];
+        assert_eq!(requirement.provider.as_str(), "github");
+        assert_eq!(requirement.requester_extension.as_str(), "github");
+
+        let active = active_extension_capability_ids(&extension_management).await;
+        assert!(!active.iter().any(|id| id == "github.search_issues"));
+    }
+
+    #[tokio::test]
+    async fn local_dev_extension_activate_returns_auth_gate_when_account_lacks_required_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "extension-tools-scope-gate-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let extension_management = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate")
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+
+        invoke_json(
+            &services,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "google-calendar"}),
+        )
+        .await
+        .expect("install succeeds");
+        let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
+        seed_configured_account_with_scopes(
+            &services,
+            &activate_context.resource_scope,
+            "google",
+            &["https://www.googleapis.com/auth/calendar.readonly"],
+            true,
+        )
+        .await;
+
+        let outcome = invoke_outcome(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "google-calendar"}),
+        )
+        .await;
+        let RuntimeCapabilityOutcome::AuthRequired(gate) = outcome else {
+            panic!("expected missing calendar.events scope to request auth, got {outcome:?}");
+        };
+        assert_eq!(gate.credential_requirements.len(), 1);
+        let requirement = &gate.credential_requirements[0];
+        assert_eq!(requirement.provider.as_str(), "google");
+        assert_eq!(requirement.requester_extension.as_str(), "google-calendar");
+        assert_eq!(
+            requirement.provider_scopes,
+            vec!["https://www.googleapis.com/auth/calendar.events".to_string()]
+        );
+
+        let active = active_extension_capability_ids(&extension_management).await;
+        assert!(!active.iter().any(|id| id == "google-calendar.create_event"));
+    }
+
+    #[tokio::test]
+    async fn local_dev_extension_activate_maps_corrupt_configured_account_to_backend() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "extension-tools-corrupt-auth-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let extension_management = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate")
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+
+        invoke_json(
+            &services,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "github"}),
+        )
+        .await
+        .expect("install succeeds");
+        let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
+        seed_configured_account_with_scopes(
+            &services,
+            &activate_context.resource_scope,
+            "github",
+            &[],
+            false,
+        )
+        .await;
+
+        let outcome = invoke_outcome(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "github"}),
+        )
+        .await;
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected corrupt configured account to fail, got {outcome:?}");
+        };
+        assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+
+        let active = active_extension_capability_ids(&extension_management).await;
+        assert!(!active.iter().any(|id| id == "github.search_issues"));
     }
 
     #[tokio::test]
@@ -396,6 +607,8 @@ mod tests {
         )
         .await
         .expect("install succeeds");
+        let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
+        seed_configured_account(&services, &activate_context.resource_scope, "notion").await;
 
         let activate = invoke_json(
             &services,
@@ -454,6 +667,16 @@ mod tests {
             .await,
             Err(RuntimeFailureKind::InvalidInput)
         );
+        let outcome = invoke_outcome(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "github"}),
+        )
+        .await;
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected uninstalled extension activation to fail, got {outcome:?}");
+        };
+        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
     }
 
     async fn invoke_json(
@@ -469,6 +692,63 @@ mod tests {
             trust_decision(),
         )
         .await
+    }
+
+    async fn invoke_outcome(
+        services: &RebornServices,
+        capability_id: &str,
+        input: serde_json::Value,
+    ) -> RuntimeCapabilityOutcome {
+        crate::approval_test_support::invoke_with_local_dev_approval(
+            services,
+            capability_id,
+            execution_context([capability_id]),
+            input,
+            trust_decision(),
+        )
+        .await
+    }
+
+    async fn seed_configured_account(
+        services: &RebornServices,
+        scope: &ResourceScope,
+        provider: &str,
+    ) {
+        seed_configured_account_with_scopes(services, scope, provider, &[], true).await;
+    }
+
+    async fn seed_configured_account_with_scopes(
+        services: &RebornServices,
+        scope: &ResourceScope,
+        provider: &str,
+        scopes: &[&str],
+        include_access_secret: bool,
+    ) {
+        services
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .credential_account_service()
+            .create_account(NewCredentialAccount {
+                scope: AuthProductScope::new(runtime_account_owner_scope(scope), AuthSurface::Api),
+                provider: AuthProviderId::new(provider).expect("valid auth provider"),
+                label: CredentialAccountLabel::new(provider).expect("valid account label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: include_access_secret.then(|| {
+                    SecretHandle::new(format!("{provider}-test-token"))
+                        .expect("valid secret handle")
+                }),
+                refresh_secret: None,
+                scopes: scopes
+                    .iter()
+                    .map(|scope| ProviderScope::new((*scope).to_string()).expect("valid scope"))
+                    .collect(),
+            })
+            .await
+            .expect("create configured account");
     }
 
     async fn active_extension_capability_ids(

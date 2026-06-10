@@ -988,11 +988,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             reason: format!("web access first-party handlers are invalid: {error}"),
         },
     )?;
-    insert_extension_lifecycle_handlers(&mut first_party_registry, extension_management).map_err(
-        |error| RebornBuildError::InvalidConfig {
-            reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
-        },
-    )?;
+    insert_extension_lifecycle_handlers(
+        &mut first_party_registry,
+        extension_management,
+        product_auth.runtime_credential_account_selection_service(),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
+    })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
