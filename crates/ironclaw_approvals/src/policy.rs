@@ -275,6 +275,7 @@ where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
+    path_cache: RwLock<HashMap<PersistentApprovalPolicyKey, ScopedPath>>,
 }
 
 impl<F> FilesystemPersistentApprovalPolicyStore<F>
@@ -282,7 +283,10 @@ where
     F: RootFilesystem,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
-        Self { filesystem }
+        Self {
+            filesystem,
+            path_cache: RwLock::new(HashMap::new()),
+        }
     }
 
     fn record_entry(
@@ -309,7 +313,7 @@ where
             input.capability_id,
             input.grantee,
         )?;
-        let path = policy_path(&key)?;
+        let path = self.cached_policy_path(&key)?;
         let existing = self.lookup_versioned(&key).await?;
         let now = Utc::now();
         let (created_at, grant_id, cas) = existing.as_ref().map_or(
@@ -360,10 +364,11 @@ where
         policy.revoked_at = Some(now);
         policy.updated_at = now;
         let scope = resource_scope_for_policy_key(key);
+        let path = self.cached_policy_path(key)?;
         self.filesystem
             .put(
                 &scope,
-                &policy_path(key)?,
+                &path,
                 Self::record_entry(&policy)?,
                 CasExpectation::Version(version),
             )
@@ -381,12 +386,34 @@ where
         key: &PersistentApprovalPolicyKey,
     ) -> Result<Option<(PersistentApprovalPolicy, RecordVersion)>, PersistentApprovalPolicyError>
     {
-        let path = policy_path(key)?;
+        let path = self.cached_policy_path(key)?;
         let scope = resource_scope_for_policy_key(key);
         let Some(versioned) = self.filesystem.get(&scope, &path).await? else {
             return Ok(None);
         };
         deserialize_versioned_policy(key, versioned)
+    }
+
+    fn cached_policy_path(
+        &self,
+        key: &PersistentApprovalPolicyKey,
+    ) -> Result<ScopedPath, PersistentApprovalPolicyError> {
+        if let Some(path) = self
+            .path_cache
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .cloned()
+        {
+            return Ok(path);
+        }
+
+        let path = policy_path(key)?;
+        let mut cache = self
+            .path_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(cache.entry(key.clone()).or_insert(path).clone())
     }
 }
 
@@ -528,6 +555,35 @@ mod tests {
 
         assert_eq!(reloaded, saved);
         assert!(reloaded.active_grant().is_some());
+    }
+
+    #[tokio::test]
+    async fn filesystem_policy_store_caches_policy_paths() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_fs(backend, "tenant-a", "alice");
+        let store = FilesystemPersistentApprovalPolicyStore::new(scoped);
+        let scope = scope(None, Some("thread-a"));
+        let key = key_for(&scope);
+
+        store.allow(input(scope)).await.expect("allow policy");
+        assert_eq!(
+            store
+                .path_cache
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            1
+        );
+
+        store.lookup(&key).await.expect("lookup policy");
+        assert_eq!(
+            store
+                .path_cache
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

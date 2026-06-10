@@ -137,6 +137,8 @@ where
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
+    // arch-exempt: optional_arc, service builders support minimal/test host runtime
+    // graphs while production Reborn wiring installs this store, plan #4539
     persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,

@@ -69,6 +69,9 @@ pub struct DefaultHostRuntime {
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
+    // arch-exempt: optional_arc, minimal/test compositions intentionally disable
+    // persistent approval replay until the product revoke control plane is split out,
+    // plan #4539
     persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
     process_manager: Option<Arc<dyn ProcessManager>>,
     process_store: Option<Arc<dyn ProcessStore>>,

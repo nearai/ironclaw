@@ -63,6 +63,9 @@ pub struct DefaultApprovalInteractionService {
     read_model: Arc<dyn ApprovalInteractionReadModel>,
     lease_terms_provider: Arc<dyn ApprovalLeaseTermsProvider>,
     resolver: Arc<dyn ApprovalResolutionPort>,
+    // arch-exempt: optional_arc, absence is the explicit fail-closed
+    // AlwaysAllowUnsupported path for minimal/test compositions until user-facing
+    // revoke controls land, plan #4539
     persistent_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
