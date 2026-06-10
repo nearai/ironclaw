@@ -4,19 +4,19 @@ use ironclaw_host_api::CapabilityId;
 use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
-        AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureDetail,
-        CapabilityFailureKind, CapabilityInputIssue, CapabilityInputIssueCode,
-        CapabilityInputRepair, CapabilityInvocation, CapabilityRecoveryHint,
-        CapabilityResultMessage, CapabilitySurfaceVersion, ModelVisibleToolObservation,
-        ObservationTrust, ProviderToolCallReference, SameCallRetryConstraint,
-        ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
-        VisibleCapabilitySurface,
+        AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume,
+        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
+        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
+        CapabilityInputIssueCode, CapabilityInputRepair, CapabilityInvocation,
+        CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion,
+        ModelVisibleToolObservation, ObservationTrust, ProviderToolCallReference,
+        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
+        ToolRecoveryObservation, VisibleCapabilitySurface,
     },
 };
 
 use crate::{
-    state::{CapabilityCallSignature, LoopExecutionState},
+    state::{CapabilityCallSignature, LoopExecutionState, PendingApprovalResume},
     strategies::{CapabilityCallSummary, CapabilityErrorSummary, CapabilityFilter, GateKind},
 };
 
@@ -27,11 +27,26 @@ const MAX_MODEL_OBSERVATION_TEXT_BYTES: usize = 256;
 
 pub(super) fn capability_invocation_from_candidate(
     call: CapabilityCallCandidate,
+    approval_resume: Option<CapabilityApprovalResume>,
 ) -> CapabilityInvocation {
     CapabilityInvocation {
         surface_version: call.surface_version,
         capability_id: call.capability_id,
         input_ref: call.input_ref,
+        approval_resume,
+    }
+}
+
+pub(super) fn pending_approval_resume_candidate(
+    resume: &PendingApprovalResume,
+    surface_version: CapabilitySurfaceVersion,
+) -> CapabilityCallCandidate {
+    CapabilityCallCandidate {
+        surface_version,
+        capability_id: resume.capability_id.clone(),
+        input_ref: resume.input_ref.clone(),
+        effective_capability_ids: resume.effective_capability_ids.clone(),
+        provider_replay: resume.provider_replay.clone(),
     }
 }
 

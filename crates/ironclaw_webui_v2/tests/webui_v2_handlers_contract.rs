@@ -35,7 +35,10 @@ use ironclaw_product_workflow::{
     RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
     RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
@@ -128,6 +131,7 @@ struct StubServices {
     /// branches, or empty drains in a deterministic order.
     next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
     stream_events_notify: Arc<Notify>,
+    operator_calls: Mutex<Vec<String>>,
 }
 
 impl StubServices {
@@ -555,6 +559,98 @@ impl RebornServicesApi for StubServices {
             fields: Vec::new(),
             onboarding: None,
         })
+    }
+
+    async fn get_operator_setup(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push("get_setup".to_string());
+        Err(service_unavailable_error(false))
+    }
+
+    async fn run_operator_setup(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorSetupRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls.lock().expect("lock").push(format!(
+            "run_setup:{:?}:{:?}:{:?}",
+            request.provider_id, request.model, request.profile_id
+        ));
+        Err(service_unavailable_error(false))
+    }
+
+    async fn list_operator_config(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push("list_config".to_string());
+        Err(service_unavailable_error(false))
+    }
+
+    async fn validate_operator_config(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorConfigValidateRequest,
+    ) -> Result<RebornOperatorConfigValidateResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push(format!("validate_config:{:?}", request.keys));
+        Err(service_unavailable_error(false))
+    }
+
+    async fn get_operator_diagnostics(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push("diagnostics".to_string());
+        Err(service_unavailable_error(false))
+    }
+
+    async fn get_operator_status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push("status".to_string());
+        Err(service_unavailable_error(false))
+    }
+
+    async fn query_operator_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        query: RebornOperatorLogsQuery,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push(format!("logs:{:?}:{:?}", query.limit, query.cursor));
+        Err(service_unavailable_error(false))
+    }
+
+    async fn run_operator_service_lifecycle(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorServiceLifecycleRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        self.operator_calls
+            .lock()
+            .expect("lock")
+            .push(format!("service:{:?}", request.action));
+        Err(service_unavailable_error(false))
     }
 
     async fn get_llm_config(

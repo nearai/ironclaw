@@ -11,6 +11,7 @@ use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuth
 use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::GrantAuthorizer;
 #[cfg(not(feature = "libsql"))]
 use ironclaw_authorization::InMemoryCapabilityLeaseStore;
@@ -98,7 +99,8 @@ use crate::RebornProductAuthServicePorts;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
-use crate::local_dev_capability_policy::local_dev_capability_policy;
+use crate::local_dev_authorization::local_dev_authorizer;
+use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
     skill_management_mount_view, workspace_mount_view,
@@ -345,11 +347,35 @@ impl RebornServices {
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
     }
+
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_approval_test_parts(&self) -> Option<RebornLocalDevApprovalTestParts> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
+            local_runtime.approval_requests.clone();
+        let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
+            local_runtime.capability_leases.clone();
+        Some(RebornLocalDevApprovalTestParts {
+            approval_requests,
+            capability_leases,
+        })
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Clone)]
+pub struct RebornLocalDevApprovalTestParts {
+    pub approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+    pub capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore>,
 }
 
 pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) approval_requests: Arc<LocalDevApprovalRequestStore>,
     pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
+    // Used in approval_test_support (cfg(test) only); suppress the dead-code
+    // lint on non-test builds where that module is not compiled in.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) capability_policy: Arc<LocalDevCapabilityPolicy>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
@@ -701,11 +727,15 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
+    let authorizer = local_dev_authorizer(
+        runtime_policy.as_ref(),
+        Arc::clone(&store_graph.local_runtime.capability_policy),
+    );
     let mut services = HostRuntimeServices::new(
         Arc::clone(&extension_registry),
         Arc::clone(&filesystem),
         Arc::clone(&store_graph.resource_governor),
-        Arc::new(GrantAuthorizer::new()),
+        authorizer,
         store_graph.process_services.clone(),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
@@ -1112,6 +1142,11 @@ fn build_local_dev_store_graph(
         skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
+    let capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev capability policy is invalid: {error}"),
+        }
+    })?);
     let memory_mounts =
         memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -1126,6 +1161,7 @@ fn build_local_dev_store_graph(
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
+        capability_policy: Arc::clone(&capability_policy),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
         outbound_preferences,
@@ -1217,6 +1253,11 @@ fn build_local_dev_store_graph(
         skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
+    let capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev capability policy is invalid: {error}"),
+        }
+    })?);
     let memory_mounts =
         memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -1233,6 +1274,7 @@ fn build_local_dev_store_graph(
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
+        capability_policy: Arc::clone(&capability_policy),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
         outbound_preferences,
@@ -2660,7 +2702,7 @@ where
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
+        Arc::new(ironclaw_authorization::GrantAuthorizer::new()),
         ProcessServices::filesystem(Arc::clone(&stores.scoped_filesystem)),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
@@ -2851,6 +2893,7 @@ mod tests {
         CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
         NewCredentialAccount, ProviderScope,
     };
+    use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer};
     use ironclaw_filesystem::FilesystemError;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     use ironclaw_filesystem::{
@@ -2876,7 +2919,11 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use crate::{
-        extension_lifecycle::ExtensionActivationMode, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
+        extension_lifecycle::ExtensionActivationMode,
+        local_dev_capability_policy::{
+            LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
+        },
+        runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
 
     struct FailingConversationActorPairingService;
@@ -2992,6 +3039,7 @@ mod tests {
         Arc::new(RebornLocalRuntimeServices {
             approval_requests: Arc::clone(&base_runtime.approval_requests),
             capability_leases: Arc::clone(&base_runtime.capability_leases),
+            capability_policy: Arc::clone(&base_runtime.capability_policy),
             turn_state: Arc::clone(&base_runtime.turn_state),
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
@@ -3109,10 +3157,8 @@ mod tests {
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.expect("host runtime composed");
-
         invoke_json(
-            runtime.as_ref(),
+            &services,
             MEMORY_WRITE_CAPABILITY_ID,
             memory_context(MEMORY_WRITE_CAPABILITY_ID),
             serde_json::json!({
@@ -3125,7 +3171,7 @@ mod tests {
         .expect("memory_write should use the mounted /memory root");
 
         let tree = invoke_json(
-            runtime.as_ref(),
+            &services,
             MEMORY_TREE_CAPABILITY_ID,
             memory_context(MEMORY_TREE_CAPABILITY_ID),
             serde_json::json!({"path": "", "depth": 3}),
@@ -3138,7 +3184,7 @@ mod tests {
         );
 
         let search = invoke_json(
-            runtime.as_ref(),
+            &services,
             MEMORY_SEARCH_CAPABILITY_ID,
             memory_context(MEMORY_SEARCH_CAPABILITY_ID),
             serde_json::json!({"query": "mounted memory root search marker", "limit": 5}),
@@ -3163,13 +3209,8 @@ mod tests {
             build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
                 .await
                 .expect("first local-dev services build");
-        let runtime = services
-            .host_runtime
-            .as_ref()
-            .expect("host runtime composed");
-
         invoke_json(
-            runtime.as_ref(),
+            &services,
             MEMORY_WRITE_CAPABILITY_ID,
             memory_context(MEMORY_WRITE_CAPABILITY_ID),
             serde_json::json!({
@@ -3186,10 +3227,9 @@ mod tests {
             build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
                 .await
                 .expect("rebuilt local-dev services");
-        let runtime = rebuilt.host_runtime.as_ref().expect("rebuilt host runtime");
 
         let tree = invoke_json(
-            runtime.as_ref(),
+            &rebuilt,
             MEMORY_TREE_CAPABILITY_ID,
             memory_context(MEMORY_TREE_CAPABILITY_ID),
             serde_json::json!({"path": "", "depth": 3}),
@@ -3202,7 +3242,7 @@ mod tests {
         );
 
         let search = invoke_json(
-            runtime.as_ref(),
+            &rebuilt,
             MEMORY_SEARCH_CAPABILITY_ID,
             memory_context(MEMORY_SEARCH_CAPABILITY_ID),
             serde_json::json!({"query": "durable mounted memory root search marker", "limit": 5}),
@@ -3391,6 +3431,20 @@ mod tests {
             .expect("activate Google Calendar");
 
         let gmail_context = gsuite_context("gmail.send_message");
+        let gmail_scope = gmail_context.resource_scope.clone();
+        let gmail_capability =
+            CapabilityId::new("gmail.send_message").expect("valid Gmail capability id");
+        assert!(matches!(
+            local_runtime.capability_policy.lease_approval_for(
+                LocalDevApprovalPolicyAction::Dispatch {
+                    capability: &gmail_capability,
+                },
+                &local_runtime.workspace_mounts,
+                &local_runtime.skill_mounts,
+                &local_runtime.memory_mounts,
+            ),
+            Err(LocalDevCapabilityPolicyError::MissingGrant { .. })
+        ));
         let auth_scope =
             AuthProductScope::new(gmail_context.resource_scope.clone(), AuthSurface::Api);
         services
@@ -3417,63 +3471,52 @@ mod tests {
             .await
             .expect("create Google account");
 
-        let outcome = services
-            .host_runtime
-            .as_ref()
-            .expect("host runtime")
-            .invoke_capability(RuntimeCapabilityRequest::new(
-                gmail_context,
-                CapabilityId::new("gmail.send_message").unwrap(),
-                ResourceEstimate::default(),
-                serde_json::json!({ "message": { "raw": "base64url-rfc822" } }),
-                trust_decision(),
-            ))
-            .await
-            .expect("runtime invocation completes");
-
-        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
-            panic!("expected fail-closed handler outcome, got {outcome:?}");
-        };
-        assert_eq!(failure.capability_id.as_str(), "gmail.send_message");
-        assert_ne!(failure.kind, RuntimeFailureKind::Authorization);
-        assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
+        let failure = invoke_json(
+            &services,
+            "gmail.send_message",
+            gmail_context,
+            serde_json::json!({ "message": { "raw": "base64url-rfc822" } }),
+        )
+        .await
+        .expect_err("missing token should fail after approval resume");
+        assert_ne!(failure, RuntimeFailureKind::Authorization);
+        assert_ne!(failure, RuntimeFailureKind::MissingRuntime);
+        let gmail_leases = local_runtime
+            .capability_leases
+            .leases_for_scope(&gmail_scope)
+            .await;
+        assert_eq!(gmail_leases.len(), 1);
+        assert_eq!(gmail_leases[0].grant.issued_by, Principal::HostRuntime);
+        assert_eq!(gmail_leases[0].grant.constraints.max_invocations, Some(1));
+        assert_eq!(gmail_leases[0].status, CapabilityLeaseStatus::Revoked);
 
         let calendar_context = gsuite_context("google-calendar.create_event");
-        let outcome = services
-            .host_runtime
-            .as_ref()
-            .expect("host runtime")
-            .invoke_capability(RuntimeCapabilityRequest::new(
-                calendar_context,
-                CapabilityId::new("google-calendar.create_event").unwrap(),
-                ResourceEstimate::default(),
-                serde_json::json!({
-                    "calendar_id": "primary",
-                    "event": { "summary": "Review" }
-                }),
-                trust_decision(),
-            ))
-            .await
-            .expect("runtime invocation completes");
-
-        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
-            panic!("expected fail-closed handler outcome, got {outcome:?}");
-        };
-        assert_eq!(
-            failure.capability_id.as_str(),
-            "google-calendar.create_event"
-        );
-        assert_ne!(failure.kind, RuntimeFailureKind::Authorization);
-        assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
+        let failure = invoke_json(
+            &services,
+            "google-calendar.create_event",
+            calendar_context,
+            serde_json::json!({
+                "calendar_id": "primary",
+                "event": { "summary": "Review" }
+            }),
+        )
+        .await
+        .expect_err("missing token should fail after approval resume");
+        assert_ne!(failure, RuntimeFailureKind::Authorization);
+        assert_ne!(failure, RuntimeFailureKind::MissingRuntime);
     }
 
     #[tokio::test]
     async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "local-dev-notion-mcp-owner",
-            dir.path().join("local-dev"),
-        ))
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev_with_profile(
+                RebornCompositionProfile::LocalDevYolo,
+                "local-dev-notion-mcp-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_minimal_approval_policy()),
+        )
         .await
         .expect("local-dev services build");
         let local_runtime = services.local_runtime.as_ref().expect("local runtime");
@@ -3531,10 +3574,14 @@ mod tests {
     #[tokio::test]
     async fn local_dev_web_access_installs_activates_and_dispatches_through_host_runtime() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "local-dev-web-access-owner",
-            dir.path().join("local-dev"),
-        ))
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev_with_profile(
+                RebornCompositionProfile::LocalDevYolo,
+                "local-dev-web-access-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_minimal_approval_policy()),
+        )
         .await
         .expect("local-dev services build");
         let local_runtime = services.local_runtime.as_ref().expect("local runtime");
@@ -3769,10 +3816,9 @@ mod tests {
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.expect("host runtime composed");
 
         let install_output = invoke_json(
-            runtime.as_ref(),
+            &services,
             SKILL_INSTALL_CAPABILITY_ID,
             skill_context(SKILL_INSTALL_CAPABILITY_ID),
             serde_json::json!({
@@ -3790,7 +3836,7 @@ mod tests {
         );
 
         let list_output = invoke_json(
-            runtime.as_ref(),
+            &services,
             SKILL_LIST_CAPABILITY_ID,
             skill_context(SKILL_LIST_CAPABILITY_ID),
             serde_json::json!({}),
@@ -3806,7 +3852,7 @@ mod tests {
         );
 
         let remove_output = invoke_json(
-            runtime.as_ref(),
+            &services,
             SKILL_REMOVE_CAPABILITY_ID,
             skill_context(SKILL_REMOVE_CAPABILITY_ID),
             serde_json::json!({"name": "runtime-sentinel"}),
@@ -3831,10 +3877,9 @@ mod tests {
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.expect("host runtime composed");
 
         let failure = invoke_json(
-            runtime.as_ref(),
+            &services,
             "builtin.write_file",
             workspace_context("builtin.write_file"),
             serde_json::json!({
@@ -4030,26 +4075,19 @@ mod tests {
     }
 
     async fn invoke_json(
-        runtime: &dyn ironclaw_host_runtime::HostRuntime,
+        services: &RebornServices,
         capability_id: &str,
         context: ExecutionContext,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, RuntimeFailureKind> {
-        let outcome = runtime
-            .invoke_capability(RuntimeCapabilityRequest::new(
-                context,
-                CapabilityId::new(capability_id).expect("valid capability id"),
-                ResourceEstimate::default(),
-                input,
-                trust_decision(),
-            ))
-            .await
-            .expect("runtime invocation completes");
-        match outcome {
-            RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
-            RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
-            other => panic!("unexpected runtime outcome: {other:?}"),
-        }
+        crate::approval_test_support::invoke_json_with_local_dev_approval(
+            services,
+            capability_id,
+            context,
+            input,
+            trust_decision(),
+        )
+        .await
     }
 
     fn skill_context(capability_id: &str) -> ExecutionContext {
@@ -4279,6 +4317,15 @@ mod tests {
             provenance: TrustProvenance::Default,
             evaluated_at: chrono::Utc::now(),
         }
+    }
+
+    fn local_dev_minimal_approval_policy()
+    -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+        let mut policy = crate::local_dev_runtime_policy().expect("local-dev policy resolves");
+        policy.requested_profile = ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo;
+        policy.resolved_profile = ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo;
+        policy.approval_policy = ironclaw_host_api::runtime_policy::ApprovalPolicy::Minimal;
+        policy
     }
 
     fn notion_mcp_trust_decision() -> TrustDecision {

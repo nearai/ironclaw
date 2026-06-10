@@ -343,7 +343,9 @@ pub struct McpHostHttpEgressPlanRequest<'a> {
 /// its credential sources, then threads that plan into the later `tools/call`
 /// transport send. Planner-visible headers are stable policy headers only; the
 /// dynamic MCP session header is added by the protocol client after planning.
-/// Handshake requests are planned independently and remain credential-free.
+/// Hosted MCP providers may require authentication for the entire JSON-RPC
+/// session, including initialization, so staged credentials must remain scoped
+/// to the invocation until the capability dispatch completes.
 pub trait McpHostHttpEgressPlanner: Send + Sync {
     fn plan(&self, request: McpHostHttpEgressPlanRequest<'_>) -> McpHostHttpEgressPlan;
 }

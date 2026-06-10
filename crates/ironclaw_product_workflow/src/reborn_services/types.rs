@@ -6,6 +6,7 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunResponse, EventCursor, GateRef, ResumeTurnResponse,
     SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
 };
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::{
@@ -1054,72 +1055,37 @@ pub struct RebornOperatorCommandPlaneResponse {
     pub diagnostics: Vec<RebornOperatorConfigDiagnostic>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RebornOperatorSurfaceStatus {
-    Available,
-    Unavailable,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornOperatorSetupRequest {
-    #[serde(default)]
-    pub provider_id: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub profile_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornOperatorConfigValidateRequest {
-    #[serde(default)]
-    pub keys: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornOperatorLogsQuery {
-    #[serde(default)]
-    pub limit: Option<u32>,
-    #[serde(default)]
-    pub cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornOperatorServiceLifecycleRequest {
-    pub action: RebornOperatorServiceLifecycleAction,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RebornOperatorServiceLifecycleAction {
-    Install,
-    Start,
-    Stop,
-    Status,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RebornOperatorConfigListResponse {
-    pub entries: Vec<RebornOperatorConfigEntry>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub precedence: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub diagnostics: Vec<RebornOperatorConfigDiagnostic>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RebornOperatorConfigGetResponse {
     pub entry: RebornOperatorConfigEntry,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RebornOperatorConfigEntry {
     pub key: String,
     pub value: serde_json::Value,
     pub source: String,
     pub redacted: bool,
     pub mutable: bool,
+}
+
+impl Serialize for RebornOperatorConfigEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("RebornOperatorConfigEntry", 5)?;
+        state.serialize_field("key", &self.key)?;
+        if self.redacted {
+            state.serialize_field("value", &serde_json::Value::Null)?;
+        } else {
+            state.serialize_field("value", &self.value)?;
+        }
+        state.serialize_field("source", &self.source)?;
+        state.serialize_field("redacted", &self.redacted)?;
+        state.serialize_field("mutable", &self.mutable)?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1150,4 +1116,30 @@ pub enum RebornOperatorConfigDiagnosticSeverity {
     Info,
     Warning,
     Error,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn operator_config_entry_masks_redacted_value_when_serialized() {
+        let entry = RebornOperatorConfigEntry {
+            key: "secret.api_key".to_string(),
+            value: json!("should-not-leak"),
+            source: "secret".to_string(),
+            redacted: true,
+            mutable: true,
+        };
+
+        let serialized = serde_json::to_value(entry).expect("serialize entry");
+        assert_eq!(serialized.get("value"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            serialized
+                .get("redacted")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+    }
 }

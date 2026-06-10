@@ -13,10 +13,6 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
-use ironclaw_host_api::runtime_policy::{
-    ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
-    NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
-};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy, Principal,
@@ -30,8 +26,9 @@ use ironclaw_loop_support::{
     HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    TriggerPollerSettings, build_reborn_runtime,
+    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
+    RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options,
 };
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
@@ -47,20 +44,6 @@ const TENANT: &str = "trigger-e2e-tenant";
 const USER: &str = "trigger-e2e-owner";
 const AGENT: &str = "trigger-e2e-agent";
 const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
-
-fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
-    EffectiveRuntimePolicy {
-        deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
-        filesystem_backend: FilesystemBackendKind::HostWorkspace,
-        process_backend: ProcessBackendKind::LocalHost,
-        network_mode: NetworkMode::DirectLogged,
-        secret_mode: SecretMode::ScrubbedEnv,
-        approval_policy: ApprovalPolicy::AskDestructive,
-        audit_mode: AuditMode::LocalMinimal,
-    }
-}
 
 #[derive(Debug, Default)]
 struct RecordingGateway {
@@ -135,11 +118,20 @@ async fn build_runtime_with(
     recording_gateway: Arc<RecordingGateway>,
     trigger_poller: TriggerPollerSettings,
 ) -> RebornRuntime {
-    let input =
-        RebornRuntimeInput::from_services(
-            RebornBuildInput::local_dev(USER, root.path().join("local-dev"))
-                .with_runtime_policy(local_dev_runtime_policy()),
-        )
+    let host_home_root = root.path().join("host-home");
+    std::fs::create_dir_all(&host_home_root).expect("host home root");
+    let input = local_runtime_build_input_with_options(
+        RebornCompositionProfile::LocalDevYolo,
+        USER,
+        root.path().join("local-dev"),
+        RebornLocalRuntimeProfileOptions {
+            confirm_host_access: true,
+        },
+    )
+    .expect("local-yolo runtime input")
+    .with_local_dev_confirmed_host_home_root(host_home_root);
+
+    let input = RebornRuntimeInput::from_services(input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
