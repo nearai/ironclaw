@@ -110,9 +110,14 @@ export function useProviderDialogForm({
         setMessage({ tone: "error", text: result.message || t("llm.modelsFetchFailed") });
       } else {
         setModels(result.models);
-        // Default the model field to the first fetched model when it is empty,
-        // so the user can save/test immediately without picking one manually.
-        if (!form.model.trim()) update("model", result.models[0]);
+        // The model field is a controlled <Select>; when it is empty (or holds a
+        // value no longer in the fetched list) the browser shows the first
+        // <option> while form.model stays stale, and re-picking that already-shown
+        // option fires no change event — so Save would persist an empty/wrong
+        // model. Commit a valid choice so what's displayed is what gets saved.
+        if (!form.model.trim() || !result.models.includes(form.model.trim())) {
+          update("model", result.models[0]);
+        }
         setMessage({ tone: "success", text: t("llm.modelsFetched", { count: result.models.length }) });
       }
     } catch (err) {
