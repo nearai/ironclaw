@@ -99,12 +99,12 @@ pub(crate) fn is_context_length_error_message(lower: &str) -> bool {
         "too many tokens",
         "payload too large",
         "longer than the model's context length",
-        "prompt is too long",
     ];
 
-    CONTEXT_PATTERNS
-        .iter()
-        .any(|pattern| lower.contains(pattern))
+    parse_prompt_too_long_counts(lower).is_some()
+        || CONTEXT_PATTERNS
+            .iter()
+            .any(|pattern| lower.contains(pattern))
 }
 
 /// Try to extract token counts from a context-length error message.
@@ -142,14 +142,12 @@ pub(crate) fn parse_context_token_counts(lower: &str) -> (usize, usize) {
 }
 
 fn parse_prompt_too_long_counts(lower: &str) -> Option<(usize, usize)> {
-    let tail = lower.split_once("prompt is too long")?.1;
-    let mut numbers = tail
-        .split(|ch: char| !ch.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| part.parse().ok())
-        .filter(|&n| n > 0);
-    let used = numbers.next()?;
-    let limit = numbers.next().unwrap_or(0);
+    let tail = lower.split_once("prompt is too long:")?.1.trim_start();
+    let (used, tail) = tail.split_once("tokens")?;
+    let used = used.trim().parse().ok().filter(|&n| n > 0)?;
+    let tail = tail.trim_start().strip_prefix('>')?.trim_start();
+    let (limit, _) = tail.split_once("maximum")?;
+    let limit = limit.trim().parse().ok().filter(|&n| n > 0)?;
     Some((used, limit))
 }
 
@@ -297,6 +295,18 @@ mod tests {
         let (used, limit) = parse_context_token_counts(msg);
         assert_eq!(used, 150000);
         assert_eq!(limit, 128000);
+    }
+
+    #[test]
+    fn prompt_too_long_requires_near_proxy_token_limit_shape() {
+        let malformed = r#"{"error":{"message":"prompt is too long: 234872 tokens"}}"#;
+        assert!(!is_context_length_error_message(malformed));
+        assert_eq!(parse_context_token_counts(malformed), (0, 0));
+
+        let unrelated = r#"{"error":{"message":"prompt is too long for this schema"}}"#;
+        assert!(!is_context_length_error_message(unrelated));
+        assert_eq!(parse_context_token_counts(unrelated), (0, 0));
+        assert!(context_length_error(400, unrelated).is_none());
     }
 
     // ------------------------------------------------------------------
