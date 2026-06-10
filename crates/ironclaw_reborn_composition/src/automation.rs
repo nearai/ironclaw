@@ -73,8 +73,11 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         caller: ProductAgentBoundCaller,
         request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
-        let records = tokio::time::timeout(
-            self.backend_timeout,
+        // Both repository calls share one deadline so the panel read budget is
+        // backend_timeout total, not per call.
+        let deadline = tokio::time::Instant::now() + self.backend_timeout;
+        let records = tokio::time::timeout_at(
+            deadline,
             self.trigger_repository.list_scoped_triggers(
                 caller.tenant_id.clone(),
                 caller.user_id.clone(),
@@ -84,14 +87,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
             ),
         )
         .await
-        .map_err(|_| {
-            services_error(
-                RebornServicesErrorCode::Unavailable,
-                RebornServicesErrorKind::ServiceUnavailable,
-                503,
-                true,
-            )
-        })?
+        .map_err(|_| backend_timeout_error())?
         .map_err(map_trigger_error)?;
 
         if records.is_empty() || request.run_limit == 0 {
@@ -102,24 +98,18 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         }
 
         let trigger_ids: Vec<TriggerId> = records.iter().map(|r| r.trigger_id).collect();
-        let mut runs_by_trigger: HashMap<TriggerId, Vec<TriggerRunRecord>> = tokio::time::timeout(
-            self.backend_timeout,
-            self.trigger_repository.list_trigger_run_history_batch(
-                caller.tenant_id.clone(),
-                &trigger_ids,
-                request.run_limit,
-            ),
-        )
-        .await
-        .map_err(|_| {
-            services_error(
-                RebornServicesErrorCode::Unavailable,
-                RebornServicesErrorKind::ServiceUnavailable,
-                503,
-                true,
+        let mut runs_by_trigger: HashMap<TriggerId, Vec<TriggerRunRecord>> =
+            tokio::time::timeout_at(
+                deadline,
+                self.trigger_repository.list_trigger_run_history_batch(
+                    caller.tenant_id.clone(),
+                    &trigger_ids,
+                    request.run_limit,
+                ),
             )
-        })?
-        .map_err(map_trigger_error)?;
+            .await
+            .map_err(|_| backend_timeout_error())?
+            .map_err(map_trigger_error)?;
 
         Ok(records
             .into_iter()
@@ -180,6 +170,10 @@ fn map_trigger_state(state: TriggerState) -> RebornAutomationState {
     }
 }
 
+/// Maps the repository run status to the wire DTO run status.
+///
+/// Exhaustive — no wildcard arm so a new `TriggerRunStatus` variant is a
+/// compile error here rather than a silent mapping gap.
 fn map_trigger_run_status(status: TriggerRunStatus) -> RebornAutomationRunStatus {
     match status {
         TriggerRunStatus::Ok => RebornAutomationRunStatus::Ok,
@@ -195,9 +189,8 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
     };
     // TriggerRouteThreadId is a validated lower-hex string; ThreadId accepts
     // any non-empty value without path separators or control chars, so this
-    // conversion is always valid for well-formed repository rows. The
-    // filter_map here is a defensive guard against future validation tightening.
-    let thread_id = ThreadId::new(run.thread_id.as_str()).ok()?;
+    // conversion cannot fail for constructible repository rows.
+    let thread_id = ThreadId::new(run.thread_id.as_str()).ok()?; // silent-ok: structurally unreachable; defensive drop if ThreadId validation ever tightens
     Some(RebornAutomationRecentRunInfo {
         run_id: run.run_id,
         thread_id,
@@ -206,6 +199,16 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
         submitted_at: run.submitted_at,
         completed_at: run.completed_at,
     })
+}
+
+/// Shared 503 for repository calls that exceed the panel read deadline.
+fn backend_timeout_error() -> RebornServicesError {
+    services_error(
+        RebornServicesErrorCode::Unavailable,
+        RebornServicesErrorKind::ServiceUnavailable,
+        503,
+        true,
+    )
 }
 
 fn map_trigger_error(error: TriggerError) -> RebornServicesError {
@@ -353,174 +356,34 @@ mod tests {
     // Failing repository for error-path tests
     // -------------------------------------------------------------------------
 
-    struct FailingTriggerRepository;
-
-    impl FailingTriggerRepository {
-        fn new() -> Self {
-            Self
-        }
+    /// Single configurable mock covering every error/hang path the facade
+    /// exercises. `scoped` scripts `list_scoped_triggers`; `batch` scripts
+    /// `list_trigger_run_history_batch`. All other trait methods are never
+    /// called by the facade and return a backend error.
+    enum ScriptedOutcome {
+        Records(Vec<TriggerRecord>),
+        FailBackend,
+        NotFound,
+        Hang,
     }
 
-    #[async_trait]
-    impl TriggerRepository for FailingTriggerRepository {
-        async fn upsert_trigger(&self, _: TriggerRecord) -> Result<(), TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
+    struct ScriptedRepository {
+        scoped: ScriptedOutcome,
+        batch: ScriptedOutcome,
+    }
 
-        async fn get_trigger(
-            &self,
-            _: TenantId,
-            _: TriggerId,
-        ) -> Result<Option<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn list_triggers(&self, _: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn list_scoped_triggers(
-            &self,
-            _: TenantId,
-            _: UserId,
-            _: Option<AgentId>,
-            _: Option<ProjectId>,
-            _: usize,
-        ) -> Result<Vec<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
+    impl ScriptedRepository {
+        fn backend_error() -> TriggerError {
+            TriggerError::Backend {
                 reason: "internal details".to_string(),
-            })
-        }
-
-        async fn remove_trigger(
-            &self,
-            _: TenantId,
-            _: TriggerId,
-        ) -> Result<Option<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn remove_scoped_trigger(
-            &self,
-            _: TenantId,
-            _: UserId,
-            _: Option<AgentId>,
-            _: Option<ProjectId>,
-            _: TriggerId,
-        ) -> Result<Option<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn list_due_triggers(
-            &self,
-            _: Timestamp,
-            _: usize,
-        ) -> Result<Vec<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn list_active_triggers(&self, _: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn list_active_triggers_after(
-            &self,
-            _: Option<ActiveTriggerScanCursor>,
-            _: usize,
-        ) -> Result<Vec<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn claim_due_fire(
-            &self,
-            _: ClaimDueFireRequest,
-        ) -> Result<ClaimDueFireOutcome, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn mark_fire_accepted(
-            &self,
-            _: FireAcceptedRequest,
-        ) -> Result<Option<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn mark_fire_replayed(
-            &self,
-            _: FireReplayedRequest,
-        ) -> Result<Option<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn mark_fire_retryable_failed(
-            &self,
-            _: FireRetryableFailedRequest,
-        ) -> Result<Option<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn mark_fire_permanently_failed(
-            &self,
-            _: FirePermanentFailedRequest,
-        ) -> Result<Option<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn mark_fire_terminally_failed(
-            &self,
-            _: FireTerminalFailedRequest,
-        ) -> Result<Option<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
-        }
-
-        async fn clear_active_fire(
-            &self,
-            _: ClearActiveFireRequest,
-        ) -> Result<Option<TriggerRecord>, TriggerError> {
-            Err(TriggerError::Backend {
-                reason: "unsupported".to_string(),
-            })
+            }
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Hanging repository for timeout tests
-    // -------------------------------------------------------------------------
-
-    struct HangingTriggerRepository;
-
     #[async_trait]
-    impl TriggerRepository for HangingTriggerRepository {
+    impl TriggerRepository for ScriptedRepository {
         async fn upsert_trigger(&self, _: TriggerRecord) -> Result<(), TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn get_trigger(
@@ -528,11 +391,11 @@ mod tests {
             _: TenantId,
             _: TriggerId,
         ) -> Result<Option<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn list_triggers(&self, _: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn list_scoped_triggers(
@@ -543,7 +406,27 @@ mod tests {
             _: Option<ProjectId>,
             _: usize,
         ) -> Result<Vec<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            match &self.scoped {
+                ScriptedOutcome::Records(records) => Ok(records.clone()),
+                ScriptedOutcome::FailBackend => Err(Self::backend_error()),
+                ScriptedOutcome::NotFound => Err(TriggerError::NotFound),
+                ScriptedOutcome::Hang => std::future::pending().await,
+            }
+        }
+
+        async fn list_trigger_run_history_batch(
+            &self,
+            _: TenantId,
+            _: &[TriggerId],
+            _: usize,
+        ) -> Result<std::collections::HashMap<TriggerId, Vec<TriggerRunRecord>>, TriggerError>
+        {
+            match &self.batch {
+                ScriptedOutcome::Records(_) => Ok(std::collections::HashMap::new()),
+                ScriptedOutcome::FailBackend => Err(Self::backend_error()),
+                ScriptedOutcome::NotFound => Err(TriggerError::NotFound),
+                ScriptedOutcome::Hang => std::future::pending().await,
+            }
         }
 
         async fn remove_trigger(
@@ -551,7 +434,7 @@ mod tests {
             _: TenantId,
             _: TriggerId,
         ) -> Result<Option<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn remove_scoped_trigger(
@@ -562,7 +445,7 @@ mod tests {
             _: Option<ProjectId>,
             _: TriggerId,
         ) -> Result<Option<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn list_due_triggers(
@@ -570,11 +453,11 @@ mod tests {
             _: Timestamp,
             _: usize,
         ) -> Result<Vec<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn list_active_triggers(&self, _: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn list_active_triggers_after(
@@ -582,56 +465,56 @@ mod tests {
             _: Option<ActiveTriggerScanCursor>,
             _: usize,
         ) -> Result<Vec<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn claim_due_fire(
             &self,
             _: ClaimDueFireRequest,
         ) -> Result<ClaimDueFireOutcome, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn mark_fire_accepted(
             &self,
             _: FireAcceptedRequest,
         ) -> Result<Option<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn mark_fire_replayed(
             &self,
             _: FireReplayedRequest,
         ) -> Result<Option<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn mark_fire_retryable_failed(
             &self,
             _: FireRetryableFailedRequest,
         ) -> Result<Option<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn mark_fire_permanently_failed(
             &self,
             _: FirePermanentFailedRequest,
         ) -> Result<Option<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn mark_fire_terminally_failed(
             &self,
             _: FireTerminalFailedRequest,
         ) -> Result<Option<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
 
         async fn clear_active_fire(
             &self,
             _: ClearActiveFireRequest,
         ) -> Result<Option<TriggerRecord>, TriggerError> {
-            std::future::pending().await
+            Err(Self::backend_error())
         }
     }
 
@@ -795,7 +678,10 @@ mod tests {
 
     #[tokio::test]
     async fn automation_facade_maps_backend_error_to_unavailable() {
-        let repo = Arc::new(FailingTriggerRepository::new());
+        let repo = Arc::new(ScriptedRepository {
+            scoped: ScriptedOutcome::FailBackend,
+            batch: ScriptedOutcome::FailBackend,
+        });
         let facade = RebornAutomationProductFacade::new(repo);
 
         let error = facade
@@ -819,7 +705,10 @@ mod tests {
     #[tokio::test]
     async fn automation_facade_times_out_stalled_repository() {
         let facade = RebornAutomationProductFacade::with_backend_timeout(
-            Arc::new(HangingTriggerRepository),
+            Arc::new(ScriptedRepository {
+                scoped: ScriptedOutcome::Hang,
+                batch: ScriptedOutcome::Hang,
+            }),
             std::time::Duration::from_millis(10),
         );
 
@@ -835,6 +724,88 @@ mod tests {
         assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
         assert_eq!(error.status_code, 503);
         assert!(error.retryable);
+    }
+
+    #[tokio::test]
+    async fn automation_facade_maps_backend_error_on_run_history_batch_to_unavailable() {
+        let c = caller();
+        let record = make_record(
+            TriggerId::new(),
+            &c,
+            TriggerState::Scheduled,
+            "Daily task",
+            "0 9 * * *",
+        );
+        let facade = RebornAutomationProductFacade::new(Arc::new(ScriptedRepository {
+            scoped: ScriptedOutcome::Records(vec![record]),
+            batch: ScriptedOutcome::FailBackend,
+        }));
+
+        let error = facade
+            .list_automations(c, automation_list_request(10, 5))
+            .await
+            .expect_err("batch backend error should propagate as 503");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
+
+        let debug_repr = format!("{error:?}");
+        assert!(
+            !debug_repr.contains("internal details"),
+            "backend reason must not appear in rendered error: {debug_repr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn automation_facade_times_out_stalled_run_history_batch() {
+        let c = caller();
+        let record = make_record(
+            TriggerId::new(),
+            &c,
+            TriggerState::Scheduled,
+            "Daily task",
+            "0 9 * * *",
+        );
+        let facade = RebornAutomationProductFacade::with_backend_timeout(
+            Arc::new(ScriptedRepository {
+                scoped: ScriptedOutcome::Records(vec![record]),
+                batch: ScriptedOutcome::Hang,
+            }),
+            std::time::Duration::from_millis(10),
+        );
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            facade.list_automations(c, automation_list_request(10, 5)),
+        )
+        .await
+        .expect("facade timeout should complete promptly")
+        .expect_err("stalled batch call should time out");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
+    }
+
+    #[tokio::test]
+    async fn automation_facade_maps_not_found_trigger_error_to_404() {
+        let facade = RebornAutomationProductFacade::new(Arc::new(ScriptedRepository {
+            scoped: ScriptedOutcome::NotFound,
+            batch: ScriptedOutcome::NotFound,
+        }));
+
+        let error = facade
+            .list_automations(caller(), automation_list_request(10, 5))
+            .await
+            .expect_err("not-found error should propagate as 404");
+
+        assert_eq!(error.code, RebornServicesErrorCode::NotFound);
+        assert_eq!(error.kind, RebornServicesErrorKind::NotFound);
+        assert_eq!(error.status_code, 404);
+        assert!(!error.retryable);
     }
 
     #[tokio::test]
