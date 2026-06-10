@@ -11,8 +11,8 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     Action, ApprovalRequestId, CapabilityGrant, CapabilityGrantId, CapabilityId, GrantConstraints,
-    HostApiError, PermissionMode, Principal, ProjectId, ResourceScope, ScopedPath, TenantId,
-    ThreadId, UserId, sha256_digest_token,
+    HostApiError, PermissionMode, Principal, ProjectId, ResourceScope, ScopedPath, SystemServiceId,
+    TenantId, ThreadId, UserId, sha256_digest_token,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -20,9 +20,24 @@ use thiserror::Error;
 const POLICY_PREFIX: &str = "/approvals/persistent";
 const POLICY_PATH_CACHE_MAX_ENTRIES: usize = 1024;
 const POLICY_CAS_RETRY_ATTEMPTS: usize = 3;
+const PERSISTENT_APPROVAL_GRANT_ISSUER: &str = "persistent-approval";
 
+/// Returns whether an extension manifest permission mode may be upgraded by an
+/// explicit "always allow" user decision.
+///
+/// `Ask` is eligible because it is the prompting posture for user-mediated
+/// approval. Extension authors that require mandatory per-invocation consent
+/// must use a separate gate that does not offer persistent approval.
 pub fn permission_mode_allows_persistent_approval(permission: PermissionMode) -> bool {
     matches!(permission, PermissionMode::Allow | PermissionMode::Ask)
+}
+
+pub fn persistent_approval_grant_issuer() -> Principal {
+    Principal::System(
+        SystemServiceId::new(PERSISTENT_APPROVAL_GRANT_ISSUER)
+            // Safety: static lowercase ASCII literal satisfies SystemServiceId validation.
+            .expect("persistent approval grant issuer literal is valid"),
+    )
 }
 
 #[derive(Debug, Error)]
@@ -158,7 +173,7 @@ impl PersistentApprovalPolicy {
             id: self.grant_id,
             capability: self.key.capability_id.clone(),
             grantee: self.key.grantee.clone(),
-            issued_by: self.approved_by.clone(),
+            issued_by: persistent_approval_grant_issuer(),
             constraints: self.constraints.clone(),
         })
     }
@@ -652,6 +667,19 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn permission_modes_allowed_for_persistent_approval_are_explicit() {
+        assert!(permission_mode_allows_persistent_approval(
+            PermissionMode::Allow
+        ));
+        assert!(permission_mode_allows_persistent_approval(
+            PermissionMode::Ask
+        ));
+        assert!(!permission_mode_allows_persistent_approval(
+            PermissionMode::Deny
+        ));
+    }
+
     #[tokio::test]
     async fn in_memory_policy_revoke_removes_active_grant() {
         let store = InMemoryPersistentApprovalPolicyStore::new();
@@ -944,6 +972,21 @@ mod tests {
         assert_eq!(policy.grant_id, first_grant.id);
         assert_eq!(first_grant.id, second_grant.id);
         assert_eq!(first_grant.id, reloaded_grant.id);
+    }
+
+    #[tokio::test]
+    async fn active_grant_uses_persistent_approval_issuer_marker() {
+        let store = InMemoryPersistentApprovalPolicyStore::new();
+        let scope = scope(None, Some("thread-a"));
+
+        let policy = store.allow(input(scope)).await.expect("allow policy");
+        let grant = policy.active_grant().expect("active grant");
+
+        assert_eq!(
+            policy.approved_by,
+            Principal::User(UserId::new("alice").unwrap())
+        );
+        assert_eq!(grant.issued_by, persistent_approval_grant_issuer());
     }
 
     #[tokio::test]

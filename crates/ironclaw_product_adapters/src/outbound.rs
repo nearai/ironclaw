@@ -1162,6 +1162,51 @@ mod tests {
     }
 
     #[test]
+    fn projection_state_round_trips_gate_item_with_allow_always() {
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::Gate {
+                gate_ref: "gate:approval-test".to_string(),
+                headline: "Approval required".to_string(),
+                allow_always: true,
+            }],
+        )
+        .expect("valid gate projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+
+        assert_eq!(value["items"][0]["gate"]["gate_ref"], "gate:approval-test");
+        assert_eq!(value["items"][0]["gate"]["headline"], "Approval required");
+        assert_eq!(value["items"][0]["gate"]["allow_always"], true);
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize gate projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_accepts_legacy_gate_item_without_allow_always() {
+        let json = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "gate": {
+                    "gate_ref": "gate:approval-test",
+                    "headline": "Approval required"
+                }
+            }]
+        });
+
+        let decoded: ProductProjectionState =
+            serde_json::from_value(json).expect("deserialize legacy gate projection");
+        assert_eq!(
+            decoded.items,
+            vec![ProductProjectionItem::Gate {
+                gate_ref: "gate:approval-test".to_string(),
+                headline: "Approval required".to_string(),
+                allow_always: false,
+            }]
+        );
+    }
+
+    #[test]
     fn projection_state_round_trips_skill_activation_item() {
         let run_id = TurnRunId::new();
         let state = ProductProjectionState::new(

@@ -331,7 +331,6 @@ async fn blocked_prompt_payload(
     let Some(gate_ref) = state.gate_ref.as_ref() else {
         return Ok(None);
     };
-    let allow_persistent_approval = is_approval_gate_ref(gate_ref);
     let gate_ref_str = gate_ref.as_str().to_string();
     match event.status {
         TurnStatus::BlockedAuth => {
@@ -354,7 +353,7 @@ async fn blocked_prompt_payload(
             event,
             gate_ref_str,
             "Approval required",
-            allow_persistent_approval,
+            is_approval_gate_ref(gate_ref),
         ))),
         TurnStatus::BlockedResource => Ok(Some(gate_prompt(
             event,

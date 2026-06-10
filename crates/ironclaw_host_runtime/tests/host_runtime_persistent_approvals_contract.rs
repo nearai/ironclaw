@@ -349,7 +349,7 @@ async fn default_runtime_falls_back_when_persistent_policy_lookup_fails() {
 }
 
 #[tokio::test]
-async fn default_runtime_does_not_reuse_persistent_policy_for_manifest_ask() {
+async fn default_runtime_reuses_persistent_policy_for_manifest_ask() {
     let registry = Arc::new(registry_with_echo_capability_permission("ask"));
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
@@ -403,13 +403,13 @@ async fn default_runtime_does_not_reuse_persistent_policy_for_manifest_ask() {
         .unwrap();
 
     match outcome {
-        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.capability_id, capability_id());
-            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id());
+            assert_eq!(completed.output, json!({"ok": true}));
         }
-        other => panic!("expected authorization failure, got {:?}", other),
+        other => panic!("expected Completed outcome, got {:?}", other),
     }
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.has_request());
 }
 
 #[tokio::test]

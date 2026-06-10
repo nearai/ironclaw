@@ -151,7 +151,7 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_approval_gate_prompt() {
+async fn webui_event_stream_offers_always_for_typed_approval_gate() {
     let tenant_id = TenantId::new("webui-events-approval-tenant").unwrap();
     let user_id = UserId::new("webui-events-approval-user").unwrap();
     let agent_id = AgentId::new("webui-events-approval-agent").unwrap();
