@@ -24,7 +24,7 @@ use ironclaw_product_adapters::{
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
     MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -1760,14 +1760,42 @@ impl RebornServicesApi for RebornServices {
         let cursor = parse_timeline_cursor(request.cursor.as_deref())?;
         let scope = caller.turn_scope(thread_id);
         let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
-        let history = self
+        let history = match self
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
                 scope: thread_scope,
                 thread_id: scope.thread_id.clone(),
             })
             .await
-            .map_err(map_timeline_probe_error)?;
+        {
+            Ok(history) => history,
+            // When the session-scoped lookup fails with NotFound, try the
+            // automation-trigger fallback: automation-trigger threads are
+            // created under the trigger's scope (no owner_user_id), not the
+            // WebUI caller's session scope, so the user-scoped lookup always
+            // misses them. If the thread_id appears in any recent run of an
+            // automation that belongs to this caller, we know the caller is
+            // authorized (list_automations applies the same authorization).
+            // We then re-fetch using an unscoped thread_scope (no
+            // owner_user_id constraint) so the production backend can resolve
+            // the thread. Both UnknownThread and ThreadScopeMismatch are
+            // treated as "not found in my scope" — only those are eligible for
+            // the automation fallback; backend/serialization errors propagate
+            // as-is.
+            Err(
+                SessionThreadError::UnknownThread { .. }
+                | SessionThreadError::ThreadScopeMismatch { .. },
+            ) => {
+                // The primary user-scoped lookup missed. Try the automation-
+                // trigger fallback; if it does not authorize the access it
+                // returns the canonical NotFound error.
+                let original_error =
+                    RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
+                self.try_automation_trigger_timeline_fallback(caller, &scope, original_error)
+                    .await?
+            }
+            Err(err) => return Err(map_timeline_probe_error(err)),
+        };
 
         let (messages, next_cursor) = paginate_timeline_messages(history.messages, limit, cursor);
         let summary_artifacts = cap_summary_artifacts(history.summary_artifacts);
@@ -2642,6 +2670,82 @@ async fn replay_accepted_message(
 // collapses both UnknownThread and ThreadScopeMismatch into NotFound so the
 // response cannot be used as an existence oracle.
 impl RebornServices {
+    /// Fallback timeline fetch for automation-trigger threads.
+    ///
+    /// Automation-trigger threads are created under the trigger's scope (no
+    /// `owner_user_id`), not the caller's session scope. The normal user-scoped
+    /// `list_thread_history` therefore always misses them. This fallback is
+    /// only reached when the user-scoped lookup returned `UnknownThread` or
+    /// `ThreadScopeMismatch`.
+    ///
+    /// Authorization: the thread_id must appear in at least one `recent_run`
+    /// for an automation returned by `list_automations` for this caller. That
+    /// is the same authorization check the Automations list endpoint applies,
+    /// so no new trust boundary is introduced.
+    ///
+    /// On authorization success, the history is loaded without an
+    /// `owner_user_id` constraint so the backend can resolve trigger-owned
+    /// threads. On authorization failure (thread not in any of the caller's
+    /// automation runs, or automation facade unavailable), the
+    /// `original_not_found_error` is returned so the response is
+    /// indistinguishable from a genuinely absent thread.
+    async fn try_automation_trigger_timeline_fallback(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        scope: &TurnScope,
+        original_not_found_error: RebornServicesError,
+    ) -> Result<ThreadHistory, RebornServicesError> {
+        // Authorization gate: does this thread_id appear in any recent run
+        // belonging to the caller's automations?
+        let Some(bound_caller) = product_agent_bound_caller_from_webui(caller) else {
+            // Without an agent binding we cannot call list_automations at all;
+            // fall through to NotFound so the error is the same as a normal miss.
+            return Err(original_not_found_error);
+        };
+        let automations = match self
+            .automation_facade
+            .list_automations(
+                bound_caller,
+                AutomationListRequest {
+                    limit: AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
+                    run_limit: AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE as usize,
+                },
+            )
+            .await
+        {
+            Ok(automations) => automations,
+            Err(_) => {
+                // Automation facade unavailable — deny silently; the caller
+                // already got a not-found from the primary lookup path.
+                return Err(original_not_found_error);
+            }
+        };
+
+        let thread_id = &scope.thread_id;
+        let authorized = automations.iter().any(|automation| {
+            automation
+                .recent_runs
+                .iter()
+                .any(|run| &run.thread_id == thread_id)
+        });
+
+        if !authorized {
+            // thread_id is not in any of the caller's automations.
+            return Err(original_not_found_error);
+        }
+
+        // Authorized: re-fetch the history without the owner_user_id scope
+        // constraint so the backend can resolve the trigger-scoped thread.
+        let unscoped_thread_scope = thread_scope_from_turn_scope(scope, None)?;
+        self.thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: unscoped_thread_scope,
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .map_err(map_timeline_probe_error)
+    }
+
     async fn resolve_webui_thread_metadata(
         &self,
         scope: TurnScope,

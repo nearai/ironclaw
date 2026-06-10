@@ -5143,6 +5143,135 @@ async fn operator_service_lifecycle_contract_is_implementable_from_crate_root() 
     assert_eq!(response.state, RebornServiceLifecycleState::Unsupported);
 }
 
+/// Build a `ThreadScope` scoped to the same tenant/agent/project as `caller`
+/// but with `owner_user_id = None`, mirroring how automation trigger threads
+/// are stored (they are not owned by any one WebUI user).
+fn trigger_thread_scope_for(caller: &WebUiAuthenticatedCaller) -> ThreadScope {
+    ThreadScope {
+        tenant_id: caller.tenant_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+        owner_user_id: None,
+        mission_id: None,
+    }
+}
+
+// Regression tests for the automation-trigger timeline fallback.
+// Bug: `get_timeline` scoped the thread lookup to the WebUI user's
+// `owner_user_id`, but trigger-fired threads are stored with
+// `owner_user_id = None`.  The user-scoped probe returned `UnknownThread`,
+// and the handler propagated `404` without checking whether the thread
+// belongs to one of the caller's automations.
+
+#[tokio::test]
+async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
+    // The trigger thread is stored with owner_user_id=None — exactly how
+    // automation_trigger_thread_metadata_json() threads are created.
+    let trigger_thread_id = ThreadId::new("thread-trigger-alpha").expect("valid trigger thread id");
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+    // Insert the trigger thread in the unscoped (trigger) scope.
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Scheduled run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-scheduled-alpha",
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // The automation facade confirms this thread is in the caller's runs.
+    let automation_facade = Arc::new(StaticAutomationFacade {
+        output: vec![RebornAutomationInfo {
+            automation_id: "trigger-scheduled-alpha".to_string(),
+            name: "Morning briefing".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: Some(RebornAutomationRunStatus::Ok),
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: trigger_thread_id.clone(),
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-09T09:00:01Z".parse().expect("submitted_at"),
+                completed_at: Some("2026-06-09T09:00:42Z".parse().expect("completed_at")),
+            }],
+            is_active: true,
+            created_at: None,
+        }],
+    });
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let response = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("owner should be able to read their automation trigger thread timeline");
+
+    assert_eq!(response.thread.thread_id, trigger_thread_id);
+}
+
+#[tokio::test]
+async fn get_timeline_rejects_other_users_automation_trigger_thread() {
+    // A trigger thread owned by alice's automation. Bob tries to read it.
+    let alice = caller_for_user("user-alice");
+    let bob = caller_for_user("user-bob");
+    let trigger_thread_id = ThreadId::new("thread-trigger-beta").expect("valid trigger thread id");
+
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    // Store the thread in alice's trigger scope.
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&alice),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Alice's scheduled run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-alices-job",
+            )),
+        })
+        .await
+        .expect("alice trigger thread stored");
+
+    // The automation facade returns alice's automations for alice, but Bob's
+    // `list_automations` call returns an empty list (he has no automations),
+    // so the fallback must not authorize Bob.
+    let automation_facade = Arc::new(StaticAutomationFacade { output: Vec::new() });
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let err = services
+        .get_timeline(
+            bob,
+            RebornTimelineRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("non-owner must not read another user's trigger thread");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+}
+
 #[tokio::test]
 async fn list_automations_returns_empty_list() {
     let services = RebornServices::new(
