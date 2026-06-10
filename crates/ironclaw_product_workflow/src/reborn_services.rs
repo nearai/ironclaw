@@ -1460,8 +1460,8 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
         extensions::list_extensions(
-            self.lifecycle_facade.as_ref(),
-            self.extension_credentials.as_deref(),
+            Arc::clone(&self.lifecycle_facade),
+            self.extension_credentials.clone(),
             caller,
         )
         .await

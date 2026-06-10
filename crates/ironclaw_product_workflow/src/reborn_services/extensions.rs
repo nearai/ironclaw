@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
+
+use futures::{StreamExt, TryStreamExt, stream};
+use ironclaw_host_api::ExtensionId;
 
 use crate::{
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageRef,
@@ -8,7 +11,6 @@ use crate::{
     RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornServicesError,
     WebUiAuthenticatedCaller,
 };
-use ironclaw_host_api::ExtensionId;
 
 use super::{
     ExtensionCredentialSetupService,
@@ -19,16 +21,23 @@ use super::{
     lifecycle_setup::map_lifecycle_error,
 };
 
+const EXTENSION_READINESS_CONCURRENCY: usize = 8;
+
 pub(super) async fn list_extensions(
-    facade: &dyn LifecycleProductFacade,
-    extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
+    facade: Arc<dyn LifecycleProductFacade>,
+    extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     caller: WebUiAuthenticatedCaller,
 ) -> Result<RebornExtensionListResponse, RebornServicesError> {
     let context = lifecycle_surface_context(caller.clone());
-    let lifecycle =
-        execute_lifecycle(facade, context, LifecycleProductAction::ExtensionList).await?;
+    let lifecycle = execute_lifecycle(
+        facade.as_ref(),
+        context,
+        LifecycleProductAction::ExtensionList,
+    )
+    .await?;
+    let installed = lifecycle_installed_extensions(&lifecycle);
     Ok(RebornExtensionListResponse {
-        extensions: lifecycle_extension_infos(&lifecycle, extension_credentials, &caller).await?,
+        extensions: lifecycle_extension_infos(installed, extension_credentials, caller).await?,
     })
 }
 
@@ -181,17 +190,31 @@ fn lifecycle_installed_extensions(
 }
 
 async fn lifecycle_extension_infos(
-    lifecycle: &LifecycleProductResponse,
-    extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
-    caller: &WebUiAuthenticatedCaller,
+    installed: Vec<LifecycleInstalledExtensionSummary>,
+    extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
+    caller: WebUiAuthenticatedCaller,
 ) -> Result<Vec<RebornExtensionInfo>, RebornServicesError> {
-    let mut infos = Vec::new();
-    for installed in lifecycle_installed_extensions(lifecycle) {
-        let readiness =
-            credential_readiness_for_extension(extension_credentials, caller, &installed).await?;
-        infos.push(extension_info(installed, readiness));
-    }
-    Ok(infos)
+    let resolved = stream::iter(installed.into_iter())
+        .map(|installed| {
+            let caller = caller.clone();
+            let extension_credentials = extension_credentials.clone();
+            async move {
+                let readiness = credential_readiness_for_extension(
+                    extension_credentials.as_deref(),
+                    &caller,
+                    &installed,
+                )
+                .await?;
+                Ok::<_, RebornServicesError>((installed, readiness))
+            }
+        })
+        .buffered(EXTENSION_READINESS_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+    Ok(resolved
+        .into_iter()
+        .map(|(installed, readiness)| extension_info(installed, readiness))
+        .collect())
 }
 
 fn registry_entry(
@@ -316,7 +339,10 @@ fn action_response(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use async_trait::async_trait;
     use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
@@ -384,10 +410,11 @@ mod tests {
                 phase: LifecyclePhase::Active,
             },
         };
-        let credentials = RecordingCredentials::default();
+        let credentials = Arc::new(RecordingCredentials::default());
         let caller = caller();
 
-        let response = list_extensions(&facade, Some(&credentials), caller.clone())
+        let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
+        let response = list_extensions(Arc::new(facade), Some(credentials_service), caller.clone())
             .await
             .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
@@ -424,7 +451,7 @@ mod tests {
         };
         let credentials = UnavailableCredentials;
 
-        let response = list_extensions(&facade, Some(&credentials), caller())
+        let response = list_extensions(Arc::new(facade), Some(Arc::new(credentials)), caller())
             .await
             .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
@@ -436,6 +463,37 @@ mod tests {
         );
         assert!(!extension.needs_setup);
         assert!(extension.onboarding_state.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_checks_extension_readiness_with_bounded_concurrency() {
+        let facade = MultiListingFacade {
+            extensions: (0..EXTENSION_READINESS_CONCURRENCY + 3)
+                .map(|index| LifecycleInstalledExtensionSummary {
+                    summary: summary_with_onboarding_for(&format!("fixture-{index}")),
+                    phase: LifecyclePhase::Active,
+                })
+                .collect(),
+        };
+        let credentials = Arc::new(ConcurrentCredentials::default());
+        let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
+
+        let response = list_extensions(Arc::new(facade), Some(credentials_service), caller())
+            .await
+            .expect("list extensions");
+
+        assert_eq!(
+            response.extensions.len(),
+            EXTENSION_READINESS_CONCURRENCY + 3
+        );
+        assert!(
+            credentials.max_active.load(Ordering::SeqCst) > 1,
+            "readiness checks should not run as a serialized page-load path"
+        );
+        assert!(
+            credentials.max_active.load(Ordering::SeqCst) <= EXTENSION_READINESS_CONCURRENCY,
+            "readiness checks must stay bounded"
+        );
     }
 
     #[derive(Default)]
@@ -487,6 +545,33 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ConcurrentCredentials {
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ExtensionCredentialSetupService for ConcurrentCredentials {
+        async fn credential_status(
+            &self,
+            _request: ExtensionCredentialStatusRequest,
+        ) -> Result<Option<CredentialAccountProjection>, RebornServicesError> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(None)
+        }
+
+        async fn submit_manual_token(
+            &self,
+            _request: ExtensionCredentialSubmitRequest,
+        ) -> Result<CredentialAccountId, RebornServicesError> {
+            Ok(CredentialAccountId::new())
+        }
+    }
+
     struct ListingFacade {
         extension: LifecycleInstalledExtensionSummary,
     }
@@ -507,6 +592,39 @@ mod tests {
                 payload: Some(LifecycleProductPayload::ExtensionList {
                     extensions: vec![self.extension.clone()],
                     count: 1,
+                }),
+            })
+        }
+
+        async fn project_package(
+            &self,
+            _context: LifecycleProductContext,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+            panic!("list_extensions should execute the list action, not project one package")
+        }
+    }
+
+    struct MultiListingFacade {
+        extensions: Vec<LifecycleInstalledExtensionSummary>,
+    }
+
+    #[async_trait]
+    impl LifecycleProductFacade for MultiListingFacade {
+        async fn execute(
+            &self,
+            _context: LifecycleProductContext,
+            action: LifecycleProductAction,
+        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+            assert!(matches!(action, LifecycleProductAction::ExtensionList));
+            Ok(LifecycleProductResponse {
+                package_ref: None,
+                phase: LifecyclePhase::Active,
+                blockers: Vec::new(),
+                message: None,
+                payload: Some(LifecycleProductPayload::ExtensionList {
+                    extensions: self.extensions.clone(),
+                    count: self.extensions.len(),
                 }),
             })
         }
@@ -587,8 +705,13 @@ mod tests {
     }
 
     fn summary_with_onboarding() -> LifecycleExtensionSummary {
+        summary_with_onboarding_for("fixture")
+    }
+
+    fn summary_with_onboarding_for(package_id: &str) -> LifecycleExtensionSummary {
         LifecycleExtensionSummary {
-            package_ref: package_ref(),
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
+                .expect("valid package ref"),
             name: "Fixture".to_string(),
             version: "1.0.0".to_string(),
             description: "test extension".to_string(),
