@@ -577,13 +577,17 @@ fn create_ollama_from_registry(
         extra_headers: reqwest::header::HeaderMap::new(),
     };
 
-    // Ollama's native /api/chat requires `think: true` to enable extended
-    // reasoning for thinking models (Qwen3, DeepSeek-R1, Gemma 4, etc.).
-    // Non-thinking models ignore the parameter harmlessly.
-    let adapter = RigAdapter::new(model, &config.model)
+    let mut adapter = RigAdapter::new(model, &config.model)
         .with_unsupported_params(config.unsupported_params.clone())
-        .with_additional_params(serde_json::json!({ "think": true }))
         .with_model_listing(models_endpoint);
+    // Ollama's /api/chat enables extended reasoning via `think: true`, but
+    // rejects that parameter with HTTP 400 ("does not support thinking") for
+    // models that have no thinking capability (e.g. llama3). Only send it for
+    // known native-thinking models (Qwen3, DeepSeek-R1, …); everything else
+    // must omit it or every turn fails.
+    if crate::reasoning_models::has_native_thinking(&config.model) {
+        adapter = adapter.with_additional_params(serde_json::json!({ "think": true }));
+    }
     Ok(Arc::new(adapter))
 }
 

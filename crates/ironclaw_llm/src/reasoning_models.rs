@@ -214,6 +214,10 @@ mod tests {
         assert!(!has_native_thinking("gpt-4o"));
         assert!(!has_native_thinking("claude-3-5-sonnet"));
         assert!(!has_native_thinking("llama-3.1-70b"));
+        // Exact Ollama tag format: gating the `think: true` param on this is
+        // what stops Ollama's /api/chat from rejecting llama3 with HTTP 400
+        // "does not support thinking".
+        assert!(!has_native_thinking("llama3:latest"));
         assert!(!has_native_thinking("mistral-7b"));
         assert!(!has_native_thinking("gemini-2.0-flash"));
     }
