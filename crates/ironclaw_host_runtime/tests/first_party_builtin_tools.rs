@@ -86,8 +86,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | TRIGGER_CREATE_CAPABILITY_ID
             | TRIGGER_REMOVE_CAPABILITY_ID
             | TRACE_COMMONS_ONBOARD_CAPABILITY_ID
-            | TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID
-            | TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID => PermissionMode::Ask,
+            | TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID => PermissionMode::Ask,
             _ => PermissionMode::Allow,
         };
         assert_eq!(descriptor.default_permission, expected_permission);

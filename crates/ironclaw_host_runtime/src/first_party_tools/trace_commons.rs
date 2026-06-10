@@ -135,7 +135,7 @@ pub(super) fn profile_set_manifest() -> Result<CapabilityManifest, ExtensionErro
             EffectKind::Network,
             EffectKind::ExternalWrite,
         ],
-        PermissionMode::Ask,
+        PermissionMode::Allow,
         Some(ResourceProfile {
             default_estimate: ResourceEstimate {
                 wall_clock_ms: Some(15_000),
