@@ -20,6 +20,8 @@ use secrecy::SecretString;
 
 #[cfg(feature = "postgres")]
 use ironclaw_reborn_config::StorageBackend;
+#[cfg(feature = "postgres")]
+use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode};
 
 #[cfg(feature = "postgres")]
 use crate::RebornBuildError;
@@ -33,6 +35,11 @@ use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
 #[cfg(feature = "postgres")]
 const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
+#[cfg(feature = "postgres")]
+const DATABASE_SSLMODE_ENV: &str = "DATABASE_SSLMODE";
+#[cfg(feature = "postgres")]
+const ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV: &str =
+    "IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT";
 
 /// Composition-time OAuth client metadata.
 ///
@@ -194,6 +201,7 @@ pub(crate) enum RebornStorageInput {
     Postgres {
         pool: deadpool_postgres::Pool,
         url: ironclaw_secrets::SecretMaterial,
+        tls_options: PostgresPoolTlsOptions,
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     },
 }
@@ -345,6 +353,7 @@ impl RebornBuildInput {
             RebornStorageInput::Postgres {
                 pool,
                 url,
+                tls_options: PostgresPoolTlsOptions::default(),
                 secret_master_key: Some(secret_master_key),
             },
         )
@@ -363,6 +372,7 @@ impl RebornBuildInput {
             RebornStorageInput::Postgres {
                 pool,
                 url,
+                tls_options: PostgresPoolTlsOptions::default(),
                 secret_master_key: None,
             },
         )
@@ -418,17 +428,28 @@ impl RebornBuildInput {
         let pool_max_size = storage
             .pool_max_size
             .unwrap_or(ironclaw_reborn_event_store::DEFAULT_POSTGRES_POOL_MAX_SIZE);
-        let pool =
-            crate::open_reborn_postgres_pool_with_max_size(database_url.clone(), pool_max_size)?;
+        let tls_options = postgres_pool_tls_options_from_env()?;
+        let pool = ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
+            database_url.clone(),
+            pool_max_size,
+            tls_options,
+        )?;
         let runtime_policy = resolve_production_runtime_policy(profile, config_file)?;
         let trust_policy = crate::builtin_first_party_trust_policy()?;
 
-        Ok(
-            Self::postgres(profile, owner_id, pool, database_url, secret_master_key)
-                .with_production_trust_policy(Arc::new(trust_policy))
-                .with_runtime_policy(runtime_policy)
-                .with_runtime_process_binding(RebornRuntimeProcessBinding::none()),
+        Ok(Self::new(
+            profile,
+            owner_id,
+            RebornStorageInput::Postgres {
+                pool,
+                url: database_url,
+                tls_options,
+                secret_master_key: Some(secret_master_key),
+            },
         )
+        .with_production_trust_policy(Arc::new(trust_policy))
+        .with_runtime_policy(runtime_policy)
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::none()))
     }
 
     pub fn with_required_runtime_backends(
@@ -684,6 +705,56 @@ fn required_production_key_env(
         });
     }
     Ok(SecretString::from(value))
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, RebornBuildError> {
+    let ssl_mode_override = match std::env::var(DATABASE_SSLMODE_ENV) {
+        Ok(value) if value.trim().is_empty() => None,
+        Ok(value) => Some(
+            value
+                .trim()
+                .parse::<RebornPostgresSslMode>()
+                .map_err(|error| RebornBuildError::InvalidConfig {
+                    reason: format!("{DATABASE_SSLMODE_ENV}: {error}"),
+                })?,
+        ),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("{DATABASE_SSLMODE_ENV} must be valid UTF-8"),
+            });
+        }
+    };
+    let allow_remote_cleartext = match std::env::var(ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV) {
+        Ok(value) => parse_cleartext_opt_in(&value).ok_or_else(|| {
+            RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "{ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV} must be one of true, false, 1, 0, yes, no, on, or off"
+                ),
+            }
+        })?,
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("{ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV} must be valid UTF-8"),
+            });
+        }
+    };
+
+    Ok(PostgresPoolTlsOptions {
+        ssl_mode_override,
+        allow_remote_cleartext,
+    })
+}
+
+#[cfg(feature = "postgres")]
+fn parse_cleartext_opt_in(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" | "off" => Some(false),
+        "1" | "true" | "yes" | "on" => Some(true),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

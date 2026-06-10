@@ -8,6 +8,10 @@ use std::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_approvals::FilesystemPersistentApprovalPolicyStore;
+#[cfg(not(feature = "libsql"))]
+use ironclaw_approvals::InMemoryPersistentApprovalPolicyStore;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
@@ -188,6 +192,12 @@ pub(crate) type LocalDevCapabilityLeaseStore =
     FilesystemCapabilityLeaseStore<LocalDevRootFilesystem>;
 #[cfg(not(feature = "libsql"))]
 pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
+
+#[cfg(feature = "libsql")]
+pub(crate) type LocalDevPersistentApprovalPolicyStore =
+    FilesystemPersistentApprovalPolicyStore<LocalDevRootFilesystem>;
+#[cfg(not(feature = "libsql"))]
+pub(crate) type LocalDevPersistentApprovalPolicyStore = InMemoryPersistentApprovalPolicyStore;
 
 #[cfg(feature = "libsql")]
 type LocalDevProcessServices = ProcessServices<
@@ -381,6 +391,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     // lint on non-test builds where that module is not compiled in.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) capability_policy: Arc<LocalDevCapabilityPolicy>,
+    pub(crate) persistent_approval_policies: Arc<LocalDevPersistentApprovalPolicyStore>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
@@ -517,6 +528,7 @@ struct RebornLocalDevStoreGraph {
     run_state: Arc<LocalDevRunStateStore>,
     approval_requests: Arc<LocalDevApprovalRequestStore>,
     capability_leases: Arc<LocalDevCapabilityLeaseStore>,
+    persistent_approval_policies: Arc<LocalDevPersistentApprovalPolicyStore>,
     turn_state: Arc<LocalDevTurnStateStore>,
     local_runtime: Arc<RebornLocalRuntimeServices>,
     resource_governor: Arc<LocalDevResourceGovernor>,
@@ -787,6 +799,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .with_run_state(Arc::clone(&store_graph.run_state))
     .with_approval_requests(Arc::clone(&store_graph.approval_requests))
     .with_capability_leases(Arc::clone(&store_graph.capability_leases))
+    .with_persistent_approval_policies(Arc::clone(&store_graph.persistent_approval_policies))
     .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
     let local_dev_process_port = local_dev_process_port_for_policy(
         &runtime_policy,
@@ -1155,6 +1168,9 @@ fn build_local_dev_store_graph(
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
+    let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+        Arc::clone(&scoped_filesystem),
+    ));
     let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
         &scoped_filesystem,
     )));
@@ -1201,6 +1217,7 @@ fn build_local_dev_store_graph(
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         capability_policy: Arc::clone(&capability_policy),
+        persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
         outbound_preferences,
@@ -1244,6 +1261,7 @@ fn build_local_dev_store_graph(
         run_state,
         approval_requests,
         capability_leases,
+        persistent_approval_policies,
         turn_state,
         local_runtime,
         resource_governor,
@@ -1273,6 +1291,7 @@ fn build_local_dev_store_graph(
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let persistent_approval_policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
         Arc::new(InMemoryCheckpointStateStore::default());
@@ -1314,6 +1333,7 @@ fn build_local_dev_store_graph(
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         capability_policy: Arc::clone(&capability_policy),
+        persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
         outbound_preferences,
@@ -1356,6 +1376,7 @@ fn build_local_dev_store_graph(
         run_state,
         approval_requests,
         capability_leases,
+        persistent_approval_policies,
         turn_state,
         local_runtime,
         resource_governor,
@@ -2344,6 +2365,7 @@ async fn build_production_shaped(
         RebornStorageInput::Postgres {
             pool,
             url,
+            tls_options,
             secret_master_key,
         } => {
             let production_wiring = production_wiring(
@@ -2362,7 +2384,7 @@ async fn build_production_shaped(
                 oauth_dcr_provider_configs,
                 owner_id,
             };
-            build_postgres_production(context, pool, url, secret_master_key).await
+            build_postgres_production(context, pool, url, tls_options, secret_master_key).await
         }
     }
 }
@@ -2522,6 +2544,9 @@ where
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
+    let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+        Arc::clone(&scoped_filesystem),
+    ));
     let (runtime_policy, process_binding) = runtime_policy.into_parts();
 
     let services = HostRuntimeServices::new(
@@ -2535,6 +2560,7 @@ where
     .with_trust_policy(trust_policy)
     .with_runtime_policy(runtime_policy)
     .with_capability_leases(capability_leases)
+    .with_persistent_approval_policies(persistent_approval_policies)
     .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
     .with_secret_store(Arc::clone(&secret_credentials.secret_store))
     .with_credential_broker(secret_credentials.credential_broker)
@@ -2646,6 +2672,7 @@ where
     filesystem: Arc<F>,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     leases: Arc<FilesystemCapabilityLeaseStore<F>>,
+    persistent_approval_policies: Arc<FilesystemPersistentApprovalPolicyStore<F>>,
     secret_credentials: FilesystemSecretCredentialStores<F>,
     event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
 }
@@ -2664,6 +2691,9 @@ where
         let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
             &scoped_filesystem,
         )));
+        let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+            Arc::clone(&scoped_filesystem),
+        ));
         let secret_credentials = FilesystemSecretCredentialStores::from_master_key(
             Arc::clone(&scoped_filesystem),
             secret_master_key,
@@ -2673,6 +2703,7 @@ where
             filesystem,
             scoped_filesystem,
             leases,
+            persistent_approval_policies,
             secret_credentials,
             event_store,
         })
@@ -2797,6 +2828,7 @@ where
     .with_trust_policy(production_wiring.trust_policy)
     .with_runtime_policy(production_wiring.runtime_policy)
     .with_capability_leases(stores.leases)
+    .with_persistent_approval_policies(stores.persistent_approval_policies)
     .with_secret_store(Arc::clone(&stores.secret_credentials.secret_store))
     .with_credential_broker(stores.secret_credentials.credential_broker)
     .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
@@ -2929,6 +2961,7 @@ async fn build_postgres_production(
     context: RebornProductionBuildContext,
     pool: deadpool_postgres::Pool,
     url: ironclaw_secrets::SecretMaterial,
+    tls_options: ironclaw_reborn_event_store::PostgresPoolTlsOptions,
     secret_master_key: ironclaw_secrets::SecretMaterial,
 ) -> Result<RebornServices, RebornBuildError> {
     use ironclaw_filesystem::PostgresRootFilesystem;
@@ -2945,7 +2978,7 @@ async fn build_postgres_production(
     let stores = ProductionStoreBundle::new(
         filesystem,
         secret_master_key,
-        ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url },
+        ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url, tls_options },
     )?;
 
     build_backend_production(
@@ -3155,6 +3188,7 @@ mod tests {
             approval_requests: Arc::clone(&base_runtime.approval_requests),
             capability_leases: Arc::clone(&base_runtime.capability_leases),
             capability_policy: Arc::clone(&base_runtime.capability_policy),
+            persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
             turn_state: Arc::clone(&base_runtime.turn_state),
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),

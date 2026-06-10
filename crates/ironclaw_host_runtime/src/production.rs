@@ -16,6 +16,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::future::join_all;
+use ironclaw_approvals::{
+    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalScope, permission_mode_allows_persistent_approval,
+};
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
     CapabilityHost, CapabilityInvocationError, CapabilityInvocationRequest,
@@ -25,9 +30,10 @@ use ironclaw_capabilities::{
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
-    PackageSource, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind,
-    RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
+    ApprovalRequestId, CapabilityDispatcher, CapabilityId, Decision, DispatchFailureKind,
+    InvocationId, PackageSource, Principal, ResourceEstimate, ResourceScope,
+    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+    runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
@@ -63,6 +69,10 @@ pub struct DefaultHostRuntime {
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
+    // arch-exempt: optional_arc, minimal/test compositions intentionally disable
+    // persistent approval replay until the product revoke control plane is split out,
+    // plan #4539
+    persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
     process_manager: Option<Arc<dyn ProcessManager>>,
     process_store: Option<Arc<dyn ProcessStore>>,
     process_result_store: Option<Arc<dyn ProcessResultStore>>,
@@ -127,6 +137,7 @@ impl DefaultHostRuntime {
             approval_requests: None,
             run_state_approval_store: None,
             capability_leases: None,
+            persistent_approval_policies: None,
             process_manager: None,
             process_store: None,
             process_result_store: None,
@@ -199,6 +210,16 @@ impl DefaultHostRuntime {
         capability_leases: Arc<dyn CapabilityLeaseStore>,
     ) -> Self {
         self.capability_leases = Some(capability_leases);
+        self
+    }
+
+    /// Attaches reusable approval policy overrides used to inject scoped,
+    /// manifest-bounded grants before ordinary authorization.
+    pub fn with_persistent_approval_policies(
+        mut self,
+        policies: Arc<dyn PersistentApprovalPolicyStore>,
+    ) -> Self {
+        self.persistent_approval_policies = Some(policies);
         self
     }
 
@@ -351,6 +372,15 @@ impl HostRuntime for DefaultHostRuntime {
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+        self.apply_persistent_approval_policy(
+            &mut context,
+            &registry,
+            PersistentApprovalAction::Dispatch,
+            &capability_id,
+            &estimate,
+            &trust_decision,
+        )
+        .await;
         let host = self.capability_host(&registry);
 
         let invocation = CapabilityInvocationRequest {
@@ -425,6 +455,15 @@ impl HostRuntime for DefaultHostRuntime {
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+        self.apply_persistent_approval_policy(
+            &mut context,
+            &registry,
+            PersistentApprovalAction::SpawnCapability,
+            &capability_id,
+            &estimate,
+            &trust_decision,
+        )
+        .await;
         let host = self.capability_host(&registry);
         let spawn = CapabilitySpawnRequest {
             context,
@@ -924,6 +963,123 @@ impl DefaultHostRuntime {
         Ok(())
     }
 
+    async fn apply_persistent_approval_policy(
+        &self,
+        context: &mut ironclaw_host_api::ExecutionContext,
+        registry: &ExtensionRegistry,
+        action: PersistentApprovalAction,
+        capability_id: &CapabilityId,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) {
+        let Some(policies) = self.persistent_approval_policies.as_ref() else {
+            return;
+        };
+        let Some(descriptor) = registry.get_capability(capability_id) else {
+            return;
+        };
+        if !permission_mode_allows_persistent_approval(descriptor.default_permission) {
+            tracing::debug!(
+                capability_id = %capability_id,
+                permission = ?descriptor.default_permission,
+                "persistent approval skipped for manifest policy"
+            );
+            return;
+        }
+        let scope = match PersistentApprovalScope::from_resource_scope(&context.resource_scope) {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    error = %error,
+                    "persistent approval lookup skipped for unsupported scope"
+                );
+                return;
+            }
+        };
+        let lookup_results = join_all(persistent_approval_grantees(context).into_iter().map(
+            |grantee| {
+                let policies = Arc::clone(policies);
+                let key = PersistentApprovalPolicyKey {
+                    scope: scope.clone(),
+                    action,
+                    capability_id: capability_id.clone(),
+                    grantee,
+                };
+                async move { policies.lookup(&key).await }
+            },
+        ))
+        .await;
+        for policy in lookup_results {
+            let policy = match policy {
+                Ok(policy) => policy,
+                Err(error) => {
+                    tracing::warn!(
+                        capability_id = %capability_id,
+                        error = %error,
+                        "persistent approval policy lookup failed; falling back to normal authorization"
+                    );
+                    continue;
+                }
+            };
+            let Some(policy) = policy else {
+                continue;
+            };
+            let Some(grant) = policy.active_grant() else {
+                continue;
+            };
+            let mut candidate_context = context.clone();
+            candidate_context.grants.grants.clear();
+            candidate_context.grants.grants.push(grant.clone());
+            let decision = match action {
+                PersistentApprovalAction::Dispatch => {
+                    self.authorizer
+                        .authorize_dispatch_with_trust(
+                            &candidate_context,
+                            descriptor,
+                            estimate,
+                            trust_decision,
+                        )
+                        .await
+                }
+                PersistentApprovalAction::SpawnCapability => {
+                    self.authorizer
+                        .authorize_spawn_with_trust(
+                            &candidate_context,
+                            descriptor,
+                            estimate,
+                            trust_decision,
+                        )
+                        .await
+                }
+            };
+            match decision {
+                Decision::Allow { .. } => {}
+                Decision::Deny { reason } => {
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        deny_reason = ?reason,
+                        "persistent approval policy matched but cannot authorize invocation"
+                    );
+                    continue;
+                }
+                Decision::RequireApproval { .. } => {
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        "persistent approval policy matched but still requires approval"
+                    );
+                    continue;
+                }
+            }
+            tracing::debug!(
+                capability_id = %capability_id,
+                "persistent approval policy matched; injecting scoped grant"
+            );
+            context.grants.grants.push(grant);
+            break;
+        }
+    }
+
     async fn fail_matching_blocked_resume_on_preflight_error(
         &self,
         context: &ironclaw_host_api::ExecutionContext,
@@ -1385,6 +1541,26 @@ fn spawned_process_outcome_from(
         process_id: result.process.process_id,
         capability_id,
     }
+}
+
+fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -> Vec<Principal> {
+    let mut grantees = vec![
+        Principal::Extension(context.extension_id.clone()),
+        Principal::User(context.user_id.clone()),
+    ];
+    if let Some(agent_id) = &context.agent_id {
+        grantees.push(Principal::Agent(agent_id.clone()));
+    }
+    if let Some(project_id) = &context.project_id {
+        grantees.push(Principal::Project(project_id.clone()));
+    }
+    if let Some(mission_id) = &context.mission_id {
+        grantees.push(Principal::Mission(mission_id.clone()));
+    }
+    if let Some(thread_id) = &context.thread_id {
+        grantees.push(Principal::Thread(thread_id.clone()));
+    }
+    grantees
 }
 
 fn host_runtime_spawn_input_for_capability(

@@ -44,24 +44,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product_workflow::{
-    LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
-};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_reborn_composition::{
     RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
 };
@@ -69,241 +53,13 @@ use ironclaw_reborn_webui_ingress::{
     EmailUserDirectory, InMemorySessionStore, OAuthError, OAuthProvider, OAuthProviderName,
     OAuthRouterConfig, OAuthUserProfile, SessionAuthenticator, SessionStore, webui_v2_auth_router,
 };
-use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use tower::ServiceExt;
 
-const TENANT: &str = "tenant-a";
-const AGENT: &str = "agent-default";
-const PROJECT: &str = "project-default";
+#[path = "support/harness.rs"]
+mod harness;
+use harness::{AGENT, PROJECT, StubServices, TENANT, with_peer, with_peer_addr};
+
 const PROVIDER: &str = "google";
-
-// ─── stub facade ──────────────────────────────────────────────────────
-
-/// Minimal `RebornServicesApi` — these tests never reach a v2 handler
-/// (every assertion is decided by a middleware: rate limit, body limit,
-/// or CORS), so every method rejects/panics. Mirrors the stub shape in
-/// `session_round_trip.rs`, minus the call accumulator that file needs
-/// but this one never reads (no test here routes past the middleware).
-struct StubServices;
-
-#[async_trait]
-impl RebornServicesApi for StubServices {
-    async fn create_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-        Ok(RebornCreateThreadResponse {
-            thread: SessionThreadRecord {
-                thread_id: ThreadId::new("thread.fake").expect("thread"),
-                scope: ThreadScope {
-                    tenant_id: TenantId::new(TENANT).expect("tenant"),
-                    agent_id: AgentId::new("agent.fake").expect("agent"),
-                    project_id: Some(ProjectId::new("project.fake").expect("project")),
-                    owner_user_id: Some(UserId::new("alice@example.com").expect("user")),
-                    mission_id: None,
-                },
-                created_by_actor_id: "alice@example.com".to_string(),
-                title: None,
-                metadata_json: None,
-                goal: None,
-            },
-        })
-    }
-
-    async fn submit_turn(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        unreachable!("network-limit tests do not drive submit_turn")
-    }
-
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        unreachable!("network-limit tests do not drive get_timeline")
-    }
-
-    async fn stream_events(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        unreachable!("network-limit tests do not drive stream_events")
-    }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        unreachable!("network-limit tests do not drive get_run_state")
-    }
-
-    async fn cancel_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        unreachable!("network-limit tests do not drive cancel_run")
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        unreachable!("network-limit tests do not drive resolve_gate")
-    }
-
-    async fn list_threads(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        Ok(RebornListThreadsResponse {
-            threads: Vec::new(),
-            next_cursor: None,
-        })
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        unreachable!("network-limit tests do not drive delete_thread")
-    }
-
-    async fn list_automations(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn get_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_outbound_delivery_targets(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_extensions(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn search_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn install_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn read_skill_content(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn update_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn remove_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_extension_registry(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn install_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn activate_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn remove_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn setup_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-        _request: WebUiSetupExtensionRequest,
-    ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-}
 
 // ─── stub OAuth provider ──────────────────────────────────────────────
 
@@ -362,7 +118,7 @@ fn build_app(allowed_origins: Vec<HeaderValue>) -> axum::Router {
     ));
 
     let bundle = RebornWebuiBundle {
-        api: Arc::new(StubServices),
+        api: Arc::new(StubServices::default()),
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
@@ -379,20 +135,6 @@ fn build_app(allowed_origins: Vec<HeaderValue>) -> axum::Router {
 
 fn default_origins() -> Vec<HeaderValue> {
     vec![HeaderValue::from_static("http://localhost:1234")]
-}
-
-/// Tag a request with a specific peer address. The per-IP rate limiter
-/// keys on the peer **IP** (port is ignored), so tests that need
-/// distinct buckets must vary the IP octets, not just the port. Host
-/// composition injects this via `into_make_service_with_connect_info`.
-fn with_peer_addr(mut req: Request<Body>, addr: SocketAddr) -> Request<Body> {
-    req.extensions_mut().insert(ConnectInfo(addr));
-    req
-}
-
-/// Default fixed peer so a test keys every request to the same bucket.
-fn with_peer(req: Request<Body>) -> Request<Body> {
-    with_peer_addr(req, SocketAddr::from(([127, 0, 0, 1], 1234)))
 }
 
 fn login_builder() -> Request<Body> {
@@ -419,6 +161,17 @@ async fn sso_login_enforces_per_ip_rate_limit() {
     // 60s on `/auth/login/{provider}` (a different scope from the v2
     // facade's per-caller limiter). A single IP must be cut off after
     // the budget so an unauthenticated login flood is bounded.
+    //
+    // Two implementation properties this test relies on, both held by
+    // `webui_rate_limit::build_rate_limit_state` (`shards: Arc::new(..)`)
+    // and verified by the 429 below: (1) the rate-limit counter is
+    // Arc-backed inside the router, so the 60 `app.clone()` calls share
+    // ONE window — if `Router::clone` reset the counter, all 61 would
+    // redirect and this test would never reach 429; (2) the state is
+    // built per `webui_v2_app` call (not a process-global), so this
+    // test's budget is independent of other tests / run order. `i` is
+    // bound into `login_request` via a fresh builder each iteration, so
+    // the only shared state is the limiter itself.
     let app = build_app(default_origins());
 
     for i in 0..60 {
@@ -430,6 +183,9 @@ async fn sso_login_enforces_per_ip_rate_limit() {
         );
     }
 
+    // The 61st request through a fresh `app.clone()` is the explicit
+    // assertion that the counter survives clone: it can only be 429 if
+    // the prior 60 clones incremented the same Arc-backed window.
     let blocked = app.oneshot(login_request()).await.expect("oneshot");
     assert_eq!(
         blocked.status(),

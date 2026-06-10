@@ -278,6 +278,9 @@ fn router_with(services: Arc<dyn RebornServicesApi>) -> Router {
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }))
 }
 
 #[tokio::test]

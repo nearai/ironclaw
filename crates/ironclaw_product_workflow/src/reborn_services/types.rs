@@ -6,6 +6,7 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunResponse, EventCursor, GateRef, ResumeTurnResponse,
     SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
 };
+use secrecy::SecretString;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
@@ -1169,6 +1170,8 @@ pub struct RebornOperatorCommandPlaneResponse {
     pub logs: Option<RebornLogQueryResponse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_lifecycle: Option<RebornServiceLifecycleResponse>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<RebornOperatorConfigDiagnostic>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1178,14 +1181,22 @@ pub enum RebornOperatorSurfaceStatus {
     Unavailable,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct RebornOperatorSetupRequest {
     #[serde(default)]
     pub provider_id: Option<String>,
     #[serde(default)]
+    pub adapter: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub api_key: Option<SecretString>,
+    #[serde(default)]
     pub profile_id: Option<String>,
+    #[serde(default)]
+    pub webui_access_token: Option<SecretString>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1227,6 +1238,8 @@ pub struct RebornOperatorConfigListResponse {
     pub entries: Vec<RebornOperatorConfigEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub precedence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<RebornOperatorConfigDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1280,6 +1293,8 @@ pub struct RebornOperatorConfigDiagnostic {
     pub severity: RebornOperatorConfigDiagnosticSeverity,
     pub reason_code: String,
     pub message: String,
+    pub owning_area: RebornOperatorArea,
+    pub remediation: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

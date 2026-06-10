@@ -339,7 +339,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | GSuite WASM tools | ✅ | 🚧 | Reborn bundles operation-level Google Drive/Docs/Sheets/Slides WASM packages with host-mediated HTTP egress, product-auth scoped bearer injection, and manifest-declared Google OAuth setup metadata; full live-recorded parity remains follow-up |
 | Hosted MCP extensions | ✅ | 🚧 | Reborn composes host-mediated MCP runtime, bundles the current Notion MCP supported tool set, wires Notion ProductAuth OAuth exchange/refresh, can use Reborn ProductAuth DCR OAuth setup through the host callback origin, and can activate hosted MCP packages with live `tools/list` schema discovery through host-staged product-auth credentials |
 | NEAR AI MCP extension | ✅ | 🚧 | Host-bundled Reborn MCP extension exposes `nearai.search` via host-mediated HTTP and `llm_nearai_api_key`; manifest-declared product-auth credentials can now be staged through the hosted MCP runtime/discovery bridge, while NEAR remains a static supported-tool adapter |
-| Tool policies (allow/deny) | ✅ | ✅ | |
+| Tool policies (allow/deny) | ✅ | ✅ | Reborn now stores scoped persistent `AlwaysAllow` approval policies for manifest-allow capabilities and replays them at the current sandbox scope; product-facing revoke paths remain follow-up while the policy-store revoke interface is available |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
 | Tool inventory cache | ✅ | ❌ | Coalesced effective-tool inventory cache with channel-registry invalidation |
 | Pending exec approval `errorMessage` cleanup | ✅ | ❌ | Failed restart-interrupted approval-pending sessions instead of replaying stale ids |
