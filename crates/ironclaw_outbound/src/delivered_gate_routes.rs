@@ -36,7 +36,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// Persisted per `(tenant_id, user_id, gate_ref)`. The gate_ref is unique per
 /// run; a user cannot hold two concurrent pending approvals with the same
-/// gate_ref, so no eviction or expiry policy is needed at this layer.
+/// gate_ref. The routing wrapper removes the record (best-effort) once the
+/// gate resolves; routes for gates that never resolve linger, which is
+/// accepted — records are tiny and keys never collide.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveredGateRouteRecord {
     /// Tenant the gate belongs to.
@@ -95,6 +97,18 @@ pub trait DeliveredGateRouteStore: Send + Sync {
         user_id: &UserId,
         gate_ref: &str,
     ) -> Result<Option<DeliveredGateRouteRecord>, String>;
+
+    /// Remove the route record for `(tenant_id, user_id, gate_ref)`.
+    /// Best-effort cleanup after the gate is resolved; removing a missing
+    /// record is not an error. Routes for gates that are never resolved
+    /// linger — accepted for now, since records are tiny and gate refs are
+    /// unique per run.
+    async fn remove_delivered_gate_route(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        gate_ref: &str,
+    ) -> Result<(), String>;
 }
 
 /// In-memory [`DeliveredGateRouteStore`].
@@ -134,6 +148,20 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&key)
             .cloned())
+    }
+
+    async fn remove_delivered_gate_route(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        gate_ref: &str,
+    ) -> Result<(), String> {
+        let key = RouteKey::new(tenant_id.clone(), user_id.clone(), gate_ref.to_string());
+        self.records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+        Ok(())
     }
 }
 

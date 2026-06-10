@@ -1149,15 +1149,17 @@ async fn deliver_triggered_run(
             Ok(posted_messages) => {
                 // A delivered approval prompt invites "approve <gate_ref>" in
                 // the creator's DM — record the route so the reply resolves
-                // the gate on this run's thread. Best-effort: never affects
-                // the delivery outcome.
+                // the gate on this run's thread. Keyed by the trigger creator
+                // (the actor): trusted trigger submissions may carry no
+                // explicit scope owner, and the prompt is delivered to the
+                // creator's personal preference either way. Best-effort:
+                // never affects the delivery outcome.
                 if event_kind == RunNotificationEventKind::ApprovalNeeded
                     && let Some(gate_ref) = gate_ref_for_routing
-                    && let Some(owner) = scope.explicit_owner_user_id()
                 {
                     let record = DeliveredGateRouteRecord {
                         tenant_id: scope.tenant_id.clone(),
-                        user_id: owner.clone(),
+                        user_id: fire.creator_user_id.clone(),
                         gate_ref,
                         run_id,
                         scope: scope.clone(),
@@ -2268,15 +2270,13 @@ mod tests {
 
         assert_eq!(record.outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
 
-        // The delivered approval prompt must record a gate route so a DM
-        // reply can resolve the gate on the triggered run's thread.
+        // The delivered approval prompt must record a gate route keyed by the
+        // trigger creator so a DM reply can resolve the gate on the triggered
+        // run's thread — even when the run scope has no explicit owner.
         let scope = personal_turn_scope();
-        let owner = scope
-            .explicit_owner_user_id()
-            .expect("personal scope owner")
-            .clone();
+        let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
         let route = route_store
-            .load_delivered_gate_route(&scope.tenant_id, &owner, gate_ref_str)
+            .load_delivered_gate_route(&scope.tenant_id, &creator, gate_ref_str)
             .await
             .expect("load gate route")
             .expect("gate route recorded");

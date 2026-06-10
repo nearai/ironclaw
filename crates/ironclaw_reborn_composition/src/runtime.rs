@@ -1685,11 +1685,6 @@ pub async fn build_reborn_runtime(
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
         model_cost_table_override,
-        // Removed: trigger_post_submit_hook was the old eager-binding hook.
-        // The late-binding slot on RebornRuntime replaces it; callers use
-        // `set_trigger_post_submit_hook` after build instead.
-        #[cfg(feature = "slack-v2-host-beta")]
-            trigger_post_submit_hook: _,
     } = input;
 
     let mut services_input = services_input.ok_or(RebornRuntimeError::InvalidArgument {

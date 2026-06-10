@@ -693,11 +693,17 @@ fn map_outbound_error(error: OutboundError) -> ProjectionStreamError {
         OutboundError::InvalidRequest { reason } => {
             ProjectionStreamError::InvalidRequest { reason }
         }
+        // A missing preference target is a resolution-stage configuration
+        // miss, not a transport failure — classify it with InvalidRequest so
+        // callers do not retry it as if outbound infrastructure had failed
+        // (matches the product-workflow status-update mapping).
+        OutboundError::PreferenceTargetMissing { kind } => {
+            ProjectionStreamError::InvalidRequest { reason: kind }
+        }
         OutboundError::Backend
         | OutboundError::CasConflict
         | OutboundError::Serialization
         | OutboundError::SubscriptionScopeMismatch
-        | OutboundError::DeliveryNotFound
-        | OutboundError::PreferenceTargetMissing { .. } => ProjectionStreamError::Outbound,
+        | OutboundError::DeliveryNotFound => ProjectionStreamError::Outbound,
     }
 }

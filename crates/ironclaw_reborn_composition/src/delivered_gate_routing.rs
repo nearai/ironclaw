@@ -106,14 +106,22 @@ impl ApprovalInteractionService for DeliveredGateRoutingApprovalService {
             return self.inner.resolve(request).await;
         };
 
-        // Defense-in-depth: the key already encodes actor user_id, but
-        // verify explicitly before rewriting. On mismatch, forward unchanged
-        // so the inner service decides — do not error here.
+        // Defense-in-depth: the key already encodes tenant and actor user_id,
+        // but verify both explicitly before rewriting. On mismatch, forward
+        // unchanged so the inner service decides — do not error here.
         if record.user_id != *user_id {
             tracing::debug!(
                 target = "ironclaw::reborn::delivered_gate_routing",
                 gate_ref = gate_ref_str,
                 "delivered gate route user_id mismatch; forwarding unchanged"
+            );
+            return self.inner.resolve(request).await;
+        }
+        if record.tenant_id != *tenant_id {
+            tracing::debug!(
+                target = "ironclaw::reborn::delivered_gate_routing",
+                gate_ref = gate_ref_str,
+                "delivered gate route tenant_id mismatch; forwarding unchanged"
             );
             return self.inner.resolve(request).await;
         }
@@ -125,6 +133,10 @@ impl ApprovalInteractionService for DeliveredGateRoutingApprovalService {
             "rewriting approval resolve request to triggered run scope"
         );
 
+        let route_tenant = record.tenant_id.clone();
+        let route_user = record.user_id.clone();
+        let route_gate_ref = gate_ref_str.to_string();
+
         let rewritten = ResolveApprovalInteractionRequest {
             scope: record.scope,
             run_id_hint: Some(record.run_id),
@@ -135,7 +147,25 @@ impl ApprovalInteractionService for DeliveredGateRoutingApprovalService {
             idempotency_key: request.idempotency_key,
         };
 
-        self.inner.resolve(rewritten).await
+        let response = self.inner.resolve(rewritten).await;
+
+        // The gate is settled (approved or denied) — best-effort cleanup of
+        // the route record so resolved gates do not accumulate route files.
+        if response.is_ok()
+            && let Err(reason) = self
+                .routes
+                .remove_delivered_gate_route(&route_tenant, &route_user, &route_gate_ref)
+                .await
+        {
+            tracing::debug!(
+                target = "ironclaw::reborn::delivered_gate_routing",
+                gate_ref = %route_gate_ref,
+                error = %reason,
+                "failed to remove resolved delivered gate route (best-effort)"
+            );
+        }
+
+        response
     }
 }
 

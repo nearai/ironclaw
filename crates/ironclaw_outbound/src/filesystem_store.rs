@@ -819,9 +819,8 @@ where
     ) -> Result<(), String> {
         let path = delivered_gate_route_path(&record.tenant_id, &record.user_id, &record.gate_ref)
             .map_err(|e| format!("delivered gate route path: {e}"))?;
-        // Use system scope — the hash-keyed path already encodes tenant + user;
-        // the mount's path-prefix tenant isolation is an additional layer.
-        let resource_scope = ResourceScope::system();
+        let resource_scope =
+            delivered_gate_route_resource_scope(&record.tenant_id, &record.user_id);
         let body = serde_json::to_vec(&record)
             .map_err(|e| format!("delivered gate route serialize: {e}"))?;
         let entry = Entry::bytes(body).with_content_type(ContentType::json());
@@ -838,7 +837,7 @@ where
     ) -> Result<Option<DeliveredGateRouteRecord>, String> {
         let path = delivered_gate_route_path(tenant_id, user_id, gate_ref)
             .map_err(|e| format!("delivered gate route path: {e}"))?;
-        let resource_scope = ResourceScope::system();
+        let resource_scope = delivered_gate_route_resource_scope(tenant_id, user_id);
         match self
             .filesystem
             .get(&resource_scope, &path)
@@ -854,6 +853,32 @@ where
             None => Ok(None),
         }
     }
+
+    async fn remove_delivered_gate_route(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        gate_ref: &str,
+    ) -> Result<(), String> {
+        let path = delivered_gate_route_path(tenant_id, user_id, gate_ref)
+            .map_err(|e| format!("delivered gate route path: {e}"))?;
+        let resource_scope = delivered_gate_route_resource_scope(tenant_id, user_id);
+        match self.filesystem.delete(&resource_scope, &path).await {
+            Ok(()) => Ok(()),
+            Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(e) => Err(format!("delivered gate route delete: {e}")),
+        }
+    }
+}
+
+/// Resource scope for delivered-gate route records. Carries the real tenant
+/// and user so the mount's path-prefix isolation applies structurally, on top
+/// of the hash-keyed file name (which also binds tenant + user + gate_ref).
+fn delivered_gate_route_resource_scope(tenant_id: &TenantId, user_id: &UserId) -> ResourceScope {
+    let mut resource_scope = ResourceScope::system();
+    resource_scope.tenant_id = tenant_id.clone();
+    resource_scope.user_id = user_id.clone();
+    resource_scope
 }
 
 fn delivery_scope_index_value(scope: &TurnScope) -> IndexValue {
