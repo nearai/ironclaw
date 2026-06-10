@@ -2,7 +2,7 @@
 #![warn(unreachable_pub)]
 
 mod attachment;
-mod attachment_format;
+pub mod attachment_format;
 pub mod env_helpers;
 mod event;
 pub mod hashing;
@@ -16,11 +16,12 @@ mod timezone;
 mod trust_boundary;
 mod util;
 
-pub use attachment::{AttachmentKind, IncomingAttachment};
-pub use attachment_format::{
-    AttachmentFormat, ExtractorId, accept_attribute, accept_tokens, all_formats,
-    canonical_extension, extractor_for_mime, is_supported_mime, kind_for_mime, lookup,
-};
+pub use attachment::{AttachmentKind, IncomingAttachment, normalize_mime_type};
+// The attachment-format registry is exposed as a module (`attachment_format::lookup`,
+// `attachment_format::is_supported_mime`, …) rather than flattening its
+// generically-named functions onto the crate root, where `ironclaw_common::lookup`
+// would read meaninglessly. The two types are re-exported for convenience.
+pub use attachment_format::{AttachmentFormat, ExtractorId};
 pub use event::{
     AppEvent, CodeExecutionFailureCategory, JobResultStatus, OnboardingStateDto, PlanStepDto,
     SelfImprovementPhase, ToolDecisionDto,

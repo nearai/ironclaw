@@ -7,6 +7,22 @@
 //! directly on `&mut [IncomingAttachment]` to fill `extracted_text` for
 //! audio inputs.
 
+/// Normalize a MIME type to its canonical comparison form: drop any
+/// `; parameter` suffix, trim surrounding whitespace, and lowercase.
+///
+/// MIME types are case-insensitive (RFC 2045 §5.1), so this is the single
+/// normalizer every MIME comparison in the workspace routes through — the
+/// attachment-format registry, kind inference, and audio transcription all call
+/// it instead of re-deriving `split(';').next().trim()` (and disagreeing on
+/// case) locally.
+pub fn normalize_mime_type(mime: &str) -> String {
+    mime.split(';')
+        .next()
+        .unwrap_or(mime)
+        .trim()
+        .to_ascii_lowercase()
+}
+
 /// Kind of attachment carried on an incoming message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachmentKind {
@@ -21,7 +37,7 @@ pub enum AttachmentKind {
 impl AttachmentKind {
     /// Infer attachment kind from a MIME type string.
     pub fn from_mime_type(mime: &str) -> Self {
-        let base = mime.split(';').next().unwrap_or(mime).trim();
+        let base = normalize_mime_type(mime);
         if base.starts_with("audio/") {
             Self::Audio
         } else if base.starts_with("image/") {

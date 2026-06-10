@@ -18,7 +18,7 @@
 //! table here lets those layers (and a future crate-level extractor) select an
 //! extractor from one authority instead of re-deriving it from a private match.
 
-use crate::AttachmentKind;
+use crate::{AttachmentKind, normalize_mime_type};
 
 /// Names the strategy that turns an attachment's bytes into `extracted_text`.
 ///
@@ -165,6 +165,114 @@ const FORMATS: &[AttachmentFormat] = &[
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Rtf,
     },
+    // ── Plain-text & source-code family (UTF-8 passthrough) ───────────────────
+    // These mirror the text/code arms of the document extractor: each is a
+    // distinct file type with its own extension, so each gets its own entry.
+    AttachmentFormat {
+        mime: "text/tab-separated-values",
+        mime_aliases: &[],
+        canonical_ext: "tsv",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/html",
+        mime_aliases: &[],
+        canonical_ext: "html",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/javascript",
+        mime_aliases: &[],
+        canonical_ext: "js",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/css",
+        mime_aliases: &[],
+        canonical_ext: "css",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/x-python",
+        mime_aliases: &[],
+        canonical_ext: "py",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/x-java",
+        mime_aliases: &[],
+        canonical_ext: "java",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/x-c",
+        mime_aliases: &[],
+        canonical_ext: "c",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/x-c++",
+        mime_aliases: &[],
+        canonical_ext: "cpp",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/x-rust",
+        mime_aliases: &[],
+        canonical_ext: "rs",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/x-go",
+        mime_aliases: &[],
+        canonical_ext: "go",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/x-ruby",
+        mime_aliases: &[],
+        canonical_ext: "rb",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/x-shellscript",
+        mime_aliases: &["application/x-sh"],
+        canonical_ext: "sh",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/x-toml",
+        mime_aliases: &["application/toml"],
+        canonical_ext: "toml",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/x-yaml",
+        mime_aliases: &["application/yaml", "application/x-yaml"],
+        canonical_ext: "yaml",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
+    AttachmentFormat {
+        mime: "text/x-log",
+        mime_aliases: &[],
+        canonical_ext: "log",
+        kind: AttachmentKind::Document,
+        extractor: ExtractorId::Utf8Text,
+    },
     AttachmentFormat {
         mime: "application/msword",
         mime_aliases: &[],
@@ -224,7 +332,7 @@ const FORMATS: &[AttachmentFormat] = &[
     },
     AttachmentFormat {
         mime: "audio/wav",
-        mime_aliases: &["audio/x-wav"],
+        mime_aliases: &["audio/x-wav", "audio/wave"],
         canonical_ext: "wav",
         kind: AttachmentKind::Audio,
         extractor: ExtractorId::AudioTranscription,
@@ -266,22 +374,12 @@ const FORMATS: &[AttachmentFormat] = &[
     },
 ];
 
-/// Normalize a MIME type for comparison: drop any `; parameter` suffix, trim
-/// surrounding whitespace, and lowercase. Mirrors the channel-layer
-/// normalization so registry membership matches what the channels accept.
-fn normalize_mime(mime: &str) -> String {
-    mime.split(';')
-        .next()
-        .unwrap_or(mime)
-        .trim()
-        .to_ascii_lowercase()
-}
-
 /// Look up the format for a MIME type, matching the canonical spelling or any
 /// alias. The input is normalized (parameters stripped, trimmed, lowercased)
-/// before matching. Returns `None` for unsupported MIME types.
+/// via [`normalize_mime_type`] before matching. Returns `None` for unsupported
+/// MIME types.
 pub fn lookup(mime: &str) -> Option<&'static AttachmentFormat> {
-    let normalized = normalize_mime(mime);
+    let normalized = normalize_mime_type(mime);
     FORMATS.iter().find(|format| {
         format.mime == normalized || format.mime_aliases.contains(&normalized.as_str())
     })
@@ -324,35 +422,22 @@ pub fn all_formats() -> &'static [AttachmentFormat] {
 }
 
 /// Build the token list for an HTML file-input `accept` attribute from the
-/// registry. Emits the `image/*` and `audio/*` wildcards (when any image/audio
-/// format is registered) followed by an explicit `.ext` token for every
-/// document and audio format. This is the single source the frontend
-/// `accept=` list should be generated from or asserted against.
+/// registry: one explicit `.ext` token per registered format, in table order.
+/// This is the single source the frontend `accept=` list should be generated
+/// from or asserted against.
+///
+/// Every kind — image, document, and audio — is advertised the same way, by its
+/// canonical extension. We deliberately do *not* emit `image/*` / `audio/*`
+/// wildcards: a wildcard tells the browser to accept *any* image/audio type,
+/// including ones the registry rejects (`image/svg+xml`, `image/bmp`, …), so the
+/// picker would offer files that then fail server-side validation — the exact
+/// drift this registry exists to remove. Advertising exactly the registry's
+/// extensions keeps the picker and [`is_supported_mime`] in lockstep.
 pub fn accept_tokens() -> Vec<String> {
-    let mut tokens = Vec::new();
-    if FORMATS.iter().any(|f| f.kind == AttachmentKind::Image) {
-        tokens.push("image/*".to_string());
-    }
-    if FORMATS.iter().any(|f| f.kind == AttachmentKind::Audio) {
-        tokens.push("audio/*".to_string());
-    }
-    for format in FORMATS
+    FORMATS
         .iter()
-        .filter(|f| f.kind == AttachmentKind::Document)
-    {
-        push_ext_token(&mut tokens, format.canonical_ext);
-    }
-    for format in FORMATS.iter().filter(|f| f.kind == AttachmentKind::Audio) {
-        push_ext_token(&mut tokens, format.canonical_ext);
-    }
-    tokens
-}
-
-fn push_ext_token(tokens: &mut Vec<String>, ext: &str) {
-    let token = format!(".{ext}");
-    if !tokens.contains(&token) {
-        tokens.push(token);
-    }
+        .map(|format| format!(".{}", format.canonical_ext))
+        .collect()
 }
 
 /// The comma-joined `accept` attribute value for an HTML file input, generated
@@ -380,6 +465,7 @@ mod tests {
         assert_eq!(lookup("text/xml").unwrap().mime, "application/xml");
         assert_eq!(lookup("text/rtf").unwrap().mime, "application/rtf");
         assert_eq!(lookup("audio/x-wav").unwrap().mime, "audio/wav");
+        assert_eq!(lookup("audio/wave").unwrap().mime, "audio/wav");
         assert_eq!(lookup("audio/mp3").unwrap().mime, "audio/mpeg");
         assert_eq!(lookup("audio/m4a").unwrap().mime, "audio/x-m4a");
         assert_eq!(lookup("audio/opus").unwrap().mime, "audio/ogg");
@@ -479,7 +565,7 @@ mod tests {
             assert!(!format.canonical_ext.is_empty());
             assert_eq!(
                 format.mime,
-                normalize_mime(format.mime),
+                normalize_mime_type(format.mime),
                 "canonical MIME {} is not already normalized",
                 format.mime
             );
@@ -497,36 +583,149 @@ mod tests {
     }
 
     #[test]
-    fn accept_tokens_advertise_wildcards_and_unique_extensions() {
+    fn accept_tokens_are_exactly_the_registry_extensions() {
         let tokens = accept_tokens();
-        assert!(tokens.contains(&"image/*".to_string()));
-        assert!(tokens.contains(&"audio/*".to_string()));
+
+        // Every token is an explicit extension — no `image/*` / `audio/*`
+        // wildcards that would advertise formats the registry rejects.
+        assert!(
+            tokens.iter().all(|t| t.starts_with('.')),
+            "accept tokens must be extensions, not wildcards: {tokens:?}"
+        );
 
         // No duplicate tokens.
         let unique: HashSet<&String> = tokens.iter().collect();
         assert_eq!(unique.len(), tokens.len(), "accept tokens must be unique");
 
-        // The document + audio extension set is exactly the canonical
-        // extensions of every document and audio format.
-        let ext_tokens: HashSet<String> = tokens
-            .iter()
-            .filter(|t| t.starts_with('.'))
-            .cloned()
-            .collect();
+        // The advertised set is exactly the canonical extension of every
+        // registered format — including images, so the picker and
+        // `is_supported_mime` stay in lockstep.
+        let token_set: HashSet<String> = tokens.iter().cloned().collect();
         let expected: HashSet<String> = all_formats()
             .iter()
-            .filter(|f| matches!(f.kind, AttachmentKind::Document | AttachmentKind::Audio))
             .map(|f| format!(".{}", f.canonical_ext))
             .collect();
-        assert_eq!(ext_tokens, expected);
+        assert_eq!(token_set, expected);
 
-        // Images are advertised only via the wildcard, not as extensions.
-        assert!(!tokens.contains(&".png".to_string()));
+        // Images are advertised by explicit extension, not a wildcard.
+        assert!(tokens.contains(&".png".to_string()));
+        assert!(!tokens.contains(&"image/*".to_string()));
     }
 
     #[test]
     fn accept_attribute_is_comma_joined_tokens() {
         assert_eq!(accept_attribute(), accept_tokens().join(","));
-        assert!(accept_attribute().starts_with("image/*,audio/*,"));
+        // Table order: the first registered format is `image/png`.
+        assert!(accept_attribute().starts_with(".png,"));
+    }
+
+    /// The registry is the source of truth the v1 `src/` call sites will migrate
+    /// onto, so it must already recognize every MIME those lists handle today —
+    /// otherwise migration silently drops support. This crate can't import
+    /// `src/`, so the existing lists are mirrored here as fixtures: if a format
+    /// is dropped from the table (or one of the lists grows a format the table
+    /// lacks), this fails loudly. Keep these in sync with their sources.
+    #[test]
+    fn registry_is_a_superset_of_the_document_extractor() {
+        // Mirror of the dispatch arms in
+        // `src/document_extraction/extractors.rs::extract_text` (everything it
+        // maps to a concrete extractor, excluding the filename fallback).
+        const EXTRACTOR_MIMES: &[(&str, ExtractorId)] = &[
+            ("application/pdf", ExtractorId::Pdf),
+            (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ExtractorId::Docx,
+            ),
+            (
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ExtractorId::Pptx,
+            ),
+            (
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ExtractorId::Xlsx,
+            ),
+            ("application/msword", ExtractorId::LegacyOffice),
+            ("application/vnd.ms-powerpoint", ExtractorId::LegacyOffice),
+            ("application/vnd.ms-excel", ExtractorId::LegacyOffice),
+            ("text/plain", ExtractorId::Utf8Text),
+            ("text/csv", ExtractorId::Utf8Text),
+            ("text/tab-separated-values", ExtractorId::Utf8Text),
+            ("text/markdown", ExtractorId::Utf8Text),
+            ("text/html", ExtractorId::Utf8Text),
+            ("text/xml", ExtractorId::Utf8Text),
+            ("text/x-python", ExtractorId::Utf8Text),
+            ("text/x-java", ExtractorId::Utf8Text),
+            ("text/x-c", ExtractorId::Utf8Text),
+            ("text/x-c++", ExtractorId::Utf8Text),
+            ("text/x-rust", ExtractorId::Utf8Text),
+            ("text/x-go", ExtractorId::Utf8Text),
+            ("text/x-ruby", ExtractorId::Utf8Text),
+            ("text/x-shellscript", ExtractorId::Utf8Text),
+            ("text/javascript", ExtractorId::Utf8Text),
+            ("text/css", ExtractorId::Utf8Text),
+            ("text/x-toml", ExtractorId::Utf8Text),
+            ("text/x-yaml", ExtractorId::Utf8Text),
+            ("text/x-log", ExtractorId::Utf8Text),
+            ("application/json", ExtractorId::Utf8Text),
+            ("application/xml", ExtractorId::Utf8Text),
+            ("application/x-yaml", ExtractorId::Utf8Text),
+            ("application/yaml", ExtractorId::Utf8Text),
+            ("application/toml", ExtractorId::Utf8Text),
+            ("application/x-sh", ExtractorId::Utf8Text),
+            ("application/rtf", ExtractorId::Rtf),
+            ("text/rtf", ExtractorId::Rtf),
+        ];
+        for (mime, expected) in EXTRACTOR_MIMES {
+            assert_eq!(
+                extractor_for_mime(mime),
+                Some(*expected),
+                "registry missing or mismaps document MIME {mime}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_is_a_superset_of_the_web_upload_allow_list() {
+        // Mirror of `is_allowed_attachment_mime` in
+        // `src/channels/web/util.rs` (excluding `application/octet-stream`,
+        // which is the deliberate generic-binary exclusion).
+        const ALLOWED_MIMES: &[&str] = &[
+            "image/png",
+            "image/jpeg",
+            "image/jpg",
+            "image/gif",
+            "image/webp",
+            "audio/mpeg",
+            "audio/ogg",
+            "audio/wav",
+            "audio/wave",
+            "audio/x-wav",
+            "audio/mp4",
+            "audio/x-m4a",
+            "audio/aac",
+            "audio/flac",
+            "audio/webm",
+            "text/plain",
+            "text/csv",
+            "text/markdown",
+            "text/xml",
+            "application/pdf",
+            "application/json",
+            "application/xml",
+            "application/rtf",
+            "text/rtf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/msword",
+            "application/vnd.ms-powerpoint",
+            "application/vnd.ms-excel",
+        ];
+        for mime in ALLOWED_MIMES {
+            assert!(
+                is_supported_mime(mime),
+                "registry does not recognize allow-listed upload MIME {mime}"
+            );
+        }
     }
 }
