@@ -25,8 +25,9 @@ owns:
    the same path prefix the descriptors declare.
 2. **Bearer-token middleware.** Authenticate `Authorization: Bearer
    …` (or the matching session form) and inject a
-   `WebUiAuthenticatedCaller` as an `axum::Extension` *before* the
-   handler runs. The handlers fail closed (`500`) when this layer is
+   `WebUiAuthenticatedCaller` and request-scoped
+   `WebUiV2Capabilities` as `axum::Extension`s *before* the handler
+   runs. The handlers fail closed (`500`) when this layer is
    missing — verified by
    `missing_caller_extension_returns_500`.
 3. **Query-token path for the SSE route.** The browser's
@@ -86,14 +87,17 @@ browser-reachable.
 
 All routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
-constructing the `WebUiAuthenticatedCaller` and injecting it as an
-axum `Extension` before the handler runs.
+constructing the `WebUiAuthenticatedCaller`, carrying the matched
+token's `WebUiV2Capabilities`, and injecting both as axum
+`Extension`s before the handler runs.
 
 The LLM configuration and operator command-plane routes are operator-wide. Host
-composition must only mount them for authenticators that represent a single
-trusted operator; multi-user session/OIDC authenticators should leave those
-routes unmounted until an admin role boundary exists in
-`WebUiAuthenticatedCaller`. Unwired operator command-plane facade methods fail
+composition mounts them only when the authenticator says the deployment
+has an operator configuration surface, and must still authorize each
+request from the matched token's `operator_webui_config` capability.
+Multi-user session/OIDC authenticators should leave those routes
+unmounted or return non-operator capabilities until an admin role
+boundary exists. Unwired operator command-plane facade methods fail
 closed with sanitized `503 service_unavailable` responses.
 
 ### List-threads

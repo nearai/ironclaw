@@ -81,6 +81,10 @@ bind sockets or call `axum::serve`.
 - Non-streaming Chat Completions wait timeout detaches from the wait, not from
   the underlying turn. The API response is a retryable sanitized service
   unavailable error.
+- Timed-out create requests remain bounded by the shared Reborn turn-admission
+  reservation held by ProductWorkflow / TurnCoordinator. OpenAI-compatible
+  wrappers must not add route-local quota, route-local cancellation, or any
+  admission release separate from the underlying turn's terminal transition.
 - SSE translation consumes a composition-supplied projection stream port and
   emits OpenAI-compatible events from `ProductProjectionItem` state. Reborn
   keepalive/control frames, projection cursors, internal refs, provider
@@ -111,6 +115,10 @@ The route:
   reader polls `SessionThreadService::finalized_assistant_message_by_run` for
   the accepted run's finalized assistant message and returns a sanitized Chat
   Completions response.
+- Inherits the shared turn-admission policy from the configured
+  `TurnCoordinator` / turn-state store. A wait timeout must not release
+  admission capacity while the underlying run remains queued, running, blocked,
+  cancel-requested, or otherwise non-terminal.
 - Carries the requested public model string as a composition/policy hint for
   the projection reader; the route must not inject the model name into user
   transcript text.

@@ -54,6 +54,7 @@ use crate::{
 };
 
 mod error;
+mod extension_credentials;
 mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
@@ -1458,7 +1459,12 @@ impl RebornServicesApi for RebornServices {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        extensions::list_extensions(self.lifecycle_facade.as_ref(), caller).await
+        extensions::list_extensions(
+            Arc::clone(&self.lifecycle_facade),
+            self.extension_credentials.clone(),
+            caller,
+        )
+        .await
     }
 
     async fn list_skills(

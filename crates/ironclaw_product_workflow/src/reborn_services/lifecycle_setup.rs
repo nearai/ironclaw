@@ -1,6 +1,5 @@
-use ironclaw_auth::{AuthProductScope, AuthSurface};
-use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope};
-use uuid::Uuid;
+use ironclaw_auth::AuthProductScope;
+use ironclaw_host_api::ExtensionId;
 
 use crate::{
     LifecycleExtensionCredentialRequirement, LifecyclePackageRef, LifecycleProductContext,
@@ -10,7 +9,10 @@ use crate::{
     WebUiInboundValidationError, WebUiSetupExtensionRequest,
 };
 
-use super::{ExtensionCredentialSetupService, extension_onboarding, extension_setup_credentials};
+use super::{
+    ExtensionCredentialSetupService, extension_credentials::credential_scope, extension_onboarding,
+    extension_setup_credentials,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SetupAction {
@@ -26,7 +28,7 @@ pub(super) async fn setup_extension(
     request: WebUiSetupExtensionRequest,
 ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
     let action = setup_action(&request)?;
-    let scope = setup_scope(&caller, &package_ref);
+    let scope = credential_scope(&caller, &package_ref);
     let extension_id = ExtensionId::new(package_ref.id.as_str())
         .map_err(|_| RebornServicesError::internal_invariant())?;
     let context = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
@@ -106,39 +108,6 @@ async fn setup_extension_response(
         secrets,
         fields: Vec::new(),
     })
-}
-
-fn setup_scope(
-    caller: &WebUiAuthenticatedCaller,
-    package_ref: &LifecyclePackageRef,
-) -> AuthProductScope {
-    let seed = format!(
-        "webui-v2-extension-setup:{}:{}:{}:{}:{}",
-        caller.tenant_id.as_str(),
-        caller.user_id.as_str(),
-        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
-        caller
-            .project_id
-            .as_ref()
-            .map(|id| id.as_str())
-            .unwrap_or(""),
-        package_ref.id.as_str()
-    );
-    AuthProductScope::new(
-        ResourceScope {
-            tenant_id: caller.tenant_id.clone(),
-            user_id: caller.user_id.clone(),
-            agent_id: caller.agent_id.clone(),
-            project_id: caller.project_id.clone(),
-            mission_id: None,
-            thread_id: None,
-            invocation_id: InvocationId::from_uuid(Uuid::new_v5(
-                &Uuid::NAMESPACE_OID,
-                seed.as_bytes(),
-            )),
-        },
-        AuthSurface::Web,
-    )
 }
 
 fn setup_action(request: &WebUiSetupExtensionRequest) -> Result<SetupAction, RebornServicesError> {

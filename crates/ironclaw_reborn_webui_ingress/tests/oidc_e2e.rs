@@ -166,7 +166,7 @@ async fn oidc_authenticator_accepts_valid_jwks_signed_token_and_rejects_bad_clai
         .authenticate(&valid)
         .await
         .expect("valid JWKS-signed token must be accepted");
-    assert_eq!(user.as_str(), "alice");
+    assert_eq!(user.user_id.as_str(), "alice");
 
     // (2) Wrong issuer → rejected.
     let wrong_iss = sign_token(
@@ -247,7 +247,7 @@ async fn oidc_authenticator_refetches_jwks_on_kid_miss_during_rotation() {
         .authenticate(&token_two)
         .await
         .expect("rotated-key token must trigger force-refresh + accept");
-    assert_eq!(user.as_str(), "alice");
+    assert_eq!(user.user_id.as_str(), "alice");
     // The force-refresh produced exactly one additional JWKS fetch.
     assert_eq!(
         state.fetch_count(),
@@ -284,7 +284,7 @@ async fn oidc_jwks_refresh_is_single_flight_under_concurrent_authenticate() {
     }
     for handle in handles {
         let user = handle.await.expect("join").expect("auth accepted");
-        assert_eq!(user.as_str(), "alice");
+        assert_eq!(user.user_id.as_str(), "alice");
     }
     assert_eq!(
         state.fetch_count(),
@@ -517,7 +517,7 @@ async fn oidc_authenticator_rejects_future_nbf() {
         .authenticate(&past_nbf)
         .await
         .expect("a token with a past nbf must authenticate (isolates nbf as the cause)");
-    assert_eq!(user.as_str(), "alice");
+    assert_eq!(user.user_id.as_str(), "alice");
 
     server.abort();
 }

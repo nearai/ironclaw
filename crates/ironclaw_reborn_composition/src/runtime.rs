@@ -5361,8 +5361,7 @@ mod tests {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use ironclaw_webui_v2::{
-            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State,
-            webui_v2_router,
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2State, webui_v2_router,
         };
         use tower::ServiceExt;
 
@@ -5401,7 +5400,6 @@ mod tests {
         );
         let router = webui_v2_router(WebUiV2State::new(
             bundle.api,
-            WebUiV2Capabilities::default(),
             DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
         ))
         .layer(axum::Extension(caller_without_agent));

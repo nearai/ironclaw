@@ -116,8 +116,8 @@ use crate::product_auth_providers::{OAuthProviderComposition, compose_provider_c
 use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessState,
-    RebornWorkerReadiness,
+    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessDiagnostic,
+    RebornReadinessState, RebornWorkerReadiness,
 };
 use crate::{
     available_extensions::{
@@ -2994,14 +2994,27 @@ fn readiness_for(
     turn_coordinator: bool,
     product_auth: bool,
 ) -> RebornReadiness {
-    let state = match profile {
-        RebornCompositionProfile::Disabled => RebornReadinessState::Disabled,
-        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
-            RebornReadinessState::DevOnly
+    let (state, diagnostics) = match profile {
+        RebornCompositionProfile::Disabled => (
+            RebornReadinessState::Disabled,
+            vec![RebornReadinessDiagnostic::disabled()],
+        ),
+        RebornCompositionProfile::LocalDev => (
+            RebornReadinessState::DevOnly,
+            vec![RebornReadinessDiagnostic::local_dev()],
+        ),
+        RebornCompositionProfile::LocalDevYolo => (
+            RebornReadinessState::DevOnly,
+            vec![RebornReadinessDiagnostic::local_dev_yolo()],
+        ),
+        RebornCompositionProfile::Production => {
+            (RebornReadinessState::ProductionValidated, Vec::new())
         }
-        RebornCompositionProfile::Production => RebornReadinessState::ProductionValidated,
-        RebornCompositionProfile::MigrationDryRun => RebornReadinessState::MigrationDryRunValidated,
+        RebornCompositionProfile::MigrationDryRun => {
+            (RebornReadinessState::MigrationDryRunValidated, Vec::new())
+        }
     };
+
     RebornReadiness {
         profile,
         state,
@@ -3014,6 +3027,7 @@ fn readiness_for(
             turn_runner: false,
             trigger_poller: false,
         },
+        diagnostics,
     }
 }
 
@@ -3791,8 +3805,8 @@ mod tests {
             .expect("active capabilities");
         let search = capabilities
             .iter()
-            .find(|capability| capability.id.as_str() == "nearai.search")
-            .expect("nearai.search active");
+            .find(|capability| capability.id.as_str() == "nearai.web_search")
+            .expect("nearai.web_search active");
 
         assert_eq!(search.provider.as_str(), "nearai");
         assert_eq!(search.effects, nearai_allowed_effects());
@@ -4201,10 +4215,29 @@ mod tests {
             RebornReadinessState::ProductionValidated
         );
         assert!(!without_auth.facades.product_auth);
+        assert!(without_auth.diagnostics.is_empty());
 
         let with_auth = readiness_for(RebornCompositionProfile::Production, true, true, true);
         assert_eq!(with_auth.state, RebornReadinessState::ProductionValidated);
         assert!(with_auth.facades.product_auth);
+        assert!(with_auth.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn readiness_for_profile_diagnostics_cover_cutover_states() {
+        let migration = readiness_for(RebornCompositionProfile::MigrationDryRun, true, true, true);
+        assert_eq!(
+            migration.state,
+            RebornReadinessState::MigrationDryRunValidated
+        );
+        assert!(migration.diagnostics.is_empty());
+
+        let yolo = readiness_for(RebornCompositionProfile::LocalDevYolo, true, true, true);
+        assert_eq!(yolo.state, RebornReadinessState::DevOnly);
+        assert_eq!(
+            yolo.diagnostics,
+            vec![RebornReadinessDiagnostic::local_dev_yolo()]
+        );
     }
 
     async fn invoke_json(
