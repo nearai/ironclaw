@@ -204,6 +204,31 @@ fn all_locales_share_the_en_key_set() {
 }
 
 #[test]
+fn all_locales_include_recent_automations_and_skills_keys() {
+    let packs = load_all();
+    let required_keys = [
+        "automations.detail.currentRun",
+        "automations.summary.running",
+        "skills.contentLoadFailed",
+    ];
+
+    let mut problems = Vec::new();
+    for (lang, pack) in &packs {
+        for key in required_keys {
+            if !pack.contains_key(key) {
+                problems.push(format!("{lang}: missing \"{key}\""));
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "locale packs are missing keys introduced by automations/skills UI:\n{}",
+        problems.join("\n")
+    );
+}
+
+#[test]
 fn no_empty_values_where_en_is_nonempty() {
     let packs = load_all();
     let en = en_pack(&packs);
