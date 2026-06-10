@@ -2147,20 +2147,24 @@ pub async fn build_reborn_runtime(
                 )
                 .with_audit_sink(approval_audit_sink.clone()),
             );
-            Arc::new(DefaultApprovalInteractionService::new(
-                approval_read_model,
-                Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
-                    local_dev_capability_policy,
-                    local_runtime.workspace_mounts.clone(),
-                    local_runtime.skill_mounts.clone(),
-                    local_runtime.memory_mounts.clone(),
-                    local_dev::extension_surface::LocalDevExtensionSurfaceSource::new(
-                        local_runtime.extension_management.clone(),
-                    ),
-                )),
-                approval_resolver,
-                Arc::clone(&planned_turn_coordinator),
-            ))
+            Arc::new(
+                DefaultApprovalInteractionService::new(
+                    approval_read_model,
+                    Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
+                        local_dev_capability_policy,
+                        Arc::clone(&local_runtime.extension_registry),
+                        local_runtime.workspace_mounts.clone(),
+                        local_runtime.skill_mounts.clone(),
+                        local_runtime.memory_mounts.clone(),
+                        local_dev::extension_surface::LocalDevExtensionSurfaceSource::new(
+                            local_runtime.extension_management.clone(),
+                        ),
+                    )),
+                    approval_resolver,
+                    Arc::clone(&planned_turn_coordinator),
+                )
+                .with_persistent_policy_store(local_runtime.persistent_approval_policies.clone()),
+            )
         } else {
             Arc::new(UnavailableApprovalInteractionService)
         };

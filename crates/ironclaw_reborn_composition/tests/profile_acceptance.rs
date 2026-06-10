@@ -418,6 +418,7 @@ fn production_wiring_components_keep_host_runtime_stable_names() {
         ProductionWiringComponent::RunState,
         ProductionWiringComponent::ApprovalRequests,
         ProductionWiringComponent::CapabilityLeases,
+        ProductionWiringComponent::PersistentApprovalPolicies,
         ProductionWiringComponent::EventSink,
         ProductionWiringComponent::AuditSink,
         ProductionWiringComponent::SecretStore,

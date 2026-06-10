@@ -142,6 +142,7 @@ pub enum RebornReadinessDiagnosticComponent {
     RunState,
     ApprovalRequests,
     CapabilityLeases,
+    PersistentApprovalPolicies,
     EventSink,
     AuditSink,
     SecretStore,
@@ -174,6 +175,7 @@ impl RebornReadinessDiagnosticComponent {
             Self::RunState => "run_state",
             Self::ApprovalRequests => "approval_requests",
             Self::CapabilityLeases => "capability_leases",
+            Self::PersistentApprovalPolicies => "persistent_approval_policies",
             Self::EventSink => "event_sink",
             Self::AuditSink => "audit_sink",
             Self::SecretStore => "secret_store",
@@ -221,6 +223,7 @@ impl<'de> Deserialize<'de> for RebornReadinessDiagnosticComponent {
             "run_state" => Self::RunState,
             "approval_requests" => Self::ApprovalRequests,
             "capability_leases" => Self::CapabilityLeases,
+            "persistent_approval_policies" => Self::PersistentApprovalPolicies,
             "event_sink" => Self::EventSink,
             "audit_sink" => Self::AuditSink,
             "secret_store" => Self::SecretStore,
@@ -337,6 +340,9 @@ impl From<ProductionWiringComponent> for RebornReadinessDiagnosticComponent {
             ProductionWiringComponent::RunState => Self::RunState,
             ProductionWiringComponent::ApprovalRequests => Self::ApprovalRequests,
             ProductionWiringComponent::CapabilityLeases => Self::CapabilityLeases,
+            ProductionWiringComponent::PersistentApprovalPolicies => {
+                Self::PersistentApprovalPolicies
+            }
             ProductionWiringComponent::EventSink => Self::EventSink,
             ProductionWiringComponent::AuditSink => Self::AuditSink,
             ProductionWiringComponent::SecretStore => Self::SecretStore,

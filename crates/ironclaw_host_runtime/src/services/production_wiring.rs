@@ -6,9 +6,10 @@ use super::{
     DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials, InMemoryApprovalRequestStore,
     InMemoryAuditSink, InMemoryCapabilityLeaseStore, InMemoryCredentialBroker,
     InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
-    InMemoryProcessResultStore, InMemoryProcessStore, InMemoryResourceGovernor,
-    InMemoryRunStateStore, InMemorySecretStore, InMemoryTurnStateStore, LocalFilesystem,
-    LocalHostProcessPort, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
+    InMemoryPersistentApprovalPolicyStore, InMemoryProcessResultStore, InMemoryProcessStore,
+    InMemoryResourceGovernor, InMemoryRunStateStore, InMemorySecretStore, InMemoryTurnStateStore,
+    LocalFilesystem, LocalHostProcessPort, NoopTurnRunWakeNotifier, RebornEventStoreError,
+    RuntimeKind,
 };
 
 #[derive(Debug, Error)]
@@ -81,6 +82,7 @@ pub enum ProductionWiringComponent {
     RunState,
     ApprovalRequests,
     CapabilityLeases,
+    PersistentApprovalPolicies,
     EventSink,
     AuditSink,
     SecretStore,
@@ -111,6 +113,7 @@ impl ProductionWiringComponent {
             Self::RunState => "run_state",
             Self::ApprovalRequests => "approval_requests",
             Self::CapabilityLeases => "capability_leases",
+            Self::PersistentApprovalPolicies => "persistent_approval_policies",
             Self::EventSink => "event_sink",
             Self::AuditSink => "audit_sink",
             Self::SecretStore => "secret_store",
@@ -222,6 +225,7 @@ pub(super) struct ProductionComponentTypes {
     pub(super) run_state: Option<ProductionComponentType>,
     pub(super) approval_requests: Option<ProductionComponentType>,
     pub(super) capability_leases: Option<ProductionComponentType>,
+    pub(super) persistent_approval_policies: Option<ProductionComponentType>,
     pub(super) event_sink: Option<ProductionComponentType>,
     pub(super) audit_sink: Option<ProductionComponentType>,
     pub(super) secret_store: Option<ProductionComponentType>,
@@ -290,6 +294,7 @@ fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationRea
             || type_id == TypeId::of::<InMemoryRunStateStore>()
             || type_id == TypeId::of::<InMemoryApprovalRequestStore>()
             || type_id == TypeId::of::<InMemoryCapabilityLeaseStore>()
+            || type_id == TypeId::of::<InMemoryPersistentApprovalPolicyStore>()
             || type_id == TypeId::of::<InMemoryEventSink>()
             || type_id == TypeId::of::<InMemoryDurableEventLog>()
             || type_id == TypeId::of::<InMemoryAuditSink>()
