@@ -1,4 +1,5 @@
 import { React, html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import { Button } from "../../../design-system/button.js";
 import { EmptyPanel, Panel } from "../../../design-system/primitives.js";
 import { formatJobDate } from "../lib/jobs-presenters.js";
@@ -53,6 +54,7 @@ function EventCard({ event }) {
 }
 
 export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
+  const t = useT();
   const [filter, setFilter] = React.useState("all");
   const [content, setContent] = React.useState("");
   const [autoScroll, setAutoScroll] = React.useState(true);
@@ -116,8 +118,8 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
             `)
           : html`
               <${EmptyPanel}
-                title="No activity captured yet"
-                description="This job has not written any persisted events for the selected filter."
+                title=${t("job.noActivityTitle")}
+                description=${t("job.noActivityDesc")}
               />
             `}
       </div>
@@ -133,11 +135,11 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
                 handleSend(false);
               }
             }}
-            placeholder="Send a follow-up prompt to the running job"
+            placeholder=${t("job.followupPlaceholder")}
             className="h-11 rounded-md border border-white/10 bg-iron-950/90 px-3 text-sm text-white outline-none focus:border-signal/45"
           />
-          <${Button} variant="secondary" disabled=${isSendingPrompt} onClick=${() => handleSend(true)}>Done<//>
-          <${Button} variant="primary" disabled=${isSendingPrompt} onClick=${() => handleSend(false)}>Send<//>
+          <${Button} variant="secondary" disabled=${isSendingPrompt} onClick=${() => handleSend(true)}>${t("common.done")}<//>
+          <${Button} variant="primary" disabled=${isSendingPrompt} onClick=${() => handleSend(false)}>${t("common.send")}<//>
         </div>
       `}
     <//>

@@ -101,11 +101,15 @@ mod slack_connectable_channel;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_delivery;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_dm_open;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_egress;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_beta;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_state;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_outbound_targets;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_pairing_notifier;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -127,6 +131,8 @@ mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
 mod webui_extension_credentials;
+#[cfg(feature = "webui-v2-beta")]
+mod webui_operator_auth;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_rate_limit;
 #[cfg(feature = "webui-v2-beta")]
@@ -153,7 +159,7 @@ pub use extension_lifecycle_command::{
 };
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
-pub use factory::{RebornServices, build_reborn_services};
+pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use hooks::{
     HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
@@ -168,6 +174,10 @@ pub use ironclaw_auth::GoogleOAuthRouteConfig;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,
+};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use ironclaw_runtime_policy::{
+    ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
 };
 pub use ironclaw_skills::{
     ManagedSkillSource as RebornSkillSource, SkillSummary as RebornSkillSummary,
@@ -210,7 +220,9 @@ pub use provider_admin_product_command::RebornProviderAdminProductCommandService
 #[cfg(feature = "root-llm-provider")]
 pub use provider_repo::{ProviderRepo, ProviderRepoError};
 pub use readiness::{
-    RebornFacadeReadiness, RebornReadiness, RebornReadinessState, RebornWorkerReadiness,
+    RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
+    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
+    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
 };
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
@@ -294,9 +306,9 @@ pub use webui::{RebornWebuiBundle, build_webui_services};
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_serve::{
-    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount, WebuiAuthenticator,
-    WebuiServeConfig, WebuiServeConfigError, WebuiServeError, WebuiV2App, webui_v2_app,
-    webui_v2_app_with_lifecycle,
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
+    WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
 };
 
 /// Re-exported identity vocabulary host binaries need to construct
@@ -873,6 +885,29 @@ where
     TWake: TurnRunWakeNotifier + 'static,
 {
     factory::build_postgres_production_host_runtime_services(config).await
+}
+
+/// Open a PostgreSQL pool for Reborn production storage using the same
+/// TLS/cleartext policy enforced by the production event-store backend.
+///
+/// Callers are responsible for validating that production boot selected the
+/// PostgreSQL storage backend and that the URL came from an env-only config
+/// reference before passing it here.
+#[cfg(feature = "postgres")]
+pub fn open_reborn_postgres_pool(
+    url: secrecy::SecretString,
+) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
+    Ok(ironclaw_reborn_event_store::open_postgres_pool(url)?)
+}
+
+/// Open a PostgreSQL pool for Reborn production storage with an explicit
+/// maximum connection count.
+#[cfg(feature = "postgres")]
+pub fn open_reborn_postgres_pool_with_max_size(
+    url: secrecy::SecretString,
+    max_size: usize,
+) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
+    Ok(ironclaw_reborn_event_store::open_postgres_pool_with_max_size(url, max_size)?)
 }
 
 #[cfg(all(test, any(feature = "libsql", feature = "postgres")))]

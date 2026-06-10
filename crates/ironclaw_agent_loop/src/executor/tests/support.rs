@@ -31,10 +31,10 @@ use crate::{
     state::{CheckpointKind, GateStrategyState, LoopExecutionState, StopStrategyState},
     strategies::{
         CapabilityErrorClass, CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy,
-        ContextStrategy, DefaultCompactionStrategy, GateHandlingStrategy, GateOutcome, GateSummary,
-        InputDrainStrategy, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy,
-        ReplyAdmissionOutcome, ReplyAdmissionStrategy, RetryAlteration, RetryScope,
-        StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
+        ContextStrategy, DefaultBudgetStrategy, DefaultCompactionStrategy, GateHandlingStrategy,
+        GateOutcome, GateSummary, InputDrainStrategy, ModelErrorSummary, RecoveryOutcome,
+        RecoveryStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy, RetryAlteration,
+        RetryScope, StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
     },
 };
 
@@ -990,6 +990,16 @@ pub(super) fn family_with_stop_after_observed_turns(turns_completed: u32) -> Loo
         .with_stop(Arc::new(StopAfterObservedTurns { turns_completed }));
     let id = LoopFamilyId::new("executor-stop-test").expect("valid test family id");
     let version = ComponentIdentity::from_static("executor-stop-test", ComponentDigest([6; 32]));
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn family_with_iteration_limit(iteration_limit: u32) -> LoopFamily {
+    let planner = DefaultPlanner::compose_default().with_budget(Arc::new(DefaultBudgetStrategy {
+        iteration_limit,
+        wall_clock_limit: None,
+    }));
+    let id = LoopFamilyId::new("executor-budget-test").expect("valid test family id");
+    let version = ComponentIdentity::from_static("executor-budget-test", ComponentDigest([10; 32]));
     LoopFamily::new(id, version, Arc::new(planner))
 }
 

@@ -40,7 +40,8 @@ use ironclaw_loop_support::{
 };
 use ironclaw_reborn_composition::{
     PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime, build_webui_services, webui_v2_app,
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime,
+    build_webui_services, webui_v2_app,
 };
 use ironclaw_turns::run_profile::{LoopCapabilityPort, ProviderToolCall};
 use serde_json::{Value, json};
@@ -60,9 +61,11 @@ struct OnlyValidToken;
 
 #[async_trait]
 impl WebuiAuthenticator for OnlyValidToken {
-    async fn authenticate(&self, token: &str) -> Option<UserId> {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         if token == VALID_TOKEN {
-            Some(UserId::new(USER).expect("user id"))
+            Some(WebuiAuthentication::user(
+                UserId::new(USER).expect("user id"),
+            ))
         } else {
             None
         }

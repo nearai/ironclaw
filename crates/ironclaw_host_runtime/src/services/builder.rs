@@ -145,7 +145,7 @@ where
         self.with_root_filesystem(filesystem)
     }
 
-    fn with_resource_governor<T>(self, governor: Arc<T>) -> HostRuntimeServices<F, T, S, R>
+    pub fn with_resource_governor<T>(self, governor: Arc<T>) -> HostRuntimeServices<F, T, S, R>
     where
         T: ResourceGovernor + 'static,
     {
@@ -486,6 +486,18 @@ where
         self
     }
 
+    pub fn with_turn_run_wake_notifier_dyn(
+        mut self,
+        notifier: Arc<dyn TurnRunWakeNotifier>,
+    ) -> Self {
+        self.component_types.turn_run_wake_notifier = Some(ProductionComponentType::named(
+            "dyn TurnRunWakeNotifier",
+            ProductionImplementationReadiness::ProductionCandidate,
+        ));
+        self.turn_run_wake_notifier = Some(notifier);
+        self
+    }
+
     pub fn with_event_sink<T>(mut self, event_sink: Arc<T>) -> Self
     where
         T: EventSink + 'static,
@@ -547,6 +559,12 @@ where
     /// into the live sink traits consumed by runtime services.
     pub fn with_reborn_event_stores(self, stores: RebornEventStores) -> Self {
         self.with_reborn_event_stores_verified(stores, false)
+    }
+
+    /// Attaches pre-built Reborn durable event/audit stores after the caller
+    /// has already enforced production profile restrictions.
+    pub fn with_production_reborn_event_stores(self, stores: RebornEventStores) -> Self {
+        self.with_reborn_event_stores_verified(stores, true)
     }
 
     fn with_reborn_event_stores_verified(

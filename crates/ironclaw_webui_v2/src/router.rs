@@ -75,7 +75,6 @@ impl WebUiV2RouteOptions {
 pub struct WebUiV2State {
     services: Arc<dyn RebornServicesApi>,
     sse_capacity: Arc<SseCapacity>,
-    capabilities: WebUiV2Capabilities,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -86,13 +85,11 @@ pub struct WebUiV2Capabilities {
 impl WebUiV2State {
     pub fn new(
         services: Arc<dyn RebornServicesApi>,
-        capabilities: WebUiV2Capabilities,
         max_concurrent_streams_per_caller: usize,
     ) -> Self {
         Self {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
-            capabilities,
         }
     }
 
@@ -102,10 +99,6 @@ impl WebUiV2State {
 
     pub(crate) fn sse_capacity(&self) -> &Arc<SseCapacity> {
         &self.sse_capacity
-    }
-
-    pub(crate) fn capabilities(&self) -> WebUiV2Capabilities {
-        self.capabilities
     }
 }
 

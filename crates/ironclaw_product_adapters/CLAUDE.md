@@ -45,6 +45,11 @@ Owns the product-surface adapter boundary for IronClaw Reborn (issue #3269).
   test-support builds expose `ProtocolAuthEvidence::test_verified` for fakes.
   WASM components and adapter implementations may declare auth requirements
   and inspect evidence; they must not fabricate verification.
+- Tenant-scoped product/API surfaces must require tenant-bearing verified auth
+  evidence and compare it against the resolved actor scope before submitting,
+  reading, subscribing, cancelling, or resolving product workflow state.
+  Unscoped verified evidence is only suitable for protocol surfaces that bind
+  tenant/account identity through another trusted host-owned path.
 - `ProductAdapter::auth_requirement` and `ProductAdapter::declared_egress`
   are host-visible control-plane metadata. Host glue must build protocol-auth
   and egress policy from these typed declarations, not from side tables.

@@ -148,6 +148,15 @@ pub struct ProductionWiringIssue {
 }
 
 impl ProductionWiringIssue {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(component: ProductionWiringComponent, kind: ProductionWiringIssueKind) -> Self {
+        Self {
+            component,
+            kind,
+            implementation: None,
+        }
+    }
+
     pub fn component(&self) -> ProductionWiringComponent {
         self.component
     }
@@ -168,6 +177,11 @@ pub struct ProductionWiringReport {
 }
 
 impl ProductionWiringReport {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(issues: Vec<ProductionWiringIssue>) -> Self {
+        Self { issues }
+    }
+
     pub fn issues(&self) -> &[ProductionWiringIssue] {
         &self.issues
     }
@@ -237,7 +251,7 @@ pub(super) struct ProductionComponentType {
 }
 
 impl ProductionComponentType {
-    pub(super) fn of<T: 'static>() -> Self {
+    pub(super) fn of<T: ?Sized + 'static>() -> Self {
         Self {
             implementation: type_name::<T>(),
             readiness: classify_component_type::<T>(),
@@ -266,7 +280,7 @@ pub(super) fn component_name(component: Option<ProductionComponentType>) -> Opti
     component.map(|component| component.implementation)
 }
 
-fn classify_component_type<T: 'static>() -> ProductionImplementationReadiness {
+fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationReadiness {
     let type_id = TypeId::of::<T>();
     match () {
         () if type_id == TypeId::of::<LocalFilesystem>()

@@ -313,6 +313,16 @@ impl LlmProvider for OpenAiCodexProvider {
             }
         }
 
+        // Strict-mode tool schemas advertise every optional as required+nullable,
+        // so the model fills unset optionals with `null` (or `""` for some codex
+        // models). Strip those placeholders against each tool's original schema so
+        // only provided values reach the tool. `true`: this is a codex model.
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut parsed.tool_calls,
+            &request.tools,
+            true,
+        );
+
         let finish_reason = if !parsed.tool_calls.is_empty() {
             FinishReason::ToolUse
         } else {

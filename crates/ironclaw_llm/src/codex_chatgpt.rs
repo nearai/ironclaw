@@ -910,26 +910,6 @@ impl CodexChatGptProvider {
             }
         }
     }
-
-    /// Remove keys with empty-string values from a JSON object.
-    ///
-    /// gpt-5.2-codex fills optional tool parameters with `""` (e.g.
-    /// `"timestamp": ""`). IronClaw's tool validation treats these as
-    /// invalid "non-empty input expected". Stripping them makes the
-    /// tool see only the actually-provided values.
-    fn strip_empty_string_values(value: Value) -> Value {
-        match value {
-            Value::Object(map) => {
-                let cleaned: serde_json::Map<String, Value> = map
-                    .into_iter()
-                    .filter(|(_, v)| !matches!(v, Value::String(s) if s.is_empty()))
-                    .map(|(k, v)| (k, Self::strip_empty_string_values(v)))
-                    .collect();
-                Value::Object(cleaned)
-            }
-            other => other,
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -999,7 +979,7 @@ impl LlmProvider for CodexChatGptProvider {
         );
         let result = self.send_request(body).await?;
 
-        let tool_calls: Vec<ToolCall> = result
+        let mut tool_calls: Vec<ToolCall> = result
             .pending_tool_calls
             .into_values()
             .map(|tc| {
@@ -1010,10 +990,6 @@ impl LlmProvider for CodexChatGptProvider {
                     .unwrap_or(returned_name);
                 let args: Value =
                     serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!(tc.arguments));
-                // gpt-5.2-codex fills optional parameters with empty strings (e.g.
-                // `"timestamp": ""`), which IronClaw's tool validation rejects.
-                // Strip them so only actually-provided values reach the tool.
-                let args = Self::strip_empty_string_values(args);
                 ToolCall {
                     id: tc.call_id,
                     name,
@@ -1024,6 +1000,12 @@ impl LlmProvider for CodexChatGptProvider {
                 }
             })
             .collect();
+        // Strict-mode tool schemas advertise every optional as required+nullable,
+        // so the model fills unset optionals with `null` (or `""` for some codex
+        // models). Strip those placeholders against each tool's original schema
+        // so only genuinely-provided values reach the tool. `true`: the codex
+        // family fills with `""` as well as `null`.
+        crate::tool_schema::strip_unset_optional_fields(&mut tool_calls, &request.tools, true);
 
         let finish_reason = if tool_calls.is_empty() {
             FinishReason::Stop
@@ -1654,16 +1636,49 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
         );
     }
 
-    #[test]
-    fn test_strip_empty_string_values() {
-        let input = json!({
-            "format": "%Y-%m-%d",
-            "operation": "now",
-            "timestamp": "",
-            "timestamp2": "",
-        });
-        let cleaned = CodexChatGptProvider::strip_empty_string_values(input);
-        assert_eq!(cleaned, json!({"format": "%Y-%m-%d", "operation": "now"}));
+    #[tokio::test]
+    async fn complete_with_tools_strips_unset_optional_placeholders_through_the_caller() {
+        // Test-through-the-caller (.claude/rules/testing.md): drive the whole
+        // complete_with_tools path, not just the helper. The model fills two
+        // optional fields with strict-mode placeholders (`null` and `""`); the
+        // provider must strip them so only the provided value reaches the caller.
+        let sse = r#"event: response.output_item.added
+data: {"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"demo"}}
+
+event: response.function_call_arguments.done
+data: {"item_id":"fc_1","arguments":"{\"required_arg\":\"x\",\"optional_arg\":null,\"optional_str\":\"\"}"}
+
+event: response.completed
+data: {"response":{"usage":{"input_tokens":5,"output_tokens":5}}}
+
+"#;
+        let base_url = responses_api_test_server::spawn(sse).await;
+        let provider = CodexChatGptProvider::new(&base_url, "test-key", "gpt-4o");
+        let tools = vec![ToolDefinition {
+            name: "demo".to_string(),
+            description: "demo".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "required_arg": { "type": "string" },
+                    "optional_arg": { "type": "string" },
+                    "optional_str": { "type": "string" }
+                },
+                "required": ["required_arg"]
+            }),
+        }];
+        let request = ToolCompletionRequest::new(vec![ChatMessage::user("call demo")], tools);
+        let response = provider
+            .complete_with_tools(request)
+            .await
+            .expect("complete_with_tools");
+        assert_eq!(response.tool_calls.len(), 1);
+        // `optional_arg: null` and `optional_str: ""` are dropped at the provider
+        // boundary; only the genuinely-provided required arg survives.
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            json!({ "required_arg": "x" })
+        );
     }
 
     mod responses_api_test_server {
