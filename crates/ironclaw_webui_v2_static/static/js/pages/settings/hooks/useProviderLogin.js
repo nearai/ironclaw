@@ -165,6 +165,16 @@ export function useProviderLogin({ onSuccess } = {}) {
         "_blank",
         "width=460,height=640"
       );
+      // A popup blocker makes window.open return null; fail fast instead of
+      // waiting out the full signature timeout on a window that never opened.
+      if (!popup) {
+        setNearaiError(t("onboarding.nearaiFailed"));
+        return;
+      }
+      // Defense-in-depth against reverse tabnabbing: sever the child's back
+      // reference to this window. The wallet page reports back over
+      // BroadcastChannel, not window.opener, so this doesn't affect the flow.
+      popup.opener = null;
       const signed = await awaitWalletSignature(popup, channelName);
       if (!signed) {
         setNearaiError(t("onboarding.nearaiFailed"));

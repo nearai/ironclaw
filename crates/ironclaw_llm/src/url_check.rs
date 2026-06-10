@@ -93,7 +93,12 @@ fn is_always_blocked(ip: &IpAddr) -> bool {
                 || *v4 == Ipv4Addr::new(169, 254, 169, 254)
         }
         IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
+            // `to_ipv4()` (not `to_ipv4_mapped()`) so both embedded-IPv4 forms
+            // are unwrapped and checked against the V4 rules: IPv4-mapped
+            // (`::ffff:a.b.c.d`) and IPv4-compatible (`::a.b.c.d`). The latter
+            // would otherwise sail past as a plain v6 address — e.g.
+            // `::169.254.169.254` reaching the metadata endpoint.
+            if let Some(v4) = v6.to_ipv4() {
                 return is_always_blocked(&IpAddr::V4(v4));
             }
             v6.is_unspecified() || v6.octets()[0] == 0xff || (v6.segments()[0] & 0xffc0) == 0xfe80
@@ -119,6 +124,23 @@ mod tests {
         check_models_url("p", "https://[fe80::1]/models").expect_err("link-local v6");
         check_models_url("p", "http://224.0.0.1/models").expect_err("multicast");
         check_models_url("p", "http://0.0.0.0/models").expect_err("unspecified");
+    }
+
+    #[test]
+    fn rejects_embedded_ipv4_metadata_in_both_v6_forms() {
+        // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d) both
+        // embed the metadata address; neither may bypass the V4 block rules.
+        check_models_url("p", "https://[::ffff:169.254.169.254]/models")
+            .expect_err("ipv4-mapped metadata");
+        check_models_url("p", "https://[::169.254.169.254]/models")
+            .expect_err("ipv4-compatible metadata");
+    }
+
+    #[test]
+    fn allows_ipv6_loopback() {
+        // ::1 maps to 0.0.0.1 under to_ipv4(), which is not in the blocked
+        // class — self-hosted providers on IPv6 loopback stay reachable.
+        check_models_url("p", "http://[::1]:11434/api/tags").unwrap();
     }
 
     #[test]
