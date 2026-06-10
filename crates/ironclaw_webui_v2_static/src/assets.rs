@@ -168,10 +168,25 @@ mod tests {
         let api = asset_text("js/lib/api.js");
         assert!(api.contains("listAutomations"));
         assert!(api.contains("/automations"));
+        assert!(api.contains("getOutboundPreferences"));
+        assert!(api.contains("setOutboundPreferences"));
+        assert!(api.contains("/outbound/preferences"));
+        assert!(api.contains("/outbound/targets"));
 
         let page = asset_text("js/pages/automations/automations-page.js");
         assert!(page.contains("AutomationsSummaryStrip"));
+        assert!(page.contains("AutomationDeliveryDefaultsPanel"));
+        assert!(page.contains("useOutboundDeliveryDefaults"));
         assert!(page.contains("AutomationsList"));
+
+        let defaults_panel =
+            asset_text("js/pages/automations/components/automation-delivery-defaults-panel.js");
+        assert!(defaults_panel.contains("finalReplyTargets"));
+        assert!(defaults_panel.contains("saveFinalReplyTarget"));
+
+        let defaults_hook = asset_text("js/pages/automations/hooks/useOutboundDeliveryDefaults.js");
+        assert!(defaults_hook.contains("listOutboundDeliveryTargets"));
+        assert!(defaults_hook.contains("setOutboundPreferences"));
 
         let presenter = asset_text("js/pages/automations/lib/automations-presenters.js");
         assert!(presenter.contains("source?.type === \"schedule\""));
