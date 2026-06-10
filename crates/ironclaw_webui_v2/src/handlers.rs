@@ -648,11 +648,30 @@ pub async fn setup_extension(
     Ok(Json(response))
 }
 
+fn require_operator_webui_config(
+    capabilities: WebUiV2Capabilities,
+) -> Result<(), WebUiV2HttpError> {
+    if capabilities.operator_webui_config {
+        return Ok(());
+    }
+    Err(RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+    .into())
+}
+
 /// `GET /api/webchat/v2/operator/setup`
 pub async fn get_operator_setup(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorSetupResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().get_operator_setup(caller).await?;
     Ok(Json(response))
 }
@@ -661,8 +680,10 @@ pub async fn get_operator_setup(
 pub async fn run_operator_setup(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<RebornOperatorSetupRequest>,
 ) -> Result<Json<RebornOperatorSetupResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().run_operator_setup(caller, body).await?;
     Ok(Json(response))
 }
@@ -671,7 +692,9 @@ pub async fn run_operator_setup(
 pub async fn list_operator_config(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().list_operator_config(caller).await?;
     Ok(Json(response))
 }
@@ -713,8 +736,10 @@ fn operator_config_key_error(code: WebUiInboundValidationCode) -> WebUiV2HttpErr
 pub async fn get_operator_config_key(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Path(OperatorConfigKeyPath { key }): Path<OperatorConfigKeyPath>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let key = validate_operator_config_key(key)?;
     let response = state
         .services()
@@ -727,9 +752,11 @@ pub async fn get_operator_config_key(
 pub async fn set_operator_config_key(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Path(OperatorConfigKeyPath { key }): Path<OperatorConfigKeyPath>,
     Json(body): Json<RebornOperatorConfigSetRequest>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let key = validate_operator_config_key(key)?;
     let response = state
         .services()
@@ -743,8 +770,10 @@ pub async fn set_operator_config_key(
 /// `validate` is reserved for the validation operation and is not a readable
 /// config key. This explicit static-path handler keeps axum static route
 /// priority from surfacing an ambiguous 405.
-pub async fn reject_reserved_operator_config_key()
--> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+pub async fn reject_reserved_operator_config_key(
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     Err(operator_config_key_error(
         WebUiInboundValidationCode::InvalidValue,
     ))
@@ -754,8 +783,10 @@ pub async fn reject_reserved_operator_config_key()
 pub async fn validate_operator_config(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<RebornOperatorConfigValidateRequest>,
 ) -> Result<Json<RebornOperatorConfigValidateResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state
         .services()
         .validate_operator_config(caller, body)
@@ -767,7 +798,9 @@ pub async fn validate_operator_config(
 pub async fn get_operator_diagnostics(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().get_operator_diagnostics(caller).await?;
     Ok(Json(response))
 }
@@ -776,7 +809,9 @@ pub async fn get_operator_diagnostics(
 pub async fn get_operator_status(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().get_operator_status(caller).await?;
     Ok(Json(response))
 }
@@ -785,8 +820,10 @@ pub async fn get_operator_status(
 pub async fn query_operator_logs(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<RebornOperatorLogsQuery>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().query_operator_logs(caller, query).await?;
     Ok(Json(response))
 }
@@ -795,8 +832,10 @@ pub async fn query_operator_logs(
 pub async fn run_operator_service_lifecycle(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<RebornOperatorServiceLifecycleRequest>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state
         .services()
         .run_operator_service_lifecycle(caller, body)

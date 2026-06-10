@@ -1739,6 +1739,47 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
 }
 
 #[tokio::test]
+async fn operator_routes_require_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/setup")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/operator/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"provider_id":"openai"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    assert_eq!(*services.get_operator_setup_calls.lock().expect("lock"), 0);
+    assert!(
+        services
+            .run_operator_setup_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn operator_config_key_routes_dispatch_path_and_body() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(

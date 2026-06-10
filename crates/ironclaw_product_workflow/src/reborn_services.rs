@@ -6,6 +6,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
 };
 
@@ -32,6 +33,7 @@ use ironclaw_turns::{
 };
 use secrecy::SecretString;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use url::Url;
 use uuid::Uuid;
 
 use crate::{
@@ -429,13 +431,14 @@ impl GateResolutionRoute {
 /// Stable WebUI-facing facade surface for beta Reborn routes.
 fn operator_setup_diagnostic(
     key: &str,
+    severity: RebornOperatorConfigDiagnosticSeverity,
     reason_code: &str,
     message: &str,
     remediation: &str,
 ) -> RebornOperatorConfigDiagnostic {
     RebornOperatorConfigDiagnostic {
         key: key.to_string(),
-        severity: RebornOperatorConfigDiagnosticSeverity::Error,
+        severity,
         reason_code: reason_code.to_string(),
         message: message.to_string(),
         owning_area: RebornOperatorArea::Setup,
@@ -443,17 +446,40 @@ fn operator_setup_diagnostic(
     }
 }
 
+fn operator_setup_info_diagnostic(
+    key: &str,
+    reason_code: &str,
+    message: &str,
+    remediation: &str,
+) -> RebornOperatorConfigDiagnostic {
+    operator_setup_diagnostic(
+        key,
+        RebornOperatorConfigDiagnosticSeverity::Info,
+        reason_code,
+        message,
+        remediation,
+    )
+}
+
+fn operator_setup_validation_error(field: &str) -> RebornServicesError {
+    WebUiInboundValidationError {
+        field: field.to_string(),
+        code: WebUiInboundValidationCode::InvalidValue,
+    }
+    .into()
+}
+
 fn setup_response_from_llm_snapshot(
     snapshot: LlmConfigSnapshot,
     mut diagnostics: Vec<RebornOperatorConfigDiagnostic>,
 ) -> RebornOperatorSetupResponse {
-    diagnostics.push(operator_setup_diagnostic(
+    diagnostics.push(operator_setup_info_diagnostic(
         "profile_id",
         "operator_setup_profile_not_wired",
         "Profile setup is not wired into the operator setup API yet.",
         "Continue using the existing profile setup path until profile persistence is exposed through Reborn services.",
     ));
-    diagnostics.push(operator_setup_diagnostic(
+    diagnostics.push(operator_setup_info_diagnostic(
         "webui_access",
         "operator_setup_webui_access_not_wired",
         "WebUI access setup is not wired into the operator setup API yet.",
@@ -470,7 +496,11 @@ fn setup_response_from_llm_snapshot(
         .and_then(|active| active.model.clone());
     let provider_complete = active_provider_id.is_some();
     let model_complete = active_model.is_some();
-    let status = RebornOperatorSetupStatus::Incomplete;
+    let status = if provider_complete && model_complete {
+        RebornOperatorSetupStatus::Complete
+    } else {
+        RebornOperatorSetupStatus::Incomplete
+    };
 
     RebornOperatorSetupResponse {
         area: RebornOperatorArea::Setup,
@@ -522,6 +552,57 @@ fn setup_response_from_llm_snapshot(
         ],
         diagnostics,
     }
+}
+
+const LLM_BASE_URL_MAX_BYTES: usize = 2048;
+
+fn validate_llm_base_url(base_url: Option<&str>) -> Result<(), RebornServicesError> {
+    let Some(raw) = base_url else {
+        return Ok(());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > LLM_BASE_URL_MAX_BYTES {
+        return Err(operator_setup_validation_error("base_url"));
+    }
+    let parsed = Url::parse(trimmed).map_err(|_| operator_setup_validation_error("base_url"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(operator_setup_validation_error("base_url"));
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err(operator_setup_validation_error("base_url"));
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(operator_setup_validation_error("base_url"));
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if forbidden_llm_base_url_ip(ip) {
+            return Err(operator_setup_validation_error("base_url"));
+        }
+    }
+    Ok(())
+}
+
+fn forbidden_llm_base_url_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => forbidden_llm_base_url_ipv4(ip),
+        IpAddr::V6(ip) => forbidden_llm_base_url_ipv6(ip),
+    }
+}
+
+fn forbidden_llm_base_url_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+}
+
+fn forbidden_llm_base_url_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local()
 }
 
 fn operator_config_surface_not_wired_diagnostic() -> RebornOperatorConfigDiagnostic {
@@ -1205,43 +1286,23 @@ impl RebornServicesApi for RebornServices {
             return Err(llm_config::llm_config_unavailable());
         };
 
-        let mut diagnostics = Vec::new();
         if request.model.is_some() && request.provider_id.is_none() {
-            diagnostics.push(operator_setup_diagnostic(
-                "model",
-                "operator_setup_model_requires_provider",
-                "A model cannot be selected until a provider is selected.",
-                "Include provider_id with the requested model.",
-            ));
+            return Err(operator_setup_validation_error("model"));
         }
         if request.provider_id.is_none()
             && (request.adapter.is_some()
                 || request.base_url.is_some()
                 || request.api_key.is_some())
         {
-            diagnostics.push(operator_setup_diagnostic(
-                "provider_id",
-                "operator_setup_provider_id_required",
-                "Provider setup cannot be changed without a provider id.",
-                "Include provider_id when creating or repairing provider configuration.",
-            ));
+            return Err(operator_setup_validation_error("provider_id"));
+        }
+        if request.base_url.is_some() && request.adapter.is_none() {
+            return Err(operator_setup_validation_error("base_url"));
         }
         if request.api_key.is_some() && request.adapter.is_none() {
-            diagnostics.push(operator_setup_diagnostic(
-                "api_key",
-                "operator_setup_api_key_requires_adapter",
-                "An API key cannot be stored without provider adapter metadata.",
-                "Include adapter when creating or repairing a provider with an API key.",
-            ));
+            return Err(operator_setup_validation_error("api_key"));
         }
-
-        if !diagnostics.is_empty() {
-            let snapshot = llm_config
-                .snapshot(caller)
-                .await
-                .map_err(llm_config::map_llm_config_error)?;
-            return Ok(setup_response_from_llm_snapshot(snapshot, diagnostics));
-        }
+        validate_llm_base_url(request.base_url.as_deref())?;
 
         let snapshot = match (request.provider_id, request.adapter) {
             (Some(provider_id), Some(adapter)) => llm_config
@@ -1917,6 +1978,7 @@ impl RebornServicesApi for RebornServices {
             .llm_config
             .as_ref()
             .ok_or_else(llm_config::llm_config_unavailable)?;
+        validate_llm_base_url(request.base_url.as_deref())?;
         service
             .upsert_provider(caller, request)
             .await
