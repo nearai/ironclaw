@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,12 +10,16 @@ use ironclaw_triggers::{
     TriggerPromptMaterializer, TriggerRepository, TriggerRunHistoryStatus,
     TrustedTriggerFireSubmitter,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_triggers::{TrustedTriggerFireSubmitOutcome, TrustedTriggerSubmitRequest};
 use ironclaw_turns::{TurnPersistenceSnapshot, TurnStatus};
 use rand::Rng;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime_input::TriggerPollerSettings;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::slack_delivery::PostSubmitDeliveryHook;
 pub(crate) use crate::trigger_poller_trusted_submit::AccessCheckerTriggerFireAuthorizer;
 pub(crate) use crate::trigger_poller_trusted_submit::ConversationContentRefMaterializer;
 #[cfg(any(test, feature = "test-support"))]
@@ -63,6 +67,13 @@ pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) materializer: Arc<dyn TriggerPromptMaterializer>,
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    /// Late-binding slot for the post-submit delivery hook. Filled by
+    /// `RebornRuntime::set_trigger_post_submit_hook` after the runtime is
+    /// built. The poller wrapper checks `slot.get()` at each successful submit
+    /// (cheap atomic read), so the hook can be wired after `spawn_trigger_poller`
+    /// returns without restarting the poller.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) post_submit_hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
 }
 
 pub(crate) fn spawn_trigger_poller(
@@ -73,13 +84,21 @@ pub(crate) fn spawn_trigger_poller(
         return Ok(None);
     }
     settings.worker.validate()?;
+    #[cfg(feature = "slack-v2-host-beta")]
+    let submitter: Arc<dyn TrustedTriggerFireSubmitter> =
+        Arc::new(PostSubmitHookWrappedSubmitter {
+            inner: deps.trusted_submitter,
+            hook_slot: deps.post_submit_hook_slot,
+        });
+    #[cfg(not(feature = "slack-v2-host-beta"))]
+    let submitter: Arc<dyn TrustedTriggerFireSubmitter> = deps.trusted_submitter;
     let worker = TriggerPollerWorker::new(
         settings.worker.clone(),
         TriggerPollerWorkerDeps {
             repository: deps.repository,
             source_provider: Arc::new(ScheduleTriggerSourceProvider),
             materializer: deps.materializer,
-            trusted_submitter: deps.trusted_submitter,
+            trusted_submitter: submitter,
             active_run_lookup: deps.active_run_lookup,
         },
     )?;
@@ -89,6 +108,42 @@ pub(crate) fn spawn_trigger_poller(
         run_trigger_poller(worker, settings, task_cancel).await;
     });
     Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
+}
+
+/// Wraps a `TrustedTriggerFireSubmitter` to invoke a post-submit hook after
+/// each successful fire submission. The hook is stored in a `OnceLock` slot so
+/// it can be wired after the poller is spawned (late-binding). If the slot is
+/// empty at submit time the hook is simply skipped.
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) struct PostSubmitHookWrappedSubmitter {
+    pub(crate) inner: Arc<dyn TrustedTriggerFireSubmitter>,
+    pub(crate) hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[async_trait]
+impl TrustedTriggerFireSubmitter for PostSubmitHookWrappedSubmitter {
+    async fn submit_trusted_trigger_fire(
+        &self,
+        request: TrustedTriggerSubmitRequest,
+    ) -> Result<TrustedTriggerFireSubmitOutcome, TriggerError> {
+        // Clone the fire before delegating so the hook can receive it.
+        let fire = request.fire().clone();
+        let outcome = self.inner.submit_trusted_trigger_fire(request).await?;
+        if let TrustedTriggerFireSubmitOutcome::Accepted {
+            run_id,
+            turn_scope: ref scope,
+            ..
+        } = outcome
+        {
+            // Cheap atomic read: if the slot is not yet filled the hook simply
+            // doesn't fire — the poller is not restarted.
+            if let Some(hook) = self.hook_slot.get() {
+                hook.on_trigger_submitted(fire, run_id, scope.clone()).await;
+            }
+        }
+        Ok(outcome)
+    }
 }
 
 async fn run_trigger_poller(

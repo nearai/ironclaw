@@ -827,6 +827,7 @@ async fn authenticate_request(
     // authenticate users only to reject every v2 mutation/read. The
     // browser body cannot influence either of these identifiers — by
     // contract `WebuiServeConfig` is host-owned.
+    #[cfg(feature = "openai-compat-beta")]
     let openai_user_id = user_id.clone();
     let caller = WebUiAuthenticatedCaller::new(
         state.tenant_id.clone(),

@@ -54,7 +54,8 @@ use crate::{
     CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveryDefaultScope,
     LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError,
     OutboundStateStore, ProjectionSubscriptionId, ProjectionSubscriptionRecord,
-    ThreadNotificationPolicy, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    ThreadNotificationPolicy, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
+    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
     WriteCommunicationPreferenceRequest,
 };
 
@@ -88,6 +89,7 @@ const TENANT_ID_INDEX_KEY: &str = "tenant_id";
 const TENANT_ID_INDEX_NAME: &str = "outbound_by_tenant";
 const POLICIES_ROOT: &str = "/outbound/policies";
 const SUBSCRIPTIONS_ROOT: &str = "/outbound/subscriptions";
+const TRIGGERED_RUN_DELIVERY_ROOT: &str = "/outbound/triggered-run-delivery";
 
 /// Filesystem-backed outbound store. Construct with a [`ScopedFilesystem`]
 /// over any [`RootFilesystem`] implementation (libSQL, Postgres, in-memory,
@@ -735,6 +737,55 @@ fn delivery_scope_index_key() -> IndexKey {
         ),
     })
     .clone()
+}
+
+#[async_trait]
+impl<F> TriggeredRunDeliveryStore for FilesystemOutboundStateStore<F>
+where
+    F: RootFilesystem,
+{
+    async fn record_triggered_run_delivery(
+        &self,
+        record: TriggeredRunDeliveryRecord,
+    ) -> Result<(), String> {
+        let run_id_str = record.run_id.to_string();
+        let path = ScopedPath::new(format!("{TRIGGERED_RUN_DELIVERY_ROOT}/{run_id_str}.json"))
+            .map_err(|e| format!("triggered run delivery path: {e}"))?;
+        // Delivery records are written once per run and are tenant-scoped by
+        // the filesystem mount. Use system scope so the put is always
+        // authorized regardless of which user-scoped mount is active.
+        let resource_scope = ResourceScope::system();
+        let body = serde_json::to_vec(&record)
+            .map_err(|e| format!("triggered run delivery serialize: {e}"))?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        self.put_with_byte_fallback(&resource_scope, &path, entry, CasExpectation::Any)
+            .await
+            .map_err(|e| format!("triggered run delivery write: {e}"))
+    }
+
+    async fn load_triggered_run_delivery(
+        &self,
+        run_id: ironclaw_turns::TurnRunId,
+    ) -> Result<Option<TriggeredRunDeliveryRecord>, String> {
+        let run_id_str = run_id.to_string();
+        let path = ScopedPath::new(format!("{TRIGGERED_RUN_DELIVERY_ROOT}/{run_id_str}.json"))
+            .map_err(|e| format!("triggered run delivery path: {e}"))?;
+        let resource_scope = ResourceScope::system();
+        match self
+            .filesystem
+            .get(&resource_scope, &path)
+            .await
+            .map_err(|e| format!("triggered run delivery read: {e}"))?
+        {
+            Some(versioned) => {
+                let record: TriggeredRunDeliveryRecord =
+                    serde_json::from_slice(&versioned.entry.body)
+                        .map_err(|e| format!("triggered run delivery deserialize: {e}"))?;
+                Ok(Some(record))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 fn delivery_scope_index_value(scope: &TurnScope) -> IndexValue {

@@ -301,6 +301,10 @@ impl From<OutboundError> for ProductOutboundStatusUpdateFailure {
             OutboundError::AccessDenied => Self::AccessDenied,
             OutboundError::DeliveryNotFound => Self::DeliveryNotFound,
             OutboundError::CasConflict => Self::CasConflict,
+            // PreferenceTargetMissing is a resolution-stage failure; it does not
+            // reach the transport layer and is not a recognised status-update
+            // category. Map to InvalidRequest so the saga does not retry.
+            OutboundError::PreferenceTargetMissing { .. } => Self::InvalidRequest,
         }
     }
 }
