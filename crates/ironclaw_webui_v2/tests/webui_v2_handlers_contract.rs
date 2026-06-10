@@ -40,13 +40,16 @@ use ironclaw_product_workflow::{
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigListResponse,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
-    RebornOperatorSurfaceStatus, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornOperatorSurfaceStatus, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
@@ -208,6 +211,10 @@ struct StubServices {
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
+    get_outbound_preferences_calls: Mutex<usize>,
+    set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
+    next_set_outbound_preferences_error: Mutex<Option<RebornServicesError>>,
+    list_outbound_delivery_targets_calls: Mutex<usize>,
     list_connectable_channels_calls: Mutex<usize>,
     next_list_connectable_channels_error: Mutex<Option<RebornServicesError>>,
     list_extensions_calls: Mutex<usize>,
@@ -238,6 +245,13 @@ impl StubServices {
 
     fn fail_list_automations(&self, error: RebornServicesError) {
         *self.next_list_automations_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
+        *self
+            .next_set_outbound_preferences_error
+            .lock()
+            .expect("lock") = Some(error);
     }
 
     fn fail_list_connectable_channels(&self, error: RebornServicesError) {
@@ -577,22 +591,76 @@ impl RebornServicesApi for StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Ok(RebornOutboundPreferencesResponse::default())
+        *self.get_outbound_preferences_calls.lock().expect("lock") += 1;
+        Ok(outbound_preferences_response("slack-dm-alpha"))
     }
 
     async fn set_outbound_preferences(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: RebornSetOutboundPreferencesRequest,
+        request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Err(service_unavailable_error(false))
+        if let Some(err) = self
+            .next_set_outbound_preferences_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(err);
+        }
+        let target_id = request
+            .final_reply_target_id
+            .as_ref()
+            .map(|id| id.as_str().to_string());
+        self.set_outbound_preferences_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        Ok(match target_id {
+            Some(id) => outbound_preferences_response(&id),
+            None => RebornOutboundPreferencesResponse {
+                final_reply_target: None,
+                final_reply_target_status: RebornOutboundDeliveryTargetStatus::NoneConfigured,
+                default_modality: Default::default(),
+            },
+        })
     }
 
     async fn list_outbound_delivery_targets(
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        Err(service_unavailable_error(false))
+        *self
+            .list_outbound_delivery_targets_calls
+            .lock()
+            .expect("lock") += 1;
+        Ok(RebornOutboundDeliveryTargetListResponse {
+            targets: vec![
+                RebornOutboundDeliveryTargetOption {
+                    target: outbound_target_summary("slack-dm-alpha"),
+                    capabilities: RebornOutboundDeliveryTargetCapabilities {
+                        final_replies: true,
+                        gate_prompts: true,
+                        auth_prompts: true,
+                    },
+                },
+                RebornOutboundDeliveryTargetOption {
+                    target: RebornOutboundDeliveryTargetSummary::new(
+                        outbound_target_id("slack-status-alpha"),
+                        "slack",
+                        "Slack status",
+                        None,
+                    )
+                    .expect("valid target summary"),
+                    capabilities: RebornOutboundDeliveryTargetCapabilities {
+                        final_replies: false,
+                        gate_prompts: false,
+                        auth_prompts: false,
+                    },
+                },
+            ],
+            next_cursor: None,
+        })
     }
 
     async fn list_extension_registry(
@@ -844,6 +912,28 @@ fn extension_action_response(message: &str) -> RebornExtensionActionResponse {
         instructions: None,
         onboarding_state: None,
         onboarding: None,
+    }
+}
+
+fn outbound_target_id(target_id: &str) -> RebornOutboundDeliveryTargetId {
+    RebornOutboundDeliveryTargetId::new(target_id).expect("valid target id")
+}
+
+fn outbound_target_summary(target_id: &str) -> RebornOutboundDeliveryTargetSummary {
+    RebornOutboundDeliveryTargetSummary::new(
+        outbound_target_id(target_id),
+        "slack",
+        "Slack DM",
+        Some("Slack direct message".to_string()),
+    )
+    .expect("valid target summary")
+}
+
+fn outbound_preferences_response(target_id: &str) -> RebornOutboundPreferencesResponse {
+    RebornOutboundPreferencesResponse {
+        final_reply_target: Some(outbound_target_summary(target_id)),
+        final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
+        default_modality: Default::default(),
     }
 }
 
@@ -1377,6 +1467,166 @@ async fn list_automations_error_maps_to_http_status() {
     assert_eq!(body["error"], "forbidden");
     assert_eq!(body["kind"], "participant_denied");
     assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn get_outbound_preferences_dispatches_through_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/outbound/preferences")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["final_reply_target"]["target_id"], "slack-dm-alpha");
+    assert_eq!(body["final_reply_target_status"], "available");
+    assert_eq!(
+        *services
+            .get_outbound_preferences_calls
+            .lock()
+            .expect("lock"),
+        1
+    );
+}
+
+#[tokio::test]
+async fn set_outbound_preferences_dispatches_body_through_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/outbound/preferences")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"final_reply_target_id":"slack-dm-beta"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["final_reply_target"]["target_id"], "slack-dm-beta");
+    let calls = services
+        .set_outbound_preferences_calls
+        .lock()
+        .expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0]
+            .final_reply_target_id
+            .as_ref()
+            .map(|target_id| target_id.as_str()),
+        Some("slack-dm-beta")
+    );
+}
+
+#[tokio::test]
+async fn set_outbound_preferences_accepts_explicit_clear() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/outbound/preferences")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"final_reply_target_id":null}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert!(body.get("final_reply_target").is_none());
+    assert_eq!(body["final_reply_target_status"], "none_configured");
+    let calls = services
+        .set_outbound_preferences_calls
+        .lock()
+        .expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].final_reply_target_id.is_none());
+}
+
+#[tokio::test]
+async fn set_outbound_preferences_error_maps_to_http_status() {
+    let services = Arc::new(StubServices::default());
+    services.fail_set_outbound_preferences(RebornServicesError {
+        code: RebornServicesErrorCode::NotFound,
+        kind: RebornServicesErrorKind::NotFound,
+        status_code: 404,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    });
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/outbound/preferences")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"final_reply_target_id":"target-does-not-exist"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "not_found");
+    assert_eq!(body["kind"], "not_found");
+    assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn list_outbound_delivery_targets_dispatches_through_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/outbound/targets")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["targets"][0]["target"]["target_id"], "slack-dm-alpha");
+    assert_eq!(body["targets"][0]["capabilities"]["final_replies"], true);
+    assert_eq!(
+        body["targets"][1]["target"]["target_id"],
+        "slack-status-alpha"
+    );
+    assert_eq!(body["targets"][1]["capabilities"]["final_replies"], false);
+    assert_eq!(
+        *services
+            .list_outbound_delivery_targets_calls
+            .lock()
+            .expect("lock"),
+        1
+    );
 }
 
 #[tokio::test]

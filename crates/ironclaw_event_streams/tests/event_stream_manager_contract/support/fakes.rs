@@ -650,6 +650,7 @@ enum FailingOutboundKind {
     AccessDenied,
     InvalidRequest,
     Backend,
+    PreferenceTargetMissing,
 }
 
 struct FailingOutboundStore {
@@ -664,6 +665,9 @@ impl FailingOutboundStore {
                 reason: "bad request",
             },
             FailingOutboundKind::Backend => OutboundError::Backend,
+            FailingOutboundKind::PreferenceTargetMissing => {
+                OutboundError::PreferenceTargetMissing { kind: "approval" }
+            }
         }
     }
 }

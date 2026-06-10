@@ -5,8 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
-use ironclaw_turns::TurnRunId;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_turns::{TurnRunId, TurnScope};
 
 use super::*;
 use crate::{
@@ -32,6 +32,15 @@ fn ymd_hms(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32)
 
 fn tenant(value: &str) -> TenantId {
     TenantId::new(value).expect("valid tenant")
+}
+
+fn test_turn_scope() -> TurnScope {
+    TurnScope::new(
+        TenantId::new("test-tenant").expect("tenant id"),
+        None,
+        None,
+        ThreadId::new("test-thread").expect("thread id"),
+    )
 }
 
 fn user(value: &str) -> UserId {
@@ -210,6 +219,7 @@ async fn tick_processes_one_due_trigger_happy_path() {
         TrustedTriggerFireSubmitOutcome::Accepted {
             run_id,
             submitted_at: ts(1_704_067_205),
+            turn_scope: test_turn_scope(),
         },
     )]));
     let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
@@ -477,6 +487,7 @@ async fn tick_skips_active_trigger_but_processes_other_due_trigger() {
         TrustedTriggerFireSubmitOutcome::Accepted {
             run_id: due_run_ref,
             submitted_at: fire_slot,
+            turn_scope: test_turn_scope(),
         },
     )]));
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
@@ -981,6 +992,7 @@ async fn tick_clears_terminal_active_and_processes_due_trigger() {
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id: due_run_id,
                 submitted_at: fire_slot,
+                turn_scope: test_turn_scope(),
             },
         )])),
         Arc::new(RecordingActiveRunLookup::with_state(
@@ -1030,6 +1042,7 @@ async fn tick_reports_active_lookup_error_and_continues_to_due_triggers() {
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id: due_run_id,
                 submitted_at: fire_slot,
+                turn_scope: test_turn_scope(),
             },
         )])),
         Arc::new(RecordingActiveRunLookup::with_results(vec![Err(
@@ -1198,6 +1211,7 @@ async fn tick_replayed_submit_can_be_cleared_on_a_later_tick_without_stopping_du
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id: second_due_run_id,
                 submitted_at: fire_slot,
+                turn_scope: test_turn_scope(),
             },
         )])),
         Arc::new(RecordingActiveRunLookup::with_results(vec![Ok(
@@ -1478,6 +1492,7 @@ async fn tick_accepted_mark_fire_missing_reports_due_failure() {
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id,
                 submitted_at: fire_slot,
+                turn_scope: test_turn_scope(),
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -1567,6 +1582,7 @@ async fn tick_reports_due_record_error_and_continues_to_later_due_trigger() {
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id: success_run_id,
                 submitted_at: fire_slot,
+                turn_scope: test_turn_scope(),
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),

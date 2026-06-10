@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, Timestamp};
-use ironclaw_turns::TurnRunId;
+use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::{
     TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerRunHistoryStatus,
@@ -58,6 +58,9 @@ pub enum TrustedTriggerFireSubmitOutcome {
     Accepted {
         run_id: TurnRunId,
         submitted_at: Timestamp,
+        /// Scope of the submitted run, available for post-submit hooks (e.g.
+        /// triggered-run delivery) that need to poll the run state.
+        turn_scope: TurnScope,
     },
     Replayed {
         original_run_id: TurnRunId,

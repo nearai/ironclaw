@@ -391,6 +391,7 @@ fn submit_trusted_trigger_outcome(
     Ok(TrustedTriggerFireSubmitOutcome::Accepted {
         run_id,
         submitted_at,
+        turn_scope: response.resolution.turn_scope.clone(),
     })
 }
 
@@ -636,6 +637,7 @@ mod tests {
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id: observed_run_id,
                 submitted_at: observed_submitted_at,
+                ..
             } if observed_run_id == run_id && observed_submitted_at == submitted_at
         ));
 
@@ -658,6 +660,7 @@ mod tests {
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id: observed_run_id,
                 submitted_at: observed_submitted_at,
+                ..
             } if observed_run_id == run_id && observed_submitted_at == submitted_at
         ));
     }
