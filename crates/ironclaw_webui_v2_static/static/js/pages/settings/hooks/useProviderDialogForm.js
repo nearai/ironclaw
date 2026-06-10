@@ -110,6 +110,9 @@ export function useProviderDialogForm({
         setMessage({ tone: "error", text: result.message || t("llm.modelsFetchFailed") });
       } else {
         setModels(result.models);
+        // Default the model field to the first fetched model when it is empty,
+        // so the user can save/test immediately without picking one manually.
+        if (!form.model.trim()) update("model", result.models[0]);
         setMessage({ tone: "success", text: t("llm.modelsFetched", { count: result.models.length }) });
       }
     } catch (err) {
@@ -117,7 +120,7 @@ export function useProviderDialogForm({
     } finally {
       setBusy("");
     }
-  }, [apiKey, builtinOverrides, form, onListModels, provider, t]);
+  }, [apiKey, builtinOverrides, form, onListModels, provider, t, update]);
 
   return {
     form,

@@ -7,6 +7,7 @@ import { filterSettingsSections, matchesSearch } from "../lib/settings-search.js
 import { ProviderManagement } from "./provider-management.js";
 import { SettingsGroup } from "./settings-field.js";
 import { SettingsSearchEmpty } from "./settings-search-empty.js";
+import { useLlmProviders } from "../hooks/useLlmProviders.js";
 
 export function InferenceTab({
   settings,
@@ -17,12 +18,20 @@ export function InferenceTab({
   searchQuery = "",
 }) {
   const t = useT();
+  // Source the active backend/model from the `/llm/providers` snapshot (the
+  // same query the provider list below renders from) rather than the empty
+  // settings/gatewayStatus stubs, which left the Model field showing "—".
+  // Shares the `["llm-providers"]` react-query cache, so no extra fetch.
+  const { activeProviderId, selectedModel, providers } = useLlmProviders({ settings, gatewayStatus });
   if (isLoading) {
     return html`<${SettingsSkeleton} />`;
   }
 
-  const backend = settings.llm_backend || gatewayStatus?.llm_backend || "nearai";
-  const model = settings.selected_model || gatewayStatus?.llm_model || "";
+  const backend = activeProviderId;
+  // Match the provider card's fallback (active model → provider default_model)
+  // so the summary never shows "—" while the list below shows a model.
+  const activeProvider = providers.find((provider) => provider.id === activeProviderId);
+  const model = selectedModel || activeProvider?.default_model || settings.selected_model || "";
   const sections = filterSettingsSections(INFERENCE_FIELDS, settings, searchQuery, t);
   const showProviderSummary = matchesSearch(searchQuery, [
     t("inference.provider"),
