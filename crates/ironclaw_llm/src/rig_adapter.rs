@@ -53,34 +53,58 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Default additional parameters merged into every request.
     /// Used by providers that need extra top-level fields (e.g., Ollama `think: true`).
     default_additional_params: Option<serde_json::Value>,
-    /// Optional `/models` listing endpoint. When set, [`LlmProvider::list_models`]
-    /// performs a `GET {base_url}/models` request (OpenAI-compatible shape) instead
-    /// of returning the empty default. rig-core's `CompletionModel` does not expose
-    /// model discovery, so this is wired explicitly for the OpenAI-compatible path.
+    /// Optional model-discovery endpoint. When set, [`LlmProvider::list_models`]
+    /// issues a `GET` instead of returning the empty default. rig-core's
+    /// `CompletionModel` does not expose model discovery, so this is wired
+    /// explicitly per protocol (OpenAI-compatible, Anthropic, Ollama).
     models_endpoint: Option<ModelsEndpoint>,
 }
 
-/// Connection details for an OpenAI-compatible `GET /models` request.
+/// Auth scheme applied to a model-discovery request.
 #[derive(Clone)]
-struct ModelsEndpoint {
-    /// Provider id, used only for error/log context.
-    provider_id: String,
-    /// Already-normalized base URL (e.g. `https://api.openai.com/v1`).
-    base_url: String,
-    /// Bearer API key.
-    api_key: String,
+pub(crate) enum ModelsAuth {
+    /// `Authorization: Bearer <key>` (OpenAI-compatible, NEAR AI).
+    Bearer(String),
+    /// `x-api-key: <key>` plus an `anthropic-version` header (Anthropic).
+    AnthropicKey { api_key: String, version: String },
+    /// No auth header (Ollama).
+    None,
+}
+
+/// Response body shape returned by a model-discovery endpoint.
+#[derive(Clone, Copy)]
+pub(crate) enum ModelsShape {
+    /// OpenAI / Anthropic: `{ "data": [ { "id": ... } ] }`.
+    OpenAiData,
+    /// Ollama `/api/tags`: `{ "models": [ { "name": ... } ] }`.
+    OllamaTags,
+}
+
+/// Connection details for a provider model-discovery request.
+#[derive(Clone)]
+pub(crate) struct ModelsEndpoint {
+    /// Provider id, used for error/log context.
+    pub(crate) provider_id: String,
+    /// Fully-built request URL (base + discovery path).
+    pub(crate) url: String,
+    /// Auth scheme for the request.
+    pub(crate) auth: ModelsAuth,
+    /// Response body shape to parse.
+    pub(crate) shape: ModelsShape,
     /// Extra headers applied to every request to this provider.
-    extra_headers: reqwest::header::HeaderMap,
+    pub(crate) extra_headers: reqwest::header::HeaderMap,
 }
 
 impl ModelsEndpoint {
-    /// Perform a `GET {base_url}/models` request and return the model ids.
+    /// Issue the model-discovery `GET` and return the model ids.
     ///
-    /// Parses the OpenAI-compatible list shape (`{ "data": [{ "id": ... }] }`).
-    /// Network, auth, and parse failures map to `LlmError` so the caller can
-    /// surface a real message instead of an empty list.
+    /// Validates the URL against the baseline SSRF guard, applies the
+    /// adapter-specific auth scheme, and parses the adapter-specific response
+    /// shape. Network, auth, and parse failures map to `LlmError` so the caller
+    /// can surface a real message instead of an empty list.
     async fn fetch_models(&self) -> Result<Vec<String>, LlmError> {
-        let url = format!("{}/models", self.base_url.trim_end_matches('/'));
+        crate::url_check::check_models_url(&self.provider_id, &self.url)?;
+
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -89,16 +113,19 @@ impl ModelsEndpoint {
                 reason: format!("failed to build HTTP client: {e}"),
             })?;
 
-        let response = client
-            .get(&url)
-            .bearer_auth(&self.api_key)
-            .headers(self.extra_headers.clone())
-            .send()
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: self.provider_id.clone(),
-                reason: format!("request to {url} failed: {e}"),
-            })?;
+        let mut builder = client.get(&self.url).headers(self.extra_headers.clone());
+        builder = match &self.auth {
+            ModelsAuth::Bearer(key) => builder.bearer_auth(key),
+            ModelsAuth::AnthropicKey { api_key, version } => builder
+                .header("x-api-key", api_key)
+                .header("anthropic-version", version),
+            ModelsAuth::None => builder,
+        };
+
+        let response = builder.send().await.map_err(|e| LlmError::RequestFailed {
+            provider: self.provider_id.clone(),
+            reason: format!("request to {} failed: {e}", self.url),
+        })?;
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
@@ -109,7 +136,7 @@ impl ModelsEndpoint {
         if !status.is_success() {
             return Err(LlmError::RequestFailed {
                 provider: self.provider_id.clone(),
-                reason: format!("{url} returned HTTP {}", status.as_u16()),
+                reason: format!("{} returned HTTP {}", self.url, status.as_u16()),
             });
         }
 
@@ -118,40 +145,64 @@ impl ModelsEndpoint {
             .await
             .map_err(|e| LlmError::InvalidResponse {
                 provider: self.provider_id.clone(),
-                reason: format!("could not read /models response: {e}"),
+                reason: format!("could not read models response: {e}"),
             })?;
-        parse_models_response(&self.provider_id, &body)
+        parse_models_response(&self.provider_id, self.shape, &body)
     }
 }
 
-/// Extract model ids from an OpenAI-compatible `GET /models` response body
-/// (`{ "data": [{ "id": ... }] }`). Empty/whitespace ids are dropped.
+/// Extract model ids from a model-discovery response body. Empty/whitespace
+/// ids are dropped.
 ///
 /// Split out from the HTTP call so the parsing contract is unit-testable
-/// without a live endpoint.
-fn parse_models_response(provider_id: &str, body: &[u8]) -> Result<Vec<String>, LlmError> {
+/// without a live endpoint. `ModelsShape` selects the JSON shape:
+/// OpenAI/Anthropic `{ "data": [{ "id" }] }` vs Ollama
+/// `{ "models": [{ "name" }] }`.
+fn parse_models_response(
+    provider_id: &str,
+    shape: ModelsShape,
+    body: &[u8],
+) -> Result<Vec<String>, LlmError> {
     #[derive(serde::Deserialize)]
-    struct ModelsResponse {
+    struct OpenAiResponse {
         #[serde(default)]
-        data: Vec<ModelEntry>,
+        data: Vec<OpenAiEntry>,
     }
     #[derive(serde::Deserialize)]
-    struct ModelEntry {
+    struct OpenAiEntry {
         id: String,
     }
+    #[derive(serde::Deserialize)]
+    struct OllamaResponse {
+        #[serde(default)]
+        models: Vec<OllamaEntry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct OllamaEntry {
+        name: String,
+    }
 
-    let parsed: ModelsResponse =
-        serde_json::from_slice(body).map_err(|e| LlmError::InvalidResponse {
-            provider: provider_id.to_string(),
-            reason: format!("could not parse /models response: {e}"),
-        })?;
+    let parse_err = |e: serde_json::Error| LlmError::InvalidResponse {
+        provider: provider_id.to_string(),
+        reason: format!("could not parse models response: {e}"),
+    };
 
-    Ok(parsed
-        .data
-        .into_iter()
-        .map(|entry| entry.id)
-        .filter(|id| !id.trim().is_empty())
-        .collect())
+    let ids = match shape {
+        ModelsShape::OpenAiData => serde_json::from_slice::<OpenAiResponse>(body)
+            .map_err(parse_err)?
+            .data
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        ModelsShape::OllamaTags => serde_json::from_slice::<OllamaResponse>(body)
+            .map_err(parse_err)?
+            .models
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>(),
+    };
+
+    Ok(ids.into_iter().filter(|id| !id.trim().is_empty()).collect())
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -172,24 +223,14 @@ impl<M: CompletionModel> RigAdapter<M> {
         }
     }
 
-    /// Enable OpenAI-compatible model discovery via `GET {base_url}/models`.
+    /// Enable model discovery for [`LlmProvider::list_models`].
     ///
-    /// Without this, [`LlmProvider::list_models`] falls back to the trait default
-    /// (an empty list). Wire it from the OpenAI-compatible provider factory so the
-    /// "Fetch models" UI returns the provider's catalog.
-    pub fn with_model_listing(
-        mut self,
-        provider_id: impl Into<String>,
-        base_url: impl Into<String>,
-        api_key: impl Into<String>,
-        extra_headers: reqwest::header::HeaderMap,
-    ) -> Self {
-        self.models_endpoint = Some(ModelsEndpoint {
-            provider_id: provider_id.into(),
-            base_url: base_url.into(),
-            api_key: api_key.into(),
-            extra_headers,
-        });
+    /// Without this, `list_models` falls back to the trait default (an empty
+    /// list). The provider factories build a protocol-specific [`ModelsEndpoint`]
+    /// (URL, auth scheme, response shape) so the "Fetch models" UI returns the
+    /// provider's catalog.
+    pub(crate) fn with_model_listing(mut self, endpoint: ModelsEndpoint) -> Self {
+        self.models_endpoint = Some(endpoint);
         self
     }
 
@@ -973,24 +1014,33 @@ mod tests {
     use rig::streaming::StreamingCompletionResponse;
 
     #[test]
-    fn parse_models_response_extracts_ids() {
+    fn parse_models_response_openai_extracts_ids() {
         let body =
             br#"{"object":"list","data":[{"id":"gpt-4o","object":"model"},{"id":"gpt-4o-mini"}]}"#;
-        let models = parse_models_response("openai", body).expect("parses");
+        let models =
+            parse_models_response("openai", ModelsShape::OpenAiData, body).expect("parses");
         assert_eq!(models, vec!["gpt-4o", "gpt-4o-mini"]);
+    }
+
+    #[test]
+    fn parse_models_response_ollama_extracts_names() {
+        let body = br#"{"models":[{"name":"llama3.2:latest"},{"name":"qwen2.5"}]}"#;
+        let models =
+            parse_models_response("ollama", ModelsShape::OllamaTags, body).expect("parses");
+        assert_eq!(models, vec!["llama3.2:latest", "qwen2.5"]);
     }
 
     #[test]
     fn parse_models_response_drops_blank_ids_and_tolerates_missing_data() {
         let with_blank = br#"{"data":[{"id":"a"},{"id":"  "},{"id":""}]}"#;
         assert_eq!(
-            parse_models_response("openai", with_blank).expect("parses"),
+            parse_models_response("openai", ModelsShape::OpenAiData, with_blank).expect("parses"),
             vec!["a"]
         );
         // A successful response with no `data` key yields an empty list, not an error.
         let no_data = br#"{"object":"list"}"#;
         assert!(
-            parse_models_response("openai", no_data)
+            parse_models_response("openai", ModelsShape::OpenAiData, no_data)
                 .expect("parses")
                 .is_empty()
         );
@@ -998,7 +1048,8 @@ mod tests {
 
     #[test]
     fn parse_models_response_rejects_malformed_json() {
-        let err = parse_models_response("openai", b"not json").expect_err("rejects");
+        let err = parse_models_response("openai", ModelsShape::OpenAiData, b"not json")
+            .expect_err("rejects");
         assert!(matches!(err, LlmError::InvalidResponse { .. }));
     }
 

@@ -48,6 +48,7 @@ mod token_refreshing;
 pub(crate) mod tool_args;
 pub mod tool_schema;
 pub mod transcription;
+mod url_check;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -407,14 +408,16 @@ fn create_openai_compat_from_registry(
         "Using OpenAI-compatible provider"
     );
 
+    let models_endpoint = rig_adapter::ModelsEndpoint {
+        provider_id: config.provider_id.clone(),
+        url: format!("{}/models", normalized_base_url.trim_end_matches('/')),
+        auth: rig_adapter::ModelsAuth::Bearer(api_key),
+        shape: rig_adapter::ModelsShape::OpenAiData,
+        extra_headers,
+    };
     let adapter = RigAdapter::new(model, &config.model)
         .with_unsupported_params(config.unsupported_params.clone())
-        .with_model_listing(
-            &config.provider_id,
-            &normalized_base_url,
-            &api_key,
-            extra_headers,
-        );
+        .with_model_listing(models_endpoint);
     Ok(Arc::new(adapter))
 }
 
@@ -482,10 +485,35 @@ fn create_anthropic_from_registry(
         "Using Anthropic provider"
     );
 
+    // Anthropic model discovery: `GET {base}/v1/models` with `x-api-key` +
+    // `anthropic-version` (the SDK appends `/v1` itself for completions, so we
+    // add it explicitly here only for the discovery URL).
+    let anthropic_base = if config.base_url.is_empty() {
+        "https://api.anthropic.com".to_string()
+    } else {
+        config.base_url.trim_end_matches('/').to_string()
+    };
+    let discovery_base = if anthropic_base.ends_with("/v1") || anthropic_base.contains("/v1/") {
+        anthropic_base
+    } else {
+        format!("{anthropic_base}/v1")
+    };
+    let models_endpoint = rig_adapter::ModelsEndpoint {
+        provider_id: config.provider_id.clone(),
+        url: format!("{discovery_base}/models"),
+        auth: rig_adapter::ModelsAuth::AnthropicKey {
+            api_key,
+            version: "2023-06-01".to_string(),
+        },
+        shape: rig_adapter::ModelsShape::OpenAiData,
+        extra_headers: reqwest::header::HeaderMap::new(),
+    };
+
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
             .with_cache_retention(cache_retention)
-            .with_unsupported_params(config.unsupported_params.clone()),
+            .with_unsupported_params(config.unsupported_params.clone())
+            .with_model_listing(models_endpoint),
     ))
 }
 
@@ -513,12 +541,27 @@ fn create_ollama_from_registry(
         "Using Ollama provider"
     );
 
+    // Ollama model discovery: `GET {base}/api/tags`, no auth, `models[].name`.
+    let ollama_base = if config.base_url.trim().is_empty() {
+        "http://localhost:11434".to_string()
+    } else {
+        config.base_url.trim_end_matches('/').to_string()
+    };
+    let models_endpoint = rig_adapter::ModelsEndpoint {
+        provider_id: config.provider_id.clone(),
+        url: format!("{ollama_base}/api/tags"),
+        auth: rig_adapter::ModelsAuth::None,
+        shape: rig_adapter::ModelsShape::OllamaTags,
+        extra_headers: reqwest::header::HeaderMap::new(),
+    };
+
     // Ollama's native /api/chat requires `think: true` to enable extended
     // reasoning for thinking models (Qwen3, DeepSeek-R1, Gemma 4, etc.).
     // Non-thinking models ignore the parameter harmlessly.
     let adapter = RigAdapter::new(model, &config.model)
         .with_unsupported_params(config.unsupported_params.clone())
-        .with_additional_params(serde_json::json!({ "think": true }));
+        .with_additional_params(serde_json::json!({ "think": true }))
+        .with_model_listing(models_endpoint);
     Ok(Arc::new(adapter))
 }
 
