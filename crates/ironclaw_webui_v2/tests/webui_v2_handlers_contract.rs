@@ -36,7 +36,8 @@ use ironclaw_product_workflow::{
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
     RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
     RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigValidateRequest, RebornOperatorLogsQuery,
+    RebornOperatorConfigListResponse, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
@@ -586,7 +587,7 @@ impl RebornServicesApi for StubServices {
     async fn list_operator_config(
         &self,
         _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
         self.operator_calls
             .lock()
             .expect("lock")
@@ -598,7 +599,7 @@ impl RebornServicesApi for StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: RebornOperatorConfigValidateRequest,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+    ) -> Result<RebornOperatorConfigValidateResponse, RebornServicesError> {
         self.operator_calls
             .lock()
             .expect("lock")
