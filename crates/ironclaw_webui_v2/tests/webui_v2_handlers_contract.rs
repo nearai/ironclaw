@@ -1911,7 +1911,7 @@ async fn operator_config_validation_surfaces_redacted_reason_codes() {
 #[tokio::test]
 async fn operator_config_set_failure_does_not_echo_secret_value() {
     let services = Arc::new(StubServices::default());
-    services.fail_set_operator_config_key(RebornServicesError::service_unavailable(false));
+    services.fail_set_operator_config_key(service_unavailable_error(false));
     let router = router_with_capabilities(
         services,
         WebUiV2Capabilities {
