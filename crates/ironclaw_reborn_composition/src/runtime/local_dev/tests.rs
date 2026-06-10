@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_io_forwards_input_and_result_to_trajectory_observer() {
+    async fn capability_io_forwards_result_to_trajectory_observer() {
         let run_context = run_context("trajectory-observer").await;
         let observer = Arc::new(RecordingTrajectoryObserver::default());
         let capability_io =
@@ -452,7 +452,6 @@ mod tests {
                     observer.clone() as Arc<dyn crate::RebornTrajectoryObserver>
                 ));
 
-        // Staging the tool-call input fires `on_capability_input`...
         let input_ref = capability_io
             .register_provider_tool_call_input(
                 &run_context,
@@ -461,7 +460,8 @@ mod tests {
             .await
             .expect("input stages");
 
-        // ...and writing the result fires `on_capability_result`.
+        // `LocalDevCapabilityIo` is the source of `on_capability_result` (inputs
+        // are observed at the port level with the resolved dotted capability id).
         let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
         capability_io
             .write_capability_result(CapabilityResultWrite {
@@ -475,19 +475,21 @@ mod tests {
             .await
             .expect("result stages");
 
-        let inputs = observer.inputs.lock().expect("inputs lock");
-        assert_eq!(inputs.len(), 1, "one input callback");
-        assert_eq!(inputs[0].0, input_ref.as_str(), "input ref correlates");
-        // `register_provider_tool_call_input` forwards the provider tool-call
-        // name here (the resolved capability id is only known once the result is
-        // written — see the result assertion below).
-        assert_eq!(inputs[0].1, "builtin_echo");
-        assert_eq!(inputs[0].2, serde_json::json!({"message": "hello"}));
+        // Staging an input must NOT emit `on_capability_input` from here — that
+        // hook lives on the port and forwards the resolved dotted id.
+        assert!(
+            observer.inputs.lock().expect("inputs lock").is_empty(),
+            "input staging should not emit on_capability_input from local-dev IO"
+        );
 
         let results = observer.results.lock().expect("results lock");
         assert_eq!(results.len(), 1, "one result callback");
         assert_eq!(results[0].0, input_ref.as_str(), "result correlates by ref");
-        assert_eq!(results[0].1, capability_id.as_str());
+        assert_eq!(
+            results[0].1,
+            capability_id.as_str(),
+            "result carries the resolved dotted capability id"
+        );
         assert_eq!(results[0].2, serde_json::json!({"content": "hello"}));
     }
 

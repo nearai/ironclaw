@@ -59,8 +59,11 @@ const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
 /// implementations must never block or fail the run.
 pub trait CapabilityTrajectoryObserver: std::fmt::Debug + Send + Sync {
     /// A model tool call resolved to a capability invocation: `capability_id` is
-    /// the resolved capability (e.g. `builtin.shell`), `arguments` the resolved
-    /// input JSON the capability runs with.
+    /// the resolved capability (e.g. `builtin.shell`), `arguments` the tool-call
+    /// input JSON resolved from the input ref. This fires before schema
+    /// normalization/coercion, so `arguments` is the raw model-emitted input
+    /// (what the trajectory should record), not the post-validation execution
+    /// payload.
     fn on_capability_input(
         &self,
         call_id: &str,

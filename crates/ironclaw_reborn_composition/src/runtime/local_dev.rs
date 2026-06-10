@@ -482,17 +482,14 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
             &tool_call.name,
             &tool_call.arguments,
         );
-        // NOTE: provider tool calls are staged by a lower decorator
-        // (`ProviderToolCallInputResolver`) that does not delegate here, so this
-        // path does not fire for them. Input args capture is a follow-up; the
-        // reliable spine is `on_capability_result`. Kept for non-provider inputs.
-        if let Some(observer) = &self.observer {
-            observer.on_capability_input(
-                input_ref.as_str(),
-                &tool_call.name,
-                &tool_call.arguments,
-            );
-        }
+        // Trajectory inputs are observed at the port level
+        // (`HostRuntimeLoopCapabilityPort::invoke_capability`), which forwards
+        // the *resolved* dotted `CapabilityId` per the observer contract. This
+        // staging point only has the provider tool name (`builtin_echo`), not
+        // the resolved id, and `ProviderToolCallInputResolver` doesn't delegate
+        // here for provider tool calls anyway — so emitting `on_capability_input`
+        // here would both never fire in practice and break call-id correlation.
+        // `LocalDevCapabilityIo` remains the source of `on_capability_result`.
         Ok(input_ref)
     }
 }
