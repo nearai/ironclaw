@@ -99,6 +99,7 @@ pub(crate) fn is_context_length_error_message(lower: &str) -> bool {
         "too many tokens",
         "payload too large",
         "longer than the model's context length",
+        "prompt is too long",
     ];
 
     CONTEXT_PATTERNS
@@ -111,9 +112,16 @@ pub(crate) fn is_context_length_error_message(lower: &str) -> bool {
 /// Handles patterns like:
 /// - "maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens."
 /// - "The input (150000 tokens) is longer than the model's context length (128000 tokens)."
+/// - "prompt is too long: 150000 tokens > 128000 maximum"
 ///
 /// Returns `(0, 0)` if parsing fails.
 pub(crate) fn parse_context_token_counts(lower: &str) -> (usize, usize) {
+    // NEAR Anthropic-compatible proxy pattern:
+    // "prompt is too long: {used} tokens > {limit} maximum"
+    if let Some((used, limit)) = parse_prompt_too_long_counts(lower) {
+        return (used, limit);
+    }
+
     let numbers = token_count_numbers(lower);
     if numbers.len() < 2 {
         return (0, 0);
@@ -131,6 +139,18 @@ pub(crate) fn parse_context_token_counts(lower: &str) -> (usize, usize) {
     }
 
     (0, 0)
+}
+
+fn parse_prompt_too_long_counts(lower: &str) -> Option<(usize, usize)> {
+    let tail = lower.split_once("prompt is too long")?.1;
+    let mut numbers = tail
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse().ok())
+        .filter(|&n| n > 0);
+    let used = numbers.next()?;
+    let limit = numbers.next().unwrap_or(0);
+    Some((used, limit))
 }
 
 fn token_count_numbers(lower: &str) -> Vec<usize> {

@@ -1217,6 +1217,18 @@ mod tests {
     }
 
     #[test]
+    fn context_length_error_detects_provider_prompt_too_long_wording() {
+        let body = r#"{"error":{"message":"Provider failed for model 'anthropic/claude-sonnet-4-5': prompt is too long: 234872 tokens > 200000 maximum","type":"invalid_request_error","param":null,"code":null}}"#;
+        match crate::error::context_length_error(400, body) {
+            Some(LlmError::ContextLengthExceeded { used, limit }) => {
+                assert_eq!(used, 234872);
+                assert_eq!(limit, 200000);
+            }
+            other => panic!("expected context-length error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn context_length_error_does_not_treat_all_bad_requests_as_overflow() {
         let body = r#"{"error":{"message":"invalid tool schema"}}"#;
         assert!(crate::error::context_length_error(400, body).is_none());
@@ -1244,7 +1256,7 @@ mod tests {
                         "400 Bad Request",
                         serde_json::json!({
                             "error": {
-                                "message": "Provider failed: The input (314325 tokens) is longer than the model's context length (262144 tokens)."
+                                "message": "Provider failed for model 'anthropic/claude-sonnet-4-5': prompt is too long: 234872 tokens > 200000 maximum"
                             }
                         })
                         .to_string(),
@@ -1272,8 +1284,8 @@ mod tests {
 
         match err {
             LlmError::ContextLengthExceeded { used, limit } => {
-                assert_eq!(used, 314325);
-                assert_eq!(limit, 262144);
+                assert_eq!(used, 234872);
+                assert_eq!(limit, 200000);
             }
             other => panic!("expected context-length error, got {other:?}"),
         }
