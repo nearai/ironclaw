@@ -927,6 +927,62 @@ async fn webui_v2_google_drive_oauth_setup_projects_distinct_operation_scopes() 
         .expect("runtime shutdown clean");
 }
 
+/// SECURITY (review on #4673): a browser request body must not be able to set
+/// the caller scope. The v2 request DTOs carry no `tenant_id`/`user_id`/`scope`
+/// field and the caller scope is host-minted, so injecting the reserved system
+/// sentinel into the JSON body is inert — the thread is created under the
+/// authenticated caller and stays readable by them. If the injected sentinel
+/// had diverted creation to the system scope (or another tenant), this caller
+/// could not read the resulting thread's timeline.
+#[tokio::test]
+async fn untrusted_request_body_cannot_inject_system_scope() {
+    let harness = build_harness().await;
+    let sentinel = "\u{1f}SYSTEM\u{1f}";
+
+    let malicious = json!({
+        "client_action_id": "inject-scope-1",
+        "tenant_id": sentinel,
+        "user_id": sentinel,
+        "scope": { "tenant_id": sentinel, "user_id": sentinel },
+    });
+    let create = harness
+        .router
+        .clone()
+        .oneshot(bearer_post("/api/webchat/v2/threads", malicious))
+        .await
+        .expect("create oneshot");
+    assert_eq!(
+        create.status(),
+        StatusCode::OK,
+        "injected scope fields must be ignored (unknown fields), not honored or errored"
+    );
+    let body = read_json(create).await;
+    let thread_id = body["thread"]["thread_id"]
+        .as_str()
+        .expect("thread_id")
+        .to_string();
+
+    let timeline = harness
+        .router
+        .clone()
+        .oneshot(bearer_get(&format!(
+            "/api/webchat/v2/threads/{thread_id}/timeline"
+        )))
+        .await
+        .expect("timeline oneshot");
+    assert_eq!(
+        timeline.status(),
+        StatusCode::OK,
+        "the thread must belong to the authenticated caller — the body could not set scope"
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
+}
+
 // ─── operator LLM-config smoke (issue #4673) ──────────────────────────
 //
 // Stands up the same real local-dev runtime as the chat e2e, but with a boot

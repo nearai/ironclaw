@@ -29,13 +29,25 @@ pub const SYSTEM_RESERVED_ID: &str = "\x1fSYSTEM\x1f";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceScope {
+    // SECURITY: `ResourceScope` is a TRUSTED-PERSISTENCE shape. It is serialized
+    // into durable records (e.g. system-scoped secret entries) and read back; it
+    // is NEVER deserialized from an untrusted HTTP request body. The
+    // WebUI/product request DTOs carry no `tenant_id`/`user_id`/`scope` field,
+    // and the caller scope is stamped host-side from trusted installation config
+    // plus the authenticator's verified `UserId` (see
+    // `webui_serve::authenticate_request` and the rule in
+    // `crates/ironclaw_product_workflow/CLAUDE.md`), so a browser body cannot
+    // influence it. Do not add a `ResourceScope` (or bare `TenantId`/`UserId`)
+    // field to any untrusted request DTO.
+    //
     // The system sentinel ([`SYSTEM_RESERVED_ID`]) carries control bytes that
     // `TenantId`/`UserId` validation rejects, so [`ResourceScope::system`] builds
     // it via `from_trusted`. A persisted system scope must therefore round-trip,
     // but the trusted exception stays scoped to these two fields only — the
-    // shared id `Deserialize` keeps rejecting control bytes everywhere else, so
-    // untrusted input can never mint a sentinel-bearing id or collide with the
-    // reserved system identity on any other axis.
+    // shared id `Deserialize` keeps rejecting control bytes everywhere else
+    // (locked by `system_sentinel_is_rejected_for_bare_ids`), so untrusted input
+    // can never mint a sentinel-bearing id or collide with the reserved system
+    // identity on any other axis.
     #[serde(deserialize_with = "deserialize_system_aware_tenant_id")]
     pub tenant_id: TenantId,
     #[serde(deserialize_with = "deserialize_system_aware_user_id")]

@@ -1497,6 +1497,34 @@ mod tests {
             .expect("re-saving an already-configured NEAR AI provider must succeed");
     }
 
+    /// Integration coverage for the resolver path at the composition boundary
+    /// (review on #4673): an explicit `config.toml` selection is honored
+    /// end-to-end through the real `resolve_reborn_runtime_llm`. The env-vs-
+    /// selection PRECEDENCE itself is unit-tested in
+    /// `ironclaw_llm::resolution` (`explicit_selection_overrides_env_for_model_and_base_url`),
+    /// where the env can be set — this crate is `#![forbid(unsafe_code)]` and the
+    /// resolver reads raw `std::env::var`, so the env dimension cannot be driven
+    /// here; this thin wrapper only adds the config.toml read it is exercised on.
+    #[tokio::test]
+    async fn reborn_runtime_llm_honors_explicit_config_selection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+
+        crate::provider_admin::RebornProviderAdmin::new(boot.clone())
+            .set_provider("nearai", Some("deepseek-ai/DeepSeek-V4-Flash"))
+            .expect("persist active selection");
+        let config_file =
+            ironclaw_reborn_config::RebornConfigFile::load(&boot.home().config_file_path())
+                .expect("load config file");
+
+        let resolved = crate::llm_catalog::resolve_reborn_runtime_llm(&boot, config_file.as_ref())
+            .expect("resolution succeeds")
+            .expect("a provider is resolved from the selection");
+        assert_eq!(resolved.provider_id(), "nearai");
+        assert_eq!(resolved.model(), "deepseek-ai/DeepSeek-V4-Flash");
+    }
+
     #[tokio::test]
     async fn upsert_active_failure_rolls_back_overlay_and_new_key() {
         let temp = tempfile::tempdir().expect("tempdir");
