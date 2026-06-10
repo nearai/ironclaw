@@ -278,10 +278,9 @@ mod openai_compat_mount_tests {
         assert_eq!(denied_body["error"]["code"], "rate_limited");
         assert_eq!(turn_state.active_admission_reservations().len(), 1);
 
-        let run_id = turn_state.active_admission_reservations()[0].run_id;
         let runner_id = TurnRunnerId::new();
         let lease_token = TurnLeaseToken::new();
-        turn_state
+        let claimed = turn_state
             .claim_next_run(ClaimRunRequest {
                 runner_id,
                 lease_token,
@@ -292,7 +291,7 @@ mod openai_compat_mount_tests {
             .expect("active run should be claimable");
         turn_state
             .complete_run(CompleteRunRequest {
-                run_id,
+                run_id: claimed.state.run_id,
                 runner_id,
                 lease_token,
             })
