@@ -15,6 +15,62 @@ pub(crate) fn nearai_mcp_endpoint_from_env() -> Result<NearAiMcpEndpoint, String
     nearai_mcp_endpoint_from_base(configured_base.as_deref())
 }
 
+pub(crate) fn nearai_mcp_env_credentials() -> Option<(String, secrecy::SecretString)> {
+    #[cfg(test)]
+    if let Some((base_url, api_key)) = nearai_mcp_env_credentials_override() {
+        return Some((base_url, secrecy::SecretString::from(api_key)));
+    }
+
+    let configured_base = std::env::var("NEARAI_BASE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    let api_key = std::env::var("NEARAI_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    Some((configured_base, secrecy::SecretString::from(api_key)))
+}
+
+#[cfg(test)]
+static NEARAI_MCP_ENV_CREDENTIALS_OVERRIDE: std::sync::Mutex<Option<(String, String)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) struct NearAiMcpEnvCredentialsOverrideGuard {
+    previous: Option<(String, String)>,
+}
+
+#[cfg(test)]
+impl Drop for NearAiMcpEnvCredentialsOverrideGuard {
+    fn drop(&mut self) {
+        let mut override_slot = NEARAI_MCP_ENV_CREDENTIALS_OVERRIDE
+            .lock()
+            .expect("NEAR AI MCP env override lock should not be poisoned");
+        *override_slot = self.previous.take();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn override_nearai_mcp_env_credentials_for_test(
+    base_url: impl Into<String>,
+    api_key: impl Into<String>,
+) -> NearAiMcpEnvCredentialsOverrideGuard {
+    let mut override_slot = NEARAI_MCP_ENV_CREDENTIALS_OVERRIDE
+        .lock()
+        .expect("NEAR AI MCP env override lock should not be poisoned");
+    let previous = override_slot.replace((base_url.into(), api_key.into()));
+    NearAiMcpEnvCredentialsOverrideGuard { previous }
+}
+
+#[cfg(test)]
+fn nearai_mcp_env_credentials_override() -> Option<(String, String)> {
+    NEARAI_MCP_ENV_CREDENTIALS_OVERRIDE
+        .lock()
+        .expect("NEAR AI MCP env override lock should not be poisoned")
+        .clone()
+}
+
 pub(crate) fn nearai_mcp_endpoint_from_base(
     configured_base: Option<&str>,
 ) -> Result<NearAiMcpEndpoint, String> {
