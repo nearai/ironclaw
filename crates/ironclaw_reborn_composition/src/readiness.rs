@@ -284,15 +284,17 @@ impl RebornReadinessDiagnostic {
         profile: RebornCompositionProfile,
         component: RebornReadinessDiagnosticComponent,
         reason: RebornReadinessDiagnosticReason,
-    ) -> Self {
-        debug_assert!(profile.requires_production_shape());
-        Self {
+    ) -> Option<Self> {
+        if !profile.requires_production_shape() {
+            return None;
+        }
+        Some(Self {
             profile,
             component,
             reason,
             status: RebornReadinessDiagnosticStatus::Blocking,
             blocks_production: true,
-        }
+        })
     }
 }
 

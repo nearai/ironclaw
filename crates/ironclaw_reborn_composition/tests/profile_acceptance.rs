@@ -100,7 +100,7 @@ fn readiness_serializes_diagnostics_with_stable_redacted_vocabulary() {
     let readiness = readiness_for_contract(
         RebornCompositionProfile::Production,
         RebornReadinessState::ProductionValidated,
-        vec![RebornReadinessDiagnostic::production_blocker(
+        vec![production_blocker(
             RebornCompositionProfile::Production,
             RebornReadinessDiagnosticComponent::RuntimeHttpEgress,
             RebornReadinessDiagnosticReason::Unverified,
@@ -181,7 +181,7 @@ fn readiness_deserializes_diagnostics_payload_into_typed_enums() {
 
     assert_eq!(
         readiness.diagnostics,
-        vec![RebornReadinessDiagnostic::production_blocker(
+        vec![production_blocker(
             RebornCompositionProfile::Production,
             RebornReadinessDiagnosticComponent::RuntimeHttpEgress,
             RebornReadinessDiagnosticReason::Unverified,
@@ -247,11 +247,29 @@ fn readiness_diagnostic_round_trips_through_serde() {
         RebornCompositionProfile::MigrationDryRun,
         RebornReadinessDiagnosticComponent::RuntimeProcessPort,
         RebornReadinessDiagnosticReason::Unsupported,
-    );
+    )
+    .expect("migration-dry-run is production-shaped");
     let encoded = serde_json::to_string(&diagnostic).unwrap();
     let decoded: RebornReadinessDiagnostic = serde_json::from_str(&encoded).unwrap();
 
     assert_eq!(diagnostic, decoded);
+}
+
+#[test]
+fn production_blocker_rejects_non_production_shaped_profiles() {
+    for profile in [
+        RebornCompositionProfile::Disabled,
+        RebornCompositionProfile::LocalDev,
+        RebornCompositionProfile::LocalDevYolo,
+    ] {
+        let diagnostic = RebornReadinessDiagnostic::production_blocker(
+            profile,
+            RebornReadinessDiagnosticComponent::RuntimeBackend,
+            RebornReadinessDiagnosticReason::Missing,
+        );
+
+        assert_eq!(diagnostic, None, "profile: {profile:?}");
+    }
 }
 
 #[test]
@@ -333,17 +351,17 @@ fn readiness_diagnostics_do_not_carry_sensitive_detail_fields() {
         RebornCompositionProfile::Production,
         RebornReadinessState::ProductionValidated,
         vec![
-            RebornReadinessDiagnostic::production_blocker(
+            production_blocker(
                 RebornCompositionProfile::Production,
                 RebornReadinessDiagnosticComponent::SecretStore,
                 RebornReadinessDiagnosticReason::Missing,
             ),
-            RebornReadinessDiagnostic::production_blocker(
+            production_blocker(
                 RebornCompositionProfile::Production,
                 RebornReadinessDiagnosticComponent::ApprovalRequests,
                 RebornReadinessDiagnosticReason::LocalOnly,
             ),
-            RebornReadinessDiagnostic::production_blocker(
+            production_blocker(
                 RebornCompositionProfile::Production,
                 RebornReadinessDiagnosticComponent::RuntimeBackend,
                 RebornReadinessDiagnosticReason::Unsupported,
@@ -380,4 +398,13 @@ fn readiness_for_contract(
         },
         diagnostics,
     }
+}
+
+fn production_blocker(
+    profile: RebornCompositionProfile,
+    component: RebornReadinessDiagnosticComponent,
+    reason: RebornReadinessDiagnosticReason,
+) -> RebornReadinessDiagnostic {
+    RebornReadinessDiagnostic::production_blocker(profile, component, reason)
+        .expect("test uses a production-shaped profile")
 }
