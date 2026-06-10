@@ -4,13 +4,6 @@
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath};
 
-/// Default project mount alias the agent's file tools resolve through.
-///
-/// Callers should pass the alias of the project mount in the request's
-/// `MountView`; this constant is the local-dev default and must stay in sync
-/// with the project mount alias built by the composition layer.
-pub const DEFAULT_PROJECT_MOUNT_ALIAS: &str = "/workspace";
-
 /// Subdirectory, under the project mount, where landed attachments live.
 pub const ATTACHMENTS_DIR: &str = "attachments";
 
@@ -38,8 +31,10 @@ pub enum AttachmentLandingError {
 pub struct AttachmentLanding<'a> {
     /// Stable id of the message the attachment belongs to.
     pub message_id: &'a str,
-    /// Zero-based index of this attachment within its message. Disambiguates
-    /// same-named files and supplies the fallback filename.
+    /// Zero-based index of this attachment within its message. Always rendered
+    /// into the landed path (1-based) so two attachments on one message never
+    /// collide, even when they share a filename, and it supplies the fallback
+    /// filename when `filename` is absent.
     pub index: usize,
     /// Original filename, when the source provided one.
     pub filename: Option<&'a str>,
@@ -53,7 +48,7 @@ pub struct AttachmentLanding<'a> {
 /// segment: keep ASCII alphanumerics and `.`/`-`/`_`, replace everything else
 /// with `_`, then trim leading/trailing dots (which neutralizes `..` and
 /// hidden-file segments). An empty result becomes `attachment`.
-pub fn sanitize_attachment_segment(raw: &str) -> String {
+fn sanitize_attachment_segment(raw: &str) -> String {
     let sanitized: String = raw
         .chars()
         .map(|c| {
@@ -72,18 +67,28 @@ pub fn sanitize_attachment_segment(raw: &str) -> String {
     }
 }
 
-fn fallback_filename(index: usize, extension: &str) -> String {
-    let ext = sanitize_attachment_segment(extension);
-    let ext = if ext == "attachment" {
-        "bin".to_string()
-    } else {
-        ext
-    };
-    format!("attachment-{}.{}", index + 1, ext)
+/// Filename portion of the landed path: the sanitized original name, or a
+/// synthesized `attachment.{ext}` when the source provided none. Uniqueness
+/// across attachments is carried by the index prefix in the path, not here.
+fn attachment_filename(landing: &AttachmentLanding<'_>) -> String {
+    match landing.filename {
+        Some(name) => sanitize_attachment_segment(name),
+        None => {
+            let ext = sanitize_attachment_segment(landing.fallback_extension);
+            let ext = if ext == "attachment" {
+                "bin".to_string()
+            } else {
+                ext
+            };
+            format!("attachment.{ext}")
+        }
+    }
 }
 
 /// Build the [`ScopedPath`] an attachment lands at:
-/// `{project_alias}/attachments/{date}/{message_id}-{filename}`.
+/// `{project_alias}/attachments/{date}/{message_id}-{index}-{filename}`, where
+/// `index` is the 1-based attachment index so two attachments on one message
+/// never collide even when they share a filename.
 ///
 /// Every segment derived from the message or the upload is sanitized, and
 /// [`ScopedPath::new`] additionally rejects path traversal and raw host paths,
@@ -95,12 +100,10 @@ pub fn attachment_scoped_path(
 ) -> Result<ScopedPath, AttachmentLandingError> {
     let date = sanitize_attachment_segment(date);
     let message_id = sanitize_attachment_segment(landing.message_id);
-    let filename = match landing.filename {
-        Some(name) => sanitize_attachment_segment(name),
-        None => fallback_filename(landing.index, landing.fallback_extension),
-    };
+    let index = landing.index + 1;
+    let filename = attachment_filename(landing);
     let full = format!(
-        "{}/{ATTACHMENTS_DIR}/{date}/{message_id}-{filename}",
+        "{}/{ATTACHMENTS_DIR}/{date}/{message_id}-{index}-{filename}",
         project_alias.trim_end_matches('/')
     );
     ScopedPath::new(full).map_err(AttachmentLandingError::InvalidPath)
@@ -146,10 +149,14 @@ mod tests {
     };
 
     const PROJECT_TARGET: &str = "/projects/workspace";
+    // Test-only project mount alias. Production callers pass the alias read off
+    // the request's `MountView`; the crate intentionally owns no default so it
+    // can't drift from the composition layer that builds the mount.
+    const PROJECT_ALIAS: &str = "/workspace";
 
     fn project_mount_view(permissions: MountPermissions) -> MountView {
         MountView::new(vec![MountGrant::new(
-            MountAlias::new(DEFAULT_PROJECT_MOUNT_ALIAS).unwrap(),
+            MountAlias::new(PROJECT_ALIAS).unwrap(),
             VirtualPath::new(PROJECT_TARGET).unwrap(),
             permissions,
         )])
@@ -207,7 +214,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             path.as_str(),
-            "/workspace/attachments/2026-06-09/msg1-report.pdf"
+            "/workspace/attachments/2026-06-09/msg1-1-report.pdf"
         );
     }
 
@@ -219,7 +226,30 @@ mod tests {
         let path = attachment_scoped_path("/workspace", "2026-06-09", &meta).unwrap();
         assert_eq!(
             path.as_str(),
-            "/workspace/attachments/2026-06-09/msg1-attachment-3.jpg"
+            "/workspace/attachments/2026-06-09/msg1-3-attachment.jpg"
+        );
+    }
+
+    #[test]
+    fn same_named_attachments_on_one_message_never_collide() {
+        let mut first = landing("msg1", Some("report.pdf"));
+        first.index = 0;
+        let mut second = landing("msg1", Some("report.pdf"));
+        second.index = 1;
+        let first = attachment_scoped_path("/workspace", "2026-06-09", &first).unwrap();
+        let second = attachment_scoped_path("/workspace", "2026-06-09", &second).unwrap();
+        assert_eq!(
+            first.as_str(),
+            "/workspace/attachments/2026-06-09/msg1-1-report.pdf"
+        );
+        assert_eq!(
+            second.as_str(),
+            "/workspace/attachments/2026-06-09/msg1-2-report.pdf"
+        );
+        assert_ne!(
+            first.as_str(),
+            second.as_str(),
+            "same-named attachments must land at distinct paths"
         );
     }
 
@@ -257,7 +287,7 @@ mod tests {
         let stored = land_attachment(
             &writer,
             &scope,
-            DEFAULT_PROJECT_MOUNT_ALIAS,
+            PROJECT_ALIAS,
             "2026-06-09",
             &landing("msg1", Some("report.pdf")),
             bytes.clone(),
@@ -266,7 +296,7 @@ mod tests {
         .expect("write succeeds through a read-write mount");
         assert_eq!(
             stored.as_str(),
-            "/workspace/attachments/2026-06-09/msg1-report.pdf"
+            "/workspace/attachments/2026-06-09/msg1-1-report.pdf"
         );
 
         // A separate scoped filesystem over the same backend — standing in for
@@ -289,7 +319,7 @@ mod tests {
         let err = land_attachment(
             &read_only,
             &test_scope(),
-            DEFAULT_PROJECT_MOUNT_ALIAS,
+            PROJECT_ALIAS,
             "2026-06-09",
             &landing("msg1", Some("report.pdf")),
             b"bytes".to_vec(),

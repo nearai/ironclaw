@@ -20,6 +20,6 @@
 mod landing;
 
 pub use landing::{
-    ATTACHMENTS_DIR, AttachmentLanding, AttachmentLandingError, DEFAULT_PROJECT_MOUNT_ALIAS,
-    attachment_scoped_path, land_attachment, sanitize_attachment_segment,
+    ATTACHMENTS_DIR, AttachmentLanding, AttachmentLandingError, attachment_scoped_path,
+    land_attachment,
 };
