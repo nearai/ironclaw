@@ -1,0 +1,1 @@
+Call any read-only NEAR contract view method and return the decoded JSON result. Provide the contract `account_id`, the `method_name`, and an optional `args` object. Use for arbitrary on-chain reads not covered by a more specific NEAR capability.

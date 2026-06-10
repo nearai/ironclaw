@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "tx_hash": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "Transaction hash (base58)."
+    },
+    "sender_account_id": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "Account id that signed the transaction."
+    }
+  },
+  "required": ["tx_hash", "sender_account_id"],
+  "additionalProperties": false
+}

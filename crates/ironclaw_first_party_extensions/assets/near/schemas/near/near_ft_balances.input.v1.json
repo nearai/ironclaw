@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "properties": {
+    "account_id": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "Account id whose token balances to read."
+    },
+    "token_contracts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": { "type": "string", "maxLength": 64 },
+      "description": "NEP-141 token contract account ids, e.g. \"usdt.tether-token.near\"."
+    }
+  },
+  "required": ["account_id", "token_contracts"],
+  "additionalProperties": false
+}

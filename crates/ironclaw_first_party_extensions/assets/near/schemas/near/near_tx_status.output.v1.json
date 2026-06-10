@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": ["object", "string", "null"],
+      "description": "Final transaction status (SuccessValue / Failure)."
+    },
+    "receipts_outcome": {
+      "type": ["array", "null"],
+      "description": "Full receipt outcome tree, including cross-contract receipts."
+    },
+    "transaction": {
+      "type": ["object", "null"],
+      "description": "The transaction object (signer, receiver, actions)."
+    }
+  },
+  "required": ["status"],
+  "additionalProperties": false
+}

@@ -1,0 +1,70 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "near"
+name = "NEAR"
+version = "0.1.0"
+description = "Read-only NEAR mainnet queries (accounts, contract views, token balances, NFTs, transactions, and Intents quotes) through FastNEAR RPC."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "near"
+
+[[capabilities]]
+id = "near.account"
+description = "Read a NEAR account's balance, staked amount, contract code hash, and storage usage."
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/near/near_account.input.v1.json"
+output_schema_ref = "schemas/near/near_account.output.v1.json"
+prompt_doc_ref = "prompts/near/near_account.md"
+
+[[capabilities]]
+id = "near.view"
+description = "Call any read-only contract view method and return the decoded JSON result."
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/near/near_view.input.v1.json"
+output_schema_ref = "schemas/near/near_view.output.v1.json"
+prompt_doc_ref = "prompts/near/near_view.md"
+
+[[capabilities]]
+id = "near.ft_balances"
+description = "Read NEP-141 fungible-token balances for an account across one or more token contracts."
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/near/near_ft_balances.input.v1.json"
+output_schema_ref = "schemas/near/near_ft_balances.output.v1.json"
+prompt_doc_ref = "prompts/near/near_ft_balances.md"
+
+[[capabilities]]
+id = "near.nfts"
+description = "List NEP-171 NFTs owned by an account on a given NFT contract."
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/near/near_nfts.input.v1.json"
+output_schema_ref = "schemas/near/near_nfts.output.v1.json"
+prompt_doc_ref = "prompts/near/near_nfts.md"
+
+[[capabilities]]
+id = "near.tx_status"
+description = "Read the status and full receipt tree of a NEAR transaction."
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/near/near_tx_status.input.v1.json"
+output_schema_ref = "schemas/near/near_tx_status.output.v1.json"
+prompt_doc_ref = "prompts/near/near_tx_status.md"
+
+[[capabilities]]
+id = "near.intents_quote"
+description = "Request a read-only NEAR Intents (1Click) swap quote without executing the swap."
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/near/near_intents_quote.input.v1.json"
+output_schema_ref = "schemas/near/near_intents_quote.output.v1.json"
+prompt_doc_ref = "prompts/near/near_intents_quote.md"

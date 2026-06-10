@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "properties": {
+    "account_id": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "Contract account id to call, e.g. \"token.v2.ref-finance.near\"."
+    },
+    "method_name": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "Read-only view method name, e.g. \"ft_metadata\"."
+    },
+    "args": {
+      "type": "object",
+      "description": "Optional JSON arguments object passed to the view method."
+    }
+  },
+  "required": ["account_id", "method_name"],
+  "additionalProperties": false
+}

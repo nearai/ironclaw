@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "account_id": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "NEAR account id, e.g. \"alice.near\"."
+    }
+  },
+  "required": ["account_id"],
+  "additionalProperties": false
+}

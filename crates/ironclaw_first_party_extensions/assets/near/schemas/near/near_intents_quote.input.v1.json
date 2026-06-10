@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "properties": {
+    "origin_asset": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "Source asset identifier, e.g. \"nep141:wrap.near\"."
+    },
+    "destination_asset": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "Destination asset identifier, e.g. \"nep141:<eth-contract>.omft.near\"."
+    },
+    "amount": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "Input amount in the asset's smallest units, as a string."
+    },
+    "recipient": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "Recipient address on the destination chain."
+    },
+    "refund_to": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "NEAR account id to refund to if the swap is not filled."
+    },
+    "swap_type": {
+      "type": "string",
+      "enum": ["EXACT_INPUT", "EXACT_OUTPUT"],
+      "description": "Swap direction. Defaults to \"EXACT_INPUT\"."
+    },
+    "slippage_tolerance": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000,
+      "description": "Slippage tolerance in basis points. Defaults to 100 (1%)."
+    }
+  },
+  "required": ["origin_asset", "destination_asset", "amount", "recipient", "refund_to"],
+  "additionalProperties": false
+}

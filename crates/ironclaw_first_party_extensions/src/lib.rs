@@ -7,6 +7,7 @@
 
 pub mod coding;
 mod gsuite;
+pub mod near;
 pub mod skills;
 pub mod web_access;
 
@@ -27,6 +28,12 @@ pub use gsuite::{
     GsuitePackageSpec, calendar_package_spec, find_gsuite_capability, gmail_package_spec,
     google_api_network_policy, google_provider_id, gsuite_network_policy_for, gsuite_package_specs,
     gsuite_resource_profile,
+};
+pub use near::{
+    FASTNEAR_RPC_HOST, INTENTS_HOST, NEAR_ACCOUNT_CAPABILITY_ID, NEAR_EXTENSION_ID,
+    NEAR_FT_BALANCES_CAPABILITY_ID, NEAR_INTENTS_QUOTE_CAPABILITY_ID, NEAR_NFTS_CAPABILITY_ID,
+    NEAR_TX_STATUS_CAPABILITY_ID, NEAR_VIEW_CAPABILITY_ID, NearDispatchError, NearDispatchRequest,
+    NearDispatchResult, NearExecutor,
 };
 pub use web_access::{
     EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,

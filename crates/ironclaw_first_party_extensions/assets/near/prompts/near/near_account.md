@@ -1,0 +1,1 @@
+Read a NEAR mainnet account's on-chain state: liquid balance (`amount`) and staked balance (`locked`) in yoctoNEAR, contract `code_hash`, and `storage_usage`. Use when asked about a NEAR account's balance or whether it holds a deployed contract.

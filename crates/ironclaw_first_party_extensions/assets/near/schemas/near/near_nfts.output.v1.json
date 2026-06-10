@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "tokens": {
+      "type": ["array", "null"],
+      "description": "Array of NEP-171 token objects (token_id, owner_id, metadata)."
+    }
+  },
+  "required": ["tokens"],
+  "additionalProperties": false
+}

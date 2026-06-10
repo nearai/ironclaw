@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "properties": {
+    "account_id": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "Owner account id whose NFTs to list."
+    },
+    "nft_contract": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "NEP-171 NFT contract account id."
+    },
+    "from_index": {
+      "type": "string",
+      "description": "Pagination start index as a string. Defaults to \"0\"."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Maximum number of tokens to return. Defaults to 50."
+    }
+  },
+  "required": ["account_id", "nft_contract"],
+  "additionalProperties": false
+}

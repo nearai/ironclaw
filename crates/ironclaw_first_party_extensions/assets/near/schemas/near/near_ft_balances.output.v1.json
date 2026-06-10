@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "properties": {
+    "balances": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "contract": { "type": "string", "description": "Token contract account id." },
+          "raw": { "type": "string", "description": "Balance in the token's smallest unit (divide by 10^decimals)." }
+        },
+        "required": ["contract", "raw"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["balances"],
+  "additionalProperties": false
+}

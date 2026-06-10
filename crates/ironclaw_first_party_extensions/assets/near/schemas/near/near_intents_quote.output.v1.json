@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "amount_out": {
+      "type": ["string", "number", "null"],
+      "description": "Estimated output amount in the destination asset's smallest units."
+    },
+    "deposit_address": {
+      "type": ["string", "null"],
+      "description": "Address to deposit the origin asset to in order to execute the quote."
+    },
+    "fee": {
+      "type": ["object", "array", "string", "number", "null"],
+      "description": "Fee breakdown for the quoted swap."
+    },
+    "deadline": {
+      "type": ["string", "number", "null"],
+      "description": "Quote expiry deadline."
+    }
+  },
+  "required": ["amount_out", "deposit_address"],
+  "additionalProperties": false
+}

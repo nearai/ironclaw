@@ -45,6 +45,8 @@ const NOTION_MCP_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml");
 const WEB_ACCESS_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
+const NEAR_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/near/manifest.toml");
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 
@@ -130,6 +132,12 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
             Some("No credentials are required for Web Access."),
             None,
             "Activate Web Access to publish its tools.",
+        )),
+        "near" => Some(onboarding_message(
+            "NEAR does not need credentials. Activate it to make read-only NEAR mainnet tools (account, view, balances, NFTs, transaction status, intents quote) available.",
+            Some("No credentials are required for NEAR."),
+            None,
+            "Activate NEAR to publish its tools.",
         )),
         _ => None,
     }
@@ -286,6 +294,7 @@ impl AvailableExtensionCatalog {
             github_package()?,
             notion_mcp_package()?,
             web_access_package()?,
+            near_package()?,
             nearai_mcp_package()?,
             google_calendar_package()?,
             google_docs_package()?,
@@ -386,6 +395,10 @@ fn web_access_package() -> Result<AvailableExtensionPackage, ProductWorkflowErro
     )
 }
 
+fn near_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package("near", "NEAR", NEAR_MANIFEST, near_assets())
+}
+
 fn nearai_mcp_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     let manifest = nearai_mcp_manifest_toml()?;
     bundled_extension_package("nearai", "NEAR AI", &manifest, nearai_mcp_assets(&manifest))
@@ -470,6 +483,10 @@ pub(crate) fn notion_mcp_manifest_digest() -> String {
 
 pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
+}
+
+pub(crate) fn near_manifest_digest() -> String {
+    sha256_digest_token(NEAR_MANIFEST.as_bytes())
 }
 
 pub(crate) fn nearai_mcp_manifest_toml() -> Result<String, ProductWorkflowError> {
@@ -794,6 +811,52 @@ fn web_access_assets() -> Vec<AvailableExtensionAsset> {
                 "../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/get_content.md"
             ),
         ),
+    ]
+}
+
+fn near_assets() -> Vec<AvailableExtensionAsset> {
+    macro_rules! near_schema_asset {
+        ($path:literal) => {
+            bytes_asset(
+                concat!("schemas/near/", $path),
+                include_bytes!(concat!(
+                    "../../ironclaw_first_party_extensions/assets/near/schemas/near/",
+                    $path
+                )),
+            )
+        };
+    }
+    macro_rules! near_prompt_asset {
+        ($path:literal) => {
+            bytes_asset(
+                concat!("prompts/near/", $path),
+                include_bytes!(concat!(
+                    "../../ironclaw_first_party_extensions/assets/near/prompts/near/",
+                    $path
+                )),
+            )
+        };
+    }
+    vec![
+        bytes_asset("manifest.toml", NEAR_MANIFEST.as_bytes()),
+        near_schema_asset!("near_account.input.v1.json"),
+        near_schema_asset!("near_account.output.v1.json"),
+        near_schema_asset!("near_view.input.v1.json"),
+        near_schema_asset!("near_view.output.v1.json"),
+        near_schema_asset!("near_ft_balances.input.v1.json"),
+        near_schema_asset!("near_ft_balances.output.v1.json"),
+        near_schema_asset!("near_nfts.input.v1.json"),
+        near_schema_asset!("near_nfts.output.v1.json"),
+        near_schema_asset!("near_tx_status.input.v1.json"),
+        near_schema_asset!("near_tx_status.output.v1.json"),
+        near_schema_asset!("near_intents_quote.input.v1.json"),
+        near_schema_asset!("near_intents_quote.output.v1.json"),
+        near_prompt_asset!("near_account.md"),
+        near_prompt_asset!("near_view.md"),
+        near_prompt_asset!("near_ft_balances.md"),
+        near_prompt_asset!("near_nfts.md"),
+        near_prompt_asset!("near_tx_status.md"),
+        near_prompt_asset!("near_intents_quote.md"),
     ]
 }
 
@@ -1506,6 +1569,7 @@ mod tests {
             "notion",
             "web-access",
             "nearai",
+            "near",
             "google-calendar",
             "google-docs",
             "google-drive",
@@ -1561,6 +1625,7 @@ mod tests {
             ("notion", "Notion needs OAuth authorization"),
             ("nearai", "NEAR AI needs an API key"),
             ("web-access", "Web Access does not need credentials"),
+            ("near", "NEAR does not need credentials"),
         ] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();

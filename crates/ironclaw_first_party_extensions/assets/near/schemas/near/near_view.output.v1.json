@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "result": {
+      "type": ["object", "array", "string", "number", "boolean", "null"],
+      "description": "Decoded JSON result returned by the contract view method."
+    },
+    "block_height": { "type": "integer", "description": "Block height the result was read at." }
+  },
+  "required": ["result"],
+  "additionalProperties": false
+}

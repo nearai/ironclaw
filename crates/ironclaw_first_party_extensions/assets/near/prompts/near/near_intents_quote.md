@@ -1,0 +1,1 @@
+Request a read-only NEAR Intents (1Click) cross-chain swap quote. Always runs in dry mode and never executes a swap. Provide `origin_asset`, `destination_asset`, `amount` (smallest units, string), `recipient`, and `refund_to`. Returns the estimated output amount, deposit address, fee, and deadline for planning only.

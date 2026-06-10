@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "amount": { "type": "string", "description": "Liquid balance in yoctoNEAR (1 NEAR = 1e24)." },
+    "locked": { "type": "string", "description": "Staked/locked balance in yoctoNEAR." },
+    "code_hash": { "type": "string", "description": "Deployed contract code hash; all 1s = no contract." },
+    "storage_usage": { "type": "integer", "description": "Account storage usage in bytes." },
+    "block_height": { "type": "integer", "description": "Block height the result was read at." }
+  },
+  "required": ["amount", "locked", "code_hash", "storage_usage", "block_height"],
+  "additionalProperties": false
+}

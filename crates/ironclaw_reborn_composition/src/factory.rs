@@ -119,7 +119,8 @@ use crate::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
         google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
-        google_slides_manifest_digest, notion_mcp_manifest_digest, web_access_manifest_digest,
+        google_slides_manifest_digest, near_manifest_digest, notion_mcp_manifest_digest,
+        web_access_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
@@ -132,6 +133,7 @@ use crate::{
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
+    near::register_bundled_near_first_party_handlers,
     web_access::register_bundled_web_access_first_party_handlers,
 };
 
@@ -950,6 +952,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             reason: format!("web access first-party handlers are invalid: {error}"),
         },
     )?;
+    register_bundled_near_first_party_handlers(&mut first_party_registry).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("NEAR first-party handlers are invalid: {error}"),
+        }
+    })?;
     insert_extension_lifecycle_handlers(&mut first_party_registry, extension_management).map_err(
         |error| RebornBuildError::InvalidConfig {
             reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
@@ -2159,6 +2166,16 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             None,
         ),
         AdminEntry::for_local_manifest(
+            PackageId::new("near").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("NEAR first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/near/manifest.toml".to_string(),
+            Some(near_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            near_first_party_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
             PackageId::new("google-calendar").map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("Google Calendar first-party package id is invalid: {error}"),
             })?,
@@ -2244,6 +2261,10 @@ fn gsuite_allowed_effects() -> Vec<EffectKind> {
 }
 
 fn web_access_allowed_effects() -> Vec<EffectKind> {
+    vec![EffectKind::DispatchCapability, EffectKind::Network]
+}
+
+fn near_first_party_allowed_effects() -> Vec<EffectKind> {
     vec![EffectKind::DispatchCapability, EffectKind::Network]
 }
 

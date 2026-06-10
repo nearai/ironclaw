@@ -1,0 +1,1 @@
+Read the status and full receipt tree of a NEAR transaction by `tx_hash` and `sender_account_id`. The receipt tree exposes cross-contract receipt failures even when the top-level status is success. Use to confirm whether a transaction and all its receipts executed successfully.

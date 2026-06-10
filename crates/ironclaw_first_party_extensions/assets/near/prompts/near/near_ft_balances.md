@@ -1,0 +1,1 @@
+Read NEP-141 fungible-token balances for one account across one or more token contracts. Each `raw` balance is in the token's smallest unit; divide by 10^decimals (query `ft_metadata` via near.view if you need the decimals).
