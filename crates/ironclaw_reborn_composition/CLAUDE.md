@@ -62,7 +62,7 @@ middleware with v1's `src/channels/web/`.
 | `RebornWebuiBundle` (in [`src/webui.rs`](src/webui.rs)) | `{ api: Arc<dyn RebornServicesApi>, product_auth: Option<Arc<RebornProductAuthServices>>, readiness }` — the v2 facade, optional product-auth route service, plus readiness snapshot |
 | `build_webui_services(runtime, event_stream)` | Compose a `RebornWebuiBundle` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator, product-auth services, and runtime-owned `EventStreamManager` projection stream unless a caller supplies a custom stream |
 | `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
-| `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<UserId>` |
+| `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<WebuiAuthentication>` so identity and request-scoped WebUI capabilities travel together |
 | `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
 | `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw-reborn serve` subcommand (follow-up PR) hands it to `axum::serve` from a host-owned listener |
 | `ProtectedRouteMount` | Host-supplied protected API route fragment merged inside the WebUI bearer-auth layer with descriptor-driven body/rate limits. Reborn OpenAI-compatible routes use this seam; do not use it for v1 gateway routers. |
@@ -107,8 +107,10 @@ Inbound order (outer → inner → handler):
    honored ONLY on `GET /api/webchat/v2/threads/{id}/events` because
    the browser's `EventSource` cannot set headers. Mutations and
    timeline reads stay bearer-only. On success the middleware inserts
-   a `WebUiAuthenticatedCaller` extension built from
-   `config.tenant_id` plus the authenticator's `UserId`.
+  a `WebUiAuthenticatedCaller` extension built from
+  `config.tenant_id` plus the authenticator's `UserId`, and a
+  request-scoped `WebUiV2Capabilities` extension from the same
+  authentication result.
    When `openai-compat-beta` is enabled, the same verified bearer result also
    inserts an `OpenAiCompatAuthenticatedCaller` extension for protected
    OpenAI-compatible route mounts; route crates must not mint this evidence.
@@ -273,7 +275,7 @@ rows are inventoried here, not implemented in the current PR.
 |---|---|---|---|
 | Send message | `POST /api/chat/send` | `POST /api/webchat/v2/threads/{thread_id}/messages` | Mapped |
 | Create thread | `POST /api/chat/thread/new` | `POST /api/webchat/v2/threads` | Mapped |
-| Session/profile capabilities | `GET /api/profile` | `GET /api/webchat/v2/session` | Mapped to authenticated tenant/user plus server-issued WebUI capabilities; `operator_webui_config` follows `allows_operator_webui_config` |
+| Session/profile capabilities | `GET /api/profile` | `GET /api/webchat/v2/session` | Mapped to authenticated tenant/user plus request-scoped WebUI capabilities; `operator_webui_config` follows the matched bearer token, not just the deployment-wide route-mount decision |
 | List threads | `GET /api/chat/threads` | `GET /api/webchat/v2/threads` | Mapped |
 | Delete thread | (none) | `DELETE /api/webchat/v2/threads/{thread_id}` | Mapped |
 | Read history / timeline | `GET /api/chat/history` | `GET /api/webchat/v2/threads/{thread_id}/timeline` | Mapped |
@@ -295,10 +297,13 @@ rows are inventoried here, not implemented in the current PR.
   whatever the host wires) and supplies it via `WebuiServeConfig`.
 - **Operator WebUI config** — the `/api/webchat/v2/llm/*` routes and
   Slack channel-route admin mutate operator-wide provider settings,
-  secrets, or channel ownership. `webui_v2_app` only mounts them when
-  the host authenticator opts into `allows_operator_webui_config`;
-  multi-user authenticators must leave them unmounted until a real admin
-  authorization boundary exists.
+  secrets, or channel ownership. `webui_v2_app` mounts them only when
+  the host authenticator opts into
+  `mounts_operator_webui_config_routes()`, then authorizes each request
+  from the matched token's `WebUiV2Capabilities`. Multi-user
+  session/OIDC authenticators must not grant
+  `operator_webui_config` unless a real admin authorization boundary
+  exists.
 - **`?token=` exception** — only `GET /api/webchat/v2/threads/{id}/events`;
   any other v2 route receiving a `?token=` query parameter ignores it
   and falls through to bearer-header check (so a stale referer link
